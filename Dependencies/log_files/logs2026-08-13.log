@@ -1,0 +1,53 @@
+INFO:2026-08-13 18:27:10,299:MainThread:Dhan.py System Started
+INFO:2026-08-13 18:27:10,299:MainThread:System Started
+INFO:2026-08-13 18:29:10,640:MainThread:Dhan.py System Started
+INFO:2026-08-13 18:29:10,641:MainThread:System Started
+INFO:2026-08-13 18:31:39,085:MainThread:Dhan.py System Started
+INFO:2026-08-13 18:31:39,085:MainThread:System Started
+INFO:2026-08-13 18:40:40,876:MainThread:Dhan.py System Started
+INFO:2026-08-13 18:40:40,876:MainThread:System Started
+ERROR:2026-08-13 19:22:39,825:MainThread:Exception in DhanHQConnection.POST: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+ERROR:2026-08-13 19:22:39,827:MainThread:Exception in Getting OHLC data as {'status': 'failure', 'remarks': "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))", 'data': ''}
+Traceback (most recent call last):
+  File "/Users/kushalgaur/Desktop/projects/trading/traderBoy/.venv/lib/python3.12/site-packages/Dhan_Tradehull/Dhan_Tradehull.py", line 918, in get_historical_data
+    raise Exception(ohlc)
+Exception: {'status': 'failure', 'remarks': "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))", 'data': ''}
+ERROR:2026-08-13 19:22:41,960:MainThread:Exception at calling ltp as {'status': 'failure', 'remarks': {'error_code': None, 'error_type': None, 'error_message': None}, 'data': ''}
+Traceback (most recent call last):
+  File "/Users/kushalgaur/Desktop/projects/trading/traderBoy/.venv/lib/python3.12/site-packages/Dhan_Tradehull/Dhan_Tradehull.py", line 561, in get_ltp_data
+    raise Exception(data)
+Exception: {'status': 'failure', 'remarks': {'error_code': None, 'error_type': None, 'error_message': None}, 'data': ''}
+INFO:2026-08-13 19:37:53,317:MainThread:Dhan.py System Started
+INFO:2026-08-13 19:37:53,317:MainThread:System Started
+INFO:2026-08-13 19:39:36,936:MainThread:Dhan.py System Started
+INFO:2026-08-13 19:39:36,937:MainThread:System Started
+INFO:2026-08-13 19:41:37,375:MainThread:Dhan.py System Started
+INFO:2026-08-13 19:41:37,375:MainThread:System Started
+INFO:2026-08-13 19:43:13,779:MainThread:Dhan.py System Started
+INFO:2026-08-13 19:43:13,779:MainThread:System Started
+INFO:2026-08-13 19:44:38,585:MainThread:Dhan.py System Started
+INFO:2026-08-13 19:44:38,585:MainThread:System Started
+ERROR:2026-08-13 20:37:03,002:MainThread:Exception in DhanHQConnection.POST: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+ERROR:2026-08-13 20:37:03,005:MainThread:Exception in Getting OHLC data as {'status': 'failure', 'remarks': "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))", 'data': ''}
+Traceback (most recent call last):
+  File "/Users/kushalgaur/Desktop/projects/trading/traderBoy/.venv/lib/python3.12/site-packages/Dhan_Tradehull/Dhan_Tradehull.py", line 918, in get_historical_data
+    raise Exception(ohlc)
+Exception: {'status': 'failure', 'remarks': "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))", 'data': ''}
+ERROR:2026-08-13 20:37:05,052:MainThread:Exception at calling ltp as {'status': 'failure', 'remarks': {'error_code': None, 'error_type': None, 'error_message': None}, 'data': ''}
+Traceback (most recent call last):
+  File "/Users/kushalgaur/Desktop/projects/trading/traderBoy/.venv/lib/python3.12/site-packages/Dhan_Tradehull/Dhan_Tradehull.py", line 561, in get_ltp_data
+    raise Exception(data)
+Exception: {'status': 'failure', 'remarks': {'error_code': None, 'error_type': None, 'error_message': None}, 'data': ''}
+ERROR:2026-08-13 21:10:22,385:MainThread:Exception in DhanHQConnection.POST: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+ERROR:2026-08-13 21:10:22,388:MainThread:Exception in Getting OHLC data as {'status': 'failure', 'remarks': "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))", 'data': ''}
+Traceback (most recent call last):
+  File "/Users/kushalgaur/Desktop/projects/trading/traderBoy/.venv/lib/python3.12/site-packages/Dhan_Tradehull/Dhan_Tradehull.py", line 918, in get_historical_data
+    raise Exception(ohlc)
+Exception: {'status': 'failure', 'remarks': "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))", 'data': ''}
+ERROR:2026-08-13 21:11:43,203:MainThread:Exception at calling ltp as {'status': 'failure', 'remarks': {'error_code': None, 'error_type': None, 'error_message': None}, 'data': ''}
+Traceback (most recent call last):
+  File "/Users/kushalgaur/Desktop/projects/trading/traderBoy/.venv/lib/python3.12/site-packages/Dhan_Tradehull/Dhan_Tradehull.py", line 561, in get_ltp_data
+    raise Exception(data)
+Exception: {'status': 'failure', 'remarks': {'error_code': None, 'error_type': None, 'error_message': None}, 'data': ''}
+INFO:2026-08-13 21:15:48,136:MainThread:Dhan.py System Started
+INFO:2026-08-13 21:15:48,136:MainThread:System Started
