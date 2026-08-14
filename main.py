@@ -1,5 +1,6 @@
 from __future__ import annotations
-
+import httpx
+from fastapi import HTTPException
 import asyncio
 import json
 import logging
@@ -891,6 +892,32 @@ def health_check() -> dict[str, Any]:
             if not trade.exited
         ],
     }
+
+# ============================================================
+# IP endpoint
+# ============================================================
+
+@app.get("/debug/outbound-ip")
+async def get_outbound_ip():
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                "https://api.ipify.org?format=json"
+            )
+            response.raise_for_status()
+
+        data = response.json()
+
+        return {
+            "outbound_ip": data.get("ip"),
+            "note": "This is the public IP seen by external APIs",
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not determine outbound IP: {exc}",
+        ) from exc
 
 
 # ============================================================
