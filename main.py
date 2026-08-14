@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, time
 from pathlib import Path
 from typing import Any
@@ -13,67 +13,98 @@ from typing import Any
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
+
 from Dhan_Tradehull import Tradehull
 
 
-# ---------------------------------------------------------------------
+# ============================================================
 # Configuration
-# ---------------------------------------------------------------------
+# ============================================================
 
 load_dotenv()
 
-# CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
-# ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
+DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
+DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 
-CLIENT_ID = "1107559760"
-ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzg2NzYwMTc0LCJpYXQiOjE3ODY2NzM3NzQsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTA3NTU5NzYwIn0.awcYg5dnboGc6MVOZP7Y3_xiy_TTUfp-3YiArs21CLy5SnGATkztL_9KVUkE2MGfEdJhZm77bRjRn-Xktd5oJQ"
-
-
-if not CLIENT_ID or not ACCESS_TOKEN:
+if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
     raise RuntimeError(
-        "Set DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN in the .env file"
+        "DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN must be set in .env"
     )
 
-# LIVE_TRADING = os.getenv("LIVE_TRADING", "false").lower() == "true"
-LIVE_TRADING = "true"
-TOP_N = 3
-TARGET_PERCENT = 10.0
-INITIAL_STOP_PERCENT = 4.0
-TRAILING_STOP_PERCENT = 1.0
+LIVE_TRADING = (
+    os.getenv("LIVE_TRADING", "false").strip().lower() == "true"
+)
 
-# Exit time in IST. The machine running this script should use IST,
-# or set the timezone correctly before deploying.
-FORCE_EXIT_TIME = time(23, 55)
+UNDERLYING_EXCHANGE = os.getenv(
+    "UNDERLYING_EXCHANGE",
+    "NSE",
+)
 
-# For individual stock options, the nearest expiry is generally selected
-# with Expiry=0 by the Tradehull helper.
+OPTION_EXCHANGE = os.getenv(
+    "OPTION_EXCHANGE",
+    "NFO",
+)
+
+TRADE_TYPE = os.getenv(
+    "TRADE_TYPE",
+    "MIS",
+)
+
+TOP_STOCK_COUNT = 3
+OPTION_TYPE = "CE"
 OPTION_EXPIRY_INDEX = 0
 
-# Use the exchange required by your Dhan account/package setup.
-UNDERLYING_EXCHANGE = "NSE"
-OPTION_EXCHANGE = "NFO"
-TRADE_TYPE = "MIS"
+TARGET_PERCENT = 10.0
+INITIAL_STOP_LOSS_PERCENT = 3.0
+TRAILING_STOP_LOSS_PERCENT = 1.0
+
+FORCE_EXIT_TIME = time(15, 15)
+MONITOR_INTERVAL_SECONDS = 5
 
 STATE_FILE = Path("open_trades.json")
+
+# The server's system clock must be configured for IST.
+# For production, use a timezone-aware clock instead of relying on
+# the system timezone.
+
+
+# ============================================================
+# Logging and application setup
+# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
+
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Dhan Tradehull Options Strategy")
-tsl = Tradehull(CLIENT_ID, ACCESS_TOKEN)
+app = FastAPI(
+    title="Chartink Dhan Options Trading Bot",
+    version="1.0.0",
+)
+
+tsl = Tradehull(
+    DHAN_CLIENT_ID,
+    DHAN_ACCESS_TOKEN,
+)
 
 
-# ---------------------------------------------------------------------
-# Data models
-# ---------------------------------------------------------------------
+# ============================================================
+# Data structures
+# ============================================================
+
+@dataclass
+class ChartinkStock:
+    symbol: str
+    trigger_price: float
+
 
 @dataclass
 class Trade:
     underlying: str
     option_symbol: str
+    option_type: str
     quantity: int
     entry_price: float
     highest_price: float
@@ -83,236 +114,437 @@ class Trade:
     exited: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "underlying": self.underlying,
-            "option_symbol": self.option_symbol,
-            "quantity": self.quantity,
-            "entry_price": self.entry_price,
-            "highest_price": self.highest_price,
-            "stop_price": self.stop_price,
-            "target_price": self.target_price,
-            "entry_order_id": self.entry_order_id,
-            "exited": self.exited,
-        }
+        return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Trade":
-        return cls(**data)
+    def from_dict(cls, value: dict[str, Any]) -> "Trade":
+        return cls(**value)
 
 
-# ---------------------------------------------------------------------
-# Persistence
-# ---------------------------------------------------------------------
+# ============================================================
+# Persistent trade state
+# ============================================================
 
-def load_trades() -> list[Trade]:
+def load_open_trades() -> list[Trade]:
     if not STATE_FILE.exists():
         return []
 
     try:
-        raw = json.loads(STATE_FILE.read_text())
-        return [Trade.from_dict(item) for item in raw]
+        raw_data = json.loads(
+            STATE_FILE.read_text(encoding="utf-8")
+        )
+
+        if not isinstance(raw_data, list):
+            return []
+
+        return [
+            Trade.from_dict(item)
+            for item in raw_data
+            if isinstance(item, dict)
+        ]
+
     except Exception:
-        logger.exception("Could not load state file")
+        logger.exception("Unable to load saved trade state")
         return []
 
 
-def save_trades(trades: list[Trade]) -> None:
+def save_open_trades() -> None:
     STATE_FILE.write_text(
         json.dumps(
-            [trade.to_dict() for trade in trades],
+            [trade.to_dict() for trade in open_trades],
             indent=2,
-        )
+        ),
+        encoding="utf-8",
     )
 
 
-open_trades: list[Trade] = load_trades()
+open_trades: list[Trade] = load_open_trades()
 
 
-# ---------------------------------------------------------------------
-# Generic helpers
-# ---------------------------------------------------------------------
+# ============================================================
+# General helpers
+# ============================================================
 
 def normalize_symbol(value: Any) -> str:
     return str(value).strip().upper()
 
 
-def parse_stock_array(value: Any) -> list[str]:
-    """
-    Supports:
-
-        "AXISBANK,TCS,INFY"
-        ["AXISBANK", "TCS", "INFY"]
-    """
-    if isinstance(value, str):
-        values = re.split(r"[,\s]+", value)
-    elif isinstance(value, list):
-        values = value
-    else:
-        raise ValueError("stocks must be a string or an array")
-
-    symbols: list[str] = []
-
-    for value in values:
-        symbol = normalize_symbol(value)
-
-        if symbol and symbol not in symbols:
-            symbols.append(symbol)
-
-    return symbols
-
-
-def is_live() -> bool:
+def is_live_trading() -> bool:
     return LIVE_TRADING
 
 
-def get_ltp(symbol: str) -> float:
-    """
-    Read one LTP from Tradehull.
+def current_time() -> time:
+    return datetime.now().time()
 
-    The documented package usage is:
-        tsl.get_ltp_data(names=["SYMBOL"])
+
+def is_force_exit_time() -> bool:
+    return current_time() >= FORCE_EXIT_TIME
+
+
+def find_case_insensitive_key(
+    data: dict[str, Any],
+    requested_key: str,
+) -> Any:
+    requested_key = requested_key.lower()
+
+    for key, value in data.items():
+        if str(key).lower() == requested_key:
+            return value
+
+    return None
+
+
+# ============================================================
+# Chartink payload parsing
+# ============================================================
+
+def parse_comma_separated_string(value: Any) -> list[str]:
     """
-    response = tsl.get_ltp_data(names=[symbol])
+    Parse a Chartink comma-separated field.
+
+    Example:
+        "AXISBANK, TCS, INFY"
+
+    Returns:
+        ["AXISBANK", "TCS", "INFY"]
+    """
+    if not isinstance(value, str):
+        raise ValueError(
+            "Chartink fields stocks and trigger_prices must be strings"
+        )
+
+    return [
+        item.strip()
+        for item in value.split(",")
+        if item.strip()
+    ]
+
+
+def parse_chartink_payload(
+    payload: dict[str, Any],
+) -> list[ChartinkStock]:
+    """
+    Parse the payload:
+
+    {
+      "stocks": "AXISBANK, TCS, INFY",
+      "trigger_prices": "1250.00,3400.00,1600.00"
+    }
+    """
+
+    if "stocks" not in payload:
+        raise ValueError("Missing required field: stocks")
+
+    if "trigger_prices" not in payload:
+        raise ValueError("Missing required field: trigger_prices")
+
+    raw_stocks = parse_comma_separated_string(
+        payload["stocks"]
+    )
+
+    raw_trigger_prices = parse_comma_separated_string(
+        payload["trigger_prices"]
+    )
+
+    if len(raw_stocks) != len(raw_trigger_prices):
+        raise ValueError(
+            "stocks and trigger_prices must contain the same "
+            "number of values"
+        )
+
+    parsed: list[ChartinkStock] = []
+    seen_symbols: set[str] = set()
+
+    for raw_symbol, raw_price in zip(
+        raw_stocks,
+        raw_trigger_prices,
+    ):
+        symbol = normalize_symbol(raw_symbol)
+
+        if symbol in seen_symbols:
+            logger.warning(
+                "Duplicate stock ignored from Chartink payload: %s",
+                symbol,
+            )
+            continue
+
+        try:
+            trigger_price = float(
+                raw_price.replace(",", "").strip()
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid trigger price for {symbol}: {raw_price}"
+            ) from exc
+
+        if trigger_price <= 0:
+            raise ValueError(
+                f"Trigger price must be positive for {symbol}"
+            )
+
+        parsed.append(
+            ChartinkStock(
+                symbol=symbol,
+                trigger_price=trigger_price,
+            )
+        )
+
+        seen_symbols.add(symbol)
+
+    return parsed
+
+
+# ============================================================
+# Dhan-Tradehull market-data helpers
+# ============================================================
+
+def extract_ltp_from_response(
+    response: Any,
+    symbol: str,
+) -> float:
+    """
+    Extract LTP from common Tradehull response shapes.
+    """
 
     if response is None:
-        raise RuntimeError(f"No LTP response for {symbol}")
+        raise RuntimeError(
+            f"No LTP response received for {symbol}"
+        )
+
+    if isinstance(response, (int, float)):
+        return float(response)
 
     if isinstance(response, dict):
-        value = response.get(symbol)
-
-        # Some API responses may use different capitalization.
-        if value is None:
-            for key, candidate in response.items():
-                if normalize_symbol(key) == normalize_symbol(symbol):
-                    value = candidate
-                    break
+        value = find_case_insensitive_key(response, symbol)
 
         if isinstance(value, dict):
-            for field in ("ltp", "LTP", "last_price", "lastPrice", "close"):
-                if field in value:
-                    value = value[field]
-                    break
+            for key in (
+                "ltp",
+                "last_price",
+                "lastPrice",
+                "close",
+                "price",
+            ):
+                candidate = find_case_insensitive_key(
+                    value,
+                    key,
+                )
 
-        if value is None:
-            raise RuntimeError(f"LTP not found for {symbol}: {response}")
+                if candidate is not None:
+                    return float(candidate)
 
-        return float(value)
+        if value is not None:
+            return float(value)
 
-    return float(response)
+        for key in (
+            "ltp",
+            "last_price",
+            "lastPrice",
+            "close",
+            "price",
+        ):
+            candidate = find_case_insensitive_key(
+                response,
+                key,
+            )
+
+            if candidate is not None:
+                return float(candidate)
+
+    raise RuntimeError(
+        f"Could not extract LTP for {symbol}: {response}"
+    )
+
+
+def get_ltp(symbol: str) -> float:
+    response = tsl.get_ltp_data(
+        names=[symbol],
+        debug="NO",
+    )
+
+    ltp = extract_ltp_from_response(
+        response=response,
+        symbol=symbol,
+    )
+
+    if ltp <= 0:
+        raise RuntimeError(
+            f"Invalid LTP for {symbol}: {ltp}"
+        )
+
+    return ltp
 
 
 def get_today_percent_change(symbol: str) -> float:
     """
-    Calculate today's percentage change:
+    Calculate today's percentage change as:
 
-        (latest price - today's open) / today's open * 100
+        (today close/current price - today's open)
+        / today's open * 100
 
-    This uses today's historical data, then falls back to quote data if
-    the returned structure contains open and close/LTP values.
+    The method first attempts to use daily historical data.
     """
+
     try:
-        data = tsl.get_historical_data(
+        historical = tsl.get_historical_data(
             tradingsymbol=symbol,
             exchange=UNDERLYING_EXCHANGE,
             timeframe="DAY",
         )
 
-        if isinstance(data, pd.DataFrame) and not data.empty:
-            data = data.copy()
-            data.columns = [str(column).lower() for column in data.columns]
+        if isinstance(historical, pd.DataFrame):
+            if not historical.empty:
+                data = historical.copy()
+                data.columns = [
+                    str(column).lower()
+                    for column in data.columns
+                ]
 
-            open_column = next(
-                (
-                    column
-                    for column in ("open", "open_price")
-                    if column in data.columns
-                ),
-                None,
-            )
+                open_column = next(
+                    (
+                        column
+                        for column in (
+                            "open",
+                            "open_price",
+                        )
+                        if column in data.columns
+                    ),
+                    None,
+                )
 
-            close_column = next(
-                (
-                    column
-                    for column in ("close", "ltp", "last_price")
-                    if column in data.columns
-                ),
-                None,
-            )
+                close_column = next(
+                    (
+                        column
+                        for column in (
+                            "close",
+                            "ltp",
+                            "last_price",
+                            "lastprice",
+                        )
+                        if column in data.columns
+                    ),
+                    None,
+                )
 
-            if open_column and close_column:
-                today_open = float(data.iloc[-1][open_column])
-                today_close = float(data.iloc[-1][close_column])
+                if open_column and close_column:
+                    today_open = float(
+                        data.iloc[-1][open_column]
+                    )
 
-                if today_open != 0:
-                    return (today_close - today_open) / today_open * 100
+                    today_close = float(
+                        data.iloc[-1][close_column]
+                    )
+
+                    if today_open > 0:
+                        return (
+                            (today_close - today_open)
+                            / today_open
+                            * 100
+                        )
 
     except Exception:
-        logger.exception("Historical percentage-change lookup failed for %s", symbol)
-
-    # Fallback to quote data.
-    quote = tsl.get_quote_data(names=[symbol])
-
-    if not isinstance(quote, dict):
-        raise RuntimeError(f"Unexpected quote response for {symbol}: {quote}")
-
-    row = quote.get(symbol)
-
-    if row is None:
-        for key, candidate in quote.items():
-            if normalize_symbol(key) == normalize_symbol(symbol):
-                row = candidate
-                break
-
-    if not isinstance(row, dict):
-        raise RuntimeError(f"Unexpected quote row for {symbol}: {row}")
-
-    today_open = row.get("open") or row.get("open_price")
-    today_close = (
-        row.get("close")
-        or row.get("ltp")
-        or row.get("last_price")
-        or row.get("lastPrice")
-    )
-
-    if today_open is None or today_close is None:
-        raise RuntimeError(
-            f"Could not find open/close fields for {symbol}: {row}"
+        logger.exception(
+            "Historical data lookup failed for %s",
+            symbol,
         )
 
-    today_open = float(today_open)
-    today_close = float(today_close)
-
-    if today_open == 0:
-        raise RuntimeError(f"Today's open is zero for {symbol}")
-
-    return (today_close - today_open) / today_open * 100
+    raise RuntimeError(
+        f"Could not calculate today's percentage change for {symbol}"
+    )
 
 
-def get_top_stocks(stocks: list[str]) -> list[tuple[str, float]]:
-    changes: list[tuple[str, float]] = []
+def rank_stocks_by_today_change(
+    stocks: list[ChartinkStock],
+) -> list[dict[str, Any]]:
+    ranked: list[dict[str, Any]] = []
 
     for stock in stocks:
         try:
-            percent_change = get_today_percent_change(stock)
-            changes.append((stock, percent_change))
-            logger.info("%s: %.2f%% today", stock, percent_change)
+            percent_change = get_today_percent_change(
+                stock.symbol
+            )
+
+            ranked.append(
+                {
+                    "symbol": stock.symbol,
+                    "trigger_price": stock.trigger_price,
+                    "today_percent_change": percent_change,
+                }
+            )
+
+            logger.info(
+                "%s | trigger=%.2f | today_change=%.2f%%",
+                stock.symbol,
+                stock.trigger_price,
+                percent_change,
+            )
+
         except Exception:
-            logger.exception("Could not calculate change for %s", stock)
+            logger.exception(
+                "Unable to rank %s",
+                stock.symbol,
+            )
 
-    changes.sort(key=lambda item: item[1], reverse=True)
-    return changes[:TOP_N]
+    ranked.sort(
+        key=lambda item: item["today_percent_change"],
+        reverse=True,
+    )
+
+    return ranked[:TOP_STOCK_COUNT]
 
 
-def get_lot_size(option_symbol: str) -> int:
+# ============================================================
+# Option selection
+# ============================================================
+
+def select_atm_option(
+    underlying: str,
+    option_type: str = OPTION_TYPE,
+) -> tuple[str, int]:
     """
-    Use one lot per selected option.
+    Select the nearest ATM option using Tradehull.
 
-    Confirm the returned value and your risk sizing before going live.
+    No instrument ID is used.
     """
-    lot_size = tsl.get_lot_size(tradingsymbol=option_symbol)
+
+    if option_type not in {"CE", "PE"}:
+        raise ValueError(
+            "option_type must be either CE or PE"
+        )
+
+    ce_symbol, pe_symbol, strike = (
+        tsl.ATM_Strike_Selection(
+            Underlying=underlying,
+            Expiry=OPTION_EXPIRY_INDEX,
+        )
+    )
+
+    selected_symbol = (
+        ce_symbol
+        if option_type == "CE"
+        else pe_symbol
+    )
+
+    if not selected_symbol:
+        raise RuntimeError(
+            f"ATM {option_type} option unavailable for "
+            f"{underlying}"
+        )
+
+    return str(selected_symbol), int(strike)
+
+
+def get_option_lot_size(
+    option_symbol: str,
+) -> int:
+    lot_size = tsl.get_lot_size(
+        tradingsymbol=option_symbol,
+    )
 
     if lot_size is None:
-        raise RuntimeError(f"Lot size unavailable for {option_symbol}")
+        raise RuntimeError(
+            f"Lot size unavailable for {option_symbol}"
+        )
 
     lot_size = int(lot_size)
 
@@ -324,24 +556,27 @@ def get_lot_size(option_symbol: str) -> int:
     return lot_size
 
 
-# ---------------------------------------------------------------------
-# Order handling
-# ---------------------------------------------------------------------
+# ============================================================
+# Order functions
+# ============================================================
 
 def place_buy_order(
     option_symbol: str,
     quantity: int,
-) -> str | None:
+) -> str:
     logger.info(
-        "BUY %s quantity=%d live=%s",
+        "BUY %s | quantity=%d | live=%s",
         option_symbol,
         quantity,
-        is_live(),
+        is_live_trading(),
     )
 
-    if not is_live():
-        logger.warning("DRY RUN: BUY order was not sent")
-        return "DRY_RUN_ENTRY"
+    if not is_live_trading():
+        logger.warning(
+            "DRY RUN: BUY order not sent for %s",
+            option_symbol,
+        )
+        return "DRY_RUN_BUY"
 
     order_id = tsl.order_placement(
         tradingsymbol=option_symbol,
@@ -356,7 +591,9 @@ def place_buy_order(
     )
 
     if not order_id:
-        raise RuntimeError(f"BUY order failed for {option_symbol}")
+        raise RuntimeError(
+            f"BUY order failed for {option_symbol}"
+        )
 
     return str(order_id)
 
@@ -365,18 +602,21 @@ def place_sell_order(
     option_symbol: str,
     quantity: int,
     reason: str,
-) -> str | None:
+) -> str:
     logger.info(
-        "SELL %s quantity=%d reason=%s live=%s",
+        "SELL %s | quantity=%d | reason=%s | live=%s",
         option_symbol,
         quantity,
         reason,
-        is_live(),
+        is_live_trading(),
     )
 
-    if not is_live():
-        logger.warning("DRY RUN: SELL order was not sent")
-        return "DRY_RUN_EXIT"
+    if not is_live_trading():
+        logger.warning(
+            "DRY RUN: SELL order not sent for %s",
+            option_symbol,
+        )
+        return "DRY_RUN_SELL"
 
     order_id = tsl.order_placement(
         tradingsymbol=option_symbol,
@@ -391,94 +631,122 @@ def place_sell_order(
     )
 
     if not order_id:
-        raise RuntimeError(f"SELL order failed for {option_symbol}")
+        raise RuntimeError(
+            f"SELL order failed for {option_symbol}"
+        )
 
     return str(order_id)
 
 
-def get_executed_entry_price(
-    order_id: str | None,
+def get_entry_price(
+    order_id: str,
     option_symbol: str,
 ) -> float:
-    if order_id == "DRY_RUN_ENTRY":
+    if order_id == "DRY_RUN_BUY":
         return get_ltp(option_symbol)
 
-    if not order_id:
-        raise RuntimeError("Missing entry order ID")
+    executed_price = tsl.get_executed_price(
+        orderid=order_id,
+    )
 
-    price = tsl.get_executed_price(orderid=order_id)
-
-    if price is None or float(price) <= 0:
+    if executed_price is None:
         raise RuntimeError(
-            f"Could not retrieve executed price for order {order_id}"
+            f"Executed price unavailable for order {order_id}"
         )
 
-    return float(price)
+    executed_price = float(executed_price)
+
+    if executed_price <= 0:
+        raise RuntimeError(
+            f"Invalid executed price: {executed_price}"
+        )
+
+    return executed_price
 
 
-def already_trading(underlying: str) -> bool:
+# ============================================================
+# Trade lifecycle
+# ============================================================
+
+def has_open_trade_for_underlying(
+    underlying: str,
+) -> bool:
     return any(
-        trade.underlying == underlying and not trade.exited
+        trade.underlying == underlying
+        and not trade.exited
         for trade in open_trades
     )
 
 
-def enter_option_trade(
+def enter_trade(
     underlying: str,
-    option_type: str = "CE",
+    option_type: str = OPTION_TYPE,
 ) -> Trade:
-    """
-    Select the nearest ATM strike and buy the requested option type.
-
-    For a long-only strategy, CE is used by default. If you want to buy
-    ATM puts instead, call this with option_type="PE".
-    """
-    if already_trading(underlying):
-        raise RuntimeError(f"Already have an open trade for {underlying}")
-
-    ce_symbol, pe_symbol, strike = tsl.ATM_Strike_Selection(
-        Underlying=underlying,
-        Expiry=OPTION_EXPIRY_INDEX,
-    )
-
-    option_symbol = ce_symbol if option_type == "CE" else pe_symbol
-
-    if not option_symbol:
+    if has_open_trade_for_underlying(underlying):
         raise RuntimeError(
-            f"ATM {option_type} option was not found for {underlying}; "
-            f"strike={strike}"
+            f"An open trade already exists for {underlying}"
         )
 
-    quantity = get_lot_size(option_symbol)
-    order_id = place_buy_order(option_symbol, quantity)
-    entry_price = get_executed_entry_price(order_id, option_symbol)
+    option_symbol, strike = select_atm_option(
+        underlying=underlying,
+        option_type=option_type,
+    )
+
+    quantity = get_option_lot_size(
+        option_symbol=option_symbol,
+    )
+
+    order_id = place_buy_order(
+        option_symbol=option_symbol,
+        quantity=quantity,
+    )
+
+    entry_price = get_entry_price(
+        order_id=order_id,
+        option_symbol=option_symbol,
+    )
+
+    initial_stop = entry_price * (
+        1 - INITIAL_STOP_LOSS_PERCENT / 100
+    )
+
+    target_price = entry_price * (
+        1 + TARGET_PERCENT / 100
+    )
 
     trade = Trade(
         underlying=underlying,
         option_symbol=option_symbol,
+        option_type=option_type,
         quantity=quantity,
         entry_price=entry_price,
         highest_price=entry_price,
-        stop_price=entry_price * (1 - INITIAL_STOP_PERCENT / 100),
-        target_price=entry_price * (1 + TARGET_PERCENT / 100),
+        stop_price=initial_stop,
+        target_price=target_price,
         entry_order_id=order_id,
     )
 
     open_trades.append(trade)
-    save_trades(open_trades)
+    save_open_trades()
 
     logger.info(
-        "Entered %s: entry=%.2f stop=%.2f target=%.2f",
+        "TRADE ENTERED | underlying=%s | option=%s | "
+        "strike=%d | entry=%.2f | stop=%.2f | target=%.2f",
+        underlying,
         option_symbol,
-        trade.entry_price,
-        trade.stop_price,
-        trade.target_price,
+        strike,
+        entry_price,
+        initial_stop,
+        target_price,
     )
 
     return trade
 
 
-def exit_trade(trade: Trade, reason: str) -> None:
+def exit_trade(
+    trade: Trade,
+    reason: str,
+) -> None:
     if trade.exited:
         return
 
@@ -488,167 +756,292 @@ def exit_trade(trade: Trade, reason: str) -> None:
             quantity=trade.quantity,
             reason=reason,
         )
+
         trade.exited = True
-        save_trades(open_trades)
-        logger.info("Exited %s: %s", trade.option_symbol, reason)
+        save_open_trades()
+
+        logger.info(
+            "TRADE EXITED | option=%s | reason=%s",
+            trade.option_symbol,
+            reason,
+        )
+
     except Exception:
-        logger.exception("Exit failed for %s", trade.option_symbol)
-
-
-# ---------------------------------------------------------------------
-# Monitoring logic
-# ---------------------------------------------------------------------
-
-def current_time() -> time:
-    return datetime.now().time()
+        logger.exception(
+            "Exit failed for %s",
+            trade.option_symbol,
+        )
 
 
 def update_trade(trade: Trade) -> None:
     if trade.exited:
         return
 
-    ltp = get_ltp(trade.option_symbol)
-
-    # Exit everything at or after 15:15.
-    if current_time() >= FORCE_EXIT_TIME:
-        exit_trade(trade, "TIME_EXIT_15_15")
+    if is_force_exit_time():
+        exit_trade(
+            trade=trade,
+            reason="FORCED_EXIT_15_15",
+        )
         return
 
-    # Track the highest option premium after entry.
-    if ltp > trade.highest_price:
-        trade.highest_price = ltp
+    current_ltp = get_ltp(
+        trade.option_symbol,
+    )
 
-        # A 1% trailing stop follows the option price upward.
+    # Update the highest observed option premium.
+    if current_ltp > trade.highest_price:
+        trade.highest_price = current_ltp
+
         trailing_stop = trade.highest_price * (
-            1 - TRAILING_STOP_PERCENT / 100
+            1 - TRAILING_STOP_LOSS_PERCENT / 100
         )
 
-        # Never move the stop downward.
-        trade.stop_price = max(trade.stop_price, trailing_stop)
-        save_trades(open_trades)
+        # The stop can only move upward.
+        trade.stop_price = max(
+            trade.stop_price,
+            trailing_stop,
+        )
 
-    if ltp >= trade.target_price:
-        exit_trade(trade, f"TARGET_{TARGET_PERCENT:.1f}%")
+        save_open_trades()
+
+        logger.info(
+            "TRAILING STOP UPDATED | option=%s | "
+            "ltp=%.2f | high=%.2f | stop=%.2f",
+            trade.option_symbol,
+            current_ltp,
+            trade.highest_price,
+            trade.stop_price,
+        )
+
+    if current_ltp >= trade.target_price:
+        exit_trade(
+            trade=trade,
+            reason=f"TARGET_{TARGET_PERCENT:.2f}_PERCENT",
+        )
         return
 
-    if ltp <= trade.stop_price:
-        exit_trade(trade, "STOP_OR_TRAILING_STOP")
+    if current_ltp <= trade.stop_price:
+        exit_trade(
+            trade=trade,
+            reason="INITIAL_OR_TRAILING_STOP",
+        )
 
 
-async def monitor_loop() -> None:
+# ============================================================
+# Background monitoring
+# ============================================================
+
+async def monitoring_loop() -> None:
+    logger.info(
+        "Monitoring loop started | live=%s",
+        is_live_trading(),
+    )
+
     while True:
         try:
-            if open_trades:
+            if is_force_exit_time():
                 for trade in list(open_trades):
-                    update_trade(trade)
+                    if not trade.exited:
+                        exit_trade(
+                            trade=trade,
+                            reason="FORCED_EXIT_15_15",
+                        )
+
+            else:
+                for trade in list(open_trades):
+                    if not trade.exited:
+                        try:
+                            update_trade(trade)
+                        except Exception:
+                            logger.exception(
+                                "Could not update trade %s",
+                                trade.option_symbol,
+                            )
+
         except Exception:
-            logger.exception("Monitoring loop error")
+            logger.exception(
+                "Unexpected monitoring-loop error"
+            )
 
-        await asyncio.sleep(5)
+        await asyncio.sleep(
+            MONITOR_INTERVAL_SECONDS
+        )
 
 
-# ---------------------------------------------------------------------
-# Webhook endpoint
-# ---------------------------------------------------------------------
+@app.on_event("startup")
+async def startup_event() -> None:
+    asyncio.create_task(
+        monitoring_loop()
+    )
+
+
+# ============================================================
+# Health endpoint
+# ============================================================
+
+@app.get("/")
+def health_check() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "service": "chartink-dhan-options-bot",
+        "live_trading": is_live_trading(),
+        "open_trades": [
+            trade.to_dict()
+            for trade in open_trades
+            if not trade.exited
+        ],
+    }
+
+
+# ============================================================
+# Chartink webhook
+# ============================================================
 
 @app.post("/chartink/webhook")
-async def chartink_webhook(request: Request) -> dict[str, Any]:
+async def chartink_webhook(
+    request: Request,
+) -> dict[str, Any]:
     try:
         payload = await request.json()
+
     except Exception as exc:
         raise HTTPException(
             status_code=400,
-            detail="Request body must be valid JSON",
+            detail="Request body must contain valid JSON",
         ) from exc
 
     if not isinstance(payload, dict):
         raise HTTPException(
             status_code=400,
-            detail="JSON body must be an object",
-        )
-
-    if "stocks" not in payload:
-        raise HTTPException(
-            status_code=422,
-            detail="Missing required field: stocks",
+            detail="JSON payload must be an object",
         )
 
     try:
-        received_stocks = parse_stock_array(payload["stocks"])
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    if not received_stocks:
-        raise HTTPException(
-            status_code=422,
-            detail="No stocks were received",
+        chartink_stocks = parse_chartink_payload(
+            payload
         )
 
-    if current_time() >= FORCE_EXIT_TIME:
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc
+
+    if not chartink_stocks:
+        raise HTTPException(
+            status_code=422,
+            detail="No valid stocks received",
+        )
+
+    metadata = {
+        "triggered_at": payload.get("triggered_at"),
+        "scan_name": payload.get("scan_name"),
+        "scan_url": payload.get("scan_url"),
+        "alert_name": payload.get("alert_name"),
+        "webhook_url": payload.get("webhook_url"),
+    }
+
+    logger.info(
+        "Chartink alert received | metadata=%s | stocks=%s",
+        metadata,
+        chartink_stocks,
+    )
+
+    if is_force_exit_time():
         return {
             "status": "ignored",
-            "reason": "Past 15:15 exit time",
-            "received_stocks": received_stocks,
+            "reason": "Alert received at or after 15:15",
+            "metadata": metadata,
+            "received_stocks": [
+                {
+                    "symbol": stock.symbol,
+                    "trigger_price": stock.trigger_price,
+                }
+                for stock in chartink_stocks
+            ],
         }
 
-    top_stocks = get_top_stocks(received_stocks)
+    ranked_stocks = rank_stocks_by_today_change(
+        chartink_stocks
+    )
 
-    if not top_stocks:
+    if not ranked_stocks:
         raise HTTPException(
             status_code=422,
-            detail="Could not calculate percentage change for any stock",
+            detail=(
+                "Could not calculate today's percentage "
+                "change for any received stock"
+            ),
         )
 
-    results: list[dict[str, Any]] = []
+    order_results: list[dict[str, Any]] = []
 
-    for stock, percent_change in top_stocks:
+    for ranked_stock in ranked_stocks:
+        symbol = ranked_stock["symbol"]
+
         try:
-            # This buys ATM calls. Change to "PE" for ATM puts.
-            trade = enter_option_trade(
-                underlying=stock,
-                option_type="CE",
+            trade = enter_trade(
+                underlying=symbol,
+                option_type=OPTION_TYPE,
             )
 
-            results.append(
+            order_results.append(
                 {
-                    "underlying": stock,
-                    "today_percent_change": round(percent_change, 2),
+                    "status": "entered",
+                    "underlying": symbol,
+                    "trigger_price": ranked_stock[
+                        "trigger_price"
+                    ],
+                    "today_percent_change": round(
+                        ranked_stock[
+                            "today_percent_change"
+                        ],
+                        2,
+                    ),
                     "option_symbol": trade.option_symbol,
+                    "option_type": trade.option_type,
                     "quantity": trade.quantity,
                     "entry_price": trade.entry_price,
                     "stop_price": trade.stop_price,
                     "target_price": trade.target_price,
                     "order_id": trade.entry_order_id,
-                    "status": "entered",
                 }
             )
 
         except Exception as exc:
-            logger.exception("Could not enter trade for %s", stock)
-            results.append(
+            logger.exception(
+                "Could not place trade for %s",
+                symbol,
+            )
+
+            order_results.append(
                 {
-                    "underlying": stock,
-                    "today_percent_change": round(percent_change, 2),
                     "status": "failed",
+                    "underlying": symbol,
+                    "trigger_price": ranked_stock[
+                        "trigger_price"
+                    ],
+                    "today_percent_change": round(
+                        ranked_stock[
+                            "today_percent_change"
+                        ],
+                        2,
+                    ),
                     "error": str(exc),
                 }
             )
 
     return {
         "status": "accepted",
-        "live_trading": is_live(),
-        "received_stocks": received_stocks,
-        "top_stocks": [
+        "live_trading": is_live_trading(),
+        "metadata": metadata,
+        "received_stocks": [
             {
-                "symbol": symbol,
-                "today_percent_change": round(change, 2),
+                "symbol": stock.symbol,
+                "trigger_price": stock.trigger_price,
             }
-            for symbol, change in top_stocks
+            for stock in chartink_stocks
         ],
-        "orders": results,
+        "top_stocks": ranked_stocks,
+        "orders": order_results,
     }
-
-
-@app.on_event("startup")
-async def startup_event() -> None:
-    asyncio.create_task(monitor_loop())
