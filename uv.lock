@@ -1318,6 +1318,7 @@ dependencies = [
     { name = "pandas-stubs" },
     { name = "pip" },
     { name = "python-dotenv" },
+    { name = "requests" },
     { name = "uvicorn" },
 ]
 
@@ -1330,6 +1331,7 @@ requires-dist = [
     { name = "pandas-stubs", specifier = "~=3.0.5" },
     { name = "pip", specifier = ">=26.2.1" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
+    { name = "requests", specifier = ">=2.34.2" },
     { name = "uvicorn", specifier = ">=0.52.2" },
 ]
 
