@@ -22,17 +22,24 @@ from fastapi import FastAPI, HTTPException, Request
 
 load_dotenv()
 
-GROWW_ACCESS_TOKEN = os.getenv("GROWW_ACCESS_TOKEN")
-GROWW_CLIENT_ID = os.getenv("GROWW_CLIENT_ID")
+GROWW_ACCESS_TOKEN = os.getenv(
+    "GROWW_ACCESS_TOKEN",
+    "",
+).strip()
+
+GROWW_CLIENT_ID = os.getenv(
+    "GROWW_CLIENT_ID",
+    "",
+).strip()
 
 if not GROWW_ACCESS_TOKEN:
     raise RuntimeError(
-        "GROWW_ACCESS_TOKEN must be set in .env"
+        "GROWW_ACCESS_TOKEN is required in .env"
     )
 
 if not GROWW_CLIENT_ID:
     raise RuntimeError(
-        "GROWW_CLIENT_ID must be set in .env"
+        "GROWW_CLIENT_ID is required in .env"
     )
 
 GROWW_API_BASE_URL = os.getenv(
@@ -52,54 +59,36 @@ LIVE_TRADING = (
     == "true"
 )
 
-UNDERLYING_EXCHANGE = os.getenv(
-    "UNDERLYING_EXCHANGE",
-    "NSE",
-)
-
-OPTION_EXCHANGE = os.getenv(
-    "OPTION_EXCHANGE",
-    "NSE",
-)
-
-UNDERLYING_SEGMENT = os.getenv(
-    "UNDERLYING_SEGMENT",
-    "CASH",
-)
-
-OPTION_SEGMENT = os.getenv(
-    "OPTION_SEGMENT",
-    "FNO",
-)
-
-OPTION_PRODUCT = os.getenv(
-    "OPTION_PRODUCT",
-    "NRML",
-)
-
 OPTION_TYPE = os.getenv(
     "OPTION_TYPE",
     "CE",
 ).strip().upper()
 
 OPTION_EXPIRY_DATE = os.getenv(
-    "OPTION_EXPIRY_DATE"
-)
+    "OPTION_EXPIRY_DATE",
+    "",
+).strip()
 
-TOP_STOCK_COUNT = int(
-    os.getenv("TOP_STOCK_COUNT", "3")
+OPTION_PRODUCT = os.getenv(
+    "OPTION_PRODUCT",
+    "NRML",
+).strip().upper()
+
+TOP_STOCK_COUNT = min(
+    int(os.getenv("TOP_STOCK_COUNT", "3")),
+    3,
 )
 
 TARGET_PERCENT = float(
-    os.getenv("TARGET_PERCENT", "10.0")
+    os.getenv("TARGET_PERCENT", "10")
 )
 
-INITIAL_STOP_LOSS_PERCENT = float(
-    os.getenv("INITIAL_STOP_LOSS_PERCENT", "3.0")
+STOP_LOSS_PERCENT = float(
+    os.getenv("STOP_LOSS_PERCENT", "3")
 )
 
-TRAILING_STOP_LOSS_PERCENT = float(
-    os.getenv("TRAILING_STOP_LOSS_PERCENT", "1.0")
+TRAILING_STOP_PERCENT = float(
+    os.getenv("TRAILING_STOP_PERCENT", "1")
 )
 
 FORCE_EXIT_TIME = time(
@@ -107,7 +96,7 @@ FORCE_EXIT_TIME = time(
     int(os.getenv("FORCE_EXIT_MINUTE", "15")),
 )
 
-MONITOR_INTERVAL_SECONDS = int(
+MONITOR_INTERVAL_SECONDS = float(
     os.getenv("MONITOR_INTERVAL_SECONDS", "5")
 )
 
@@ -119,9 +108,15 @@ STATE_FILE = Path(
     os.getenv("STATE_FILE", "open_trades.json")
 )
 
+UNDERLYING_EXCHANGE = "NSE"
+UNDERLYING_SEGMENT = "CASH"
+
+OPTION_EXCHANGE = "NSE"
+OPTION_SEGMENT = "FNO"
+
 
 # ============================================================
-# Logging and application
+# Logging and FastAPI
 # ============================================================
 
 logging.basicConfig(
@@ -132,13 +127,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="Chartink Groww Options Trading Bot",
-    version="3.0.0",
+    title="Chartink Groww Options Bot",
+    version="1.0.0",
 )
 
 
 # ============================================================
-# Data structures
+# Data models
 # ============================================================
 
 @dataclass
@@ -149,6 +144,7 @@ class ChartinkStock:
 
 @dataclass
 class Trade:
+    trade_date: str
     underlying: str
     option_symbol: str
     option_type: str
@@ -159,7 +155,9 @@ class Trade:
     stop_price: float
     target_price: float
     entry_order_id: str | None = None
+    exit_order_id: str | None = None
     exited: bool = False
+    exit_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -173,41 +171,53 @@ class Trade:
 
 
 # ============================================================
-# Persistent state
+# Day and state management
 # ============================================================
 
-def load_open_trades() -> list[Trade]:
+def today_key() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def load_trades() -> list[Trade]:
     if not STATE_FILE.exists():
         return []
 
     try:
-        raw_data = json.loads(
+        content = json.loads(
             STATE_FILE.read_text(encoding="utf-8")
         )
 
-        if not isinstance(raw_data, list):
+        if not isinstance(content, list):
             return []
 
-        return [
-            Trade.from_dict(item)
-            for item in raw_data
-            if isinstance(item, dict)
-        ]
+        trades: list[Trade] = []
+
+        for item in content:
+            if isinstance(item, dict):
+                try:
+                    trades.append(Trade.from_dict(item))
+                except TypeError:
+                    logger.exception(
+                        "Invalid trade state ignored: %s",
+                        item,
+                    )
+
+        return trades
 
     except Exception:
         logger.exception(
-            "Unable to load saved trade state"
+            "Could not load trade state"
         )
         return []
 
 
-open_trades: list[Trade] = load_open_trades()
+open_trades: list[Trade] = load_trades()
 
 
-def save_open_trades() -> None:
-    temporary_file = STATE_FILE.with_suffix(".tmp")
+def save_trades() -> None:
+    temporary_path = STATE_FILE.with_suffix(".tmp")
 
-    temporary_file.write_text(
+    temporary_path.write_text(
         json.dumps(
             [
                 trade.to_dict()
@@ -218,27 +228,56 @@ def save_open_trades() -> None:
         encoding="utf-8",
     )
 
-    temporary_file.replace(STATE_FILE)
+    temporary_path.replace(STATE_FILE)
+
+
+def reset_old_day_state() -> None:
+    """
+    The daily restriction is based on trade_date. Historical records
+    are retained, but only today's trades count as active.
+    """
+    current_day = today_key()
+
+    for trade in open_trades:
+        if trade.trade_date != current_day:
+            trade.exited = True
+
+    save_trades()
+
+
+def todays_trades() -> list[Trade]:
+    current_day = today_key()
+
+    return [
+        trade
+        for trade in open_trades
+        if trade.trade_date == current_day
+    ]
+
+
+def todays_active_trades() -> list[Trade]:
+    return [
+        trade
+        for trade in todays_trades()
+        if not trade.exited
+    ]
+
+
+def symbol_traded_today(underlying: str) -> bool:
+    symbol = underlying.upper()
+
+    return any(
+        trade.underlying == symbol
+        for trade in todays_trades()
+    )
 
 
 # ============================================================
-# General helpers
+# Helpers
 # ============================================================
 
 def normalize_symbol(value: Any) -> str:
     return str(value).strip().upper()
-
-
-def is_live_trading() -> bool:
-    return LIVE_TRADING
-
-
-def current_time() -> time:
-    return datetime.now().time()
-
-
-def is_force_exit_time() -> bool:
-    return current_time() >= FORCE_EXIT_TIME
 
 
 def first_value(
@@ -251,35 +290,37 @@ def first_value(
     }
 
     for key in keys:
-        value = lowered.get(key.lower())
+        result = lowered.get(key.lower())
 
-        if value is not None:
-            return value
+        if result is not None:
+            return result
 
     return None
 
 
-def unwrap_payload(data: Any) -> Any:
-    if isinstance(data, dict):
-        payload = data.get("payload")
-
-        if payload is not None:
-            return payload
-
-    return data
-
-
-def create_order_reference_id(
-    prefix: str = "GRW",
-) -> str:
+def unwrap_payload(value: Any) -> Any:
     """
-    Groww requires an 8–20 character alphanumeric reference ID,
-    with at most two hyphens.
+    Supports both:
+      {"status": "SUCCESS", "payload": {...}}
+    and:
+      {"status": "SUCCESS", "strikes": {...}}
     """
+    if not isinstance(value, dict):
+        return value
+
+    payload = value.get("payload")
+
+    if isinstance(payload, dict):
+        return payload
+
+    return value
+
+
+def order_reference_id() -> str:
     value = (
-        f"{prefix}"
-        f"{datetime.now():%H%M%S}"
-        f"{uuid.uuid4().hex[:5].upper()}"
+        "GRW"
+        + datetime.now().strftime("%H%M%S")
+        + uuid.uuid4().hex[:5].upper()
     )
 
     return re.sub(
@@ -292,8 +333,7 @@ def create_order_reference_id(
 def get_expiry_date() -> str:
     if not OPTION_EXPIRY_DATE:
         raise RuntimeError(
-            "OPTION_EXPIRY_DATE is missing from .env. "
-            "Use YYYY-MM-DD format."
+            "OPTION_EXPIRY_DATE is missing in .env"
         )
 
     try:
@@ -304,10 +344,18 @@ def get_expiry_date() -> str:
 
     except ValueError as exc:
         raise RuntimeError(
-            "OPTION_EXPIRY_DATE must use YYYY-MM-DD format."
+            "OPTION_EXPIRY_DATE must be YYYY-MM-DD"
         ) from exc
 
     return OPTION_EXPIRY_DATE
+
+
+def current_time() -> time:
+    return datetime.now().time()
+
+
+def force_exit_reached() -> bool:
+    return current_time() >= FORCE_EXIT_TIME
 
 
 # ============================================================
@@ -325,36 +373,34 @@ class GrowwClient:
 
     def headers(self) -> dict[str, str]:
         """
-        Groww documents these common API headers:
-          Authorization: Bearer {ACCESS_TOKEN}
-          Accept: application/json
-          X-API-VERSION: 1.0
+        Groww documents Bearer-token authentication and the
+        X-API-VERSION header.
 
-        X-Client-Id is included because the application is configured
-        with GROWW_CLIENT_ID. If Groww rejects this optional header,
-        remove only X-Client-Id from this method.
+        X-Client-Id is included because the application requires
+        GROWW_CLIENT_ID. If your Groww account rejects this optional
+        header, remove only X-Client-Id here.
         """
         return {
             "Authorization": (
                 f"Bearer {self.access_token}"
             ),
             "Accept": "application/json",
+            "Content-Type": "application/json",
             "X-API-VERSION": GROWW_API_VERSION,
             "X-Client-Id": self.client_id,
-            "Content-Type": "application/json",
         }
 
     async def request(
         self,
         method: str,
-        path: str,
+        endpoint: str,
         *,
-        params: dict[str, Any] | None = None,
-        json_body: dict[str, Any] | None = None,
+        params: Any = None,
+        body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         url = (
             f"{GROWW_API_BASE_URL}/"
-            f"{path.lstrip('/')}"
+            f"{endpoint.lstrip('/')}"
         )
 
         async with httpx.AsyncClient(
@@ -365,7 +411,7 @@ class GrowwClient:
                 url=url,
                 headers=self.headers(),
                 params=params,
-                json=json_body,
+                json=body,
             )
 
         try:
@@ -386,6 +432,12 @@ class GrowwClient:
             }
 
         if not response.is_success:
+            logger.error(
+                "Groww HTTP error | code=%s | body=%s",
+                response.status_code,
+                data,
+            )
+
             raise RuntimeError(
                 f"Groww HTTP {response.status_code}: "
                 f"{data}"
@@ -398,9 +450,7 @@ class GrowwClient:
 
         return data
 
-    async def get_user_detail(
-        self,
-    ) -> dict[str, Any]:
+    async def get_user_detail(self) -> dict[str, Any]:
         data = await self.request(
             "GET",
             "/user/detail",
@@ -417,17 +467,15 @@ class GrowwClient:
 
     async def get_quote(
         self,
-        exchange: str,
-        segment: str,
-        trading_symbol: str,
+        symbol: str,
     ) -> dict[str, Any]:
         data = await self.request(
             "GET",
             "/live-data/quote",
             params={
-                "exchange": exchange,
-                "segment": segment,
-                "trading_symbol": trading_symbol,
+                "exchange": UNDERLYING_EXCHANGE,
+                "segment": UNDERLYING_SEGMENT,
+                "trading_symbol": symbol,
             },
         )
 
@@ -435,35 +483,28 @@ class GrowwClient:
 
         if not isinstance(payload, dict):
             raise RuntimeError(
-                f"Invalid quote response: {data}"
+                f"Invalid quote response for {symbol}: {data}"
             )
 
         return payload
 
     async def get_ltp(
         self,
-        exchange: str,
+        symbol: str,
         segment: str,
-        trading_symbol: str,
     ) -> float:
-        """
-        Groww's documented LTP parameter is an array named
-        exchange_symbols. httpx sends a repeated query parameter
-        when given a list.
-        """
+        params = [
+            ("segment", segment),
+            (
+                "exchange_symbols",
+                f"{OPTION_EXCHANGE}_{symbol}",
+            ),
+        ]
+
         data = await self.request(
             "GET",
             "/live-data/ltp",
-            params=[
-                (
-                    "segment",
-                    segment,
-                ),
-                (
-                    "exchange_symbols",
-                    f"{exchange}_{trading_symbol}",
-                ),
-            ],
+            params=params,
         )
 
         payload = unwrap_payload(data)
@@ -479,16 +520,16 @@ class GrowwClient:
             )
 
             if direct_ltp is not None:
-                ltp = float(direct_ltp)
+                value = float(direct_ltp)
 
-                if ltp > 0:
-                    return ltp
+                if value > 0:
+                    return value
 
             nested = (
                 payload.get(
-                    f"{exchange}_{trading_symbol}"
+                    f"{OPTION_EXCHANGE}_{symbol}"
                 )
-                or payload.get(trading_symbol)
+                or payload.get(symbol)
             )
 
             if isinstance(nested, dict):
@@ -502,19 +543,17 @@ class GrowwClient:
                 )
 
                 if nested_ltp is not None:
-                    ltp = float(nested_ltp)
+                    value = float(nested_ltp)
 
-                    if ltp > 0:
-                        return ltp
+                    if value > 0:
+                        return value
 
         raise RuntimeError(
-            f"Could not extract LTP for "
-            f"{exchange}_{trading_symbol}: {data}"
+            f"Could not extract LTP for {symbol}: {data}"
         )
 
     async def get_option_chain(
         self,
-        exchange: str,
         underlying: str,
         expiry_date: str,
     ) -> dict[str, Any]:
@@ -522,7 +561,8 @@ class GrowwClient:
             "GET",
             (
                 "/option-chain/exchange/"
-                f"{exchange}/underlying/{underlying}"
+                f"{OPTION_EXCHANGE}/underlying/"
+                f"{underlying}"
             ),
             params={
                 "expiry_date": expiry_date,
@@ -540,31 +580,31 @@ class GrowwClient:
 
     async def place_order(
         self,
-        payload: dict[str, Any],
+        body: dict[str, Any],
     ) -> dict[str, Any]:
         data = await self.request(
             "POST",
             "/order/create",
-            json_body=payload,
+            body=body,
         )
 
-        payload_data = unwrap_payload(data)
+        payload = unwrap_payload(data)
 
-        if not isinstance(payload_data, dict):
+        if not isinstance(payload, dict):
             raise RuntimeError(
                 f"Invalid order response: {data}"
             )
 
-        return payload_data
+        return payload
 
-    async def get_order_status(
+    async def order_status(
         self,
-        groww_order_id: str,
+        order_id: str,
         segment: str,
     ) -> dict[str, Any]:
         data = await self.request(
             "GET",
-            f"/order/status/{groww_order_id}",
+            f"/order/status/{order_id}",
             params={
                 "segment": segment,
             },
@@ -574,19 +614,19 @@ class GrowwClient:
 
         if not isinstance(payload, dict):
             raise RuntimeError(
-                f"Invalid order-status response: {data}"
+                f"Invalid order status response: {data}"
             )
 
         return payload
 
-    async def get_order_detail(
+    async def order_detail(
         self,
-        groww_order_id: str,
+        order_id: str,
         segment: str,
     ) -> dict[str, Any]:
         data = await self.request(
             "GET",
-            f"/order/detail/{groww_order_id}",
+            f"/order/detail/{order_id}",
             params={
                 "segment": segment,
             },
@@ -596,19 +636,19 @@ class GrowwClient:
 
         if not isinstance(payload, dict):
             raise RuntimeError(
-                f"Invalid order-detail response: {data}"
+                f"Invalid order detail response: {data}"
             )
 
         return payload
 
-    async def get_trade_list_for_order(
+    async def trades_for_order(
         self,
-        groww_order_id: str,
+        order_id: str,
         segment: str,
     ) -> list[dict[str, Any]]:
         data = await self.request(
             "GET",
-            f"/order/trades/{groww_order_id}",
+            f"/order/trades/{order_id}",
             params={
                 "segment": segment,
                 "page": 1,
@@ -641,10 +681,10 @@ class GrowwClient:
                 ]
 
         raise RuntimeError(
-            f"Invalid trade-list response: {data}"
+            f"Invalid trades response: {data}"
         )
 
-    async def get_order_list(
+    async def order_list(
         self,
         segment: str,
     ) -> Any:
@@ -668,63 +708,62 @@ groww = GrowwClient(
 
 
 # ============================================================
-# Chartink parsing
+# Chartink payload
 # ============================================================
 
 def parse_chartink_payload(
     payload: dict[str, Any],
 ) -> list[ChartinkStock]:
-    required_fields = (
-        "stocks",
-        "trigger_prices",
-    )
+    if "stocks" not in payload:
+        raise ValueError(
+            "Missing required field: stocks"
+        )
 
-    for field in required_fields:
-        if field not in payload:
-            raise ValueError(
-                f"Missing required field: {field}"
-            )
+    if "trigger_prices" not in payload:
+        raise ValueError(
+            "Missing required field: trigger_prices"
+        )
 
     raw_stocks = payload["stocks"]
-    raw_trigger_prices = payload["trigger_prices"]
+    raw_prices = payload["trigger_prices"]
 
     if not isinstance(raw_stocks, str):
         raise ValueError(
             "stocks must be a comma-separated string"
         )
 
-    if not isinstance(raw_trigger_prices, str):
+    if not isinstance(raw_prices, str):
         raise ValueError(
             "trigger_prices must be a comma-separated string"
         )
 
     symbols = [
-        normalize_symbol(symbol)
-        for symbol in raw_stocks.split(",")
-        if symbol.strip()
+        normalize_symbol(value)
+        for value in raw_stocks.split(",")
+        if value.strip()
     ]
 
-    price_strings = [
-        price.strip()
-        for price in raw_trigger_prices.split(",")
-        if price.strip()
+    prices = [
+        value.strip()
+        for value in raw_prices.split(",")
+        if value.strip()
     ]
 
-    if len(symbols) != len(price_strings):
+    if len(symbols) != len(prices):
         raise ValueError(
             "stocks and trigger_prices must contain "
             "the same number of values"
         )
 
-    results: list[ChartinkStock] = []
+    result: list[ChartinkStock] = []
     seen_symbols: set[str] = set()
 
     for symbol, raw_price in zip(
         symbols,
-        price_strings,
+        prices,
     ):
         if symbol in seen_symbols:
-            logger.warning(
+            logger.info(
                 "Duplicate symbol ignored: %s",
                 symbol,
             )
@@ -746,7 +785,7 @@ def parse_chartink_payload(
                 f"Trigger price must be positive for {symbol}"
             )
 
-        results.append(
+        result.append(
             ChartinkStock(
                 symbol=symbol,
                 trigger_price=trigger_price,
@@ -755,41 +794,21 @@ def parse_chartink_payload(
 
         seen_symbols.add(symbol)
 
-    return results
+    return result
+
 
 # ============================================================
-# Market data
+# Ranking
 # ============================================================
 
-async def get_ltp(
-    symbol: str,
-    exchange: str,
-    segment: str,
-) -> float:
-    ltp = await groww.get_ltp(
-        exchange=exchange,
-        segment=segment,
-        trading_symbol=symbol,
-    )
-
-    if ltp <= 0:
-        raise RuntimeError(
-            f"Invalid LTP for {symbol}: {ltp}"
-        )
-
-    return ltp
-
-
-async def get_today_percent_change(
+async def get_today_change_percent(
     symbol: str,
 ) -> float:
     quote = await groww.get_quote(
-        exchange=UNDERLYING_EXCHANGE,
-        segment=UNDERLYING_SEGMENT,
-        trading_symbol=symbol,
+        symbol=symbol
     )
 
-    day_change_percent = first_value(
+    day_change = first_value(
         quote,
         (
             "day_change_perc",
@@ -798,8 +817,8 @@ async def get_today_percent_change(
         ),
     )
 
-    if day_change_percent is not None:
-        return float(day_change_percent)
+    if day_change is not None:
+        return float(day_change)
 
     open_price = first_value(
         quote,
@@ -820,7 +839,7 @@ async def get_today_percent_change(
 
     if open_price is None or last_price is None:
         raise RuntimeError(
-            f"Quote lacks open/last price: {quote}"
+            f"Quote lacks required price fields: {quote}"
         )
 
     open_price = float(open_price)
@@ -839,7 +858,7 @@ async def get_today_percent_change(
     )
 
 
-async def rank_stocks_by_today_change(
+async def rank_stocks(
     stocks: list[ChartinkStock],
 ) -> list[dict[str, Any]]:
     ranked: list[dict[str, Any]] = []
@@ -847,7 +866,7 @@ async def rank_stocks_by_today_change(
     for stock in stocks:
         try:
             percent_change = (
-                await get_today_percent_change(
+                await get_today_change_percent(
                     stock.symbol
                 )
             )
@@ -863,7 +882,8 @@ async def rank_stocks_by_today_change(
             )
 
             logger.info(
-                "%s | trigger=%.2f | day_change=%.2f%%",
+                "Rank input | symbol=%s | "
+                "trigger=%.2f | change=%.2f%%",
                 stock.symbol,
                 stock.trigger_price,
                 percent_change,
@@ -886,22 +906,68 @@ async def rank_stocks_by_today_change(
 
 
 # ============================================================
-# Option selection
+# ATM option selection
 # ============================================================
+
+def parse_chain_strikes(
+    strikes: Any,
+) -> list[tuple[float, dict[str, Any]]]:
+    rows: list[
+        tuple[float, dict[str, Any]]
+    ] = []
+
+    if isinstance(strikes, dict):
+        for raw_strike, strike_data in strikes.items():
+            try:
+                strike_price = float(raw_strike)
+
+            except (TypeError, ValueError):
+                continue
+
+            if isinstance(strike_data, dict):
+                rows.append(
+                    (strike_price, strike_data)
+                )
+
+        return rows
+
+    if isinstance(strikes, list):
+        for item in strikes:
+            if not isinstance(item, dict):
+                continue
+
+            raw_strike = (
+                item.get("strike_price")
+                or item.get("strike")
+                or item.get("strikePrice")
+            )
+
+            try:
+                strike_price = float(raw_strike)
+
+            except (TypeError, ValueError):
+                continue
+
+            rows.append(
+                (strike_price, item)
+            )
+
+        return rows
+
+    return rows
+
 
 async def select_atm_option(
     underlying: str,
-    option_type: str,
 ) -> tuple[str, float]:
-    if option_type not in {"CE", "PE"}:
-        raise ValueError(
+    if OPTION_TYPE not in {"CE", "PE"}:
+        raise RuntimeError(
             "OPTION_TYPE must be CE or PE"
         )
 
     expiry_date = get_expiry_date()
 
     chain = await groww.get_option_chain(
-        exchange=OPTION_EXCHANGE,
         underlying=underlying,
         expiry_date=expiry_date,
     )
@@ -911,14 +977,12 @@ async def select_atm_option(
         (
             "underlying_ltp",
             "underlying_last_price",
-            "ltp",
         ),
     )
 
     if underlying_ltp_value is None:
-        underlying_ltp = await get_ltp(
+        underlying_ltp = await groww.get_ltp(
             symbol=underlying,
-            exchange=UNDERLYING_EXCHANGE,
             segment=UNDERLYING_SEGMENT,
         )
 
@@ -929,50 +993,55 @@ async def select_atm_option(
 
     strikes = chain.get("strikes")
 
-    if not isinstance(strikes, dict):
-        raise RuntimeError(
-            f"Option-chain strikes missing: {chain}"
+    strike_rows = parse_chain_strikes(
+        strikes
+    )
+
+    if not strike_rows:
+        logger.error(
+            "Option-chain response has no valid strikes | "
+            "underlying=%s | keys=%s | response=%s",
+            underlying,
+            list(chain.keys()),
+            json.dumps(
+                chain,
+                indent=2,
+                default=str,
+            ),
         )
 
-    parsed_strikes: list[
-        tuple[float, dict[str, Any]]
-    ] = []
-
-    for raw_strike, strike_data in strikes.items():
-        try:
-            strike = float(raw_strike)
-
-        except (TypeError, ValueError):
-            continue
-
-        if isinstance(strike_data, dict):
-            parsed_strikes.append(
-                (strike, strike_data)
-            )
-
-    if not parsed_strikes:
         raise RuntimeError(
             f"No valid strikes found for {underlying}"
         )
 
     selected_strike, selected_data = min(
-        parsed_strikes,
+        strike_rows,
         key=lambda item: abs(
             item[0] - underlying_ltp
         ),
     )
 
-    contract = selected_data.get(option_type)
+    contract: dict[str, Any] | None = None
 
-    if not isinstance(contract, dict):
+    for key, value in selected_data.items():
+        if str(key).upper() == OPTION_TYPE:
+            if isinstance(value, dict):
+                contract = value
+
+            break
+
+    if contract is None:
         raise RuntimeError(
-            f"{option_type} unavailable at strike "
-            f"{selected_strike}: {selected_data}"
+            f"{OPTION_TYPE} contract not available for "
+            f"{underlying} strike {selected_strike}"
         )
 
-    option_symbol = (
-        contract.get("trading_symbol")
-        or contract.get("symbol")
+    option_symbol = first_value(
+        contract,
+        (
+            "trading_symbol",
+            "symbol",
+        ),
     )
 
     option_ltp = first_value(
@@ -1002,11 +1071,13 @@ async def select_atm_option(
         )
 
     logger.info(
-        "ATM option | underlying=%s | underlying_ltp=%.2f | "
-        "strike=%.2f | option=%s | option_ltp=%.2f",
+        "ATM option selected | underlying=%s | "
+        "spot=%.2f | strike=%.2f | type=%s | "
+        "symbol=%s | option_ltp=%.2f",
         underlying,
         underlying_ltp,
         selected_strike,
+        OPTION_TYPE,
         option_symbol,
         option_ltp,
     )
@@ -1014,66 +1085,107 @@ async def select_atm_option(
     return str(option_symbol), option_ltp
 
 
+# ============================================================
+# Lot size
+# ============================================================
+
 async def get_option_lot_size(
     option_symbol: str,
 ) -> int:
     """
-    Uses the Groww instruments endpoint.
+    Downloads the Groww instruments CSV URL and finds the option
+    by trading_symbol.
 
-    Verify the exact instrument response for your account. The
-    code accepts common list and field names.
+    Configure INSTRUMENTS_CSV_URL with the current URL from Groww's
+    Instruments documentation if the default URL changes.
     """
-    data = await groww.request(
-        "GET",
-        "/instruments",
-        params={
-            "segment": OPTION_SEGMENT,
-            "exchange": OPTION_EXCHANGE,
-        },
+    instruments_url = os.getenv(
+        "INSTRUMENTS_CSV_URL"
     )
 
-    instruments = unwrap_payload(data)
-
-    if isinstance(instruments, dict):
-        instruments = (
-            instruments.get("instruments")
-            or instruments.get("items")
-            or instruments.get("data")
-        )
-
-    if not isinstance(instruments, list):
+    if not instruments_url:
         raise RuntimeError(
-            "Groww instruments response is not a list."
+            "INSTRUMENTS_CSV_URL is required to obtain "
+            "the option lot size."
         )
 
-    for instrument in instruments:
-        if not isinstance(instrument, dict):
+    async with httpx.AsyncClient(
+        timeout=REQUEST_TIMEOUT_SECONDS
+    ) as client:
+        response = await client.get(
+            instruments_url
+        )
+
+    response.raise_for_status()
+
+    lines = response.text.splitlines()
+
+    if not lines:
+        raise RuntimeError(
+            "Instrument CSV is empty"
+        )
+
+    headers = [
+        item.strip()
+        for item in lines[0].split(",")
+    ]
+
+    symbol_index = None
+    lot_size_index = None
+    segment_index = None
+
+    for index, name in enumerate(headers):
+        lowered = name.lower()
+
+        if lowered == "trading_symbol":
+            symbol_index = index
+
+        elif lowered == "lot_size":
+            lot_size_index = index
+
+        elif lowered == "segment":
+            segment_index = index
+
+    if symbol_index is None:
+        raise RuntimeError(
+            "trading_symbol column missing from instruments CSV"
+        )
+
+    if lot_size_index is None:
+        raise RuntimeError(
+            "lot_size column missing from instruments CSV"
+        )
+
+    import csv
+    from io import StringIO
+
+    reader = csv.DictReader(
+        StringIO(response.text)
+    )
+
+    for row in reader:
+        if (
+            row.get("trading_symbol")
+            != option_symbol
+        ):
             continue
 
-        symbol = first_value(
-            instrument,
-            (
-                "trading_symbol",
-                "groww_symbol",
-                "symbol",
-            ),
-        )
-
-        if str(symbol) != option_symbol:
+        if (
+            segment_index is not None
+            and row.get("segment") not in {
+                None,
+                "",
+                OPTION_SEGMENT,
+            }
+        ):
             continue
 
-        lot_size = first_value(
-            instrument,
-            (
-                "lot_size",
-                "lotSize",
-            ),
-        )
+        raw_lot_size = row.get("lot_size")
 
-        if lot_size is None:
+        if not raw_lot_size:
             break
 
-        lot_size = int(lot_size)
+        lot_size = int(float(raw_lot_size))
 
         if lot_size <= 0:
             break
@@ -1081,68 +1193,53 @@ async def get_option_lot_size(
         return lot_size
 
     raise RuntimeError(
-        f"Lot size unavailable for {option_symbol}"
+        f"Lot size not found for {option_symbol}"
     )
 
 
 # ============================================================
-# Order operations
+# Orders
 # ============================================================
 
-async def place_order(
+async def place_market_order(
     trading_symbol: str,
     quantity: int,
     transaction_type: str,
-    exchange: str,
-    segment: str,
-    product: str,
-    order_type: str = "MARKET",
-    price: float = 0,
 ) -> dict[str, Any]:
-    if quantity <= 0:
-        raise ValueError(
-            "Quantity must be greater than zero"
-        )
-
     if transaction_type not in {"BUY", "SELL"}:
         raise ValueError(
             "transaction_type must be BUY or SELL"
         )
 
-    if order_type not in {"MARKET", "LIMIT"}:
-        raise ValueError(
-            "order_type must be MARKET or LIMIT"
-        )
-
-    if order_type == "LIMIT" and price <= 0:
-        raise ValueError(
-            "LIMIT order requires a positive price"
-        )
-
-    payload = {
+    body = {
         "trading_symbol": trading_symbol,
         "quantity": quantity,
-        "price": round(price, 2),
+        "price": 0,
         "trigger_price": 0,
         "validity": "DAY",
-        "exchange": exchange,
-        "segment": segment,
-        "product": product,
-        "order_type": order_type,
+        "exchange": OPTION_EXCHANGE,
+        "segment": OPTION_SEGMENT,
+        "product": OPTION_PRODUCT,
+        "order_type": "MARKET",
         "transaction_type": transaction_type,
         "order_reference_id": (
-            create_order_reference_id()
+            order_reference_id()
         ),
     }
 
     logger.info(
-        "Order payload | %s",
-        payload,
+        "Order request | symbol=%s | quantity=%d | "
+        "transaction=%s | live=%s",
+        trading_symbol,
+        quantity,
+        transaction_type,
+        LIVE_TRADING(),
     )
 
-    if not is_live_trading():
+    if not LIVE_TRADING():
         logger.warning(
-            "DRY RUN: order was not submitted"
+            "DRY RUN: order not submitted | %s",
+            body,
         )
 
         return {
@@ -1150,106 +1247,43 @@ async def place_order(
             "groww_order_id": "DRY_RUN",
             "order_status": "DRY_RUN",
             "remark": "LIVE_TRADING=false",
-            **payload,
+            **body,
         }
 
-    result = await groww.place_order(payload)
+    response = await groww.place_order(body)
 
-    order_status = str(
-        result.get("order_status", "")
+    status = str(
+        response.get("order_status", "")
     ).upper()
 
-    if order_status in {
+    if status in {
         "REJECTED",
         "FAILED",
         "CANCELLED",
     }:
         raise RuntimeError(
-            "Groww order failed: "
-            f"{result.get('remark', result)}"
+            f"Groww order failed: "
+            f"{response.get('remark', response)}"
         )
 
-    return result
+    return response
 
 
-async def place_buy_order(
-    option_symbol: str,
-    quantity: int,
-) -> str:
-    response = await place_order(
-        trading_symbol=option_symbol,
-        quantity=quantity,
-        transaction_type="BUY",
-        exchange=OPTION_EXCHANGE,
-        segment=OPTION_SEGMENT,
-        product=OPTION_PRODUCT,
-        order_type="MARKET",
-        price=0,
-    )
-
-    order_id = response.get(
-        "groww_order_id"
-    )
-
-    if not order_id:
-        raise RuntimeError(
-            f"BUY response has no order ID: {response}"
-        )
-
-    return str(order_id)
-
-
-async def place_sell_order(
-    option_symbol: str,
-    quantity: int,
-    reason: str,
-) -> str:
-    logger.info(
-        "SELL | option=%s | quantity=%d | reason=%s",
-        option_symbol,
-        quantity,
-        reason,
-    )
-
-    response = await place_order(
-        trading_symbol=option_symbol,
-        quantity=quantity,
-        transaction_type="SELL",
-        exchange=OPTION_EXCHANGE,
-        segment=OPTION_SEGMENT,
-        product=OPTION_PRODUCT,
-        order_type="MARKET",
-        price=0,
-    )
-
-    order_id = response.get(
-        "groww_order_id"
-    )
-
-    if not order_id:
-        raise RuntimeError(
-            f"SELL response has no order ID: {response}"
-        )
-
-    return str(order_id)
-
-
-async def get_entry_price(
+async def wait_for_execution_price(
     order_id: str,
     option_symbol: str,
 ) -> float:
-    if not is_live_trading() or order_id == "DRY_RUN":
-        return await get_ltp(
+    if not LIVE_TRADING() or order_id == "DRY_RUN":
+        return await groww.get_ltp(
             symbol=option_symbol,
-            exchange=OPTION_EXCHANGE,
             segment=OPTION_SEGMENT,
         )
 
     for attempt in range(1, 7):
         try:
             trades = (
-                await groww.get_trade_list_for_order(
-                    groww_order_id=order_id,
+                await groww.trades_for_order(
+                    order_id=order_id,
                     segment=OPTION_SEGMENT,
                 )
             )
@@ -1294,7 +1328,8 @@ async def get_entry_price(
 
         except Exception:
             logger.warning(
-                "Trade lookup attempt %d failed for %s",
+                "Execution lookup failed | attempt=%d | "
+                "order_id=%s",
                 attempt,
                 order_id,
                 exc_info=True,
@@ -1309,49 +1344,52 @@ async def get_entry_price(
 
 
 # ============================================================
-# Trade lifecycle
+# Entry and exit
 # ============================================================
 
-def has_open_trade_for_underlying(
-    underlying: str,
-) -> bool:
-    return any(
-        trade.underlying == underlying
-        and not trade.exited
-        for trade in open_trades
-    )
-
-
 async def enter_trade(
-    underlying: str,
-    option_type: str,
+    stock: ChartinkStock,
 ) -> Trade:
-    if has_open_trade_for_underlying(underlying):
+    if len(todays_active_trades()) >= 3:
         raise RuntimeError(
-            f"Open trade already exists for {underlying}"
+            "Three active trades already exist today"
+        )
+
+    if symbol_traded_today(stock.symbol):
+        raise RuntimeError(
+            f"{stock.symbol} already traded today"
         )
 
     option_symbol, _ = await select_atm_option(
-        underlying=underlying,
-        option_type=option_type,
+        underlying=stock.symbol
     )
 
     quantity = await get_option_lot_size(
         option_symbol=option_symbol
     )
 
-    order_id = await place_buy_order(
-        option_symbol=option_symbol,
+    order_response = await place_market_order(
+        trading_symbol=option_symbol,
         quantity=quantity,
+        transaction_type="BUY",
     )
 
-    entry_price = await get_entry_price(
-        order_id=order_id,
-        option_symbol=option_symbol,
+    order_id = str(
+        order_response.get(
+            "groww_order_id",
+            "DRY_RUN",
+        )
+    )
+
+    entry_price = (
+        await wait_for_execution_price(
+            order_id=order_id,
+            option_symbol=option_symbol,
+        )
     )
 
     stop_price = entry_price * (
-        1 - INITIAL_STOP_LOSS_PERCENT / 100
+        1 - STOP_LOSS_PERCENT / 100
     )
 
     target_price = entry_price * (
@@ -1359,9 +1397,10 @@ async def enter_trade(
     )
 
     trade = Trade(
-        underlying=underlying,
+        trade_date=today_key(),
+        underlying=stock.symbol,
         option_symbol=option_symbol,
-        option_type=option_type,
+        option_type=OPTION_TYPE,
         expiry_date=get_expiry_date(),
         quantity=quantity,
         entry_price=entry_price,
@@ -1372,12 +1411,12 @@ async def enter_trade(
     )
 
     open_trades.append(trade)
-    save_open_trades()
+    save_trades()
 
     logger.info(
-        "TRADE ENTERED | underlying=%s | option=%s | "
-        "quantity=%d | entry=%.2f | stop=%.2f | target=%.2f",
-        underlying,
+        "ENTRY | stock=%s | option=%s | quantity=%d | "
+        "entry=%.2f | stop=%.2f | target=%.2f",
+        stock.symbol,
         option_symbol,
         quantity,
         entry_price,
@@ -1396,53 +1435,61 @@ async def exit_trade(
         return
 
     try:
-        await place_sell_order(
-            option_symbol=trade.option_symbol,
+        response = await place_market_order(
+            trading_symbol=trade.option_symbol,
             quantity=trade.quantity,
-            reason=reason,
+            transaction_type="SELL",
+        )
+
+        trade.exit_order_id = response.get(
+            "groww_order_id"
         )
 
         trade.exited = True
-        save_open_trades()
+        trade.exit_reason = reason
+
+        save_trades()
 
         logger.info(
-            "TRADE EXITED | option=%s | reason=%s",
+            "EXIT | stock=%s | option=%s | reason=%s",
+            trade.underlying,
             trade.option_symbol,
             reason,
         )
 
     except Exception:
         logger.exception(
-            "Exit failed for %s",
+            "Exit order failed | stock=%s | option=%s",
+            trade.underlying,
             trade.option_symbol,
         )
 
 
-async def update_trade(
+async def monitor_trade(
     trade: Trade,
 ) -> None:
     if trade.exited:
         return
 
-    if is_force_exit_time():
+    if force_exit_reached():
         await exit_trade(
             trade=trade,
-            reason="FORCED_EXIT",
+            reason="FORCED_EXIT_15_15",
         )
         return
 
-    current_ltp = await get_ltp(
+    current_ltp = await groww.get_ltp(
         symbol=trade.option_symbol,
-        exchange=OPTION_EXCHANGE,
         segment=OPTION_SEGMENT,
     )
 
+    # Update high-water mark and move the stop only upward.
     if current_ltp > trade.highest_price:
         trade.highest_price = current_ltp
 
         trailing_stop = (
             trade.highest_price
-            * (1 - TRAILING_STOP_LOSS_PERCENT / 100)
+            * (1 - TRAILING_STOP_PERCENT / 100)
         )
 
         trade.stop_price = max(
@@ -1450,11 +1497,11 @@ async def update_trade(
             trailing_stop,
         )
 
-        save_open_trades()
+        save_trades()
 
         logger.info(
             "TRAILING STOP | option=%s | ltp=%.2f | "
-            "high=%.2f | stop=%.2f",
+            "highest=%.2f | stop=%.2f",
             trade.option_symbol,
             current_ltp,
             trade.highest_price,
@@ -1464,14 +1511,14 @@ async def update_trade(
     if current_ltp >= trade.target_price:
         await exit_trade(
             trade=trade,
-            reason="TARGET_REACHED",
+            reason="TARGET_10_PERCENT",
         )
         return
 
     if current_ltp <= trade.stop_price:
         await exit_trade(
             trade=trade,
-            reason="STOP_LOSS",
+            reason="STOP_LOSS_3_PERCENT",
         )
 
 
@@ -1479,37 +1526,29 @@ async def update_trade(
 # Background monitor
 # ============================================================
 
-async def monitoring_loop() -> None:
+async def monitor_loop() -> None:
     logger.info(
-        "Monitoring loop started | live=%s",
-        is_live_trading(),
+        "Monitor started | live_trading=%s",
+        LIVE_TRADING,
     )
 
     while True:
         try:
-            if is_force_exit_time():
-                for trade in list(open_trades):
-                    if not trade.exited:
-                        await exit_trade(
-                            trade=trade,
-                            reason="FORCED_EXIT",
-                        )
+            reset_old_day_state()
 
-            else:
-                for trade in list(open_trades):
-                    if not trade.exited:
-                        try:
-                            await update_trade(trade)
+            for trade in list(todays_active_trades()):
+                try:
+                    await monitor_trade(trade)
 
-                        except Exception:
-                            logger.exception(
-                                "Could not update %s",
-                                trade.option_symbol,
-                            )
+                except Exception:
+                    logger.exception(
+                        "Could not monitor %s",
+                        trade.option_symbol,
+                    )
 
         except Exception:
             logger.exception(
-                "Unexpected monitoring-loop error"
+                "Unexpected monitor-loop error"
             )
 
         await asyncio.sleep(
@@ -1520,75 +1559,39 @@ async def monitoring_loop() -> None:
 @app.on_event("startup")
 async def startup_event() -> None:
     asyncio.create_task(
-        monitoring_loop()
+        monitor_loop()
     )
 
 
 # ============================================================
-# Health and diagnostics
+# Endpoints
 # ============================================================
 
 @app.get("/")
-async def health_check() -> dict[str, Any]:
+async def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "service": "chartink-groww-options-bot",
-        "live_trading": is_live_trading(),
-        "groww_client_id_configured": bool(
-            GROWW_CLIENT_ID
+        "live_trading": LIVE_TRADING,
+        "today": today_key(),
+        "active_trade_count": len(
+            todays_active_trades()
         ),
-        "groww_access_token_configured": bool(
-            GROWW_ACCESS_TOKEN
-        ),
-        "open_trades": [
+        "active_trades": [
             trade.to_dict()
-            for trade in open_trades
-            if not trade.exited
+            for trade in todays_active_trades()
         ],
     }
 
 
-@app.get("/debug/outbound-ip")
-async def get_outbound_ip() -> dict[str, Any]:
-    try:
-        async with httpx.AsyncClient(
-            timeout=10
-        ) as client:
-            response = await client.get(
-                "https://api.ipify.org?format=json"
-            )
-
-            response.raise_for_status()
-
-        data = response.json()
-
-        return {
-            "outbound_ip": data.get("ip"),
-            "note": (
-                "Public IP visible to external APIs"
-            ),
-        }
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=str(exc),
-        ) from exc
-
-
 @app.get("/debug/auth")
-async def test_authentication() -> dict[str, Any]:
-    """
-    Authentication-only endpoint.
-
-    This calls Groww user detail and does not place an order.
-    """
+async def debug_auth() -> dict[str, Any]:
     try:
-        user = await groww.get_user_detail()
+        user_detail = await groww.get_user_detail()
 
         return {
             "status": "ok",
-            "groww_user_detail": user,
+            "user_detail": user_detail,
         }
 
     except Exception as exc:
@@ -1602,18 +1605,18 @@ async def test_authentication() -> dict[str, Any]:
         ) from exc
 
 
-@app.get("/orders/{groww_order_id}")
+@app.get("/orders/{order_id}")
 async def order_diagnostics(
-    groww_order_id: str,
+    order_id: str,
 ) -> dict[str, Any]:
     try:
-        status = await groww.get_order_status(
-            groww_order_id=groww_order_id,
+        status = await groww.order_status(
+            order_id=order_id,
             segment=OPTION_SEGMENT,
         )
 
-        detail = await groww.get_order_detail(
-            groww_order_id=groww_order_id,
+        detail = await groww.order_detail(
+            order_id=order_id,
             segment=OPTION_SEGMENT,
         )
 
@@ -1625,7 +1628,7 @@ async def order_diagnostics(
     except Exception as exc:
         logger.exception(
             "Unable to inspect order %s",
-            groww_order_id,
+            order_id,
         )
 
         raise HTTPException(
@@ -1633,10 +1636,6 @@ async def order_diagnostics(
             detail=str(exc),
         ) from exc
 
-
-# ============================================================
-# Chartink webhook
-# ============================================================
 
 @app.post("/chartink/webhook")
 async def chartink_webhook(
@@ -1654,7 +1653,7 @@ async def chartink_webhook(
     if not isinstance(payload, dict):
         raise HTTPException(
             status_code=400,
-            detail="JSON payload must be an object",
+            detail="Request JSON must be an object",
         )
 
     try:
@@ -1685,43 +1684,77 @@ async def chartink_webhook(
         metadata,
     )
 
-    if is_force_exit_time():
+    if force_exit_reached():
         return {
             "status": "ignored",
             "reason": (
-                "Alert received at or after force-exit time"
+                "Webhook received at or after 3:15 PM"
             ),
             "metadata": metadata,
         }
 
-    ranked = await rank_stocks_by_today_change(
-        stocks
+    active_count = len(
+        todays_active_trades()
     )
+
+    if active_count >= 3:
+        return {
+            "status": "ignored",
+            "reason": (
+                "Three active trades already exist today"
+            ),
+            "metadata": metadata,
+        }
+
+    ranked = await rank_stocks(stocks)
 
     if not ranked:
         raise HTTPException(
             status_code=422,
             detail=(
-                "Could not calculate today's percentage "
-                "change for received stocks"
+                "Unable to calculate today's percentage "
+                "change for any stock"
             ),
         )
 
-    order_results: list[dict[str, Any]] = []
+    available_slots = 3 - len(
+        todays_active_trades()
+    )
 
-    for item in ranked:
-        symbol = item["symbol"]
+    results: list[dict[str, Any]] = []
+
+    for ranked_stock in ranked:
+        if len(results) >= available_slots:
+            break
+
+        symbol = ranked_stock["symbol"]
+
+        if symbol_traded_today(symbol):
+            results.append(
+                {
+                    "status": "skipped",
+                    "symbol": symbol,
+                    "reason": (
+                        "Symbol already traded today"
+                    ),
+                }
+            )
+            continue
 
         try:
-            trade = await enter_trade(
-                underlying=symbol,
-                option_type=OPTION_TYPE,
+            stock = ChartinkStock(
+                symbol=symbol,
+                trigger_price=(
+                    ranked_stock["trigger_price"]
+                ),
             )
 
-            order_results.append(
+            trade = await enter_trade(stock)
+
+            results.append(
                 {
                     "status": "entered",
-                    "underlying": symbol,
+                    "underlying": trade.underlying,
                     "option_symbol": trade.option_symbol,
                     "option_type": trade.option_type,
                     "expiry_date": trade.expiry_date,
@@ -1741,17 +1774,17 @@ async def chartink_webhook(
                 symbol,
             )
 
-            order_results.append(
+            results.append(
                 {
                     "status": "failed",
-                    "underlying": symbol,
+                    "symbol": symbol,
                     "error": str(exc),
                 }
             )
 
     return {
         "status": "accepted",
-        "live_trading": is_live_trading(),
+        "live_trading": LIVE_TRADING,
         "metadata": metadata,
         "received_stocks": [
             {
@@ -1760,6 +1793,9 @@ async def chartink_webhook(
             }
             for stock in stocks
         ],
-        "top_stocks": ranked,
-        "orders": order_results,
+        "ranked_stocks": ranked,
+        "active_trade_count": len(
+            todays_active_trades()
+        ),
+        "orders": results,
     }
