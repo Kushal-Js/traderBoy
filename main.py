@@ -674,59 +674,66 @@ groww = GrowwClient(
 def parse_chartink_payload(
     payload: dict[str, Any],
 ) -> list[ChartinkStock]:
-    if "stocks" not in payload:
-        raise ValueError(
-            "Missing required field: stocks"
-        )
+    required_fields = (
+        "stocks",
+        "trigger_prices",
+    )
 
-    if "trigger_prices" not in payload:
-        raise ValueError(
-            "Missing required field: trigger_prices"
-        )
+    for field in required_fields:
+        if field not in payload:
+            raise ValueError(
+                f"Missing required field: {field}"
+            )
 
     raw_stocks = payload["stocks"]
-    raw_prices = payload["trigger_prices"]
+    raw_trigger_prices = payload["trigger_prices"]
 
     if not isinstance(raw_stocks, str):
         raise ValueError(
             "stocks must be a comma-separated string"
         )
 
-    if not isinstance(raw_prices, str):
+    if not isinstance(raw_trigger_prices, str):
         raise ValueError(
             "trigger_prices must be a comma-separated string"
         )
 
     symbols = [
-        normalize_symbol(value)
-        for value in raw_stocks.split(",")
-        if value.strip()
+        normalize_symbol(symbol)
+        for symbol in raw_stocks.split(",")
+        if symbol.strip()
     ]
 
-    prices = [
-        value.replace(",", "").strip()
-        for value in raw_prices.split(",")
-        if value.strip()
+    price_strings = [
+        price.strip()
+        for price in raw_trigger_prices.split(",")
+        if price.strip()
     ]
 
-    if len(symbols) != len(prices):
+    if len(symbols) != len(price_strings):
         raise ValueError(
-            "stocks and trigger_prices must have "
+            "stocks and trigger_prices must contain "
             "the same number of values"
         )
 
-    result: list[ChartinkStock] = []
-    seen: set[str] = set()
+    results: list[ChartinkStock] = []
+    seen_symbols: set[str] = set()
 
     for symbol, raw_price in zip(
         symbols,
-        prices,
+        price_strings,
     ):
-        if symbol in seen:
+        if symbol in seen_symbols:
+            logger.warning(
+                "Duplicate symbol ignored: %s",
+                symbol,
+            )
             continue
 
         try:
-            trigger_price = float(raw_price)
+            trigger_price = float(
+                raw_price.replace(",", "")
+            )
 
         except ValueError as exc:
             raise ValueError(
@@ -739,17 +746,16 @@ def parse_chartink_payload(
                 f"Trigger price must be positive for {symbol}"
             )
 
-        result.append(
+        results.append(
             ChartinkStock(
                 symbol=symbol,
                 trigger_price=trigger_price,
             )
         )
 
-        seen.add(symbol)
+        seen_symbols.add(symbol)
 
-    return result
-
+    return results
 
 # ============================================================
 # Market data
