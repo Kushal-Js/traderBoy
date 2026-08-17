@@ -189,6 +189,7 @@ class Trade:
     target_price: float
     entry_order_id: str | None = None
     exit_order_id: str | None = None
+    entry_status: str = "PENDING"
     exited: bool = False
     exit_reason: str | None = None
 
@@ -206,6 +207,18 @@ class Trade:
 # ============================================================
 # Day and state management
 # ============================================================
+
+def symbol_has_pending_or_active_trade_today(
+    underlying: str,
+) -> bool:
+    symbol = underlying.upper()
+
+    return any(
+        trade.trade_date == today_key()
+        and trade.underlying.upper() == symbol
+        and not trade.exited
+        for trade in open_trades
+    )
 
 def today_key() -> str:
     return datetime.now().strftime("%Y-%m-%d")
@@ -744,6 +757,28 @@ class GrowwClient:
 
         return result
 
+    async def order_status(
+            self,
+            order_id: str,
+            segment: str,
+    ) -> dict[str, Any]:
+        data = await self.request(
+            "GET",
+            f"/order/status/{order_id}",
+            params={
+                "segment": segment,
+            },
+        )
+
+        payload = unwrap_payload(data)
+
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"Invalid order-status response: {data}"
+            )
+
+        return payload
+
     async def place_order(
         self,
         body: dict[str, Any],
@@ -808,9 +843,9 @@ class GrowwClient:
         return payload
 
     async def trades_for_order(
-        self,
-        order_id: str,
-        segment: str,
+            self,
+            order_id: str,
+            segment: str,
     ) -> list[dict[str, Any]]:
         data = await self.request(
             "GET",
@@ -833,10 +868,10 @@ class GrowwClient:
 
         if isinstance(payload, dict):
             trades = (
-                payload.get("trades")
-                or payload.get("items")
-                or payload.get("data")
-                or []
+                    payload.get("trades")
+                    or payload.get("items")
+                    or payload.get("data")
+                    or []
             )
 
             if isinstance(trades, list):
@@ -1441,74 +1476,174 @@ async def wait_for_execution_price(
     order_id: str,
     option_symbol: str,
 ) -> float:
-    if not is_live_trading() or order_id == "DRY_RUN":
+    """
+    Wait for an order to execute, then calculate the weighted
+    average execution price from its trades.
+
+    Never assume that HTTP 200 from order creation means filled.
+    """
+
+    if not LIVE_TRADING or order_id == "DRY_RUN":
         return await groww.get_ltp(
             symbol=option_symbol,
             segment=OPTION_SEGMENT,
         )
 
-    for attempt in range(1, 7):
-        try:
-            trades = (
-                await groww.trades_for_order(
-                    order_id=order_id,
-                    segment=OPTION_SEGMENT,
-                )
+    terminal_failure_statuses = {
+        "REJECTED",
+        "FAILED",
+        "CANCELLED",
+    }
+
+    successful_statuses = {
+        "EXECUTED",
+        "COMPLETED",
+    }
+
+    max_attempts = 30
+    poll_seconds = 2
+
+    for attempt in range(1, max_attempts + 1):
+        status_response = await groww.order_status(
+            order_id=order_id,
+            segment=OPTION_SEGMENT,
+        )
+
+        order_status = str(
+            status_response.get(
+                "order_status",
+                status_response.get(
+                    "status",
+                    "",
+                ),
+            )
+        ).upper()
+
+        filled_quantity = status_response.get(
+            "filled_quantity",
+            status_response.get(
+                "filled_qty",
+                0,
+            ),
+        )
+
+        remaining_quantity = status_response.get(
+            "remaining_quantity",
+            status_response.get(
+                "remaining_qty",
+                None,
+            ),
+        )
+
+        remark = status_response.get(
+            "remark"
+        )
+
+        logger.info(
+            "Order status | order_id=%s | attempt=%d/%d | "
+            "status=%s | filled=%s | remaining=%s | "
+            "remark=%s",
+            order_id,
+            attempt,
+            max_attempts,
+            order_status,
+            filled_quantity,
+            remaining_quantity,
+            remark,
+        )
+
+        if order_status in terminal_failure_statuses:
+            raise RuntimeError(
+                f"Order {order_id} was not executed | "
+                f"status={order_status} | "
+                f"remark={remark} | "
+                f"response={status_response}"
             )
 
-            if trades:
-                total_quantity = 0
-                total_value = 0.0
+        if order_status in successful_statuses:
+            break
 
-                for trade in trades:
-                    price = first_value(
-                        trade,
-                        (
-                            "price",
-                            "trade_price",
-                        ),
-                    )
+        await asyncio.sleep(poll_seconds)
 
-                    quantity = first_value(
-                        trade,
-                        (
-                            "quantity",
-                            "filled_quantity",
-                        ),
-                    )
+    else:
+        raise RuntimeError(
+            f"Order {order_id} is still pending after "
+            f"{max_attempts * poll_seconds} seconds. "
+            "Do not resubmit automatically; check its "
+            "status before retrying."
+        )
 
-                    if price is None or quantity is None:
-                        continue
-
-                    price = float(price)
-                    quantity = int(quantity)
-
-                    total_quantity += quantity
-                    total_value += (
-                        price * quantity
-                    )
-
-                if total_quantity > 0:
-                    return (
-                        total_value
-                        / total_quantity
-                    )
-
-        except Exception:
-            logger.warning(
-                "Execution lookup failed | attempt=%d | "
-                "order_id=%s",
-                attempt,
-                order_id,
-                exc_info=True,
-            )
-
-        await asyncio.sleep(2)
-
-    raise RuntimeError(
-        f"Could not obtain execution price for "
-        f"order {order_id}"
+    # The order is executed. Now retrieve its fills.
+    trades = await groww.trades_for_order(
+        order_id=order_id,
+        segment=OPTION_SEGMENT,
     )
+
+    if not trades:
+        raise RuntimeError(
+            f"Order {order_id} is marked executed, but "
+            "no trades were returned yet."
+        )
+
+    total_quantity = 0
+    total_value = 0.0
+
+    for trade in trades:
+        price = first_value(
+            trade,
+            (
+                "price",
+                "trade_price",
+                "average_price",
+                "average_fill_price",
+            ),
+        )
+
+        quantity = first_value(
+            trade,
+            (
+                "quantity",
+                "filled_quantity",
+                "qty",
+            ),
+        )
+
+        if price is None or quantity is None:
+            logger.warning(
+                "Ignoring incomplete trade record: %s",
+                trade,
+            )
+            continue
+
+        price = float(price)
+        quantity = int(quantity)
+
+        if price <= 0 or quantity <= 0:
+            continue
+
+        total_quantity += quantity
+        total_value += price * quantity
+
+    if total_quantity <= 0:
+        raise RuntimeError(
+            f"Could not calculate execution price for "
+            f"order {order_id}: {trades}"
+        )
+
+    average_execution_price = (
+        total_value / total_quantity
+    )
+
+    logger.info(
+        "Order executed | order_id=%s | symbol=%s | "
+        "filled_quantity=%d | average_price=%.2f",
+        order_id,
+        option_symbol,
+        total_quantity,
+        average_execution_price,
+    )
+
+    return average_execution_price
 
 
 # ============================================================
@@ -1523,12 +1658,15 @@ async def enter_trade(
             "Three active trades already exist today"
         )
 
-    if symbol_traded_today(stock.symbol):
+    if symbol_has_pending_or_active_trade_today(
+        stock.symbol
+    ):
         raise RuntimeError(
-            f"{stock.symbol} already traded today"
+            f"{stock.symbol} already has a pending or "
+            "active order today"
         )
 
-    option_symbol, _, expiry_date = (
+    option_symbol, option_ltp, expiry_date = (
         await select_atm_option(
             underlying=stock.symbol
         )
@@ -1551,11 +1689,9 @@ async def enter_trade(
         )
     )
 
-    entry_price = (
-        await wait_for_execution_price(
-            order_id=order_id,
-            option_symbol=option_symbol,
-        )
+    entry_price = await wait_for_execution_price(
+        order_id=order_id,
+        option_symbol=option_symbol,
     )
 
     stop_price = entry_price * (
@@ -1582,17 +1718,6 @@ async def enter_trade(
 
     open_trades.append(trade)
     save_trades()
-
-    logger.info(
-        "ENTRY | stock=%s | option=%s | quantity=%d | "
-        "entry=%.2f | stop=%.2f | target=%.2f",
-        stock.symbol,
-        option_symbol,
-        quantity,
-        entry_price,
-        stop_price,
-        target_price,
-    )
 
     return trade
 
