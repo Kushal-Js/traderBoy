@@ -362,25 +362,74 @@ def order_reference_id() -> str:
         value,
     )[:20]
 
+from datetime import date
 
-def get_expiry_date() -> str:
-    if not OPTION_EXPIRY_DATE:
-        raise RuntimeError(
-            "OPTION_EXPIRY_DATE is missing in .env"
-        )
 
+def is_valid_future_expiry(
+    value: str,
+) -> bool:
     try:
-        datetime.strptime(
-            OPTION_EXPIRY_DATE,
+        expiry = datetime.strptime(
+            value,
             "%Y-%m-%d",
+        ).date()
+
+        return expiry >= date.today()
+
+    except ValueError:
+        return False
+
+
+async def choose_expiry(
+    underlying: str,
+) -> str:
+    configured_expiry = OPTION_EXPIRY_DATE.strip()
+
+    if configured_expiry:
+        available = (
+            await groww.get_available_expiries(
+                underlying=underlying
+            )
         )
 
-    except ValueError as exc:
-        raise RuntimeError(
-            "OPTION_EXPIRY_DATE must be YYYY-MM-DD"
-        ) from exc
+        if configured_expiry in available:
+            return configured_expiry
 
-    return OPTION_EXPIRY_DATE
+        logger.warning(
+            "Configured expiry %s unavailable for %s. "
+            "Available expiries: %s",
+            configured_expiry,
+            underlying,
+            available,
+        )
+
+    available = (
+        await groww.get_available_expiries(
+            underlying=underlying
+        )
+    )
+
+    future_expiries = [
+        expiry
+        for expiry in available
+        if is_valid_future_expiry(expiry)
+    ]
+
+    if not future_expiries:
+        raise RuntimeError(
+            f"No future F&O expiry available for "
+            f"{underlying}"
+        )
+
+    selected = sorted(future_expiries)[0]
+
+    logger.info(
+        "Selected expiry | underlying=%s | expiry=%s",
+        underlying,
+        selected,
+    )
+
+    return selected
 
 
 def current_time() -> time:
@@ -992,13 +1041,15 @@ def parse_chain_strikes(
 
 async def select_atm_option(
     underlying: str,
-) -> tuple[str, float]:
+) -> tuple[str, float, str]:
     if OPTION_TYPE not in {"CE", "PE"}:
         raise RuntimeError(
             "OPTION_TYPE must be CE or PE"
         )
 
-    expiry_date = get_expiry_date()
+    expiry_date = await choose_expiry(
+        underlying=underlying
+    )
 
     chain = await groww.get_option_chain(
         underlying=underlying,
@@ -1026,35 +1077,42 @@ async def select_atm_option(
 
     strikes = chain.get("strikes")
 
-    strike_rows = parse_chain_strikes(
-        strikes
-    )
-
-    if not strike_rows:
-        logger.error(
-            "Option-chain response has no valid strikes | "
-            "underlying=%s | keys=%s | response=%s",
-            underlying,
-            list(chain.keys()),
-            json.dumps(
-                chain,
-                indent=2,
-                default=str,
-            ),
+    if not isinstance(strikes, dict) or not strikes:
+        raise RuntimeError(
+            f"No option contracts found for "
+            f"{underlying} expiry {expiry_date}"
         )
 
+    valid_strikes: list[
+        tuple[float, dict[str, Any]]
+    ] = []
+
+    for raw_strike, strike_data in strikes.items():
+        try:
+            strike_price = float(raw_strike)
+
+        except (TypeError, ValueError):
+            continue
+
+        if isinstance(strike_data, dict):
+            valid_strikes.append(
+                (strike_price, strike_data)
+            )
+
+    if not valid_strikes:
         raise RuntimeError(
-            f"No valid strikes found for {underlying}"
+            f"No valid strikes found for "
+            f"{underlying} expiry {expiry_date}"
         )
 
     selected_strike, selected_data = min(
-        strike_rows,
+        valid_strikes,
         key=lambda item: abs(
             item[0] - underlying_ltp
         ),
     )
 
-    contract: dict[str, Any] | None = None
+    contract = None
 
     for key, value in selected_data.items():
         if str(key).upper() == OPTION_TYPE:
@@ -1063,59 +1121,38 @@ async def select_atm_option(
 
             break
 
-    if contract is None:
+    if not contract:
         raise RuntimeError(
-            f"{OPTION_TYPE} contract not available for "
+            f"{OPTION_TYPE} contract unavailable for "
             f"{underlying} strike {selected_strike}"
         )
 
-    option_symbol = first_value(
-        contract,
-        (
-            "trading_symbol",
-            "symbol",
-        ),
+    option_symbol = (
+        contract.get("trading_symbol")
+        or contract.get("symbol")
     )
 
-    option_ltp = first_value(
-        contract,
-        (
-            "ltp",
-            "last_price",
-            "price",
-        ),
+    option_ltp = (
+        contract.get("ltp")
+        or contract.get("last_price")
+        or contract.get("price")
     )
 
     if not option_symbol:
         raise RuntimeError(
-            f"Option trading symbol missing: {contract}"
+            f"Option symbol missing: {contract}"
         )
 
-    if option_ltp is None:
+    if option_ltp is None or float(option_ltp) <= 0:
         raise RuntimeError(
-            f"Option LTP missing: {contract}"
+            f"Invalid option LTP: {contract}"
         )
 
-    option_ltp = float(option_ltp)
-
-    if option_ltp <= 0:
-        raise RuntimeError(
-            f"Invalid option LTP: {option_ltp}"
-        )
-
-    logger.info(
-        "ATM option selected | underlying=%s | "
-        "spot=%.2f | strike=%.2f | type=%s | "
-        "symbol=%s | option_ltp=%.2f",
-        underlying,
-        underlying_ltp,
-        selected_strike,
-        OPTION_TYPE,
-        option_symbol,
-        option_ltp,
+    return (
+        str(option_symbol),
+        float(option_ltp),
+        expiry_date,
     )
-
-    return str(option_symbol), option_ltp
 
 
 # ============================================================
@@ -1393,8 +1430,10 @@ async def enter_trade(
             f"{stock.symbol} already traded today"
         )
 
-    option_symbol, _ = await select_atm_option(
-        underlying=stock.symbol
+    option_symbol, _, expiry_date = (
+        await select_atm_option(
+            underlying=stock.symbol
+        )
     )
 
     quantity = await get_option_lot_size(
@@ -1434,7 +1473,7 @@ async def enter_trade(
         underlying=stock.symbol,
         option_symbol=option_symbol,
         option_type=OPTION_TYPE,
-        expiry_date=get_expiry_date(),
+        expiry_date=expiry_date,
         quantity=quantity,
         entry_price=entry_price,
         highest_price=entry_price,
