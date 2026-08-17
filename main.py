@@ -17,9 +17,42 @@ from fastapi import FastAPI, HTTPException, Request
 
 
 # ============================================================
-# Configuration
+# Configuration AMO
 # ============================================================
 
+AMO_ENABLED = (
+    os.getenv("AMO_ENABLED", "true")
+    .strip()
+    .lower()
+    == "true"
+)
+
+AMO_LIMIT_PRICE_MODE = os.getenv(
+    "AMO_LIMIT_PRICE_MODE",
+    "OPTION_LTP",
+).strip().upper()
+
+AMO_PRICE_BUFFER_PERCENT = float(
+    os.getenv("AMO_PRICE_BUFFER_PERCENT", "0.5")
+)
+
+AMO_PRODUCT = os.getenv(
+    "AMO_PRODUCT",
+    "AMO_PRODUCT",
+).strip().upper()
+
+AMO_VALIDITY = os.getenv(
+    "AMO_VALIDITY",
+    "DAY",
+).strip().upper()
+
+AMO_MAX_STOCKS = min(
+    int(os.getenv("AMO_MAX_STOCKS", "3")),
+    3,
+)
+# ============================================================
+# Configuration NRML
+# ============================================================
 load_dotenv()
 
 GROWW_ACCESS_TOKEN = os.getenv(
@@ -1561,6 +1594,358 @@ async def startup_event() -> None:
     asyncio.create_task(
         monitor_loop()
     )
+
+
+# ============================================================
+# Endpoints
+# ============================================================
+
+async def place_amo_limit_order(
+    trading_symbol: str,
+    quantity: int,
+    limit_price: float,
+) -> dict[str, Any]:
+    """
+    Submit an AMO limit order.
+
+    This function intentionally uses a LIMIT order. The order is
+    submitted after market hours, and Groww determines its AMO
+    processing status.
+    """
+
+    if not AMO_ENABLED:
+        return {
+            "status": "DRY_RUN",
+            "order_status": "DRY_RUN",
+            "groww_order_id": "DRY_RUN",
+            "remark": (
+                "AMO_ENABLED=true; order not submitted"
+            ),
+        }
+
+    if quantity <= 0:
+        raise ValueError(
+            "AMO quantity must be greater than zero"
+        )
+
+    if limit_price <= 0:
+        raise ValueError(
+            "AMO limit price must be greater than zero"
+        )
+
+    body = {
+        "trading_symbol": trading_symbol,
+        "quantity": quantity,
+        "price": round(limit_price, 2),
+        "trigger_price": 0,
+        "validity": AMO_VALIDITY,
+        "exchange": OPTION_EXCHANGE,
+        "segment": OPTION_SEGMENT,
+        "product": AMO_PRODUCT,
+        "order_type": "LIMIT",
+        "transaction_type": "BUY",
+        "order_reference_id": (
+            order_reference_id()
+        ),
+    }
+
+    logger.info(
+        "AMO request | symbol=%s | quantity=%d | "
+        "price=%.2f | product=%s",
+        trading_symbol,
+        quantity,
+        limit_price,
+        AMO_PRODUCT,
+    )
+
+    if not LIVE_TRADING():
+        logger.warning(
+            "DRY RUN: AMO order was not submitted | %s",
+            body,
+        )
+
+        return {
+            "status": "DRY_RUN",
+            "groww_order_id": "DRY_RUN",
+            "order_status": "DRY_RUN",
+            "amo_status": "DRY_RUN",
+            "remark": "LIVE_TRADING=false",
+            **body,
+        }
+
+    response = await groww.place_order(body)
+
+    logger.info(
+        "AMO response | order_id=%s | order_status=%s | "
+        "amo_status=%s | remark=%s",
+        response.get("groww_order_id"),
+        response.get("order_status"),
+        response.get("amo_status"),
+        response.get("remark"),
+    )
+
+    order_status = str(
+        response.get("order_status", "")
+    ).upper()
+
+    amo_status = str(
+        response.get("amo_status", "")
+    ).upper()
+
+    failed_statuses = {
+        "REJECTED",
+        "FAILED",
+        "CANCELLED",
+    }
+
+    if (
+        order_status in failed_statuses
+        or amo_status in failed_statuses
+    ):
+        raise RuntimeError(
+            "Groww AMO order failed: "
+            f"{response.get('remark', response)}"
+        )
+
+    return response
+
+def calculate_amo_limit_price(
+    option_ltp: float,
+) -> float:
+    if option_ltp <= 0:
+        raise ValueError(
+            "Option LTP must be positive"
+        )
+
+    if AMO_LIMIT_PRICE_MODE == "OPTION_LTP":
+        return round(option_ltp, 2)
+
+    if AMO_LIMIT_PRICE_MODE == "BUFFERED":
+        return round(
+            option_ltp
+            * (
+                1
+                + AMO_PRICE_BUFFER_PERCENT / 100
+            ),
+            2,
+        )
+
+    raise ValueError(
+        "AMO_LIMIT_PRICE_MODE must be "
+        "OPTION_LTP or BUFFERED"
+    )
+
+async def enter_amo_trade(
+    stock: ChartinkStock,
+) -> dict[str, Any]:
+    if len(todays_active_trades()) >= 3:
+        raise RuntimeError(
+            "Three active trades already exist today"
+        )
+
+    if symbol_traded_today(stock.symbol):
+        raise RuntimeError(
+            f"{stock.symbol} already traded today"
+        )
+
+    option_symbol, option_ltp = (
+        await select_atm_option(
+            underlying=stock.symbol
+        )
+    )
+
+    quantity = await get_option_lot_size(
+        option_symbol=option_symbol
+    )
+
+    amo_limit_price = calculate_amo_limit_price(
+        option_ltp=option_ltp
+    )
+
+    order_response = await place_amo_limit_order(
+        trading_symbol=option_symbol,
+        quantity=quantity,
+        limit_price=amo_limit_price,
+    )
+
+    order_id = order_response.get(
+        "groww_order_id"
+    )
+
+    if not order_id:
+        raise RuntimeError(
+            "AMO response did not include groww_order_id"
+        )
+
+    logger.info(
+        "AMO submitted | underlying=%s | option=%s | "
+        "quantity=%d | limit_price=%.2f | "
+        "order_id=%s | amo_status=%s",
+        stock.symbol,
+        option_symbol,
+        quantity,
+        amo_limit_price,
+        order_id,
+        order_response.get("amo_status"),
+    )
+
+    return {
+        "underlying": stock.symbol,
+        "option_symbol": option_symbol,
+        "option_type": OPTION_TYPE,
+        "expiry_date": get_expiry_date(),
+        "quantity": quantity,
+        "option_ltp": option_ltp,
+        "amo_limit_price": amo_limit_price,
+        "groww_order_id": order_id,
+        "order_status": order_response.get(
+            "order_status"
+        ),
+        "amo_status": order_response.get(
+            "amo_status"
+        ),
+        "remark": order_response.get(
+            "remark"
+        ),
+    }
+
+@app.post("/chartink/amo-webhook")
+async def chartink_amo_webhook(
+    request: Request,
+) -> dict[str, Any]:
+    """
+    Accepts the same Chartink payload as /chartink/webhook.
+
+    This endpoint is intended for after-market submission.
+    It does not create an active Trade object because an AMO
+    may not be executed yet.
+    """
+
+    if not AMO_ENABLED:
+        return {
+            "status": "disabled",
+            "reason": (
+                "Set AMO_ENABLED=true to enable AMO submission"
+            ),
+        }
+
+    try:
+        payload = await request.json()
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Request body must be valid JSON",
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Request JSON must be an object",
+        )
+
+    try:
+        stocks = parse_chartink_payload(payload)
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc
+
+    if not stocks:
+        raise HTTPException(
+            status_code=422,
+            detail="No valid stocks received",
+        )
+
+    metadata = {
+        "triggered_at": payload.get("triggered_at"),
+        "scan_name": payload.get("scan_name"),
+        "scan_url": payload.get("scan_url"),
+        "alert_name": payload.get("alert_name"),
+        "webhook_url": payload.get("webhook_url"),
+    }
+
+    logger.info(
+        "Chartink AMO alert received | metadata=%s",
+        metadata,
+    )
+
+    # Do not submit AMO from both endpoints accidentally.
+    # AMO endpoint is intended for a separate Chartink alert/webhook.
+    ranked_stocks = await rank_stocks(stocks)
+
+    if not ranked_stocks:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Unable to calculate today's change "
+                "for received stocks"
+            ),
+        )
+
+    results: list[dict[str, Any]] = []
+
+    for ranked_stock in ranked_stocks[:AMO_MAX_STOCKS]:
+        symbol = ranked_stock["symbol"]
+
+        if symbol_traded_today(symbol):
+            results.append(
+                {
+                    "status": "skipped",
+                    "symbol": symbol,
+                    "reason": (
+                        "Symbol already has a trade "
+                        "record for today"
+                    ),
+                }
+            )
+            continue
+
+        try:
+            stock = ChartinkStock(
+                symbol=symbol,
+                trigger_price=(
+                    ranked_stock["trigger_price"]
+                ),
+            )
+
+            amo_result = await enter_amo_trade(
+                stock=stock
+            )
+
+            results.append(
+                {
+                    "status": "amo_submitted",
+                    "rank_data": ranked_stock,
+                    **amo_result,
+                }
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "Could not submit AMO for %s",
+                symbol,
+            )
+
+            results.append(
+                {
+                    "status": "failed",
+                    "symbol": symbol,
+                    "error": str(exc),
+                }
+            )
+
+    return {
+        "status": "accepted",
+        "mode": "AMO",
+        "live_trading": LIVE_TRADING,
+        "amo_enabled": AMO_ENABLED,
+        "metadata": metadata,
+        "ranked_stocks": ranked_stocks,
+        "orders": results,
+    }
 
 
 # ============================================================
