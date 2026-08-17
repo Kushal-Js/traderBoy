@@ -210,6 +210,8 @@ class Trade:
 def today_key() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
+def is_live_trading() -> bool:
+    return LIVE_TRADING
 
 def load_trades() -> list[Trade]:
     if not STATE_FILE.exists():
@@ -380,38 +382,58 @@ def is_valid_future_expiry(
         return False
 
 
+from datetime import date, datetime
+
+
+def is_valid_future_expiry(
+        value: str,
+) -> bool:
+    try:
+        expiry = datetime.strptime(
+            value,
+            "%Y-%m-%d",
+        ).date()
+
+        return expiry >= date.today()
+
+    except ValueError:
+        return False
+
+
 async def choose_expiry(
-    underlying: str,
+        underlying: str,
 ) -> str:
     configured_expiry = OPTION_EXPIRY_DATE.strip()
 
-    if configured_expiry:
-        available = (
-            await groww.get_available_expiries(
-                underlying=underlying
-            )
-        )
-
-        if configured_expiry in available:
-            return configured_expiry
-
-        logger.warning(
-            "Configured expiry %s unavailable for %s. "
-            "Available expiries: %s",
-            configured_expiry,
-            underlying,
-            available,
-        )
-
-    available = (
+    available_expiries = (
         await groww.get_available_expiries(
             underlying=underlying
         )
     )
 
+    if configured_expiry:
+        if configured_expiry in available_expiries:
+            logger.info(
+                "Using configured expiry | "
+                "underlying=%s | expiry=%s",
+                underlying,
+                configured_expiry,
+            )
+
+            return configured_expiry
+
+        logger.warning(
+            "Configured expiry unavailable | "
+            "underlying=%s | configured=%s | "
+            "available=%s",
+            underlying,
+            configured_expiry,
+            available_expiries,
+        )
+
     future_expiries = [
         expiry
-        for expiry in available
+        for expiry in available_expiries
         if is_valid_future_expiry(expiry)
     ]
 
@@ -421,15 +443,18 @@ async def choose_expiry(
             f"{underlying}"
         )
 
-    selected = sorted(future_expiries)[0]
+    selected_expiry = sorted(
+        future_expiries
+    )[0]
 
     logger.info(
-        "Selected expiry | underlying=%s | expiry=%s",
+        "Automatically selected expiry | "
+        "underlying=%s | expiry=%s",
         underlying,
-        selected,
+        selected_expiry,
     )
 
-    return selected
+    return selected_expiry
 
 
 def current_time() -> time:
@@ -659,6 +684,65 @@ class GrowwClient:
             )
 
         return payload
+
+    async def get_available_expiries(
+            self,
+            underlying: str,
+    ) -> list[str]:
+        """
+        Return current-year F&O expiry dates for an underlying.
+
+        Groww endpoint:
+        GET /v1/historical/expiries
+        """
+
+        data = await self.request(
+            "GET",
+            "/historical/expiries",
+            params={
+                "exchange": OPTION_EXCHANGE,
+                "underlying_symbol": underlying,
+                "year": datetime.now().year,
+            },
+        )
+
+        payload = unwrap_payload(data)
+
+        if isinstance(payload, list):
+            expiries = payload
+
+        elif isinstance(payload, dict):
+            expiries = (
+                    payload.get("expiries")
+                    or payload.get("expiry_dates")
+                    or payload.get("data")
+                    or []
+            )
+
+        else:
+            expiries = []
+
+        if not isinstance(expiries, list):
+            raise RuntimeError(
+                f"Invalid expiry response for {underlying}: "
+                f"{data}"
+            )
+
+        result = sorted(
+            {
+                str(expiry).strip()
+                for expiry in expiries
+                if expiry
+            }
+        )
+
+        logger.info(
+            "Available expiries | underlying=%s | expiries=%s",
+            underlying,
+            result,
+        )
+
+        return result
 
     async def place_order(
         self,
@@ -1112,18 +1196,13 @@ async def select_atm_option(
         ),
     )
 
-    contract = None
+    contract = selected_data.get(
+        OPTION_TYPE
+    )
 
-    for key, value in selected_data.items():
-        if str(key).upper() == OPTION_TYPE:
-            if isinstance(value, dict):
-                contract = value
-
-            break
-
-    if not contract:
+    if not isinstance(contract, dict):
         raise RuntimeError(
-            f"{OPTION_TYPE} contract unavailable for "
+            f"{OPTION_TYPE} unavailable for "
             f"{underlying} strike {selected_strike}"
         )
 
@@ -1143,14 +1222,33 @@ async def select_atm_option(
             f"Option symbol missing: {contract}"
         )
 
-    if option_ltp is None or float(option_ltp) <= 0:
+    if option_ltp is None:
         raise RuntimeError(
-            f"Invalid option LTP: {contract}"
+            f"Option LTP missing: {contract}"
         )
+
+    option_ltp = float(option_ltp)
+
+    if option_ltp <= 0:
+        raise RuntimeError(
+            f"Invalid option LTP: {option_ltp}"
+        )
+
+    logger.info(
+        "ATM option selected | underlying=%s | "
+        "expiry=%s | strike=%.2f | type=%s | "
+        "symbol=%s | ltp=%.2f",
+        underlying,
+        expiry_date,
+        selected_strike,
+        OPTION_TYPE,
+        option_symbol,
+        option_ltp,
+    )
 
     return (
         str(option_symbol),
-        float(option_ltp),
+        option_ltp,
         expiry_date,
     )
 
@@ -1303,10 +1401,10 @@ async def place_market_order(
         trading_symbol,
         quantity,
         transaction_type,
-        LIVE_TRADING(),
+        is_live_trading(),
     )
 
-    if not LIVE_TRADING():
+    if not is_live_trading():
         logger.warning(
             "DRY RUN: order not submitted | %s",
             body,
@@ -1343,7 +1441,7 @@ async def wait_for_execution_price(
     order_id: str,
     option_symbol: str,
 ) -> float:
-    if not LIVE_TRADING() or order_id == "DRY_RUN":
+    if not is_live_trading() or order_id == "DRY_RUN":
         return await groww.get_ltp(
             symbol=option_symbol,
             segment=OPTION_SEGMENT,
@@ -1697,7 +1795,7 @@ async def place_amo_limit_order(
         AMO_PRODUCT,
     )
 
-    if not LIVE_TRADING():
+    if not is_live_trading():
         logger.warning(
             "DRY RUN: AMO order was not submitted | %s",
             body,
@@ -1832,7 +1930,6 @@ async def enter_amo_trade(
         "underlying": stock.symbol,
         "option_symbol": option_symbol,
         "option_type": OPTION_TYPE,
-        "expiry_date": get_expiry_date(),
         "quantity": quantity,
         "option_ltp": option_ltp,
         "amo_limit_price": amo_limit_price,
