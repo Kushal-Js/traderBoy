@@ -7,6 +7,9 @@ from typing import Any
 import httpx
 
 from config import Settings
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def unwrap_payload(value: Any) -> Any:
@@ -309,6 +312,10 @@ class GrowwClient:
         self,
         body: dict[str, Any],
     ) -> dict[str, Any]:
+        print(
+            "Inside create order",
+            body
+        )
         data = await self.request(
             "POST",
             "/order/create",
@@ -316,6 +323,10 @@ class GrowwClient:
         )
 
         payload = unwrap_payload(data)
+        print(
+            "After order created",
+            payload
+        )
 
         if not isinstance(payload, dict):
             raise RuntimeError(

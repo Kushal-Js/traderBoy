@@ -1,9 +1,9 @@
 {
-  "trade_date": "2026-08-17",
-  "last_reconciled_at": "2026-08-17T20:05:23.590193+05:30",
+  "trade_date": "2026-08-18",
+  "last_reconciled_at": "2026-08-18T07:50:15.630988+05:30",
   "trades": {
     "AXISBANK": {
-      "trade_date": "2026-08-17",
+      "trade_date": "2026-08-18",
       "underlying": "AXISBANK",
       "option_symbol": "AXISBANK26AUG1220CE",
       "option_type": "CE",
@@ -14,17 +14,17 @@
       "entry_order_type": "AMO_LIMIT",
       "entry_amo_status": "PENDING",
       "entry_price": null,
-      "current_price": 20.6,
+      "current_price": 21.7,
       "highest_price": null,
       "stop_price": null,
       "target_price": null,
       "exit_order_id": null,
       "exit_reason": null,
       "last_error": "Groww HTTP 401: {'status': 'FAILURE', 'error': {'code': 'GA005', 'message': 'Request from unregistered IP address.', 'metadata': None}}",
-      "updated_at": "2026-08-17T20:04:53.163322+05:30"
+      "updated_at": "2026-08-18T07:45:11.203663+05:30"
     },
     "TCS": {
-      "trade_date": "2026-08-17",
+      "trade_date": "2026-08-18",
       "underlying": "TCS",
       "option_symbol": "TCS26AUG2320CE",
       "option_type": "CE",
@@ -35,17 +35,17 @@
       "entry_order_type": "AMO_LIMIT",
       "entry_amo_status": "PENDING",
       "entry_price": null,
-      "current_price": 39.95,
+      "current_price": 39.7,
       "highest_price": null,
       "stop_price": null,
       "target_price": null,
       "exit_order_id": null,
       "exit_reason": null,
       "last_error": "Groww HTTP 401: {'status': 'FAILURE', 'error': {'code': 'GA005', 'message': 'Request from unregistered IP address.', 'metadata': None}}",
-      "updated_at": "2026-08-17T20:04:53.641324+05:30"
+      "updated_at": "2026-08-18T07:45:11.634681+05:30"
     },
     "INFY": {
-      "trade_date": "2026-08-17",
+      "trade_date": "2026-08-18",
       "underlying": "INFY",
       "option_symbol": "INFY26AUG1140CE",
       "option_type": "CE",
@@ -56,14 +56,14 @@
       "entry_order_type": "AMO_LIMIT",
       "entry_amo_status": "PENDING",
       "entry_price": null,
-      "current_price": 20.75,
+      "current_price": 20.2,
       "highest_price": null,
       "stop_price": null,
       "target_price": null,
       "exit_order_id": null,
       "exit_reason": null,
       "last_error": "Groww HTTP 401: {'status': 'FAILURE', 'error': {'code': 'GA005', 'message': 'Request from unregistered IP address.', 'metadata': None}}",
-      "updated_at": "2026-08-17T20:04:54.087197+05:30"
+      "updated_at": "2026-08-18T07:45:12.046416+05:30"
     }
   }
 }
