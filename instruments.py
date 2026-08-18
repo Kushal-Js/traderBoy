@@ -16,8 +16,13 @@ class InstrumentCache:
     ) -> None:
         self.settings = settings
         self.rows: list[dict[str, str]] = []
+        self.loaded_at: str | None = None
 
-    async def refresh(self) -> None:
+    async def refresh(self) -> int:
+        """
+        Re-download and replace the in-memory instrument cache.
+        Returns the number of loaded rows.
+        """
         async with httpx.AsyncClient(
             timeout=(
                 self.settings.request_timeout_seconds
@@ -33,7 +38,7 @@ class InstrumentCache:
             StringIO(response.text)
         )
 
-        self.rows = [
+        new_rows = [
             {
                 str(key).strip(): (
                     value.strip()
@@ -44,6 +49,23 @@ class InstrumentCache:
             }
             for row in reader
         ]
+
+        if not new_rows:
+            raise RuntimeError(
+                "Instrument CSV returned no rows"
+            )
+
+        # Replace only after a successful download and parse.
+        self.rows = new_rows
+
+        from datetime import datetime
+        from config import IST
+
+        self.loaded_at = datetime.now(
+            IST
+        ).isoformat()
+
+        return len(self.rows)
 
     async def ensure_loaded(self) -> None:
         if not self.rows:
@@ -63,7 +85,7 @@ class InstrumentCache:
                 or ""
             )
 
-            if candidate == trading_symbol:
+            if candidate.strip() == trading_symbol.strip():
                 return row
 
         raise RuntimeError(
@@ -78,17 +100,17 @@ class InstrumentCache:
             trading_symbol
         )
 
-        raw_value = (
+        raw_lot_size = (
             row.get("lot_size")
             or row.get("lotSize")
         )
 
-        if not raw_value:
+        if not raw_lot_size:
             raise RuntimeError(
                 f"Lot size missing for {trading_symbol}"
             )
 
-        value = int(float(raw_value))
+        value = int(float(raw_lot_size))
 
         if value <= 0:
             raise RuntimeError(
@@ -97,3 +119,10 @@ class InstrumentCache:
             )
 
         return value
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "loaded": bool(self.rows),
+            "row_count": len(self.rows),
+            "loaded_at": self.loaded_at,
+        }

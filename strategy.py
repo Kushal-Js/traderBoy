@@ -147,6 +147,18 @@ async def rank_stocks(
 ) -> list[dict[str, Any]]:
     ranked: list[dict[str, Any]] = []
 
+    print(
+        "Ranking %d stocks: %s",
+        len(stocks),
+        [
+            {
+                "symbol": stock.symbol,
+                "trigger_price": stock.trigger_price,
+            }
+            for stock in stocks
+        ],
+    )
+
     for stock in stocks:
         try:
             change = await today_change_percent(
@@ -164,15 +176,30 @@ async def rank_stocks(
                 }
             )
 
-        except Exception:
-            # One bad quote must not stop every stock.
-            continue
+            print(
+                "Stock ranked | symbol=%s | "
+                "change=%.4f%%",
+                stock.symbol,
+                change,
+            )
+
+        except Exception as exc:
+            print(
+                "Could not rank symbol=%s | error=%s",
+                stock.symbol,
+                exc,
+            )
 
     ranked.sort(
         key=lambda item: item[
             "today_percent_change"
         ],
         reverse=True,
+    )
+
+    print(
+        "Final ranked stocks: %s",
+        ranked[:limit],
     )
 
     return ranked[:limit]

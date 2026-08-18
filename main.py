@@ -14,7 +14,8 @@ from order_manager import OrderManager
 from state_store import StateStore
 from strategy import parse_chartink_payload, rank_stocks
 from tracker import PositionTracker
-
+from datetime import datetime
+from config import IST
 
 settings = Settings.from_env()
 groww = GrowwClient(settings)
@@ -96,6 +97,26 @@ async def health() -> dict[str, Any]:
         ),
     }
 
+@app.post("/admin/instruments/refresh")
+async def refresh_instruments() -> dict[str, Any]:
+    try:
+        row_count = await instruments.refresh()
+
+        return {
+            "status": "refreshed",
+            "row_count": row_count,
+            "loaded_at": instruments.loaded_at,
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Instrument refresh failed: {exc}",
+        ) from exc
+
+@app.get("/admin/instruments/status")
+async def instrument_status() -> dict[str, Any]:
+    return instruments.status()
 
 @app.get("/tracker")
 async def tracker_status() -> dict[str, Any]:
