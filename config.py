@@ -29,12 +29,12 @@ def env_bool(
     name: str,
     default: bool = False,
 ) -> bool:
-    raw = os.getenv(name)
+    value = os.getenv(name)
 
-    if raw is None:
+    if value is None:
         return default
 
-    return raw.strip().lower() in {
+    return value.strip().lower() in {
         "1",
         "true",
         "yes",
@@ -46,24 +46,24 @@ def env_int(
     name: str,
     default: int,
 ) -> int:
-    raw = os.getenv(name)
+    value = os.getenv(name)
 
-    if raw is None or not raw.strip():
+    if value is None or not value.strip():
         return default
 
-    return int(raw)
+    return int(value)
 
 
 def env_float(
     name: str,
     default: float,
 ) -> float:
-    raw = os.getenv(name)
+    value = os.getenv(name)
 
-    if raw is None or not raw.strip():
+    if value is None or not value.strip():
         return default
 
-    return float(raw)
+    return float(value)
 
 
 @dataclass(frozen=True)
@@ -85,6 +85,11 @@ class Settings:
     option_product: str
     configured_expiry_date: str
 
+    amo_enabled: bool
+    amo_product: str
+    amo_price_buffer_percent: float
+    amo_max_stocks: int
+
     max_active_trades: int
     target_percent: float
     stop_loss_percent: float
@@ -102,11 +107,6 @@ class Settings:
     instruments_csv_url: str
     state_file: Path
 
-    amo_enabled: bool
-    amo_price_buffer_percent: float
-    amo_product: str
-    amo_max_stocks: int
-
     @classmethod
     def from_env(cls) -> "Settings":
         option_type = os.getenv(
@@ -117,6 +117,19 @@ class Settings:
         if option_type not in {"CE", "PE"}:
             raise RuntimeError(
                 "OPTION_TYPE must be CE or PE"
+            )
+
+        max_active_trades = min(
+            env_int(
+                "MAX_ACTIVE_TRADES",
+                3,
+            ),
+            3,
+        )
+
+        if max_active_trades <= 0:
+            raise RuntimeError(
+                "MAX_ACTIVE_TRADES must be positive"
             )
 
         return cls(
@@ -163,13 +176,26 @@ class Settings:
                 "OPTION_EXPIRY_DATE",
                 "",
             ).strip(),
-            max_active_trades=min(
+            amo_enabled=env_bool(
+                "AMO_ENABLED",
+                False,
+            ),
+            amo_product=os.getenv(
+                "AMO_PRODUCT",
+                "NRML",
+            ).strip().upper(),
+            amo_price_buffer_percent=env_float(
+                "AMO_PRICE_BUFFER_PERCENT",
+                0.5,
+            ),
+            amo_max_stocks=min(
                 env_int(
-                    "MAX_ACTIVE_TRADES",
+                    "AMO_MAX_STOCKS",
                     3,
                 ),
                 3,
             ),
+            max_active_trades=max_active_trades,
             target_percent=env_float(
                 "TARGET_PERCENT",
                 10.0,
@@ -192,8 +218,14 @@ class Settings:
                     15,
                 ),
             ),
-            market_start_time=time(9, 15),
-            market_end_time=time(15, 30),
+            market_start_time=time(
+                9,
+                15,
+            ),
+            market_end_time=time(
+                15,
+                30,
+            ),
             tracker_interval_seconds=env_float(
                 "TRACKER_INTERVAL_SECONDS",
                 5.0,
@@ -218,24 +250,5 @@ class Settings:
                     "STATE_FILE",
                     "trading_state.json",
                 )
-            ),
-            amo_enabled=env_bool(
-                "AMO_ENABLED",
-                False,
-            ),
-            amo_price_buffer_percent=env_float(
-                "AMO_PRICE_BUFFER_PERCENT",
-                0.5,
-            ),
-            amo_product=os.getenv(
-                "AMO_PRODUCT",
-                "NRML",
-            ).strip().upper(),
-            amo_max_stocks=min(
-                env_int(
-                    "AMO_MAX_STOCKS",
-                    3,
-                ),
-                3,
             ),
         )

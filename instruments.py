@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import csv
+import logging
 from io import StringIO
-from typing import Any
 
 import httpx
 
 from config import Settings
+
+
+logger = logging.getLogger(__name__)
 
 
 class InstrumentCache:
@@ -15,14 +18,21 @@ class InstrumentCache:
         settings: Settings,
     ) -> None:
         self.settings = settings
-        self.rows: list[dict[str, str]] = []
+        self.lot_sizes: dict[str, int] = {}
+        self.loaded = False
         self.loaded_at: str | None = None
 
     async def refresh(self) -> int:
         """
-        Re-download and replace the in-memory instrument cache.
-        Returns the number of loaded rows.
+        Download and parse the Groww instrument CSV.
+
+        This method should normally be called once during
+        FastAPI startup, not for every webhook.
         """
+        logger.info(
+            "Loading Groww instrument CSV"
+        )
+
         async with httpx.AsyncClient(
             timeout=(
                 self.settings.request_timeout_seconds
@@ -34,95 +44,102 @@ class InstrumentCache:
 
         response.raise_for_status()
 
+        new_lot_sizes: dict[str, int] = {}
+
         reader = csv.DictReader(
             StringIO(response.text)
         )
 
-        new_rows = [
-            {
-                str(key).strip(): (
-                    value.strip()
-                    if isinstance(value, str)
-                    else ""
-                )
-                for key, value in row.items()
-            }
-            for row in reader
-        ]
-
-        if not new_rows:
-            raise RuntimeError(
-                "Instrument CSV returned no rows"
-            )
-
-        # Replace only after a successful download and parse.
-        self.rows = new_rows
-
-        from datetime import datetime
-        from config import IST
-
-        self.loaded_at = datetime.now(
-            IST
-        ).isoformat()
-
-        return len(self.rows)
-
-    async def ensure_loaded(self) -> None:
-        if not self.rows:
-            await self.refresh()
-
-    async def find(
-        self,
-        trading_symbol: str,
-    ) -> dict[str, str]:
-        await self.ensure_loaded()
-
-        for row in self.rows:
-            candidate = (
+        for row in reader:
+            symbol = (
                 row.get("trading_symbol")
                 or row.get("groww_symbol")
                 or row.get("symbol")
                 or ""
+            ).strip()
+
+            if not symbol:
+                continue
+
+            raw_lot_size = (
+                row.get("lot_size")
+                or row.get("lotSize")
+                or ""
+            ).strip()
+
+            if not raw_lot_size:
+                continue
+
+            try:
+                lot_size = int(
+                    float(raw_lot_size)
+                )
+
+            except ValueError:
+                continue
+
+            if lot_size > 0:
+                new_lot_sizes[symbol] = lot_size
+
+        if not new_lot_sizes:
+            raise RuntimeError(
+                "Groww instrument CSV contained no "
+                "usable lot sizes"
             )
 
-            if candidate.strip() == trading_symbol.strip():
-                return row
+        # Replace the old cache only after a successful parse.
+        self.lot_sizes = new_lot_sizes
+        self.loaded = True
 
-        raise RuntimeError(
-            f"Instrument not found: {trading_symbol}"
+        from datetime import datetime
+
+        self.loaded_at = datetime.now(
+            self.settings_timezone()
+        ).isoformat()
+
+        logger.info(
+            "Groww instrument cache loaded | "
+            "symbols=%d | loaded_at=%s",
+            len(self.lot_sizes),
+            self.loaded_at,
         )
+
+        return len(self.lot_sizes)
+
+    def settings_timezone(self):
+        from config import IST
+
+        return IST
+
+    async def ensure_loaded(self) -> None:
+        if not self.loaded:
+            raise RuntimeError(
+                "Instrument cache is not loaded. "
+                "Startup initialization may have failed."
+            )
 
     async def lot_size(
         self,
         trading_symbol: str,
     ) -> int:
-        row = await self.find(
-            trading_symbol
-        )
+        await self.ensure_loaded()
 
-        raw_lot_size = (
-            row.get("lot_size")
-            or row.get("lotSize")
-        )
+        symbol = trading_symbol.strip()
 
-        if not raw_lot_size:
+        lot_size = self.lot_sizes.get(symbol)
+
+        if lot_size is None:
             raise RuntimeError(
-                f"Lot size missing for {trading_symbol}"
+                f"Lot size not found for {symbol}"
             )
 
-        value = int(float(raw_lot_size))
+        return lot_size
 
-        if value <= 0:
-            raise RuntimeError(
-                f"Invalid lot size for "
-                f"{trading_symbol}: {value}"
-            )
-
-        return value
-
-    def status(self) -> dict[str, Any]:
+    def status(self) -> dict[str, object]:
         return {
-            "loaded": bool(self.rows),
-            "row_count": len(self.rows),
+            "loaded": self.loaded,
+            "symbol_count": len(
+                self.lot_sizes
+            ),
             "loaded_at": self.loaded_at,
         }
