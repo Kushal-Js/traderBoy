@@ -213,10 +213,10 @@ class PositionTracker:
             return
 
         current_price = await self.client.get_ltp(
-            symbol=trade.option_symbol,
-            segment=self.settings.option_segment,
-            exchange=self.settings.option_exchange,
-        )
+                symbol=trade.option_symbol,
+                segment=trade.segment,
+                exchange=trade.exchange,
+            )
 
         trade.current_price = current_price
 

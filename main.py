@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, time
+from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -13,7 +13,7 @@ from fastapi import FastAPI, HTTPException, Request
 from config import Settings
 from groww_client import GrowwClient
 from instruments import InstrumentCache
-from models import ChartinkStock
+from models import ChartinkStock, TradeState
 from order_manager import OrderManager
 from state_store import StateStore
 from strategy import (
@@ -122,17 +122,27 @@ async def lifespan(
 ):
     """
     Startup:
-      1. Load the instrument CSV once.
+      1. Load the instrument CSV.
       2. Start exactly one tracker task.
 
     Shutdown:
-      1. Cancel the tracker task cleanly.
+      1. Cancel the tracker task.
+      2. Wait for it to stop cleanly.
     """
     global tracker_task
 
+    del application
+
     logger.info(
-        "Application startup | live_trading=%s | "
+        "Application startup | "
+        "buy_strategy=%s | "
+        "equity_quantity=%d | "
+        "equity_product=%s | "
+        "live_trading=%s | "
         "amo_enabled=%s",
+        settings.buy_strategy,
+        settings.equity_quantity,
+        settings.equity_product,
         settings.live_trading,
         settings.amo_enabled,
     )
@@ -150,14 +160,11 @@ async def lifespan(
         logger.exception(
             "Instrument cache initialization failed"
         )
-
-        # Refuse to start if lot-size data is unavailable.
-        # This prevents the application from accepting
-        # webhooks that cannot safely construct orders.
         raise
 
     tracker_task = asyncio.create_task(
-        tracker.run_forever()
+        tracker.run_forever(),
+        name="traderboy-position-tracker",
     )
 
     logger.info(
@@ -182,6 +189,8 @@ async def lifespan(
                 logger.info(
                     "Background tracker cancelled"
                 )
+
+        tracker_task = None
 
         logger.info(
             "Application shutdown completed"
@@ -221,6 +230,25 @@ def metadata_from_payload(
     }
 
 
+async def enter_by_strategy(
+    stock: ChartinkStock,
+) -> TradeState:
+    if settings.buy_strategy == "OPTIONS":
+        return await orders.enter_trade(
+            stock=stock,
+        )
+
+    if settings.buy_strategy == "EQUITY_MTF":
+        return await orders.enter_equity_trade(
+            stock=stock,
+        )
+
+    raise RuntimeError(
+        "Unsupported BUY_STRATEGY: "
+        f"{settings.buy_strategy}"
+    )
+
+
 async def read_json_object(
     request: Request,
 ) -> dict[str, Any]:
@@ -230,13 +258,17 @@ async def read_json_object(
     except Exception as exc:
         raise HTTPException(
             status_code=400,
-            detail="Request body must contain valid JSON",
+            detail=(
+                "Request body must contain valid JSON"
+            ),
         ) from exc
 
     if not isinstance(payload, dict):
         raise HTTPException(
             status_code=400,
-            detail="JSON body must be an object",
+            detail=(
+                "JSON body must be an object"
+            ),
         )
 
     return payload
@@ -287,6 +319,23 @@ def market_closed_response(
     }
 
 
+def validate_order_segment(
+    segment: str,
+) -> str:
+    normalized = segment.strip().upper()
+
+    if normalized not in {
+        "CASH",
+        "FNO",
+    }:
+        raise HTTPException(
+            status_code=422,
+            detail="segment must be CASH or FNO",
+        )
+
+    return normalized
+
+
 # ============================================================
 # Health and readiness
 # ============================================================
@@ -297,6 +346,7 @@ async def root() -> dict[str, Any]:
         "service": "traderboy-groww-bot",
         "status": "ok",
         "time_ist": now_ist().isoformat(),
+        "buy_strategy": settings.buy_strategy,
         "live_trading": settings.live_trading,
         "amo_enabled": settings.amo_enabled,
     }
@@ -304,17 +354,13 @@ async def root() -> dict[str, Any]:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    """
-    Basic process health endpoint.
-    """
     return {
         "status": "ok",
         "time_ist": now_ist().isoformat(),
+        "buy_strategy": settings.buy_strategy,
         "live_trading": settings.live_trading,
         "amo_enabled": settings.amo_enabled,
-        "instrument_cache": (
-            instruments.status()
-        ),
+        "instrument_cache": instruments.status(),
         "active_trade_count": len(
             state.active_trades()
         ),
@@ -328,10 +374,6 @@ async def health() -> dict[str, Any]:
 
 @app.get("/ready")
 async def readiness() -> dict[str, Any]:
-    """
-    Returns HTTP 200 only when the application has loaded the
-    instrument cache and can accept trading requests.
-    """
     cache_status = instruments.status()
 
     if not cache_status["loaded"]:
@@ -353,11 +395,23 @@ async def readiness() -> dict[str, Any]:
     }
 
 
+@app.get("/strategy")
+async def strategy_status() -> dict[str, Any]:
+    return {
+        "buy_strategy": settings.buy_strategy,
+        "equity_quantity": settings.equity_quantity,
+        "equity_exchange": settings.equity_exchange,
+        "equity_segment": settings.equity_segment,
+        "equity_product": settings.equity_product,
+        "option_type": settings.option_type,
+        "option_product": settings.option_product,
+        "live_trading": settings.live_trading,
+        "amo_enabled": settings.amo_enabled,
+    }
+
+
 @app.get("/tracker")
 async def tracker_status() -> dict[str, Any]:
-    """
-    Returns the current JSON-backed strategy state.
-    """
     return {
         "status": "ok",
         "trade_date": state.data.get(
@@ -389,7 +443,7 @@ async def refresh_instruments(
     request: Request,
 ) -> dict[str, Any]:
     """
-    Optional administrative endpoint.
+    Administrative endpoint.
 
     Protect this endpoint before exposing it publicly.
     """
@@ -445,6 +499,8 @@ async def refresh_instruments(
 async def debug_auth() -> dict[str, Any]:
     """
     Authenticates against Groww without placing an order.
+
+    Protect this endpoint before exposing it publicly.
     """
     try:
         user = await groww.get_user_detail()
@@ -489,7 +545,8 @@ async def debug_expiries(
 
     except Exception as exc:
         logger.exception(
-            "Expiry lookup failed | underlying=%s",
+            "Expiry lookup failed | "
+            "underlying=%s",
             symbol,
         )
 
@@ -536,31 +593,36 @@ async def debug_quote(
 @app.get("/orders/{order_id}")
 async def order_diagnostics(
     order_id: str,
+    segment: str = "FNO",
 ) -> dict[str, Any]:
-    """
-    Retrieves order status and detail.
-    """
+    normalized_segment = validate_order_segment(
+        segment
+    )
+
     try:
         status = await groww.get_order_status(
             order_id=order_id,
-            segment=settings.option_segment,
+            segment=normalized_segment,
         )
 
         detail = await groww.get_order_detail(
             order_id=order_id,
-            segment=settings.option_segment,
+            segment=normalized_segment,
         )
 
         return {
             "order_id": order_id,
+            "segment": normalized_segment,
             "status": status,
             "detail": detail,
         }
 
     except Exception as exc:
         logger.exception(
-            "Order diagnostics failed | order_id=%s",
+            "Order diagnostics failed | "
+            "order_id=%s | segment=%s",
             order_id,
+            normalized_segment,
         )
 
         raise HTTPException(
@@ -572,22 +634,30 @@ async def order_diagnostics(
 @app.get("/orders/{order_id}/trades")
 async def order_trades(
     order_id: str,
+    segment: str = "FNO",
 ) -> dict[str, Any]:
+    normalized_segment = validate_order_segment(
+        segment
+    )
+
     try:
         trades = await groww.get_order_trades(
             order_id=order_id,
-            segment=settings.option_segment,
+            segment=normalized_segment,
         )
 
         return {
             "order_id": order_id,
+            "segment": normalized_segment,
             "trades": trades,
         }
 
     except Exception as exc:
         logger.exception(
-            "Order trades lookup failed | order_id=%s",
+            "Order trades lookup failed | "
+            "order_id=%s | segment=%s",
             order_id,
+            normalized_segment,
         )
 
         raise HTTPException(
@@ -597,7 +667,7 @@ async def order_trades(
 
 
 # ============================================================
-# Debug payload/ranking endpoints
+# Debug payload and ranking endpoints
 # ============================================================
 
 @app.post("/debug/amo-payload")
@@ -606,7 +676,7 @@ async def debug_amo_payload(
 ) -> dict[str, Any]:
     """
     Parses Chartink data only.
-    It does not call Groww order creation.
+    It does not submit an order.
     """
     payload = await read_json_object(
         request
@@ -678,8 +748,7 @@ async def chartink_webhook(
     """
     Regular market-order webhook.
 
-    The same symbol cannot have more than one pending/open
-    trade in the state file.
+    The entry instrument is selected using BUY_STRATEGY.
     """
     if not is_regular_market_hours():
         return market_closed_response(
@@ -696,8 +765,9 @@ async def chartink_webhook(
 
     logger.info(
         "Regular Chartink webhook received | "
-        "metadata=%s",
+        "metadata=%s | strategy=%s",
         metadata,
+        settings.buy_strategy,
     )
 
     async with entry_webhook_lock:
@@ -747,8 +817,8 @@ async def chartink_webhook(
             )
 
             try:
-                trade = await orders.enter_trade(
-                    stock=stock
+                trade = await enter_by_strategy(
+                    stock=stock,
                 )
 
                 results.append(
@@ -761,7 +831,8 @@ async def chartink_webhook(
 
             except Exception as exc:
                 logger.exception(
-                    "Regular trade failed | symbol=%s",
+                    "Regular trade failed | "
+                    "symbol=%s",
                     stock.symbol,
                 )
 
@@ -776,6 +847,7 @@ async def chartink_webhook(
         return {
             "status": "accepted",
             "mode": "REGULAR",
+            "buy_strategy": settings.buy_strategy,
             "live_trading": settings.live_trading,
             "metadata": metadata,
             "ranked_stocks": ranked,
@@ -792,10 +864,7 @@ async def chartink_amo_webhook(
     request: Request,
 ) -> dict[str, Any]:
     """
-    AMO endpoint.
-
-    It uses the same Groww create-order endpoint but submits a
-    LIMIT BUY order. Groww determines the after-market status.
+    AMO endpoint for option entries only.
     """
     if not settings.amo_enabled:
         return {
@@ -805,6 +874,15 @@ async def chartink_amo_webhook(
                 "AMO_ENABLED is false"
             ),
         }
+
+    if settings.buy_strategy != "OPTIONS":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "AMO webhook currently supports "
+                "BUY_STRATEGY=OPTIONS only"
+            ),
+        )
 
     if is_regular_market_hours():
         return {
@@ -883,7 +961,7 @@ async def chartink_amo_webhook(
             try:
                 trade = (
                     await orders.enter_amo_trade(
-                        stock=stock
+                        stock=stock,
                     )
                 )
 
@@ -912,6 +990,7 @@ async def chartink_amo_webhook(
         return {
             "status": "accepted",
             "mode": "AMO",
+            "buy_strategy": settings.buy_strategy,
             "live_trading": settings.live_trading,
             "amo_enabled": settings.amo_enabled,
             "metadata": metadata,
