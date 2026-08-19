@@ -10,6 +10,11 @@ from models import TradeStatus
 from order_manager import OrderManager
 from state_store import StateStore
 
+from models import (
+    TradeState,
+    TradeStatus,
+)
+
 
 class PositionTracker:
     def __init__(
@@ -82,220 +87,153 @@ class PositionTracker:
     
 
     async def reconcile_pending_entries(
-        self,
-    ) -> None:
-        for trade in self.state.active_trades():
-            if trade.status != TradeStatus.ENTRY_PENDING:
-                continue
-
-            if not trade.entry_order_id:
-                continue
-
-            status = await self.client.get_order_status(
-                order_id=trade.entry_order_id,
-                segment=self.settings.option_segment,
+            self,
+        ) -> None:
+            trades = list(
+                self.state.active_trades()
             )
 
-            order_status = str(
-                status.get(
-                    "order_status",
-                    status.get(
-                        "status",
-                        "",
-                    ),
-                )
-            ).upper()
+            for trade in trades:
+                if trade.status not in {
+                    TradeStatus.RESERVED,
+                    TradeStatus.ENTRY_PENDING,
+                }:
+                    continue
 
-            amo_status = str(
-                status.get(
-                    "amo_status",
-                    "",
-                )
-            ).upper()
-
-            trade.entry_amo_status = (
-                amo_status
-                or trade.entry_amo_status
-            )
-
-            logger.info(
-                "Pending entry | symbol=%s | "
-                "order_id=%s | order_status=%s | "
-                "amo_status=%s | remark=%s",
-                trade.option_symbol,
-                trade.entry_order_id,
-                order_status,
-                amo_status,
-                status.get("remark"),
-            )
-
-            if (
-                order_status in {
-                    "REJECTED",
-                    "FAILED",
-                    "CANCELLED",
-                }
-                or amo_status == "FAILED"
-            ):
-                trade.status = TradeStatus.FAILED
-                trade.last_error = str(
-                    status.get(
-                        "remark",
-                        status,
+                if not trade.entry_order_id:
+                    logger.warning(
+                        "Pending trade has no entry order ID | "
+                        "symbol=%s",
+                        trade.option_symbol,
                     )
-                )
-                trade.updated_at = (
-                    self.now().isoformat()
-                )
+                    continue
 
-                self.state.put_trade(trade)
-                continue
+                if trade.entry_order_id == "DRY_RUN":
+                    continue
 
-            if order_status not in {
-                "EXECUTED",
-                "COMPLETED",
-            }:
-                # PENDING, DISPATCHED, PARKED, PLACED,
-                # NEW, ACKED, or APPROVED:
-                # keep the order pending.
-                self.state.put_trade(trade)
-                continue
+                try:
+                    status = (
+                        await self.client.get_order_status(
+                            order_id=(
+                                trade.entry_order_id
+                            ),
+                            segment=trade.segment,
+                        )
+                    )
 
-            # Only now retrieve fills and convert the trade
-            # to OPEN.
-            trades = await self.client.get_order_trades(
-                order_id=trade.entry_order_id,
-                segment=self.settings.option_segment,
-            )
+                    order_status = str(
+                        status.get(
+                            "order_status",
+                            status.get(
+                                "status",
+                                "",
+                            ),
+                        )
+                    ).upper()
 
-            entry_price = (
-                self.calculate_average_fill_price(
-                    trades
-                )
-            )
+                    logger.info(
+                        "Pending entry reconciliation | "
+                        "symbol=%s | order_id=%s | "
+                        "segment=%s | status=%s",
+                        trade.option_symbol,
+                        trade.entry_order_id,
+                        trade.segment,
+                        order_status,
+                    )
 
-            if entry_price is None:
-                continue
+                    if order_status in {
+                        "REJECTED",
+                        "FAILED",
+                        "CANCELLED",
+                    }:
+                        trade.status = (
+                            TradeStatus.FAILED
+                        )
+                        trade.last_error = str(
+                            status.get(
+                                "remark",
+                                status,
+                            )
+                        )
+                        trade.updated_at = (
+                            self.now_iso()
+                        )
 
-            trade.status = TradeStatus.OPEN
-            trade.entry_price = entry_price
-            trade.current_price = entry_price
-            trade.highest_price = entry_price
-            trade.stop_price = (
-                entry_price
-                * (
-                    1
-                    - self.settings.stop_loss_percent
-                    / 100
-                )
-            )
-            trade.target_price = (
-                entry_price
-                * (
-                    1
-                    + self.settings.target_percent
-                    / 100
-                )
-            )
-            trade.updated_at = (
-                self.now().isoformat()
-            )
+                        self.state.put_trade(trade)
+                        await self.state.save()
+                        continue
 
-            self.state.put_trade(trade)
+                    if order_status in {
+                        "NEW",
+                        "PENDING",
+                        "OPEN",
+                        "TRIGGER_PENDING",
+                        "VALIDATION_PENDING",
+                    }:
+                        trade.status = (
+                            TradeStatus.ENTRY_PENDING
+                        )
+                        trade.updated_at = (
+                            self.now_iso()
+                        )
 
+                        self.state.put_trade(trade)
+                        await self.state.save()
+                        continue
 
+                    if order_status in {
+                        "EXECUTED",
+                        "COMPLETED",
+                        "TRADED",
+                    }:
+                        entry_price = (
+                            await self.get_entry_fill_price(
+                                trade=trade,
+                                status=status,
+                            )
+                        )
 
-    async def update_open_trade(
-        self,
-        trade,
-    ) -> None:
-        if trade.status != TradeStatus.OPEN:
-            return
+                        if entry_price is None:
+                            logger.warning(
+                                "Executed entry has no fill "
+                                "price yet | symbol=%s | "
+                                "order_id=%s",
+                                trade.option_symbol,
+                                trade.entry_order_id,
+                            )
+                            continue
 
-        current_price = await self.client.get_ltp(
-                symbol=trade.option_symbol,
-                segment=trade.segment,
-                exchange=trade.exchange,
-            )
+                        self.initialize_open_trade(
+                            trade=trade,
+                            entry_price=entry_price,
+                        )
 
-        trade.current_price = current_price
+                        self.state.put_trade(trade)
+                        await self.state.save()
 
-        if (
-            trade.highest_price is None
-            or current_price > trade.highest_price
-        ):
-            trade.highest_price = current_price
+                except Exception as exc:
+                    logger.exception(
+                        "Pending entry reconciliation failed | "
+                        "symbol=%s | order_id=%s | "
+                        "segment=%s | error=%s",
+                        trade.option_symbol,
+                        trade.entry_order_id,
+                        trade.segment,
+                        exc,
+                    )
 
-        if trade.entry_price is None:
-            raise RuntimeError(
-                f"Missing entry price for "
-                f"{trade.option_symbol}"
-            )
+                    # Keep the trade pending rather than repeatedly
+                    # treating an unknown broker state as failed.
+                    trade.status = (
+                        TradeStatus.ENTRY_PENDING
+                    )
+                    trade.last_error = str(exc)
+                    trade.updated_at = (
+                        self.now_iso()
+                    )
 
-        initial_stop = (
-            trade.entry_price
-            * (
-                1
-                - self.settings.stop_loss_percent
-                / 100
-            )
-        )
-
-        trailing_stop = (
-            trade.highest_price
-            * (
-                1
-                - self.settings.trailing_stop_percent
-                / 100
-            )
-        )
-
-        previous_stop = trade.stop_price or 0
-
-        trade.stop_price = max(
-            previous_stop,
-            initial_stop,
-            trailing_stop,
-        )
-
-        trade.target_price = (
-            trade.entry_price
-            * (
-                1
-                + self.settings.target_percent
-                / 100
-            )
-        )
-
-        trade.updated_at = self.now().isoformat()
-
-        self.state.put_trade(trade)
-
-        if self.force_exit_reached():
-            await self.orders.submit_exit(
-                trade=trade,
-                reason="FORCED_EXIT_15_15",
-            )
-            return
-
-        if (
-            trade.target_price is not None
-            and current_price >= trade.target_price
-        ):
-            await self.orders.submit_exit(
-                trade=trade,
-                reason="TARGET_REACHED",
-            )
-            return
-
-        if (
-            trade.stop_price is not None
-            and current_price <= trade.stop_price
-        ):
-            await self.orders.submit_exit(
-                trade=trade,
-                reason="STOP_LOSS_OR_TRAILING_STOP",
-            )
+                    self.state.put_trade(trade)
+                    await self.state.save()
 
     async def reconcile_exit_orders(
         self,
@@ -309,7 +247,7 @@ class PositionTracker:
 
             status = await self.client.get_order_status(
                 order_id=trade.exit_order_id,
-                segment=self.settings.option_segment,
+                segment=trade.segment,
             )
 
             order_status = str(
