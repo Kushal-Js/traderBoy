@@ -23,13 +23,15 @@ logger = logging.getLogger(__name__)
 
 def make_reference_id() -> str:
     """
-    Creates a unique client-side order reference.
+    Create a unique client-side order reference ID.
 
-    Groww accepts an optional user-defined order reference ID.
+    The value is kept below 20 characters.
     """
-    suffix = uuid.uuid4().hex[:12].upper()
-
-    return f"TRB-{suffix}"
+    return (
+        "TRB"
+        + datetime.now(IST).strftime("%H%M%S")
+        + uuid.uuid4().hex[:8].upper()
+    )[:20]
 
 
 class OrderManager:
@@ -54,6 +56,10 @@ class OrderManager:
             self.state.active_trades()
         )
 
+    # ========================================================
+    # Order construction and submission
+    # ========================================================
+
     def build_order(
         self,
         *,
@@ -66,32 +72,43 @@ class OrderManager:
         segment: str,
         product: str,
     ) -> dict[str, Any]:
-        """
-        Build one common Groww order payload.
-
-        The exchange, segment, and product are passed explicitly
-        because options and equity use different values.
-        """
         if quantity <= 0:
             raise ValueError(
                 "Order quantity must be positive"
             )
 
+        normalized_symbol = (
+            symbol.strip().upper()
+        )
         normalized_transaction = (
             transaction_type.strip().upper()
         )
+        normalized_order_type = (
+            order_type.strip().upper()
+        )
+        normalized_exchange = (
+            exchange.strip().upper()
+        )
+        normalized_segment = (
+            segment.strip().upper()
+        )
+        normalized_product = (
+            product.strip().upper()
+        )
+
+        if not normalized_symbol:
+            raise ValueError(
+                "Order symbol is required"
+            )
 
         if normalized_transaction not in {
             "BUY",
             "SELL",
         }:
             raise ValueError(
-                "transaction_type must be BUY or SELL"
+                "transaction_type must be BUY "
+                "or SELL"
             )
-
-        normalized_order_type = (
-            order_type.strip().upper()
-        )
 
         if normalized_order_type not in {
             "MARKET",
@@ -100,25 +117,52 @@ class OrderManager:
             "SL-M",
         }:
             raise ValueError(
-                "Unsupported order_type"
+                "Unsupported order_type: "
+                f"{normalized_order_type}"
+            )
+
+        if not normalized_exchange:
+            raise ValueError(
+                "exchange is required"
+            )
+
+        if not normalized_segment:
+            raise ValueError(
+                "segment is required"
+            )
+
+        if not normalized_product:
+            raise ValueError(
+                "product is required"
+            )
+
+        if (
+            normalized_order_type != "MARKET"
+            and price <= 0
+        ):
+            raise ValueError(
+                "Price must be positive for "
+                f"{normalized_order_type} orders"
             )
 
         return {
-            "trading_symbol": symbol.strip().upper(),
+            "trading_symbol": normalized_symbol,
             "quantity": int(quantity),
             "price": (
-                round(price, 2)
+                0
                 if normalized_order_type
-                != "MARKET"
-                else 0
+                == "MARKET"
+                else round(price, 2)
             ),
             "trigger_price": 0,
             "validity": "DAY",
-            "exchange": exchange.strip().upper(),
-            "segment": segment.strip().upper(),
-            "product": product.strip().upper(),
+            "exchange": normalized_exchange,
+            "segment": normalized_segment,
+            "product": normalized_product,
             "order_type": normalized_order_type,
-            "transaction_type": normalized_transaction,
+            "transaction_type": (
+                normalized_transaction
+            ),
             "order_reference_id": (
                 make_reference_id()
             ),
@@ -128,9 +172,6 @@ class OrderManager:
         self,
         body: dict[str, Any],
     ) -> dict[str, Any]:
-        """
-        Submit an order or return a dry-run response.
-        """
         logger.info(
             "Order payload | "
             "symbol=%s | quantity=%s | "
@@ -161,7 +202,8 @@ class OrderManager:
 
         if not isinstance(response, dict):
             raise RuntimeError(
-                "Groww order response is not a JSON object"
+                "Groww order response must be "
+                "a JSON object"
             )
 
         return response
@@ -179,9 +221,15 @@ class OrderManager:
             transaction_type=transaction_type,
             order_type="MARKET",
             price=0,
-            exchange=self.settings.equity_exchange,
-            segment=self.settings.equity_segment,
-            product=self.settings.equity_product,
+            exchange=(
+                self.settings.equity_exchange
+            ),
+            segment=(
+                self.settings.equity_segment
+            ),
+            product=(
+                self.settings.equity_product
+            ),
         )
 
         return await self.create_order(body)
@@ -199,9 +247,15 @@ class OrderManager:
             transaction_type=transaction_type,
             order_type="MARKET",
             price=0,
-            exchange=self.settings.option_exchange,
-            segment=self.settings.option_segment,
-            product=self.settings.option_product,
+            exchange=(
+                self.settings.option_exchange
+            ),
+            segment=(
+                self.settings.option_segment
+            ),
+            product=(
+                self.settings.option_product
+            ),
         )
 
         return await self.create_order(body)
@@ -220,9 +274,15 @@ class OrderManager:
             transaction_type=transaction_type,
             order_type="LIMIT",
             price=price,
-            exchange=self.settings.option_exchange,
-            segment=self.settings.option_segment,
-            product=self.settings.option_product,
+            exchange=(
+                self.settings.option_exchange
+            ),
+            segment=(
+                self.settings.option_segment
+            ),
+            product=(
+                self.settings.option_product
+            ),
         )
 
         return await self.create_order(body)
@@ -234,20 +294,18 @@ class OrderManager:
         quantity: int,
         limit_price: float,
     ) -> dict[str, Any]:
-        """
-        Build and submit an option AMO limit order.
-
-        The exact AMO behavior depends on Groww's current API
-        and account rules.
-        """
         body = self.build_order(
             symbol=symbol,
             quantity=quantity,
             transaction_type="BUY",
             order_type="LIMIT",
             price=limit_price,
-            exchange=self.settings.option_exchange,
-            segment=self.settings.option_segment,
+            exchange=(
+                self.settings.option_exchange
+            ),
+            segment=(
+                self.settings.option_segment
+            ),
             product=self.settings.amo_product,
         )
 
@@ -261,6 +319,10 @@ class OrderManager:
 
         return response
 
+    # ========================================================
+    # Entry methods
+    # ========================================================
+
     async def enter_equity_trade(
         self,
         stock: ChartinkStock,
@@ -268,22 +330,9 @@ class OrderManager:
         async with self.entry_lock:
             self.state.reset_if_new_day()
 
-            if (
-                self.active_count()
-                >= self.settings.max_active_trades
-            ):
-                raise RuntimeError(
-                    "Maximum active/pending trade "
-                    "limit already reached"
-                )
-
-            if self.state.has_reserved_or_active(
-                stock.symbol
-            ):
-                raise RuntimeError(
-                    f"{stock.symbol} already has a "
-                    "pending or active trade"
-                )
+            self.ensure_entry_allowed(
+                symbol=stock.symbol
+            )
 
             quantity = self.settings.equity_quantity
 
@@ -326,7 +375,8 @@ class OrderManager:
 
             try:
                 response = (
-                    await self.submit_equity_market_order(
+                    await self
+                    .submit_equity_market_order(
                         symbol=stock.symbol,
                         quantity=quantity,
                         transaction_type="BUY",
@@ -348,14 +398,17 @@ class OrderManager:
                 await self.state.save()
 
                 entry_price = (
-                    await self.wait_for_execution_price(
+                    await self
+                    .wait_for_execution_price(
                         order_id=order_id,
                         symbol=stock.symbol,
                         segment=(
-                            self.settings.equity_segment
+                            self.settings
+                            .equity_segment
                         ),
                         exchange=(
-                            self.settings.equity_exchange
+                            self.settings
+                            .equity_exchange
                         ),
                     )
                 )
@@ -368,10 +421,21 @@ class OrderManager:
                 self.state.put_trade(reserved)
                 await self.state.save()
 
+                logger.info(
+                    "Equity trade OPEN | "
+                    "symbol=%s | quantity=%d | "
+                    "entry_price=%.4f | "
+                    "product=%s",
+                    stock.symbol,
+                    quantity,
+                    entry_price,
+                    reserved.product,
+                )
+
                 return reserved
 
             except Exception as exc:
-                await self.mark_failed(
+                await self.reconcile_entry_failure(
                     trade=reserved,
                     error=exc,
                 )
@@ -387,21 +451,9 @@ class OrderManager:
         async with self.entry_lock:
             self.state.reset_if_new_day()
 
-            if (
-                self.active_count()
-                >= self.settings.max_active_trades
-            ):
-                raise RuntimeError(
-                    "Maximum active trade limit reached"
-                )
-
-            if self.state.has_reserved_or_active(
-                stock.symbol
-            ):
-                raise RuntimeError(
-                    f"{stock.symbol} already has a "
-                    "pending or active trade"
-                )
+            self.ensure_entry_allowed(
+                symbol=stock.symbol
+            )
 
             (
                 option_symbol,
@@ -446,7 +498,8 @@ class OrderManager:
 
             try:
                 response = (
-                    await self.submit_option_market_order(
+                    await self
+                    .submit_option_market_order(
                         symbol=option_symbol,
                         quantity=quantity,
                         transaction_type="BUY",
@@ -468,14 +521,17 @@ class OrderManager:
                 await self.state.save()
 
                 entry_price = (
-                    await self.wait_for_execution_price(
+                    await self
+                    .wait_for_execution_price(
                         order_id=order_id,
                         symbol=option_symbol,
                         segment=(
-                            self.settings.option_segment
+                            self.settings
+                            .option_segment
                         ),
                         exchange=(
-                            self.settings.option_exchange
+                            self.settings
+                            .option_exchange
                         ),
                     )
                 )
@@ -491,7 +547,7 @@ class OrderManager:
                 return reserved
 
             except Exception as exc:
-                await self.mark_failed(
+                await self.reconcile_entry_failure(
                     trade=reserved,
                     error=exc,
                 )
@@ -512,22 +568,9 @@ class OrderManager:
                     "AMO_ENABLED=false"
                 )
 
-            if (
-                self.active_count()
-                >= self.settings.max_active_trades
-            ):
-                raise RuntimeError(
-                    "Maximum active/pending trade "
-                    "limit already reached"
-                )
-
-            if self.state.has_reserved_or_active(
-                stock.symbol
-            ):
-                raise RuntimeError(
-                    f"{stock.symbol} already has a "
-                    "pending or active trade"
-                )
+            self.ensure_entry_allowed(
+                symbol=stock.symbol
+            )
 
             (
                 option_symbol,
@@ -547,9 +590,11 @@ class OrderManager:
                 option_ltp
                 * (
                     1
-                    + self.settings
-                    .amo_price_buffer_percent
-                    / 100
+                    + (
+                        self.settings
+                        .amo_price_buffer_percent
+                        / 100
+                    )
                 ),
                 2,
             )
@@ -585,7 +630,8 @@ class OrderManager:
 
             try:
                 response = (
-                    await self.submit_amo_limit_order(
+                    await self
+                    .submit_amo_limit_order(
                         symbol=option_symbol,
                         quantity=quantity,
                         limit_price=limit_price,
@@ -601,7 +647,9 @@ class OrderManager:
                     "AMO_LIMIT"
                 )
                 reserved.entry_amo_status = (
-                    response.get("amo_status")
+                    response.get(
+                        "amo_status"
+                    )
                     or (
                         "DRY_RUN"
                         if order_id == "DRY_RUN"
@@ -619,7 +667,8 @@ class OrderManager:
                 logger.info(
                     "AMO order submitted | "
                     "underlying=%s | option=%s | "
-                    "quantity=%d | limit_price=%.2f | "
+                    "quantity=%d | "
+                    "limit_price=%.2f | "
                     "order_id=%s",
                     stock.symbol,
                     option_symbol,
@@ -637,6 +686,10 @@ class OrderManager:
                 )
                 raise
 
+    # ========================================================
+    # Execution and fill handling
+    # ========================================================
+
     async def wait_for_execution_price(
         self,
         *,
@@ -646,10 +699,11 @@ class OrderManager:
         exchange: str,
     ) -> float:
         """
-        Wait for a live order to execute and calculate
-        the average fill price.
+        Wait for execution and retrieve average fill price.
 
-        Dry-run orders use the current LTP.
+        Groww may report EXECUTED before the separate trades
+        endpoint immediately returns fill rows. The trade list
+        is therefore retried.
         """
         if (
             not self.settings.live_trading
@@ -673,9 +727,8 @@ class OrderManager:
             "TRADED",
         }
 
-        started = (
-            asyncio.get_running_loop().time()
-        )
+        loop = asyncio.get_running_loop()
+        started = loop.time()
 
         while True:
             status = (
@@ -685,22 +738,14 @@ class OrderManager:
                 )
             )
 
-            order_status = str(
-                status.get(
-                    "order_status",
-                    status.get(
-                        "status",
-                        "",
-                    ),
-                )
-            ).upper()
+            order_status = self.extract_status(
+                status
+            )
 
             logger.info(
                 "Execution poll | "
-                "order_id=%s | "
-                "segment=%s | "
-                "status=%s | "
-                "remark=%s",
+                "order_id=%s | segment=%s | "
+                "status=%s | remark=%s",
                 order_id,
                 segment,
                 order_status,
@@ -715,10 +760,7 @@ class OrderManager:
             if order_status in success_states:
                 break
 
-            elapsed = (
-                asyncio.get_running_loop().time()
-                - started
-            )
+            elapsed = loop.time() - started
 
             if (
                 elapsed
@@ -735,16 +777,236 @@ class OrderManager:
                 .order_poll_interval_seconds
             )
 
-        trades = (
-            await self.client.get_order_trades(
-                order_id=order_id,
-                segment=segment,
+        fill_started = loop.time()
+        last_trades: Any = None
+        last_status: dict[str, Any] = status
+
+        while True:
+            last_trades = (
+                await self.client
+                .get_order_trades(
+                    order_id=order_id,
+                    segment=segment,
+                )
+            )
+
+            trade_count = (
+                len(last_trades)
+                if isinstance(
+                    last_trades,
+                    list,
+                )
+                else 0
+            )
+
+            logger.info(
+                "Fill poll | "
+                "order_id=%s | segment=%s | "
+                "trades=%d",
+                order_id,
+                segment,
+                trade_count,
+            )
+
+            if last_trades:
+                try:
+                    return (
+                        self
+                        .calculate_average_fill_price(
+                            last_trades
+                        )
+                    )
+
+                except RuntimeError as exc:
+                    logger.warning(
+                        "Fill rows are not usable yet | "
+                        "order_id=%s | error=%s",
+                        order_id,
+                        exc,
+                    )
+
+            fill_elapsed = (
+                loop.time() - fill_started
+            )
+
+            if (
+                fill_elapsed
+                >= self.settings
+                .order_poll_timeout_seconds
+            ):
+                break
+
+            await asyncio.sleep(
+                self.settings
+                .order_poll_interval_seconds
+            )
+
+        # Fallback 1:
+        # The status response may contain a filled quantity
+        # and average/filled price even when trade rows are
+        # temporarily unavailable.
+        status_price = (
+            self.extract_fill_price(
+                last_status
             )
         )
 
-        return self.calculate_average_fill_price(
-            trades
+        if status_price is not None:
+            logger.warning(
+                "Using order-status fill price | "
+                "order_id=%s | price=%.4f",
+                order_id,
+                status_price,
+            )
+            return status_price
+
+        # Fallback 2:
+        # Use current LTP so an executed broker order is not
+        # incorrectly marked FAILED. This is approximate.
+        fallback_price = await self.client.get_ltp(
+            symbol=symbol,
+            segment=segment,
+            exchange=exchange,
         )
+
+        logger.error(
+            "Executed order has no trade rows or "
+            "fill price after %.1fs; using LTP fallback | "
+            "order_id=%s | symbol=%s | "
+            "fallback_price=%.4f | "
+            "last_trades=%s",
+            fill_elapsed,
+            order_id,
+            symbol,
+            fallback_price,
+            last_trades,
+        )
+
+        return fallback_price
+
+    async def reconcile_entry_failure(
+        self,
+        *,
+        trade: TradeState,
+        error: Exception,
+    ) -> None:
+        """
+        Do not immediately mark a trade FAILED after an order
+        ID has been received. The broker may have executed it
+        even if fill retrieval failed.
+        """
+        trade.last_error = str(error)
+        trade.updated_at = self.now_iso()
+
+        if not trade.entry_order_id:
+            trade.status = TradeStatus.FAILED
+
+        elif trade.entry_order_id == "DRY_RUN":
+            trade.status = TradeStatus.FAILED
+
+        else:
+            try:
+                broker_status = (
+                    await self.client
+                    .get_order_status(
+                        order_id=(
+                            trade.entry_order_id
+                        ),
+                        segment=trade.segment,
+                    )
+                )
+
+                status_value = (
+                    self.extract_status(
+                        broker_status
+                    )
+                )
+
+                logger.warning(
+                    "Entry processing failed; "
+                    "broker status checked | "
+                    "symbol=%s | order_id=%s | "
+                    "status=%s | error=%s",
+                    trade.option_symbol,
+                    trade.entry_order_id,
+                    status_value,
+                    error,
+                )
+
+                if status_value in {
+                    "EXECUTED",
+                    "COMPLETED",
+                    "TRADED",
+                }:
+                    trade.status = (
+                        TradeStatus.OPEN
+                    )
+
+                    # If the fill price could not be obtained,
+                    # initialize with current LTP so the tracker
+                    # has usable risk values.
+                    if not trade.entry_price:
+                        fallback_price = (
+                            await self.client
+                            .get_ltp(
+                                symbol=(
+                                    trade.option_symbol
+                                ),
+                                segment=(
+                                    trade.segment
+                                ),
+                                exchange=(
+                                    trade.exchange
+                                ),
+                            )
+                        )
+
+                        self.initialize_open_trade(
+                            trade=trade,
+                            entry_price=fallback_price,
+                        )
+
+                elif status_value in {
+                    "NEW",
+                    "PENDING",
+                    "OPEN",
+                    "TRIGGER_PENDING",
+                    "VALIDATION_PENDING",
+                }:
+                    trade.status = (
+                        TradeStatus.ENTRY_PENDING
+                    )
+
+                else:
+                    trade.status = (
+                        TradeStatus.FAILED
+                    )
+
+            except Exception as status_exc:
+                logger.exception(
+                    "Could not verify broker order "
+                    "status | order_id=%s",
+                    trade.entry_order_id,
+                )
+
+                trade.last_error = (
+                    f"{trade.last_error}; "
+                    "status_check_failed="
+                    f"{status_exc}"
+                )
+
+                # Unknown broker state must not be treated as
+                # safely failed. Keep it pending for reconciliation.
+                trade.status = (
+                    TradeStatus.ENTRY_PENDING
+                )
+
+        self.state.put_trade(trade)
+        await self.state.save()
+
+    # ========================================================
+    # Exit handling
+    # ========================================================
 
     async def submit_exit(
         self,
@@ -752,8 +1014,8 @@ class OrderManager:
         reason: str,
     ) -> None:
         """
-        Submit a market sell for either an option or
-        equity trade.
+        Submit a market SELL for either an equity or option
+        trade.
         """
         if trade.status != TradeStatus.OPEN:
             return
@@ -788,13 +1050,41 @@ class OrderManager:
             response
         )
 
-        trade.status = TradeStatus.EXIT_PENDING
+        trade.status = (
+            TradeStatus.EXIT_PENDING
+        )
         trade.exit_order_id = order_id
         trade.exit_reason = reason
         trade.updated_at = self.now_iso()
 
         self.state.put_trade(trade)
         await self.state.save()
+
+    # ========================================================
+    # State and validation helpers
+    # ========================================================
+
+    def ensure_entry_allowed(
+        self,
+        *,
+        symbol: str,
+    ) -> None:
+        if (
+            self.active_count()
+            >= self.settings.max_active_trades
+        ):
+            raise RuntimeError(
+                "Maximum active/pending trade "
+                "limit already reached"
+            )
+
+        if self.state.has_reserved_or_active(
+            symbol
+        ):
+            raise RuntimeError(
+                f"{symbol} already has a "
+                "pending or active trade"
+            )
 
     def initialize_open_trade(
         self,
@@ -811,6 +1101,7 @@ class OrderManager:
         trade.entry_price = entry_price
         trade.current_price = entry_price
         trade.highest_price = entry_price
+
         trade.stop_price = (
             entry_price
             * (
@@ -819,6 +1110,7 @@ class OrderManager:
                 / 100
             )
         )
+
         trade.target_price = (
             entry_price
             * (
@@ -827,6 +1119,7 @@ class OrderManager:
                 / 100
             )
         )
+
         trade.last_error = None
         trade.updated_at = self.now_iso()
 
@@ -843,28 +1136,109 @@ class OrderManager:
         self.state.put_trade(trade)
         await self.state.save()
 
+    # ========================================================
+    # Response parsing helpers
+    # ========================================================
+
     @staticmethod
     def extract_order_id(
         response: dict[str, Any],
     ) -> str:
         candidates = (
-            response.get("groww_order_id"),
+            response.get(
+                "groww_order_id"
+            ),
             response.get("order_id"),
             response.get("orderId"),
             response.get("id"),
         )
 
         for candidate in candidates:
-            if candidate is not None:
-                value = str(candidate).strip()
+            if candidate is None:
+                continue
 
-                if value:
-                    return value
+            value = str(candidate).strip()
+
+            if value:
+                return value
 
         raise RuntimeError(
             "Order response does not contain an "
             f"order ID: {response}"
         )
+
+    @staticmethod
+    def extract_status(
+        response: dict[str, Any],
+    ) -> str:
+        if not isinstance(response, dict):
+            return ""
+
+        value = (
+            response.get("order_status")
+            or response.get("status")
+            or response.get("state")
+            or ""
+        )
+
+        return str(value).strip().upper()
+
+    @staticmethod
+    def extract_fill_price(
+        response: dict[str, Any],
+    ) -> float | None:
+        """
+        Extract a possible fill price from an order-status
+        response.
+
+        Groww response field names may vary by endpoint/version,
+        so common names are supported.
+        """
+        if not isinstance(response, dict):
+            return None
+
+        candidates: list[Any] = [
+            response.get("average_price"),
+            response.get("avg_price"),
+            response.get("filled_price"),
+            response.get("fill_price"),
+            response.get("executed_price"),
+            response.get("trade_price"),
+        ]
+
+        nested = response.get("data")
+
+        if isinstance(nested, dict):
+            candidates.extend(
+                [
+                    nested.get(
+                        "average_price"
+                    ),
+                    nested.get("avg_price"),
+                    nested.get(
+                        "filled_price"
+                    ),
+                    nested.get("fill_price"),
+                    nested.get(
+                        "executed_price"
+                    ),
+                ]
+            )
+
+        for value in candidates:
+            try:
+                price = float(value)
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+                continue
+
+            if price > 0:
+                return price
+
+        return None
 
     @staticmethod
     def calculate_average_fill_price(
@@ -873,14 +1247,16 @@ class OrderManager:
         """
         Calculate weighted average fill price.
 
-        Supports common response shapes:
+        Supported inputs:
           - list[dict]
           - {"trades": [...]}
           - {"data": [...]}
+          - {"results": [...]}
         """
         if isinstance(trades, dict):
             raw_items = (
                 trades.get("trades")
+                or trades.get("items")
                 or trades.get("data")
                 or trades.get("results")
                 or []
@@ -906,12 +1282,20 @@ class OrderManager:
                 or item.get("trade_price")
                 or item.get("fill_price")
                 or item.get("average_price")
+                or item.get("executed_price")
             )
 
             quantity_value = (
                 item.get("quantity")
-                or item.get("trade_quantity")
-                or item.get("filled_quantity")
+                or item.get(
+                    "trade_quantity"
+                )
+                or item.get(
+                    "filled_quantity"
+                )
+                or item.get(
+                    "executed_quantity"
+                )
             )
 
             if (
@@ -923,6 +1307,7 @@ class OrderManager:
             try:
                 price = float(price_value)
                 quantity = int(quantity_value)
+
             except (
                 TypeError,
                 ValueError,
@@ -933,12 +1318,14 @@ class OrderManager:
                 continue
 
             total_quantity += quantity
-            total_value += price * quantity
+            total_value += (
+                price * quantity
+            )
 
         if total_quantity <= 0:
             raise RuntimeError(
-                "No valid fills found in trade response: "
-                f"{trades}"
+                "No valid fills found in trade "
+                f"response: {trades}"
             )
 
         return round(

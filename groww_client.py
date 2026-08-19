@@ -747,6 +747,51 @@ class GrowwClient:
 
         return unwrap_payload(data)
 
+    async def get_position_for_symbol(
+            self,
+            *,
+            symbol: str,
+            segment: str,
+    ) -> dict[str, Any] | None:
+        normalized_symbol = (
+            self.normalize_symbol(symbol)
+        )
+
+        normalized_segment = (
+            self.normalize_segment(segment)
+        )
+
+        data = await self.request(
+            "GET",
+            "/positions/trading-symbol",
+            params={
+                "trading_symbol": normalized_symbol,
+                "segment": normalized_segment,
+            },
+        )
+
+        payload = unwrap_payload(data)
+
+        if isinstance(payload, dict):
+            return payload
+
+        if isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+
+                item_symbol = str(
+                    item.get(
+                        "trading_symbol",
+                        "",
+                    )
+                ).upper()
+
+                if item_symbol == normalized_symbol:
+                    return item
+
+        return None
+
     async def get_order_list(
         self,
         segment: str,
