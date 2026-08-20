@@ -22,8 +22,11 @@ cp .env.example .env   # then fill in your Groww credentials
 ```
 
 Get your **TOTP token + secret** (recommended, no expiry) from the
-[Groww Cloud API Keys page](https://groww.in/trade-api/api-keys), or an
-API key + secret if you prefer that flow (requires re-approval daily).
+[Groww Cloud API Keys page](https://groww.in/trade-api/api-keys), an
+API key + secret if you prefer that flow (requires re-approval daily), or
+generate an **access token** directly on that page and set
+`GROWW_AUTH_MODE=TOKEN` + `GROWW_ACCESS_TOKEN` (also expires daily — you'll
+need to refresh it each day).
 
 Export the env vars (or use `python-dotenv` / your process manager) and run:
 

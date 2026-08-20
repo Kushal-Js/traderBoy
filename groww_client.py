@@ -20,7 +20,8 @@ from typing import Optional
 
 import pandas as pd
 import pyotp
-from growwapi import GrowwAPI
+from growwapi import GrowwAPI, GrowwFeed
+from growwapi.groww.exceptions import GrowwFeedNotSubscribedException
 
 import config
 
@@ -44,12 +45,19 @@ class GrowwWrapper:
     def __init__(self) -> None:
         self._client: Optional[GrowwAPI] = None
         self._instruments_df: Optional[pd.DataFrame] = None
+        self._feed: Optional[GrowwFeed] = None
+        # groww_order_id -> latest order-update dict pushed over the socket
+        self._order_updates: dict[str, dict] = {}
 
     # ------------------------------------------------------------------ #
     # Auth
     # ------------------------------------------------------------------ #
     def authenticate(self) -> None:
-        if config.AUTH_MODE == "SECRET":
+        if config.AUTH_MODE == "TOKEN":
+            access_token = config.GROWW_ACCESS_TOKEN
+            if not access_token:
+                raise ValueError("GROWW_ACCESS_TOKEN is not set")
+        elif config.AUTH_MODE == "SECRET":
             access_token = GrowwAPI.get_access_token(
                 api_key=config.GROWW_API_KEY,
                 secret=config.GROWW_API_SECRET,
@@ -71,6 +79,81 @@ class GrowwWrapper:
         if self._client is None:
             self.authenticate()
         return self._client
+
+    # ------------------------------------------------------------------ #
+    # Live feed (WebSocket)
+    # ------------------------------------------------------------------ #
+    @property
+    def feed(self) -> GrowwFeed:
+        if self._feed is None:
+            self._feed = GrowwFeed(self.client)
+            self._feed.subscribe_fno_order_updates(self._on_fno_order_update)
+            logger.info("Groww WebSocket feed connected; subscribed to FNO order updates.")
+        return self._feed
+
+    def start_feed(self) -> None:
+        """Eagerly opens the socket connection (otherwise it lazily opens on
+        first use). Call once at app startup."""
+        if not config.ENABLE_WS_FEED:
+            logger.info("WebSocket feed disabled (ENABLE_WS_FEED=false); running REST-only.")
+            return
+        _ = self.feed
+
+    def _on_fno_order_update(self, _meta: Optional[dict] = None) -> None:
+        update = self.feed.get_fno_order_update()
+        if update and update.get("growwOrderId"):
+            self._order_updates[update["growwOrderId"]] = update
+
+    def _exchange_token(self, trading_symbol: str) -> str:
+        df = self.instruments()
+        row = df[df["trading_symbol"] == trading_symbol]
+        if row.empty:
+            raise ValueError(f"No instrument found for trading_symbol {trading_symbol}")
+        return str(row.iloc[0]["exchange_token"])
+
+    def subscribe_option_price(self, trading_symbol: str) -> None:
+        if not config.ENABLE_WS_FEED:
+            return
+        token = self._exchange_token(trading_symbol)
+        self.feed.subscribe_ltp([{
+            "exchange": self.client.EXCHANGE_NSE,
+            "segment": self.client.SEGMENT_FNO,
+            "exchange_token": token,
+        }])
+
+    def unsubscribe_option_price(self, trading_symbol: str) -> None:
+        if not config.ENABLE_WS_FEED:
+            return
+        token = self._exchange_token(trading_symbol)
+        self.feed.unsubscribe_ltp([{
+            "exchange": self.client.EXCHANGE_NSE,
+            "segment": self.client.SEGMENT_FNO,
+            "exchange_token": token,
+        }])
+
+    def get_cached_option_ltp(self, trading_symbol: str) -> Optional[float]:
+        """Returns the last price pushed over the WebSocket feed for this
+        option, or None if not subscribed yet / no tick has arrived yet /
+        the feed is disabled (ENABLE_WS_FEED=false)."""
+        if not config.ENABLE_WS_FEED:
+            return None
+        token = self._exchange_token(trading_symbol)
+        try:
+            data = self.feed.get_ltp()
+        except GrowwFeedNotSubscribedException:
+            return None
+        leg = data.get(self.client.EXCHANGE_NSE, {}).get(self.client.SEGMENT_FNO, {}).get(token)
+        if not leg:
+            return None
+        return float(leg["ltp"])
+
+    def get_cached_fill_price(self, groww_order_id: str) -> float:
+        """Returns the average fill price last pushed over the order-updates
+        socket feed for this order, or 0.0 if nothing has arrived yet."""
+        update = self._order_updates.get(groww_order_id)
+        if not update:
+            return 0.0
+        return float(update.get("avgFillPrice") or 0)
 
     # ------------------------------------------------------------------ #
     # Instruments (cached in-process; refresh once a day is plenty)
@@ -207,9 +290,15 @@ class GrowwWrapper:
         return self.client.place_order(**kwargs)
 
     def get_fill_price(self, groww_order_id: str, retries: int = 6, delay: float = 1.0) -> float:
-        """Polls order detail until an average_fill_price is available
-        (market orders on FNO fill almost immediately during market hours)."""
+        """Waits for an average fill price to become available (market orders
+        on FNO fill almost immediately during market hours). Checks the
+        WebSocket order-updates feed first each tick (near-instant once the
+        push arrives) and falls back to polling get_order_detail via REST."""
         for attempt in range(retries):
+            price = self.get_cached_fill_price(groww_order_id)
+            if price:
+                return price
+
             detail = self.client.get_order_detail(
                 groww_order_id=groww_order_id,
                 segment=self.client.SEGMENT_FNO,

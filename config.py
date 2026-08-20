@@ -4,16 +4,27 @@ All values can be overridden via environment variables (see .env.example).
 """
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # ---------------------------------------------------------------------------
 # Groww API authentication
+#   AUTH_MODE = "TOKEN"  -> uses GROWW_ACCESS_TOKEN directly (expires daily)
 #   AUTH_MODE = "TOTP"   -> uses GROWW_API_KEY (the TOTP token) + GROWW_TOTP_SECRET
 #   AUTH_MODE = "SECRET" -> uses GROWW_API_KEY + GROWW_API_SECRET
 # See: https://groww.in/trade-api/docs/python-sdk (Step 3: Authentication)
 # ---------------------------------------------------------------------------
 AUTH_MODE = os.getenv("GROWW_AUTH_MODE", "TOTP").upper()
+GROWW_ACCESS_TOKEN = os.getenv("GROWW_ACCESS_TOKEN", "")
 GROWW_API_KEY = os.getenv("GROWW_API_KEY", "")
 GROWW_API_SECRET = os.getenv("GROWW_API_SECRET", "")
 GROWW_TOTP_SECRET = os.getenv("GROWW_TOTP_SECRET", "")
+
+# Live price / order-update WebSocket feed. Off by default failure mode is
+# REST polling (see groww_client.py), so this can be safely disabled if the
+# socket connection is unavailable/misbehaving.
+ENABLE_WS_FEED = os.getenv("ENABLE_WS_FEED", "true").lower() == "true"
 
 # Shared secret the webhook caller must send back to us, since Chartink
 # webhooks are unauthenticated by default. Optional but recommended.

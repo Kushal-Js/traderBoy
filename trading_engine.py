@@ -19,6 +19,7 @@ import logging
 import random
 import string
 from datetime import datetime
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import config
@@ -105,6 +106,10 @@ async def _enter_single_position(symbol: str) -> dict:
     quantity = atm.lot_size * config.QUANTITY_LOTS
     ref_id = _gen_reference_id(config.ORDER_REFERENCE_PREFIX, symbol)
 
+    # Subscribe to the option's live price over the WebSocket feed as early
+    # as possible so ticks are already flowing by the time we start monitoring.
+    await loop.run_in_executor(None, groww_wrapper.subscribe_option_price, atm.trading_symbol)
+
     order_resp = await loop.run_in_executor(
         None,
         groww_wrapper.place_market_order,
@@ -170,14 +175,22 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
         return  # leave it live so the next monitor tick retries the exit
 
     await position_store.close_position(symbol, exit_price, reason)
+    await loop.run_in_executor(None, groww_wrapper.unsubscribe_option_price, position.option_trading_symbol)
+
+
+async def _get_ltp(trading_symbol: str) -> Optional[float]:
+    """Prefers the WebSocket feed's cached LTP (near-instant); falls back to
+    a REST call if no tick has arrived yet (e.g. subscription just made)."""
+    loop = asyncio.get_running_loop()
+    ltp = await loop.run_in_executor(None, groww_wrapper.get_cached_option_ltp, trading_symbol)
+    if ltp is not None:
+        return ltp
+    return await loop.run_in_executor(None, groww_wrapper.get_option_ltp, trading_symbol)
 
 
 async def _check_one_position(symbol: str, position: Position) -> None:
-    loop = asyncio.get_running_loop()
     try:
-        ltp = await loop.run_in_executor(
-            None, groww_wrapper.get_option_ltp, position.option_trading_symbol
-        )
+        ltp = await _get_ltp(position.option_trading_symbol)
     except Exception:  # noqa: BLE001
         logger.exception("Could not fetch LTP for %s", position.option_trading_symbol)
         return
@@ -197,12 +210,9 @@ async def _square_off_all(reason: str) -> None:
     if not positions:
         return
     logger.info("Square-off triggered (%s) for %d open position(s)", reason, len(positions))
-    loop = asyncio.get_running_loop()
     for symbol, position in positions.items():
         try:
-            ltp = await loop.run_in_executor(
-                None, groww_wrapper.get_option_ltp, position.option_trading_symbol
-            )
+            ltp = await _get_ltp(position.option_trading_symbol)
         except Exception:  # noqa: BLE001
             ltp = position.entry_price  # best-effort fallback for logging only
         await _exit_position(symbol, position, ltp, reason)

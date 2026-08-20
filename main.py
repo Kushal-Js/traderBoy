@@ -41,8 +41,21 @@ _monitor_task: Optional[asyncio.Task] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _monitor_task
-    groww_wrapper.authenticate()
-    groww_wrapper.refresh_instruments()
+    loop = asyncio.get_running_loop()
+    # These are blocking SDK calls; start_feed() in particular spins up its
+    # own event loop internally (NatsClient), which can't happen on a thread
+    # that already has uvicorn's event loop running - so push it to a worker
+    # thread instead of calling it directly on the lifespan coroutine.
+    await loop.run_in_executor(None, groww_wrapper.authenticate)
+    await loop.run_in_executor(None, groww_wrapper.refresh_instruments)
+    try:
+        # The socket connection can retry for minutes on a bad/misscoped
+        # token; don't let that hang startup - fail fast and run in
+        # REST-only (polling) mode instead. All feed-reading call sites
+        # already fall back to REST when the feed has no cached data.
+        await asyncio.wait_for(loop.run_in_executor(None, groww_wrapper.start_feed), timeout=15)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not start Groww WebSocket feed - continuing in REST-only mode.")
     _monitor_task = asyncio.create_task(monitor_loop())
     logger.info("Startup complete: authenticated + monitor loop running.")
     yield
