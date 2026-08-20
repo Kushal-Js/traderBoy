@@ -49,6 +49,50 @@ def _gen_reference_id(prefix: str, symbol: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Step 0: reconcile with positions already open at the broker (call once at
+# startup) so a restart mid-day doesn't lose track of them and re-enter.
+# --------------------------------------------------------------------------- #
+async def reconcile_broker_positions() -> list[Position]:
+    """Best-effort import of positions already open at Groww (e.g. left open
+    by a previous run of this process) into the local store. Target/stop-
+    loss are computed off the broker's reported average price using the
+    current config, since we don't have the original fill we'd normally use -
+    these are marked Position.reconciled=True so that's visible downstream."""
+    loop = asyncio.get_running_loop()
+    broker_positions = await loop.run_in_executor(None, groww_wrapper.get_open_fno_positions)
+
+    positions: list[Position] = []
+    for bp in broker_positions:
+        avg_price = bp["avg_price"]
+        if not avg_price:
+            logger.warning(
+                "Skipping reconciliation for %s - broker reported no average price.",
+                bp["trading_symbol"],
+            )
+            continue
+
+        positions.append(Position(
+            underlying_symbol=bp["underlying_symbol"],
+            option_trading_symbol=bp["trading_symbol"],
+            option_type=bp["option_type"],
+            quantity=bp["quantity"],
+            lot_size=bp["lot_size"],
+            entry_price=avg_price,
+            highest_price=avg_price,
+            target_price=avg_price * (1 + config.TARGET_PCT),
+            hard_stop_loss=avg_price * (1 - config.STOP_LOSS_PCT),
+            groww_order_id="",
+            order_reference_id="",
+            reconciled=True,
+        ))
+
+    for pos in positions:
+        await loop.run_in_executor(None, groww_wrapper.subscribe_option_price, pos.option_trading_symbol)
+
+    return positions
+
+
+# --------------------------------------------------------------------------- #
 # Step 1: rank stocks from the webhook payload by today's % change
 # --------------------------------------------------------------------------- #
 def rank_and_pick_top_stocks(stock_symbols: list[str], top_n: int = config.TOP_N_STOCKS) -> list[tuple[str, float]]:
@@ -73,24 +117,39 @@ async def enter_positions_for_stocks(ranked_stocks: list[tuple[str, float]]) -> 
     """Places ATM-option BUY orders for as many of the ranked stocks as
     capacity and dedup rules allow. Returns a per-stock result log."""
     results: list[dict] = []
+    loop = asyncio.get_running_loop()
 
     for symbol, pct_change in ranked_stocks:
-        if await position_store.is_already_traded(symbol):
-            msg = f"{symbol}: skipped - already traded/live today"
-            logger.info(msg)
-            results.append({"symbol": symbol, "status": "skipped", "reason": "duplicate"})
-            continue
-
-        if not await position_store.has_capacity():
-            msg = f"{symbol}: skipped - {config.MAX_LIVE_POSITIONS} live positions already open"
-            logger.info(msg)
-            results.append({"symbol": symbol, "status": "skipped", "reason": "capacity_full"})
+        # Atomically checks dedup + capacity and claims the symbol in one
+        # locked step, so two near-simultaneous calls for the same symbol
+        # (e.g. a duplicate Chartink webhook delivery) can't both pass a
+        # check-then-act race and both end up placing an order.
+        if not await position_store.reserve_symbol(symbol):
+            logger.info("%s: skipped - already traded/live/reserved today, or no capacity", symbol)
+            results.append({"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"})
             continue
 
         try:
+            # Belt-and-suspenders: confirm the broker doesn't already show an
+            # open FNO position for this underlying (another process
+            # instance, a manual trade, or state from before this run) -
+            # our own reservation above only guards duplicates within this
+            # process's in-memory state.
+            already_open = await loop.run_in_executor(
+                None, groww_wrapper.has_open_position_for_underlying, symbol
+            )
+            if already_open:
+                logger.warning("%s: skipped - broker already shows an open FNO position for it", symbol)
+                results.append({"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker"})
+                await position_store.release_symbol(symbol)
+                continue
+
             entry_result = await _enter_single_position(symbol)
+            if entry_result.get("status") != "entered":
+                await position_store.release_symbol(symbol)
             results.append(entry_result)
         except Exception as exc:  # noqa: BLE001
+            await position_store.release_symbol(symbol)
             logger.exception("Failed to enter position for %s", symbol)
             results.append({"symbol": symbol, "status": "error", "reason": str(exc)})
 

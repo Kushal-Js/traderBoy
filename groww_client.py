@@ -313,6 +313,54 @@ class GrowwWrapper:
         )
 
     # ------------------------------------------------------------------ #
+    # Portfolio (positions already open at the broker)
+    # ------------------------------------------------------------------ #
+    def get_open_fno_positions(self) -> list[dict]:
+        """Every FNO position currently open at Groww (net quantity != 0),
+        normalized with underlying_symbol/option_type/lot_size looked up
+        from the instruments master. avg_price is Groww's own reported
+        average price for the position (credit_price, falling back to
+        net_price), not something we computed ourselves."""
+        resp = self.client.get_positions_for_user(segment=self.client.SEGMENT_FNO)
+        raw_positions = resp.get("positions") or []
+        df = self.instruments()
+
+        open_positions = []
+        for p in raw_positions:
+            quantity = int(p.get("quantity") or 0)
+            if quantity == 0:
+                continue
+
+            trading_symbol = p.get("trading_symbol", "")
+            row = df[df["trading_symbol"] == trading_symbol]
+            if row.empty:
+                logger.warning(
+                    "Open broker position %s not found in instruments master; "
+                    "skipping it for reconciliation.", trading_symbol,
+                )
+                continue
+
+            open_positions.append({
+                "trading_symbol": trading_symbol,
+                "underlying_symbol": str(row.iloc[0]["underlying_symbol"]),
+                "option_type": str(row.iloc[0]["instrument_type"]),
+                "lot_size": int(row.iloc[0]["lot_size"]),
+                "quantity": quantity,
+                "avg_price": float(p.get("credit_price") or p.get("net_price") or 0),
+            })
+        return open_positions
+
+    def has_open_position_for_underlying(self, underlying_symbol: str) -> bool:
+        """Broker-side check (in addition to our own local dedup) that
+        there's no existing open FNO position for this underlying - guards
+        against duplicate entries from another process instance, a manual
+        trade, or state we haven't reconciled yet."""
+        return any(
+            p["underlying_symbol"] == underlying_symbol
+            for p in self.get_open_fno_positions()
+        )
+
+    # ------------------------------------------------------------------ #
     # Orders
     # ------------------------------------------------------------------ #
     def place_market_order(

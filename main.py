@@ -27,7 +27,12 @@ from pydantic import BaseModel, field_validator
 import config
 from groww_client import groww_wrapper
 from position_store import position_store
-from trading_engine import enter_positions_for_stocks, monitor_loop, rank_and_pick_top_stocks
+from trading_engine import (
+    enter_positions_for_stocks,
+    monitor_loop,
+    rank_and_pick_top_stocks,
+    reconcile_broker_positions,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,14 +53,30 @@ async def lifespan(app: FastAPI):
     # thread instead of calling it directly on the lifespan coroutine.
     await loop.run_in_executor(None, groww_wrapper.authenticate)
     await loop.run_in_executor(None, groww_wrapper.refresh_instruments)
+
     try:
         # The socket connection can retry for minutes on a bad/misscoped
         # token; don't let that hang startup - fail fast and run in
         # REST-only (polling) mode instead. All feed-reading call sites
         # already fall back to REST when the feed has no cached data.
+        # This must happen before reconcile_broker_positions() below, since
+        # that also touches the feed (to subscribe reconciled positions'
+        # prices) and would otherwise trigger its own unbounded connect
+        # attempt if start_feed() hadn't already tried (and failed) once.
         await asyncio.wait_for(loop.run_in_executor(None, groww_wrapper.start_feed), timeout=15)
     except Exception:  # noqa: BLE001
         logger.exception("Could not start Groww WebSocket feed - continuing in REST-only mode.")
+
+    try:
+        reconciled = await reconcile_broker_positions()
+        if reconciled:
+            await position_store.reconcile_from_broker(reconciled)
+            logger.info(
+                "Reconciled %d existing broker position(s) at startup: %s",
+                len(reconciled), [p.underlying_symbol for p in reconciled],
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not reconcile broker positions at startup - continuing without them.")
     _monitor_task = asyncio.create_task(monitor_loop())
     logger.info("Startup complete: authenticated + monitor loop running.")
     yield

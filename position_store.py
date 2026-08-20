@@ -59,6 +59,11 @@ class Position:
     exit_reason: Optional[str] = None
     exit_price: Optional[float] = None
     closed_at: Optional[datetime] = None
+    # True if this Position was recovered from Groww's own portfolio at
+    # startup (e.g. left open by a previous run) rather than entered by us
+    # this run - target/stop-loss are computed off the broker's reported
+    # average price, not an actual fill we observed.
+    reconciled: bool = False
 
     @property
     def current_trailing_sl(self) -> float:
@@ -88,16 +93,31 @@ class PositionStore:
                 self.orders_today.clear()
                 self._trading_day = today
 
-    async def has_capacity(self) -> bool:
-        async with self._lock:
-            return len(self.live_positions) < config.MAX_LIVE_POSITIONS
+    async def reserve_symbol(self, underlying_symbol: str) -> bool:
+        """Atomically checks dedup + capacity and claims the symbol in one
+        locked step, so two near-simultaneous calls (e.g. a duplicate
+        Chartink webhook delivery) can't both pass the check and both go on
+        to place an order for the same underlying. Returns True if the
+        caller now owns the reservation and should proceed to enter;
+        False means someone/something already has this symbol (or there's
+        no capacity) and the caller must NOT place an order.
 
-    async def is_already_traded(self, underlying_symbol: str) -> bool:
+        Callers that end up not entering (order rejected, exception, etc.)
+        must call release_symbol() so a later, non-duplicate alert can still
+        retry the same symbol today."""
         async with self._lock:
-            return (
-                underlying_symbol in self.traded_symbols_today
-                or underlying_symbol in self.live_positions
-            )
+            if underlying_symbol in self.traded_symbols_today or underlying_symbol in self.live_positions:
+                return False
+            if len(self.live_positions) >= config.MAX_LIVE_POSITIONS:
+                return False
+            self.traded_symbols_today.add(underlying_symbol)
+            return True
+
+    async def release_symbol(self, underlying_symbol: str) -> None:
+        """Undoes reserve_symbol() when entry didn't end up happening."""
+        async with self._lock:
+            if underlying_symbol not in self.live_positions:
+                self.traded_symbols_today.discard(underlying_symbol)
 
     async def remaining_capacity(self) -> int:
         async with self._lock:
@@ -112,6 +132,21 @@ class PositionStore:
                 pos.underlying_symbol, pos.option_trading_symbol,
                 pos.entry_price, pos.target_price, pos.hard_stop_loss, pos.quantity,
             )
+
+    async def reconcile_from_broker(self, positions: List[Position]) -> None:
+        """Imports positions already open at Groww (e.g. left over from a
+        previous run) into live_positions/traded_symbols_today, so we don't
+        blindly place a duplicate entry for an underlying we already hold."""
+        async with self._lock:
+            for pos in positions:
+                if pos.underlying_symbol in self.live_positions:
+                    continue
+                self.live_positions[pos.underlying_symbol] = pos
+                self.traded_symbols_today.add(pos.underlying_symbol)
+                logger.info(
+                    "Reconciled existing broker position: %s (%s) qty=%s avg_price=%.2f",
+                    pos.underlying_symbol, pos.option_trading_symbol, pos.quantity, pos.entry_price,
+                )
 
     async def update_highest_price(self, underlying_symbol: str, current_price: float) -> None:
         async with self._lock:
