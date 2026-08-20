@@ -1,0 +1,6 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+growwapi>=1.5.0
+pyotp>=2.9
+pandas>=2.0
+pydantic>=2.6
