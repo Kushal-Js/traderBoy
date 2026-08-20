@@ -36,9 +36,9 @@ WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "")
 TOP_N_STOCKS = int(os.getenv("TOP_N_STOCKS", "3"))
 MAX_LIVE_POSITIONS = int(os.getenv("MAX_LIVE_POSITIONS", "3"))
 
-TARGET_PCT = float(os.getenv("TARGET_PCT", "0.10"))          # +10% target
-STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.03"))    # -3% hard stop loss
-TRAILING_SL_PCT = float(os.getenv("TRAILING_SL_PCT", "0.01"))  # 1% trailing stop
+TARGET_PCT = float(os.getenv("TARGET_PCT", "0.20"))          # +10% target
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.10"))    # -3% hard stop loss
+TRAILING_SL_PCT = float(os.getenv("TRAILING_SL_PCT", "0.001"))  # 0.1% trailing stop
 
 # Options are bought as ATM CALL (CE) since the strategy trades "Buy" /
 # breakout style Chartink alerts. Flip to "PE" if you wire up a bearish scan.
