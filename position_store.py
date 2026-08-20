@@ -6,6 +6,9 @@ Tracks:
   - `traded_symbols_today`: underlyings we've already entered today, so a
     repeat Chartink alert for the same stock is ignored even after the
     position has been closed.
+  - `orders_today`: every order placed today (both entry BUY and exit SELL
+    legs), keyed by groww_order_id, with Groww's own order_status (e.g.
+    "REJECTED", "COMPLETED" - see groww_client.OrderStatus).
 
 NOTE: This is intentionally in-memory. If you need the bot to survive a
 process restart mid-day, swap this for a small SQLite/Redis-backed store —
@@ -22,6 +25,20 @@ from typing import Dict, List, Optional
 import config
 
 logger = logging.getLogger("position_store")
+
+
+@dataclass
+class OrderRecord:
+    groww_order_id: str
+    order_reference_id: str
+    underlying_symbol: str
+    trading_symbol: str
+    transaction_type: str          # BUY | SELL
+    quantity: int
+    status: str                    # Groww's order_status, e.g. "COMPLETED", "REJECTED"
+    remark: str = ""
+    placed_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
@@ -57,6 +74,7 @@ class PositionStore:
         self.live_positions: Dict[str, Position] = {}   # keyed by underlying_symbol
         self.traded_symbols_today: set[str] = set()
         self.closed_positions_today: List[Position] = []
+        self.orders_today: Dict[str, OrderRecord] = {}  # keyed by groww_order_id
         self._trading_day: date = date.today()
 
     async def maybe_reset_for_new_day(self) -> None:
@@ -67,6 +85,7 @@ class PositionStore:
                 self.live_positions.clear()
                 self.traded_symbols_today.clear()
                 self.closed_positions_today.clear()
+                self.orders_today.clear()
                 self._trading_day = today
 
     async def has_capacity(self) -> bool:
@@ -100,6 +119,25 @@ class PositionStore:
             if pos and current_price > pos.highest_price:
                 pos.highest_price = current_price
 
+    async def record_order(self, order: OrderRecord) -> None:
+        async with self._lock:
+            self.orders_today[order.groww_order_id] = order
+            logger.info(
+                "Order PLACED: %s %s %s x%s status=%s",
+                order.transaction_type, order.trading_symbol, order.groww_order_id,
+                order.quantity, order.status,
+            )
+
+    async def update_order_status(self, groww_order_id: str, status: str, remark: str = "") -> None:
+        async with self._lock:
+            order = self.orders_today.get(groww_order_id)
+            if order is None:
+                return
+            order.status = status
+            order.remark = remark or order.remark
+            order.updated_at = datetime.now()
+            logger.info("Order STATUS: %s (%s) -> %s", groww_order_id, order.trading_symbol, status)
+
     async def close_position(self, underlying_symbol: str, exit_price: float, reason: str) -> Optional[Position]:
         async with self._lock:
             pos = self.live_positions.pop(underlying_symbol, None)
@@ -125,6 +163,7 @@ class PositionStore:
                 } for p in self.live_positions.values()],
                 "traded_symbols_today": sorted(self.traded_symbols_today),
                 "closed_positions_today": [vars(p) for p in self.closed_positions_today],
+                "orders_today": [vars(o) for o in self.orders_today.values()],
             }
 
 

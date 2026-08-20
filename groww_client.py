@@ -28,6 +28,42 @@ import config
 logger = logging.getLogger("groww_client")
 
 
+class OrderStatus:
+    """Order status values, verbatim from Groww's API docs (Annexures ->
+    Order Status): https://groww.in/trade-api/docs/python-sdk/annexures"""
+    NEW = "NEW"
+    ACKED = "ACKED"
+    TRIGGER_PENDING = "TRIGGER_PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    FAILED = "FAILED"
+    EXECUTED = "EXECUTED"
+    DELIVERY_AWAITED = "DELIVERY_AWAITED"
+    CANCELLED = "CANCELLED"
+    CANCELLATION_REQUESTED = "CANCELLATION_REQUESTED"
+    MODIFICATION_REQUESTED = "MODIFICATION_REQUESTED"
+    COMPLETED = "COMPLETED"
+
+    # The order failed to result in a trade.
+    REJECTED_STATUSES = frozenset({REJECTED, FAILED})
+    # No further status change is expected.
+    TERMINAL_STATUSES = frozenset({REJECTED, FAILED, CANCELLED, COMPLETED, EXECUTED})
+    # Still live / working at the exchange.
+    OPEN_STATUSES = frozenset({
+        NEW, ACKED, TRIGGER_PENDING, APPROVED, DELIVERY_AWAITED,
+        CANCELLATION_REQUESTED, MODIFICATION_REQUESTED,
+    })
+
+
+@dataclass
+class OrderResult:
+    groww_order_id: str
+    status: str          # one of OrderStatus.*
+    remark: str
+    fill_price: float
+    filled_quantity: int
+
+
 @dataclass
 class AtmOption:
     trading_symbol: str
@@ -147,13 +183,30 @@ class GrowwWrapper:
             return None
         return float(leg["ltp"])
 
-    def get_cached_fill_price(self, groww_order_id: str) -> float:
-        """Returns the average fill price last pushed over the order-updates
-        socket feed for this order, or 0.0 if nothing has arrived yet."""
+    def _order_snapshot_from_cache(self, groww_order_id: str) -> Optional[dict]:
+        """Normalizes a socket order-update push to the same shape as a REST
+        get_order_detail() response, or None if nothing has arrived yet."""
         update = self._order_updates.get(groww_order_id)
         if not update:
-            return 0.0
-        return float(update.get("avgFillPrice") or 0)
+            return None
+        return {
+            "order_status": update.get("orderStatus", ""),
+            "remark": update.get("remark", ""),
+            "average_fill_price": update.get("avgFillPrice") or 0,
+            "filled_quantity": update.get("filledQty") or 0,
+        }
+
+    def _order_snapshot_from_rest(self, groww_order_id: str) -> dict:
+        detail = self.client.get_order_detail(
+            groww_order_id=groww_order_id,
+            segment=self.client.SEGMENT_FNO,
+        )
+        return {
+            "order_status": detail.get("order_status", ""),
+            "remark": detail.get("remark", ""),
+            "average_fill_price": detail.get("average_fill_price") or 0,
+            "filled_quantity": detail.get("filled_quantity") or 0,
+        }
 
     # ------------------------------------------------------------------ #
     # Instruments (cached in-process; refresh once a day is plenty)
@@ -289,30 +342,41 @@ class GrowwWrapper:
         logger.info("Placing %s order: %s x%s", transaction_type, trading_symbol, quantity)
         return self.client.place_order(**kwargs)
 
-    def get_fill_price(self, groww_order_id: str, retries: int = 6, delay: float = 1.0) -> float:
-        """Waits for an average fill price to become available (market orders
-        on FNO fill almost immediately during market hours). Checks the
-        WebSocket order-updates feed first each tick (near-instant once the
-        push arrives) and falls back to polling get_order_detail via REST."""
-        for attempt in range(retries):
-            price = self.get_cached_fill_price(groww_order_id)
-            if price:
-                return price
+    def wait_for_order_result(
+        self, groww_order_id: str, retries: int = 6, delay: float = 1.0
+    ) -> OrderResult:
+        """Polls (WebSocket order-updates cache first, then REST
+        get_order_detail) until the order reaches a terminal status - see
+        OrderStatus.TERMINAL_STATUSES - or retries are exhausted. Market
+        orders on FNO settle almost immediately during market hours, so a
+        terminal status is expected well within the default retry budget.
 
-            detail = self.client.get_order_detail(
-                groww_order_id=groww_order_id,
-                segment=self.client.SEGMENT_FNO,
-            )
-            price = detail.get("average_fill_price") or 0
-            if price:
-                return float(price)
+        Always returns whatever the last-seen status was; callers MUST check
+        `.status` (e.g. against OrderStatus.REJECTED_STATUSES) rather than
+        assuming the order filled just because this returned."""
+        snapshot: dict = {}
+        for attempt in range(retries):
+            cached = self._order_snapshot_from_cache(groww_order_id)
+            if cached and cached["order_status"] in OrderStatus.TERMINAL_STATUSES:
+                snapshot = cached
+                break
+            snapshot = self._order_snapshot_from_rest(groww_order_id)
+            if snapshot["order_status"] in OrderStatus.TERMINAL_STATUSES:
+                break
             time.sleep(delay)
-        # Fall back to LTP if fill price still isn't populated
-        logger.warning(
-            "average_fill_price unavailable for %s after %s retries; caller should fall back to LTP",
-            groww_order_id, retries,
+        else:
+            logger.warning(
+                "Order %s still not in a terminal status after %s retries (last status=%s)",
+                groww_order_id, retries, snapshot.get("order_status"),
+            )
+
+        return OrderResult(
+            groww_order_id=groww_order_id,
+            status=snapshot.get("order_status") or OrderStatus.NEW,
+            remark=snapshot.get("remark", ""),
+            fill_price=float(snapshot.get("average_fill_price") or 0),
+            filled_quantity=int(snapshot.get("filled_quantity") or 0),
         )
-        return 0.0
 
 
 groww_wrapper = GrowwWrapper()

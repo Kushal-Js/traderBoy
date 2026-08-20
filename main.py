@@ -153,6 +153,15 @@ async def get_positions():
     return await position_store.snapshot()
 
 
+@app.get("/orders")
+async def get_orders():
+    """Every order placed today (entry BUY + exit SELL legs), with Groww's
+    own order_status (e.g. REJECTED, COMPLETED, CANCELLED - see
+    groww_client.OrderStatus for the full documented enum)."""
+    snapshot = await position_store.snapshot()
+    return {"orders": snapshot["orders_today"]}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}

@@ -23,8 +23,8 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 import config
-from groww_client import groww_wrapper
-from position_store import Position, position_store
+from groww_client import OrderStatus, groww_wrapper
+from position_store import OrderRecord, Position, position_store
 
 logger = logging.getLogger("trading_engine")
 
@@ -120,12 +120,40 @@ async def _enter_single_position(symbol: str) -> dict:
     )
     groww_order_id = order_resp["groww_order_id"]
 
-    fill_price = await loop.run_in_executor(
-        None, groww_wrapper.get_fill_price, groww_order_id
-    )
+    await position_store.record_order(OrderRecord(
+        groww_order_id=groww_order_id,
+        order_reference_id=ref_id,
+        underlying_symbol=symbol,
+        trading_symbol=atm.trading_symbol,
+        transaction_type="BUY",
+        quantity=quantity,
+        status=order_resp.get("order_status") or OrderStatus.NEW,
+        remark=order_resp.get("remark", ""),
+    ))
+
+    result = await loop.run_in_executor(None, groww_wrapper.wait_for_order_result, groww_order_id)
+    await position_store.update_order_status(groww_order_id, result.status, result.remark)
+
+    if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
+        await loop.run_in_executor(None, groww_wrapper.unsubscribe_option_price, atm.trading_symbol)
+        logger.warning(
+            "BUY order %s for %s rejected: status=%s remark=%s",
+            groww_order_id, symbol, result.status, result.remark,
+        )
+        return {
+            "symbol": symbol,
+            "status": "rejected",
+            "order_status": result.status,
+            "remark": result.remark,
+            "option_trading_symbol": atm.trading_symbol,
+            "groww_order_id": groww_order_id,
+        }
+
+    fill_price = result.fill_price
     if not fill_price:
-        # Fall back to last-seen option LTP if the fill price API hasn't
-        # populated yet (rare, but don't block the strategy on it).
+        # Order reached a terminal "filled" status but the fill price field
+        # hasn't populated yet (rare) - fall back to LTP so target/SL levels
+        # aren't computed off zero.
         fill_price = await loop.run_in_executor(
             None, groww_wrapper.get_option_ltp, atm.trading_symbol
         )
@@ -148,6 +176,7 @@ async def _enter_single_position(symbol: str) -> dict:
     return {
         "symbol": symbol,
         "status": "entered",
+        "order_status": result.status,
         "option_trading_symbol": atm.trading_symbol,
         "quantity": quantity,
         "entry_price": fill_price,
@@ -160,21 +189,48 @@ async def _enter_single_position(symbol: str) -> dict:
 # --------------------------------------------------------------------------- #
 async def _exit_position(symbol: str, position: Position, exit_price: float, reason: str) -> None:
     loop = asyncio.get_running_loop()
+    ref_id = _gen_reference_id("Ext", symbol)
     try:
-        await loop.run_in_executor(
+        order_resp = await loop.run_in_executor(
             None,
             groww_wrapper.place_market_order,
             position.option_trading_symbol,
             position.quantity,
             "SELL",
-            _gen_reference_id("Ext", symbol),
+            ref_id,
         )
     except Exception:  # noqa: BLE001
         logger.exception("SELL order failed for %s (%s) - will retry next tick",
                           symbol, position.option_trading_symbol)
         return  # leave it live so the next monitor tick retries the exit
 
-    await position_store.close_position(symbol, exit_price, reason)
+    groww_order_id = order_resp["groww_order_id"]
+    await position_store.record_order(OrderRecord(
+        groww_order_id=groww_order_id,
+        order_reference_id=ref_id,
+        underlying_symbol=symbol,
+        trading_symbol=position.option_trading_symbol,
+        transaction_type="SELL",
+        quantity=position.quantity,
+        status=order_resp.get("order_status") or OrderStatus.NEW,
+        remark=order_resp.get("remark", ""),
+    ))
+
+    result = await loop.run_in_executor(None, groww_wrapper.wait_for_order_result, groww_order_id)
+    await position_store.update_order_status(groww_order_id, result.status, result.remark)
+
+    if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
+        # The SELL was rejected/cancelled by the exchange - the position is
+        # still genuinely open at the broker. Leave it live so the next
+        # monitor tick retries the exit, instead of marking it closed.
+        logger.warning(
+            "SELL order %s for %s rejected: status=%s remark=%s - will retry next tick",
+            groww_order_id, symbol, result.status, result.remark,
+        )
+        return
+
+    final_exit_price = result.fill_price or exit_price
+    await position_store.close_position(symbol, final_exit_price, reason)
     await loop.run_in_executor(None, groww_wrapper.unsubscribe_option_price, position.option_trading_symbol)
 
 
