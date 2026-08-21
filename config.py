@@ -53,6 +53,13 @@ SUPERTREND_INTERVAL_MINUTES = int(os.getenv("SUPERTREND_INTERVAL_MINUTES", "5"))
 # doesn't need to track candle closes exactly (the poll loop refreshes it
 # every tick anyway, this just caps REST call frequency).
 SUPERTREND_REFRESH_SECONDS = int(os.getenv("SUPERTREND_REFRESH_SECONDS", "60"))
+# Extra minutes past a position's own entry candle before a Supertrend exit
+# is honored, on top of always skipping the entry candle itself - see
+# trading_engine._supertrend_signal_for(). Backtested across 7 real trading
+# days: skipping only the entry candle (0) still let the very next candle
+# exit a position riding the same breakout's aftershock; one extra 5-min
+# candle of grace was the best-performing setting tested.
+SUPERTREND_ENTRY_GRACE_MINUTES = int(os.getenv("SUPERTREND_ENTRY_GRACE_MINUTES", "5"))
 
 # Options are bought as ATM CALL (CE) since the strategy trades "Buy" /
 # breakout style Chartink alerts. Flip to "PE" if you wire up a bearish scan.

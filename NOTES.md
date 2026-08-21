@@ -89,6 +89,44 @@ out of git.
    while keeping every genuine multi-candle-later catch (e.g. turning one
    stock's −₹2,640 stop-loss into +₹810).
 
+10. **The single-day backtest above wasn't enough data — a 7-day, 99-trade
+    backtest (13–21 Aug 2026) showed the entry-candle fix alone was
+    net-negative (−₹5,964 vs. target/stop-loss alone) once a full week's
+    variety of trades was included.** Two distinct mechanisms were driving
+    it, found by clustering the divergent trades' exit timestamps:
+    - 17 of 29 divergent trades all exited via Supertrend at exactly
+      **10:10** regardless of stock or day. `SUPERTREND_PERIOD=10` on
+      5-min candles starting at the 09:15 market open means *every*
+      underlying's Supertrend first has enough data to produce a value at
+      exactly 10:10 — and that first value is seeded from a naive
+      close-vs-band heuristic (confirmed directly against real 5-min
+      candles) that's structurally biased toward reading "bearish" on its
+      very first bar, independent of the stock's actual trend. This
+      cluster's net effect happened to be roughly neutral on this
+      dataset, but it isn't a real per-stock signal - it's an artifact of
+      every underlying's indicator warming up at the same wall-clock
+      moment.
+    - The other 11 divergent trades: 9 of them exited exactly **one
+      candle (5 min) after entry** - even past the entry candle itself,
+      the very next candle was still often riding the same breakout's
+      aftershock rather than confirming an independent later reversal.
+      This was the larger drag (−₹8,627 across those 11 trades).
+
+    Fixed by adding `config.SUPERTREND_ENTRY_GRACE_MINUTES` (default 5,
+    i.e. one extra 5-min candle) on top of the entry-candle skip -
+    `trading_engine._supertrend_signal_for` now requires the signal to
+    have moved that far past the entry candle before honoring a bearish
+    read. Swept grace periods of 0/5/10/15 minutes against the same 99
+    trades: 5 minutes was the best performer, flipping the week's net
+    effect to **+₹2,951** vs. baseline with a better win rate (70.7% vs.
+    67.7%) using fewer, higher-quality exits (25 vs. 29). The 10:10
+    warmup cluster still fires under this fix (grace alone doesn't reach
+    past it for early-morning entries) - it just wasn't the main problem
+    this particular week. A smarter Supertrend seed (or a longer
+    mandatory warmup independent of any position's entry time) would be
+    the next thing to try if a future backtest shows that cluster turning
+    net-harmful.
+
 ## Design decisions
 
 - **Event-driven exits** — `dhan_client._on_market_tick` fires an

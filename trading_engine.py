@@ -23,7 +23,7 @@ import random
 import re
 import string
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -405,13 +405,19 @@ async def _capture_supertrend_entry_candle(loop, underlying_symbol: str) -> Opti
 def _supertrend_signal_for(position: Position) -> bool:
     """Cache-only, synchronous - safe to call from both the poll loop and
     the WebSocket tick path. Returns whether the underlying is currently
-    bearish AND the cached signal has moved past the candle the position
-    was entered on - a signal still describing the entry candle itself
-    hasn't had a chance to confirm anything since entry (see
-    Position.supertrend_entry_candle_start), it's just re-reading the same
-    breakout candle that triggered the entry. Confirmed live before this
-    guard existed: this was cutting winning trades flat at breakeven the
-    instant they were entered."""
+    bearish AND the cached signal has moved at least
+    config.SUPERTREND_ENTRY_GRACE_MINUTES past the candle the position was
+    entered on.
+
+    Backtested across 7 real trading days (99 trades): skipping only the
+    entry candle itself (0 grace) still let the very next candle exit a
+    position that was still riding the same breakout's aftershock - 9 of
+    11 non-warmup divergent trades exited exactly one candle after entry.
+    A 5-minute grace (one extra candle) flipped the week's net effect from
+    -5,964 to +2,951 vs. target/stop-loss alone, with a better win rate
+    using fewer, higher-quality exits. Confirmed live before the 0-grace
+    version existed: without the entry-candle skip at all, this was cutting
+    winning trades flat at breakeven the instant they were entered."""
     bearish = dhan_wrapper.get_cached_supertrend_bearish(position.underlying_symbol)
     if not bearish:
         return False
@@ -419,7 +425,7 @@ def _supertrend_signal_for(position: Position) -> bool:
     entry_candle_start = position.supertrend_entry_candle_start
     if candle_start is None or entry_candle_start is None:
         return True  # no entry-candle baseline captured - don't block on it
-    return candle_start > entry_candle_start
+    return candle_start > entry_candle_start + timedelta(minutes=config.SUPERTREND_ENTRY_GRACE_MINUTES)
 
 
 def _exit_reason_for(position: Position, ltp: float, supertrend_bearish: bool = False) -> Optional[str]:
