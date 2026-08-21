@@ -443,43 +443,6 @@ class DhanWrapper:
             raise ValueError(f"No LTP returned for {trading_symbol}")
         return float(ltp)
 
-    def get_fno_underlyings(self) -> list[str]:
-        """Every unique NSE F&O stock underlying (excludes index F&O like
-        NIFTY/BANKNIFTY - those aren't "stocks"). Confirmed live: 208 names
-        via SEM_INSTRUMENT_NAME == 'OPTSTK'."""
-        df = self.instruments()
-        opt = df[(df["SEM_EXM_EXCH_ID"] == "NSE") & (df["SEM_INSTRUMENT_NAME"] == "OPTSTK")]
-        underlyings = {
-            self._underlying_from_trading_symbol(s) for s in opt["SEM_TRADING_SYMBOL"]
-        }
-        return sorted(underlyings)
-
-    def get_day_change_pct_bulk(self, symbols: list[str], batch_size: int = 60) -> dict[str, float]:
-        """Day's %change for many symbols at once. Chunked (confirmed live:
-        a single get_ohlc_data() call handles ~60 symbols in ~5s, far
-        cheaper than one REST call per symbol) with pacing between chunks
-        and retry per chunk (see _retry) for the same rate-limit reason as
-        get_day_change_pct(). Symbols Dhan doesn't return data for (e.g. an
-        invalid/delisted name) are silently omitted from the result rather
-        than failing the whole batch."""
-        results: dict[str, float] = {}
-        for i in range(0, len(symbols), batch_size):
-            chunk = symbols[i:i + batch_size]
-            if i > 0:
-                time.sleep(1.0)
-            try:
-                data = _retry(self.client.get_ohlc_data, names=chunk, retries=2, delay=2.0)
-            except Exception:  # noqa: BLE001
-                logger.exception("OHLC batch fetch failed for chunk starting at %s (%d symbols) - skipping it",
-                                  chunk[0] if chunk else "?", len(chunk))
-                continue
-            for symbol, values in data.items():
-                prev_close = float((values or {}).get("ohlc", {}).get("close") or 0)
-                ltp = float((values or {}).get("last_price") or 0)
-                if prev_close and ltp:
-                    results[symbol] = (ltp - prev_close) / prev_close * 100
-        return results
-
     # ------------------------------------------------------------------ #
     # Portfolio (positions already open at the broker)
     # ------------------------------------------------------------------ #

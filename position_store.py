@@ -126,11 +126,6 @@ class PositionStore:
         self.reserved_symbols: set[str] = set()
         self.closed_positions_today: List[Position] = []
         self.orders_today: Dict[str, OrderRecord] = {}  # keyed by order_id
-        # [(symbol, pct_change), ...] sorted descending, from the once-daily
-        # market-open F&O scan (see trading_engine.scan_fno_top_gainers) -
-        # observability only, does not drive any trading decision.
-        self.top_gainers_today: List[tuple] = []
-        self.top_gainers_scanned_at: Optional[datetime] = None
         self._trading_day: date = date.today()
 
     async def maybe_reset_for_new_day(self) -> None:
@@ -142,18 +137,7 @@ class PositionStore:
                 self.reserved_symbols.clear()
                 self.closed_positions_today.clear()
                 self.orders_today.clear()
-                self.top_gainers_today = []
-                self.top_gainers_scanned_at = None
                 self._trading_day = today
-
-    async def record_top_gainers(self, ranked: List[tuple]) -> None:
-        async with self._lock:
-            self.top_gainers_today = ranked
-            self.top_gainers_scanned_at = datetime.now()
-            logger.info(
-                "F&O top gainers scan recorded: %d symbols, top 5 = %s",
-                len(ranked), ranked[:5],
-            )
 
     async def reserve_symbol(self, underlying_symbol: str) -> bool:
         """Atomically checks dedup + capacity and claims the symbol in one
@@ -340,8 +324,6 @@ class PositionStore:
                 "reserved_symbols": sorted(self.reserved_symbols),
                 "closed_positions_today": [vars(p) for p in self.closed_positions_today],
                 "orders_today": [vars(o) for o in self.orders_today.values()],
-                "top_gainers_today": self.top_gainers_today,
-                "top_gainers_scanned_at": self.top_gainers_scanned_at,
             }
 
 

@@ -125,21 +125,6 @@ def rank_and_pick_top_stocks(stock_symbols: list[str], top_n: int = config.TOP_N
     return scored[:top_n]
 
 
-def scan_fno_top_gainers() -> list[tuple[str, float]]:
-    """Ranks every NSE F&O stock by today's %change, highest first.
-    Observability only - does not place any orders or feed into the entry
-    flow. Uses the bulk OHLC fetch (a handful of batched REST calls) rather
-    than one call per symbol, since ~208 individual calls would be far more
-    exposed to Dhan's rate limit and much slower."""
-    underlyings = dhan_wrapper.get_fno_underlyings()
-    pct_by_symbol = dhan_wrapper.get_day_change_pct_bulk(underlyings)
-    ranked = sorted(pct_by_symbol.items(), key=lambda t: t[1], reverse=True)
-    logger.info(
-        "F&O top-gainers scan: %d/%d symbols returned data. Top 10: %s",
-        len(ranked), len(underlyings), ranked[:10],
-    )
-    return ranked
-
 
 # --------------------------------------------------------------------------- #
 # Step 2: enter positions
@@ -572,23 +557,10 @@ async def _sync_pending_orders() -> None:
         # else: still queued as AMO - nothing to do, check again next tick.
 
 
-async def _run_top_gainers_scan() -> None:
-    """Runs scan_fno_top_gainers() (several seconds of blocking REST calls)
-    as a background task rather than inline in monitor_loop's tick, so it
-    doesn't delay exit-checking of real open positions while it's running."""
-    loop = asyncio.get_running_loop()
-    try:
-        ranked = await loop.run_in_executor(None, scan_fno_top_gainers)
-        await position_store.record_top_gainers(ranked)
-    except Exception:  # noqa: BLE001
-        logger.exception("F&O top-gainers scan failed")
-
-
 async def monitor_loop() -> None:
     """Runs forever; polls open positions and enforces exits + EOD square-off."""
     logger.info("Monitor loop started.")
     squared_off_today_for: set = set()
-    gainers_scanned_today_for: set = set()
 
     while True:
         try:
@@ -597,12 +569,7 @@ async def monitor_loop() -> None:
 
             now = _now_ist()
             square_off_at = _parse_hhmm_today(config.SQUARE_OFF_TIME)
-            market_open_at = _parse_hhmm_today(config.MARKET_OPEN_TIME)
             today_key = now.date()
-
-            if now >= market_open_at and today_key not in gainers_scanned_today_for:
-                gainers_scanned_today_for.add(today_key)
-                asyncio.create_task(_run_top_gainers_scan())
 
             if now >= square_off_at and today_key not in squared_off_today_for:
                 await _square_off_all("EOD_SQUARE_OFF_3_15PM")
