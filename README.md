@@ -56,8 +56,8 @@ webhook URL — matching the `webhook_url` field in your sample payload.
    OHLC data for each stock and ranks by day's %change (highest first),
    taking the top `TOP_N_STOCKS`.
 
-3. **Entry** — for each ranked stock that isn't already traded today (and
-   there's capacity), `Tradehull.ATM_Strike_Selection()` picks the ATM
+3. **Entry** — for each ranked stock that doesn't already have an open or
+   in-flight position (and there's capacity), `Tradehull.ATM_Strike_Selection()` picks the ATM
    `OPTION_TYPE` (CE/PE) contract for the nearest expiry, and a MARKET BUY
    is placed. Outside market hours this is automatically placed as an
    **AMO** (After Market Order) — Dhan requires this to be an explicit flag
@@ -75,10 +75,14 @@ webhook URL — matching the `webhook_url` field in your sample payload.
    each tick and promotes a filled BUY into a live `Position` (or closes a
    filled SELL), instead of assuming a fill that hasn't happened yet.
 
-6. **Duplicate-order protection** —
+6. **Duplicate-order protection** — blocks a new entry only while a
+   position for that symbol is genuinely open or in-flight, not for the
+   rest of the day; once it closes, a later alert for the same stock is
+   free to enter again.
    - `PositionStore.reserve_symbol()` atomically checks + claims a symbol
      before any network I/O, closing a race where two near-simultaneous
      webhook deliveries for the same stock could both place an order.
+     `close_position()` releases the claim so the symbol can be re-entered.
    - `has_open_position_for_underlying()` double-checks the broker's own
      portfolio right before entry, catching duplicates from another process
      instance or a manual trade.

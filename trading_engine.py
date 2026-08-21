@@ -140,7 +140,7 @@ async def enter_positions_for_stocks(ranked_stocks: list[tuple[str, float]]) -> 
         # (e.g. a duplicate Chartink webhook delivery) can't both pass a
         # check-then-act race and both end up placing an order.
         if not await position_store.reserve_symbol(symbol):
-            logger.info("%s: skipped - already traded/live/reserved today, or no capacity", symbol)
+            logger.info("%s: skipped - already open/in-flight, or no capacity", symbol)
             results.append({"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"})
             continue
 

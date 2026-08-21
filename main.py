@@ -9,8 +9,10 @@ FastAPI service that:
        - -3% hard stop loss
        - 1% trailing stop-loss (trails the peak price in the trade's favor)
        - 3:15 PM hard square-off of everything still open
-  5. Never re-enters a symbol already traded today, and caps concurrent
-     live positions at 3.
+  5. Won't re-enter a symbol that already has an open or in-flight
+     position, and caps concurrent live positions at 3 - once that
+     position closes, the symbol is free to be entered again on a later
+     alert the same day.
 
 Run with:
     uv run uvicorn main:app --host 0.0.0.0 --port 8000

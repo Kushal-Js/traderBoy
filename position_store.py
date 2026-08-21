@@ -3,9 +3,12 @@ In-memory, thread/async-safe state for the trading day.
 
 Tracks:
   - `live_positions`: currently open option legs (max MAX_LIVE_POSITIONS)
-  - `traded_symbols_today`: underlyings we've already entered today, so a
-    repeat Chartink alert for the same stock is ignored even after the
-    position has been closed.
+  - `reserved_symbols`: underlyings currently blocked from a new entry -
+    either an entry attempt is actively in flight for it right now, an AMO
+    BUY is queued awaiting fill confirmation, or a position is open. Once a
+    position closes (or a pending entry ends up rejected), the symbol is
+    freed up again - a repeat Chartink alert for the same stock later the
+    same day is allowed as long as nothing is currently open/pending for it.
   - `orders_today`: every order placed today (both entry BUY and exit SELL
     legs), keyed by order_id, with Dhan's own order_status (e.g.
     "REJECTED", "TRADED" - see dhan_client.OrderStatus).
@@ -114,7 +117,7 @@ class PositionStore:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self.live_positions: Dict[str, Position] = {}   # keyed by underlying_symbol
-        self.traded_symbols_today: set[str] = set()
+        self.reserved_symbols: set[str] = set()
         self.closed_positions_today: List[Position] = []
         self.orders_today: Dict[str, OrderRecord] = {}  # keyed by order_id
         self._trading_day: date = date.today()
@@ -125,7 +128,7 @@ class PositionStore:
             if today != self._trading_day:
                 logger.info("New trading day detected (%s) - resetting state.", today)
                 self.live_positions.clear()
-                self.traded_symbols_today.clear()
+                self.reserved_symbols.clear()
                 self.closed_positions_today.clear()
                 self.orders_today.clear()
                 self._trading_day = today
@@ -143,18 +146,18 @@ class PositionStore:
         must call release_symbol() so a later, non-duplicate alert can still
         retry the same symbol today."""
         async with self._lock:
-            if underlying_symbol in self.traded_symbols_today or underlying_symbol in self.live_positions:
+            if underlying_symbol in self.reserved_symbols or underlying_symbol in self.live_positions:
                 return False
             if len(self.live_positions) >= config.MAX_LIVE_POSITIONS:
                 return False
-            self.traded_symbols_today.add(underlying_symbol)
+            self.reserved_symbols.add(underlying_symbol)
             return True
 
     async def release_symbol(self, underlying_symbol: str) -> None:
         """Undoes reserve_symbol() when entry didn't end up happening."""
         async with self._lock:
             if underlying_symbol not in self.live_positions:
-                self.traded_symbols_today.discard(underlying_symbol)
+                self.reserved_symbols.discard(underlying_symbol)
 
     async def remaining_capacity(self) -> int:
         async with self._lock:
@@ -163,7 +166,7 @@ class PositionStore:
     async def add_position(self, pos: Position) -> None:
         async with self._lock:
             self.live_positions[pos.underlying_symbol] = pos
-            self.traded_symbols_today.add(pos.underlying_symbol)
+            self.reserved_symbols.add(pos.underlying_symbol)
             logger.info(
                 "Position OPENED: %s (%s) entry=%.2f target=%.2f sl=%.2f qty=%s",
                 pos.underlying_symbol, pos.option_trading_symbol,
@@ -172,14 +175,14 @@ class PositionStore:
 
     async def reconcile_from_broker(self, positions: List[Position]) -> None:
         """Imports positions already open at Dhan (e.g. left over from a
-        previous run) into live_positions/traded_symbols_today, so we don't
+        previous run) into live_positions/reserved_symbols, so we don't
         blindly place a duplicate entry for an underlying we already hold."""
         async with self._lock:
             for pos in positions:
                 if pos.underlying_symbol in self.live_positions:
                     continue
                 self.live_positions[pos.underlying_symbol] = pos
-                self.traded_symbols_today.add(pos.underlying_symbol)
+                self.reserved_symbols.add(pos.underlying_symbol)
                 logger.info(
                     "Reconciled existing broker position: %s (%s) qty=%s avg_price=%.2f",
                     pos.underlying_symbol, pos.option_trading_symbol, pos.quantity, pos.entry_price,
@@ -295,6 +298,10 @@ class PositionStore:
             pos.exit_price = exit_price
             pos.closed_at = datetime.now()
             self.closed_positions_today.append(pos)
+            # Frees the symbol up for a fresh entry on a later alert today -
+            # reserved_symbols only blocks while something is genuinely
+            # open/in-flight for it, not for the rest of the day.
+            self.reserved_symbols.discard(underlying_symbol)
             logger.info(
                 "Position CLOSED: %s (%s) reason=%s exit=%.2f pnl_pct=%.2f%%",
                 pos.underlying_symbol, pos.option_trading_symbol, reason, exit_price,
@@ -308,7 +315,7 @@ class PositionStore:
                 "live_positions": [vars(p) | {
                     "current_trailing_sl": p.current_trailing_sl
                 } for p in self.live_positions.values()],
-                "traded_symbols_today": sorted(self.traded_symbols_today),
+                "reserved_symbols": sorted(self.reserved_symbols),
                 "closed_positions_today": [vars(p) for p in self.closed_positions_today],
                 "orders_today": [vars(o) for o in self.orders_today.values()],
             }
