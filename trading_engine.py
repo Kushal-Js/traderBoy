@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import string
 import time
 from datetime import datetime
@@ -46,8 +47,14 @@ def _parse_hhmm_today(hhmm: str) -> datetime:
 
 
 def _gen_tag(prefix: str, symbol: str) -> str:
+    """Dhan's correlationId rejects special characters (confirmed live:
+    GVT&D's "&" caused a hard "Invalid correlationId" rejection on order
+    placement, DH-905) - strip anything that isn't alphanumeric before
+    embedding the symbol, since several real NSE tickers contain "&"
+    (GVT&D, M&M, M&MFIN, ...)."""
+    safe_symbol = re.sub(r"[^A-Za-z0-9]", "", symbol)
     suffix = "".join(random.choices(string.digits, k=6))
-    return f"{prefix}-{symbol[:6]}-{suffix}"[:25]
+    return f"{prefix}-{safe_symbol[:6]}-{suffix}"[:25]
 
 
 # --------------------------------------------------------------------------- #
