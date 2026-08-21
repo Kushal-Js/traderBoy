@@ -40,6 +40,20 @@ STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.03"))    # -3% hard stop los
 ENABLE_TRAILING_SL = os.getenv("ENABLE_TRAILING_SL", "true").lower() == "true"
 TRAILING_SL_PCT = float(os.getenv("TRAILING_SL_PCT", "0.01"))  # 1% trailing stop
 
+# Exits a position when the underlying's 5-min candle closes below its 5-min
+# Supertrend (trend-reversal exit), in addition to target/stop-loss - see
+# dhan_client.refresh_supertrend_signal(). Computed on the underlying stock,
+# not the option's own premium (too noisy/decay-affected for a clean trend
+# read). A runtime toggle for the same reason as ENABLE_TRAILING_SL above.
+ENABLE_SUPERTREND_EXIT = os.getenv("ENABLE_SUPERTREND_EXIT", "true").lower() == "true"
+SUPERTREND_PERIOD = int(os.getenv("SUPERTREND_PERIOD", "10"))
+SUPERTREND_MULTIPLIER = float(os.getenv("SUPERTREND_MULTIPLIER", "3.0"))
+SUPERTREND_INTERVAL_MINUTES = int(os.getenv("SUPERTREND_INTERVAL_MINUTES", "5"))
+# How long a cached Supertrend signal is reused before re-fetching candles -
+# doesn't need to track candle closes exactly (the poll loop refreshes it
+# every tick anyway, this just caps REST call frequency).
+SUPERTREND_REFRESH_SECONDS = int(os.getenv("SUPERTREND_REFRESH_SECONDS", "60"))
+
 # Options are bought as ATM CALL (CE) since the strategy trades "Buy" /
 # breakout style Chartink alerts. Flip to "PE" if you wire up a bearish scan.
 OPTION_TYPE = os.getenv("OPTION_TYPE", "CE").upper()

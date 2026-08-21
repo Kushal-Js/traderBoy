@@ -20,7 +20,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
@@ -52,6 +52,65 @@ def _retry(fn, *args, retries: int = 2, delay: float = 1.5, **kwargs):
                                 getattr(fn, "__name__", fn), attempt + 1, retries + 1, exc, delay)
                 time.sleep(delay)
     raise last_exc
+
+
+def _compute_supertrend(
+    highs: list[float], lows: list[float], closes: list[float],
+    period: int = 10, multiplier: float = 3.0,
+) -> list[Optional[float]]:
+    """Standard Supertrend indicator (ATR via Wilder's smoothing, matching
+    the default used by most charting platforms). Returns one Supertrend
+    value per bar; the first `period` entries are None since ATR needs that
+    many bars to seed. Pure function - no I/O, so it's cheap to unit-test
+    independent of any live candle fetch."""
+    n = len(closes)
+    if n < period + 1:
+        return [None] * n
+
+    tr = [0.0] * n
+    for i in range(n):
+        if i == 0:
+            tr[i] = highs[i] - lows[i]
+        else:
+            tr[i] = max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i - 1]),
+                abs(lows[i] - closes[i - 1]),
+            )
+
+    atr: list[Optional[float]] = [None] * n
+    atr[period - 1] = sum(tr[:period]) / period
+    for i in range(period, n):
+        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+
+    upper_band: list[Optional[float]] = [None] * n
+    lower_band: list[Optional[float]] = [None] * n
+    supertrend: list[Optional[float]] = [None] * n
+    trend_up: list[Optional[bool]] = [None] * n  # True while price is above the Supertrend line
+
+    for i in range(period - 1, n):
+        mid = (highs[i] + lows[i]) / 2
+        basic_upper = mid + multiplier * atr[i]
+        basic_lower = mid - multiplier * atr[i]
+
+        if i == period - 1:
+            upper_band[i] = basic_upper
+            lower_band[i] = basic_lower
+            supertrend[i] = basic_upper if closes[i] <= basic_upper else basic_lower
+            trend_up[i] = closes[i] > supertrend[i]
+            continue
+
+        prev_upper, prev_lower = upper_band[i - 1], lower_band[i - 1]
+        upper_band[i] = basic_upper if (basic_upper < prev_upper or closes[i - 1] > prev_upper) else prev_upper
+        lower_band[i] = basic_lower if (basic_lower > prev_lower or closes[i - 1] < prev_lower) else prev_lower
+
+        if trend_up[i - 1]:
+            supertrend[i] = lower_band[i] if closes[i] >= lower_band[i] else upper_band[i]
+        else:
+            supertrend[i] = upper_band[i] if closes[i] <= upper_band[i] else lower_band[i]
+        trend_up[i] = closes[i] > supertrend[i]
+
+    return supertrend
 
 
 class OrderStatus:
@@ -122,6 +181,9 @@ class DhanWrapper:
         # Wired up by main.py to drive event-driven exit checks instead of
         # waiting for monitor_loop's next poll.
         self.on_price_tick: Optional[Callable[[str, float], None]] = None
+        # underlying_symbol -> (fetched_at, is_bearish) - see
+        # refresh_supertrend_signal()/get_cached_supertrend_bearish().
+        self._supertrend_cache: dict[str, tuple[datetime, bool]] = {}
         # Observability: proves (or disproves) whether the WebSocket caches
         # are actually being used instead of REST, rather than assuming it.
         self.stats = {
@@ -220,6 +282,20 @@ class DhanWrapper:
             "lot_size": int(float(r["SEM_LOT_UNITS"])),
             "underlying_symbol": self._underlying_from_trading_symbol(str(r["SEM_TRADING_SYMBOL"])),
         }
+
+    def _equity_security_id(self, underlying_symbol: str) -> str:
+        """Resolves an underlying's own NSE cash-segment security_id (for
+        Supertrend candle fetches) - distinct from any of its option
+        contracts' security_ids."""
+        df = self.instruments()
+        row = df[
+            (df["SEM_EXM_EXCH_ID"] == "NSE")
+            & (df["SEM_INSTRUMENT_NAME"] == "EQUITY")
+            & (df["SEM_TRADING_SYMBOL"] == underlying_symbol)
+        ]
+        if row.empty:
+            raise ValueError(f"No NSE equity instrument found for {underlying_symbol}")
+        return str(int(row.iloc[0]["SEM_SMST_SECURITY_ID"]))
 
     # ------------------------------------------------------------------ #
     # Market hours (Dhan requires an explicit afterMarketOrder flag - unlike
@@ -442,6 +518,78 @@ class DhanWrapper:
         if ltp is None:
             raise ValueError(f"No LTP returned for {trading_symbol}")
         return float(ltp)
+
+    # ------------------------------------------------------------------ #
+    # Supertrend exit signal (computed on the underlying stock, not the
+    # option's own premium - see config.ENABLE_SUPERTREND_EXIT)
+    # ------------------------------------------------------------------ #
+    def refresh_supertrend_signal(self, underlying_symbol: str) -> None:
+        """Fetches the underlying's 5-min candles and recomputes whether its
+        last fully-closed candle's close is below the 5-min Supertrend - a
+        trend-reversal exit signal. Cached (see get_cached_supertrend_bearish)
+        and only re-fetched every config.SUPERTREND_REFRESH_SECONDS.
+
+        Blocking (REST call) - call via run_in_executor from async code, and
+        only from the poll loop, not from the WebSocket tick path (which
+        must stay non-blocking); the poll loop already runs every few
+        seconds, which keeps the cache fresh enough for the tick path to
+        read synchronously without its own network call."""
+        cached = self._supertrend_cache.get(underlying_symbol)
+        if cached and (datetime.now(IST) - cached[0]).total_seconds() < config.SUPERTREND_REFRESH_SECONDS:
+            return
+        try:
+            security_id = self._equity_security_id(underlying_symbol)
+            today = datetime.now(IST).strftime("%Y-%m-%d")
+            resp = _retry(
+                self.client.Dhan.intraday_minute_data,
+                security_id=security_id,
+                exchange_segment="NSE_EQ",
+                instrument_type="EQUITY",
+                from_date=today,
+                to_date=today,
+                interval=config.SUPERTREND_INTERVAL_MINUTES,
+            )
+            data = resp.get("data") or {}
+            highs = data.get("high") or []
+            lows = data.get("low") or []
+            closes = data.get("close") or []
+            timestamps = data.get("timestamp") or []
+            period = config.SUPERTREND_PERIOD
+            if len(closes) < period + 1:
+                logger.info("Not enough %d-min candles yet for %s Supertrend (%d bars)",
+                            config.SUPERTREND_INTERVAL_MINUTES, underlying_symbol, len(closes))
+                return
+
+            # Drop the current, still-forming candle if Dhan included one -
+            # only a fully-closed candle's close should drive the signal
+            # ("5 min close crossed below 5 min supertrend", not a
+            # mid-candle wick). A candle starting at timestamps[-1] is
+            # closed once interval minutes have actually elapsed since then.
+            if timestamps:
+                last_candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST)
+                if datetime.now(IST) < last_candle_start + timedelta(minutes=config.SUPERTREND_INTERVAL_MINUTES):
+                    highs, lows, closes = highs[:-1], lows[:-1], closes[:-1]
+            if len(closes) < period + 1:
+                return
+
+            supertrend = _compute_supertrend(highs, lows, closes, period=period,
+                                              multiplier=config.SUPERTREND_MULTIPLIER)
+            last_st = supertrend[-1]
+            if last_st is None:
+                return
+            is_bearish = closes[-1] < last_st
+            self._supertrend_cache[underlying_symbol] = (datetime.now(IST), is_bearish)
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not refresh Supertrend signal for %s", underlying_symbol)
+
+    def get_cached_supertrend_bearish(self, underlying_symbol: str) -> Optional[bool]:
+        """Synchronous, cache-only read - safe to call from the WebSocket
+        tick path without blocking the event loop. None means no signal has
+        been computed yet (e.g. right after startup, before the poll loop's
+        first refresh) - callers should treat that as "no exit signal", not
+        force an exit on missing data."""
+        cached = self._supertrend_cache.get(underlying_symbol)
+        return cached[1] if cached else None
 
     # ------------------------------------------------------------------ #
     # Portfolio (positions already open at the broker)

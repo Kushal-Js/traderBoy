@@ -386,15 +386,21 @@ def _exit_on_cooldown(position: Position) -> bool:
     return bool(position.next_exit_retry_at and datetime.now() < position.next_exit_retry_at)
 
 
-def _exit_reason_for(position: Position, ltp: float) -> Optional[str]:
-    """Shared target/trailing-SL evaluation - used by both the poll loop
-    and the event-driven WebSocket tick handler so the two paths can't
-    drift apart from each other."""
+def _exit_reason_for(position: Position, ltp: float, supertrend_bearish: bool = False) -> Optional[str]:
+    """Shared target/stop-loss/Supertrend evaluation - used by both the poll
+    loop and the event-driven WebSocket tick handler so the two paths can't
+    drift apart from each other. supertrend_bearish reflects the
+    underlying's 5-min close vs. its 5-min Supertrend (see
+    dhan_client.get_cached_supertrend_bearish) - caller's responsibility to
+    fetch/pass it, since that read can involve I/O and this function stays
+    synchronous."""
     if ltp >= position.target_price:
         return "TARGET_HIT"
     trailing_sl = position.current_trailing_sl
     if ltp <= trailing_sl:
         return "TRAILING_SL_HIT" if trailing_sl > position.hard_stop_loss else "STOP_LOSS_HIT"
+    if config.ENABLE_SUPERTREND_EXIT and supertrend_bearish:
+        return "SUPERTREND_EXIT"
     return None
 
 
@@ -409,7 +415,19 @@ async def _check_one_position(symbol: str, position: Position) -> None:
         return
 
     await position_store.update_highest_price(symbol, ltp)
-    reason = _exit_reason_for(position, ltp)
+
+    supertrend_bearish = False
+    if config.ENABLE_SUPERTREND_EXIT:
+        loop = asyncio.get_running_loop()
+        # Blocking REST call, cached internally (see refresh_supertrend_signal) -
+        # safe to call every poll tick since it's a no-op unless the cache is
+        # stale. Only done here, not in on_price_tick, to keep the WebSocket
+        # tick path non-blocking - this poll (every MONITOR_INTERVAL_SECONDS)
+        # is what keeps the cache fresh for both paths to read.
+        await loop.run_in_executor(None, dhan_wrapper.refresh_supertrend_signal, position.underlying_symbol)
+        supertrend_bearish = bool(dhan_wrapper.get_cached_supertrend_bearish(position.underlying_symbol))
+
+    reason = _exit_reason_for(position, ltp, supertrend_bearish)
     if reason and await position_store.try_start_exit(symbol):
         await _exit_position(symbol, position, ltp, reason)
 
@@ -438,7 +456,16 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
             return
 
         await position_store.update_highest_price(symbol, ltp)
-        reason = _exit_reason_for(position, ltp)
+
+        # Cache-only read (no I/O) - the poll loop's refresh_supertrend_signal()
+        # keeps this warm; a blocking REST call here would stall the event
+        # loop on every tick.
+        supertrend_bearish = (
+            config.ENABLE_SUPERTREND_EXIT
+            and bool(dhan_wrapper.get_cached_supertrend_bearish(position.underlying_symbol))
+        )
+
+        reason = _exit_reason_for(position, ltp, supertrend_bearish)
         if reason and await position_store.try_start_exit(symbol):
             await _exit_position(symbol, position, ltp, reason)
     except Exception:  # noqa: BLE001

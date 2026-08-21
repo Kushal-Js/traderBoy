@@ -92,6 +92,20 @@ out of git.
   symbol while something is genuinely open/in-flight for it — a symbol is
   free to re-enter once its earlier position closes, for the rest of the
   same day.
+- **Supertrend exit** (`dhan_client.refresh_supertrend_signal` /
+  `get_cached_supertrend_bearish`) exits a position when the *underlying's*
+  5-min candle close crosses below its 5-min Supertrend, alongside (not
+  instead of) target/stop-loss. Computed on the underlying stock, not the
+  option's own premium — option prices are too noisy/decay-affected for a
+  clean trend read. Split into a blocking refresh (REST call to Dhan's
+  `intraday_minute_data`, cached, called only from `monitor_loop`'s poll)
+  and a synchronous cache-only read (called from `on_price_tick`) — the
+  WebSocket tick path must never block the event loop on a REST call.
+  Verified against real intraday candles before shipping: the indicator
+  flips cleanly at genuine price crossovers rather than sticking in one
+  state, and the still-forming current candle is dropped so the signal is
+  always based on a fully-closed 5-min bar. Toggle via
+  `ENABLE_SUPERTREND_EXIT`, same reasoning as `ENABLE_TRAILING_SL`.
 
 ## Known external constraints (not fixable in code)
 
