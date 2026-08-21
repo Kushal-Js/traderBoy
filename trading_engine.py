@@ -223,9 +223,12 @@ async def _enter_single_position(symbol: str) -> dict:
         # Placed outside market hours - queued as an AMO rather than filled
         # now. Keep the symbol reserved (so a repeat alert for it today is
         # still treated as a duplicate) but don't create a live Position
-        # yet - nothing has actually been bought. monitor_loop's
-        # _sync_pending_orders() will promote this to a Position once the
-        # next session actually fills it.
+        # yet - nothing has actually been bought. Hand off ownership so
+        # monitor_loop's _sync_pending_orders() is now allowed to pick this
+        # order up and promote it to a Position once the next session
+        # actually fills it - before this point (NEW/ACKED/etc., still
+        # being resolved right here), it must not touch it.
+        await position_store.release_order_ownership(order_id)
         logger.info(
             "BUY order %s for %s queued as AMO - will confirm fill next session.",
             order_id, symbol,
@@ -466,6 +469,11 @@ async def _sync_pending_orders() -> None:
         if o.transaction_type == "BUY"
         and o.status not in OrderStatus.TERMINAL_STATUSES
         and o.underlying_symbol not in position_store.live_positions
+        # Confirmed live: without this, a monitor_loop tick landing while
+        # _enter_single_position is still inline-resolving a fresh order
+        # (e.g. delayed by a rate-limit retry) races the placer to promote
+        # the same order to a Position twice.
+        and not o.owned_by_placer
     ]
     for order in pending_entries:
         try:

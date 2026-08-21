@@ -49,6 +49,17 @@ class OrderRecord:
     option_type: Optional[str] = None
     placed_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
+    # True while whoever placed this BUY order (_enter_single_position) is
+    # still actively resolving it inline. _sync_pending_orders() must never
+    # touch an order while this is True - confirmed live that without this,
+    # a monitor_loop tick landing mid-entry can race the placer to promote
+    # the same order to a Position twice (the second call silently resets
+    # highest_price back to entry, erasing any trailing-stop progress).
+    # Only released (see release_order_ownership) when the placer
+    # determines the order is genuinely queued as AMO and needs the async
+    # follow-up - never for a normal fill/rejection, which the placer
+    # always resolves to completion itself.
+    owned_by_placer: bool = True
 
 
 @dataclass
@@ -198,6 +209,15 @@ class PositionStore:
             order.remark = remark or order.remark
             order.updated_at = datetime.now()
             logger.info("Order STATUS: %s (%s) -> %s", order_id, order.trading_symbol, status)
+
+    async def release_order_ownership(self, order_id: str) -> None:
+        """Signals that whoever placed this BUY order is done actively
+        resolving it inline and it's now genuinely queued as AMO -
+        _sync_pending_orders() may only pick up an order after this."""
+        async with self._lock:
+            order = self.orders_today.get(order_id)
+            if order:
+                order.owned_by_placer = False
 
     async def try_start_exit(self, underlying_symbol: str) -> bool:
         """Atomically checks (not already pending/claimed, not on cooldown)
