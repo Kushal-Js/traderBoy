@@ -207,6 +207,18 @@ async def feed_stats():
     return dhan_wrapper.stats
 
 
+@app.get("/top-gainers")
+async def top_gainers():
+    """Every NSE F&O stock ranked by today's %change, from the once-daily
+    scan run automatically at market open (config.MARKET_OPEN_TIME).
+    Observability only - never feeds into the entry flow or places orders."""
+    snapshot = await position_store.snapshot()
+    return {
+        "scanned_at": snapshot["top_gainers_scanned_at"],
+        "ranked": snapshot["top_gainers_today"],
+    }
+
+
 @app.post("/square-off-now")
 async def manual_square_off():
     """Manual kill-switch: closes every live position immediately."""
