@@ -107,8 +107,14 @@ class Position:
 
     @property
     def current_trailing_sl(self) -> float:
-        """1% trailing stop measured off the highest price seen so far,
-        never below the hard stop loss."""
+        """Trailing stop measured off the highest price seen so far, never
+        below the hard stop loss. When config.ENABLE_TRAILING_SL is False,
+        this is just the fixed hard_stop_loss - highest_price is still
+        tracked (for observability/the /positions snapshot) but no longer
+        used to raise the exit floor, so a position only exits on
+        TARGET_PCT or the fixed STOP_LOSS_PCT."""
+        if not config.ENABLE_TRAILING_SL:
+            return self.hard_stop_loss
         trail = self.highest_price * (1 - config.TRAILING_SL_PCT)
         return max(trail, self.hard_stop_loss)
 

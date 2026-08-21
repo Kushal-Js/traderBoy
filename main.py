@@ -7,7 +7,8 @@ FastAPI service that:
   4. Runs a background monitor loop that exits a leg on:
        - +10% target
        - -3% hard stop loss
-       - 1% trailing stop-loss (trails the peak price in the trade's favor)
+       - trailing stop-loss (trails the peak price in the trade's favor) -
+         optional, see config.ENABLE_TRAILING_SL
        - 3:15 PM hard square-off of everything still open
   5. Won't re-enter a symbol that already has an open or in-flight
      position, and caps concurrent live positions at 3 - once that

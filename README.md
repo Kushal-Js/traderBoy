@@ -67,7 +67,9 @@ webhook URL — matching the `webhook_url` field in your sample payload.
    `MONITOR_INTERVAL_SECONDS` and exits a leg on:
    - `+TARGET_PCT` target
    - `-STOP_LOSS_PCT` hard stop loss
-   - `TRAILING_SL_PCT` trailing stop (trails the peak price in the trade's favor)
+   - `TRAILING_SL_PCT` trailing stop (trails the peak price in the trade's
+     favor) - set `ENABLE_TRAILING_SL=false` to disable this and exit only
+     on the target or the fixed hard stop loss
    - `SQUARE_OFF_TIME` hard square-off of everything still open
 
 5. **AMO order lifecycle** — a BUY/SELL placed outside market hours doesn't
