@@ -37,6 +37,11 @@ class OrderRecord:
     quantity: int
     status: str                    # Groww's order_status, e.g. "COMPLETED", "REJECTED"
     remark: str = ""
+    amo_status: str = "NA"         # Groww's amo_status; "NA" unless placed outside market hours
+    # Set for BUY entry orders only, so a queued AMO order can be promoted
+    # to a live Position later (once filled) without re-deriving these.
+    lot_size: Optional[int] = None
+    option_type: Optional[str] = None
     placed_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
 
@@ -64,6 +69,11 @@ class Position:
     # this run - target/stop-loss are computed off the broker's reported
     # average price, not an actual fill we observed.
     reconciled: bool = False
+    # groww_order_id of an exit (SELL) order that's been placed but hasn't
+    # reached a terminal status yet (e.g. queued as AMO) - while set, the
+    # monitor loop must not place another exit order for this position.
+    pending_exit_order_id: Optional[str] = None
+    pending_exit_reason: Optional[str] = None
 
     @property
     def current_trailing_sl(self) -> float:
@@ -163,15 +173,34 @@ class PositionStore:
                 order.quantity, order.status,
             )
 
-    async def update_order_status(self, groww_order_id: str, status: str, remark: str = "") -> None:
+    async def update_order_status(
+        self, groww_order_id: str, status: str, remark: str = "", amo_status: str = "NA"
+    ) -> None:
         async with self._lock:
             order = self.orders_today.get(groww_order_id)
             if order is None:
                 return
             order.status = status
             order.remark = remark or order.remark
+            order.amo_status = amo_status
             order.updated_at = datetime.now()
-            logger.info("Order STATUS: %s (%s) -> %s", groww_order_id, order.trading_symbol, status)
+            logger.info(
+                "Order STATUS: %s (%s) -> %s (amo_status=%s)",
+                groww_order_id, order.trading_symbol, status, amo_status,
+            )
+
+    async def set_pending_exit_order(
+        self, underlying_symbol: str, groww_order_id: Optional[str], reason: Optional[str] = None
+    ) -> None:
+        """Marks (or clears, passing None) an outstanding exit order for a
+        live position, so the monitor loop doesn't place a second exit order
+        for it while the first one (e.g. a queued AMO SELL) is still
+        unresolved."""
+        async with self._lock:
+            pos = self.live_positions.get(underlying_symbol)
+            if pos:
+                pos.pending_exit_order_id = groww_order_id
+                pos.pending_exit_reason = reason
 
     async def close_position(self, underlying_symbol: str, exit_price: float, reason: str) -> Optional[Position]:
         async with self._lock:

@@ -145,7 +145,11 @@ async def enter_positions_for_stocks(ranked_stocks: list[tuple[str, float]]) -> 
                 continue
 
             entry_result = await _enter_single_position(symbol)
-            if entry_result.get("status") != "entered":
+            # "entered" and "amo_placed" both correspond to a real order
+            # that's now live/queued for this stock - keep the reservation
+            # so a repeat alert today is treated as a duplicate. Any other
+            # outcome (rejected, etc.) frees the symbol up to retry.
+            if entry_result.get("status") not in ("entered", "amo_placed"):
                 await position_store.release_symbol(symbol)
             results.append(entry_result)
         except Exception as exc:  # noqa: BLE001
@@ -188,10 +192,12 @@ async def _enter_single_position(symbol: str) -> dict:
         quantity=quantity,
         status=order_resp.get("order_status") or OrderStatus.NEW,
         remark=order_resp.get("remark", ""),
+        lot_size=atm.lot_size,
+        option_type=atm.option_type,
     ))
 
     result = await loop.run_in_executor(None, groww_wrapper.wait_for_order_result, groww_order_id)
-    await position_store.update_order_status(groww_order_id, result.status, result.remark)
+    await position_store.update_order_status(groww_order_id, result.status, result.remark, result.amo_status)
 
     if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
         await loop.run_in_executor(None, groww_wrapper.unsubscribe_option_price, atm.trading_symbol)
@@ -205,6 +211,27 @@ async def _enter_single_position(symbol: str) -> dict:
             "order_status": result.status,
             "remark": result.remark,
             "option_trading_symbol": atm.trading_symbol,
+            "groww_order_id": groww_order_id,
+        }
+
+    if result.is_queued_amo:
+        # Placed outside market hours - Groww has queued it as an AMO
+        # rather than filling it now. Keep the symbol reserved (so a repeat
+        # alert for it today is still treated as a duplicate) but don't
+        # create a live Position yet - nothing has actually been bought.
+        # monitor_loop's _sync_pending_orders() will promote this to a
+        # Position once the next session actually fills it.
+        logger.info(
+            "BUY order %s for %s queued as AMO (amo_status=%s) - will confirm fill next session.",
+            groww_order_id, symbol, result.amo_status,
+        )
+        return {
+            "symbol": symbol,
+            "status": "amo_placed",
+            "order_status": result.status,
+            "amo_status": result.amo_status,
+            "option_trading_symbol": atm.trading_symbol,
+            "quantity": quantity,
             "groww_order_id": groww_order_id,
         }
 
@@ -274,17 +301,33 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
         status=order_resp.get("order_status") or OrderStatus.NEW,
         remark=order_resp.get("remark", ""),
     ))
+    # Mark this position as having an outstanding exit order immediately,
+    # so a concurrent monitor tick doesn't also try to exit it.
+    await position_store.set_pending_exit_order(symbol, groww_order_id, reason)
 
     result = await loop.run_in_executor(None, groww_wrapper.wait_for_order_result, groww_order_id)
-    await position_store.update_order_status(groww_order_id, result.status, result.remark)
+    await position_store.update_order_status(groww_order_id, result.status, result.remark, result.amo_status)
 
     if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
         # The SELL was rejected/cancelled by the exchange - the position is
-        # still genuinely open at the broker. Leave it live so the next
-        # monitor tick retries the exit, instead of marking it closed.
+        # still genuinely open at the broker. Clear the pending marker and
+        # leave it live so the next monitor tick retries the exit, instead
+        # of marking it closed.
         logger.warning(
             "SELL order %s for %s rejected: status=%s remark=%s - will retry next tick",
             groww_order_id, symbol, result.status, result.remark,
+        )
+        await position_store.set_pending_exit_order(symbol, None)
+        return
+
+    if result.is_queued_amo:
+        # Placed outside market hours - Groww has queued the SELL as an
+        # AMO rather than filling it now. Leave the position live with
+        # pending_exit_order_id set; _sync_pending_orders() will close it
+        # once the next session actually fills this order.
+        logger.info(
+            "SELL order %s for %s queued as AMO (amo_status=%s) - will confirm fill next session.",
+            groww_order_id, symbol, result.amo_status,
         )
         return
 
@@ -304,6 +347,9 @@ async def _get_ltp(trading_symbol: str) -> Optional[float]:
 
 
 async def _check_one_position(symbol: str, position: Position) -> None:
+    if position.pending_exit_order_id:
+        return  # already has an outstanding exit order - let it resolve first
+
     try:
         ltp = await _get_ltp(position.option_trading_symbol)
     except Exception:  # noqa: BLE001
@@ -326,11 +372,106 @@ async def _square_off_all(reason: str) -> None:
         return
     logger.info("Square-off triggered (%s) for %d open position(s)", reason, len(positions))
     for symbol, position in positions.items():
+        if position.pending_exit_order_id:
+            continue  # already has an outstanding exit order - let it resolve first
         try:
             ltp = await _get_ltp(position.option_trading_symbol)
         except Exception:  # noqa: BLE001
             ltp = position.entry_price  # best-effort fallback for logging only
         await _exit_position(symbol, position, ltp, reason)
+
+
+async def _sync_pending_orders() -> None:
+    """Re-checks orders whose fate was still open last time: queued AMO BUY
+    entries not yet promoted to a live Position, and outstanding exit
+    orders on live positions. Cheap - normally a no-op, since orders placed
+    during market hours already resolve within wait_for_order_result's own
+    retry budget. This only matters for orders queued outside market hours
+    (see AmoStatus) that need to be picked up once the next session
+    actually dispatches them."""
+    loop = asyncio.get_running_loop()
+
+    pending_entries = [
+        o for o in position_store.orders_today.values()
+        if o.transaction_type == "BUY"
+        and o.status not in OrderStatus.TERMINAL_STATUSES
+        and o.underlying_symbol not in position_store.live_positions
+    ]
+    for order in pending_entries:
+        try:
+            result = await loop.run_in_executor(None, groww_wrapper.refresh_order_status, order.groww_order_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not refresh AMO BUY order %s", order.groww_order_id)
+            continue
+
+        await position_store.update_order_status(
+            order.groww_order_id, result.status, result.remark, result.amo_status
+        )
+
+        if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
+            logger.warning(
+                "AMO BUY order %s for %s ended as %s - releasing reservation.",
+                order.groww_order_id, order.underlying_symbol, result.status,
+            )
+            await position_store.release_symbol(order.underlying_symbol)
+            await loop.run_in_executor(None, groww_wrapper.unsubscribe_option_price, order.trading_symbol)
+            continue
+
+        if result.status in OrderStatus.TERMINAL_STATUSES:
+            fill_price = result.fill_price
+            if not fill_price:
+                fill_price = await loop.run_in_executor(
+                    None, groww_wrapper.get_option_ltp, order.trading_symbol
+                )
+            position = Position(
+                underlying_symbol=order.underlying_symbol,
+                option_trading_symbol=order.trading_symbol,
+                option_type=order.option_type or config.OPTION_TYPE,
+                quantity=order.quantity,
+                lot_size=order.lot_size or config.LOT_SIZE_FALLBACK,
+                entry_price=fill_price,
+                highest_price=fill_price,
+                target_price=fill_price * (1 + config.TARGET_PCT),
+                hard_stop_loss=fill_price * (1 - config.STOP_LOSS_PCT),
+                groww_order_id=order.groww_order_id,
+                order_reference_id=order.order_reference_id,
+            )
+            await position_store.add_position(position)
+            logger.info(
+                "AMO BUY order %s for %s filled - position now live.",
+                order.groww_order_id, order.underlying_symbol,
+            )
+        # else: still queued as AMO - nothing to do, check again next tick.
+
+    positions = dict(position_store.live_positions)
+    for symbol, position in positions.items():
+        if not position.pending_exit_order_id:
+            continue
+        try:
+            result = await loop.run_in_executor(
+                None, groww_wrapper.refresh_order_status, position.pending_exit_order_id
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not refresh AMO SELL order %s", position.pending_exit_order_id)
+            continue
+
+        await position_store.update_order_status(
+            position.pending_exit_order_id, result.status, result.remark, result.amo_status
+        )
+
+        if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
+            logger.warning(
+                "AMO SELL order %s for %s ended as %s - clearing so the next tick retries the exit.",
+                position.pending_exit_order_id, symbol, result.status,
+            )
+            await position_store.set_pending_exit_order(symbol, None)
+            continue
+
+        if result.status in OrderStatus.TERMINAL_STATUSES:
+            final_exit_price = result.fill_price or position.highest_price
+            await position_store.close_position(symbol, final_exit_price, position.pending_exit_reason or "AMO_EXIT_FILLED")
+            await loop.run_in_executor(None, groww_wrapper.unsubscribe_option_price, position.option_trading_symbol)
+        # else: still queued as AMO - nothing to do, check again next tick.
 
 
 async def monitor_loop() -> None:
@@ -341,6 +482,7 @@ async def monitor_loop() -> None:
     while True:
         try:
             await position_store.maybe_reset_for_new_day()
+            await _sync_pending_orders()
 
             now = _now_ist()
             square_off_at = _parse_hhmm_today(config.SQUARE_OFF_TIME)

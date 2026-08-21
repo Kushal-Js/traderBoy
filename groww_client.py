@@ -55,6 +55,26 @@ class OrderStatus:
     })
 
 
+class AmoStatus:
+    """After-Market-Order status values, verbatim from Groww's API docs
+    (Annexures -> AMO Status). Populated on an order's amo_status field only
+    when the order was placed outside market hours - Groww decides this
+    automatically based on when place_order() is called, there's no
+    separate "is_amo" flag to set on our end.
+    https://groww.in/trade-api/docs/python-sdk/annexures"""
+    NA = "NA"
+    PENDING = "PENDING"
+    DISPATCHED = "DISPATCHED"
+    PARKED = "PARKED"
+    PLACED = "PLACED"
+    FAILED = "FAILED"
+    MARKET = "MARKET"
+
+    # Genuinely queued as AMO, not yet dispatched to the exchange for a fill
+    # decision - order_status won't reach a terminal state until it is.
+    QUEUED_STATUSES = frozenset({PENDING, DISPATCHED, PARKED, MARKET})
+
+
 @dataclass
 class OrderResult:
     groww_order_id: str
@@ -62,6 +82,14 @@ class OrderResult:
     remark: str
     fill_price: float
     filled_quantity: int
+    amo_status: str = AmoStatus.NA
+
+    @property
+    def is_queued_amo(self) -> bool:
+        """True if this order is sitting as a pending After-Market-Order -
+        i.e. genuinely still pending (not rejected/filled), just not yet
+        dispatched to the exchange for a fill decision."""
+        return self.amo_status in AmoStatus.QUEUED_STATUSES and self.status not in OrderStatus.TERMINAL_STATUSES
 
 
 @dataclass
@@ -206,6 +234,7 @@ class GrowwWrapper:
             "remark": detail.get("remark", ""),
             "average_fill_price": detail.get("average_fill_price") or 0,
             "filled_quantity": detail.get("filled_quantity") or 0,
+            "amo_status": detail.get("amo_status") or AmoStatus.NA,
         }
 
     # ------------------------------------------------------------------ #
@@ -390,6 +419,17 @@ class GrowwWrapper:
         logger.info("Placing %s order: %s x%s", transaction_type, trading_symbol, quantity)
         return self.client.place_order(**kwargs)
 
+    @staticmethod
+    def _order_result_from_snapshot(groww_order_id: str, snapshot: dict) -> OrderResult:
+        return OrderResult(
+            groww_order_id=groww_order_id,
+            status=snapshot.get("order_status") or OrderStatus.NEW,
+            remark=snapshot.get("remark", ""),
+            fill_price=float(snapshot.get("average_fill_price") or 0),
+            filled_quantity=int(snapshot.get("filled_quantity") or 0),
+            amo_status=snapshot.get("amo_status") or AmoStatus.NA,
+        )
+
     def wait_for_order_result(
         self, groww_order_id: str, retries: int = 6, delay: float = 1.0
     ) -> OrderResult:
@@ -399,9 +439,14 @@ class GrowwWrapper:
         orders on FNO settle almost immediately during market hours, so a
         terminal status is expected well within the default retry budget.
 
+        Placed outside market hours, Groww queues the order as an AMO
+        instead (see AmoStatus) - order_status won't go terminal until the
+        next session dispatches it, so this returns as soon as that's
+        detected rather than burning the whole retry budget waiting.
+
         Always returns whatever the last-seen status was; callers MUST check
-        `.status` (e.g. against OrderStatus.REJECTED_STATUSES) rather than
-        assuming the order filled just because this returned."""
+        `.status`/`.is_queued_amo` (e.g. against OrderStatus.REJECTED_STATUSES)
+        rather than assuming the order filled just because this returned."""
         snapshot: dict = {}
         for attempt in range(retries):
             cached = self._order_snapshot_from_cache(groww_order_id)
@@ -411,6 +456,8 @@ class GrowwWrapper:
             snapshot = self._order_snapshot_from_rest(groww_order_id)
             if snapshot["order_status"] in OrderStatus.TERMINAL_STATUSES:
                 break
+            if snapshot.get("amo_status", AmoStatus.NA) in AmoStatus.QUEUED_STATUSES:
+                break
             time.sleep(delay)
         else:
             logger.warning(
@@ -418,13 +465,14 @@ class GrowwWrapper:
                 groww_order_id, retries, snapshot.get("order_status"),
             )
 
-        return OrderResult(
-            groww_order_id=groww_order_id,
-            status=snapshot.get("order_status") or OrderStatus.NEW,
-            remark=snapshot.get("remark", ""),
-            fill_price=float(snapshot.get("average_fill_price") or 0),
-            filled_quantity=int(snapshot.get("filled_quantity") or 0),
-        )
+        return self._order_result_from_snapshot(groww_order_id, snapshot)
+
+    def refresh_order_status(self, groww_order_id: str) -> OrderResult:
+        """One-shot REST status check (no retry loop) - for periodically
+        re-syncing an order whose fate was still pending last time it was
+        checked, e.g. a queued AMO order awaiting the next session."""
+        snapshot = self._order_snapshot_from_rest(groww_order_id)
+        return self._order_result_from_snapshot(groww_order_id, snapshot)
 
 
 groww_wrapper = GrowwWrapper()
