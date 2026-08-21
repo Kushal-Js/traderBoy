@@ -259,6 +259,8 @@ async def _enter_single_position(symbol: str) -> dict:
             None, dhan_wrapper.get_option_ltp, atm.trading_symbol
         )
 
+    entry_candle_start = await _capture_supertrend_entry_candle(loop, symbol)
+
     position = Position(
         underlying_symbol=symbol,
         option_trading_symbol=atm.trading_symbol,
@@ -271,6 +273,7 @@ async def _enter_single_position(symbol: str) -> dict:
         hard_stop_loss=fill_price * (1 - config.STOP_LOSS_PCT),
         order_id=order_id,
         product_type=config.OPTIONS_PRODUCT,
+        supertrend_entry_candle_start=entry_candle_start,
     )
     await position_store.add_position(position)
 
@@ -386,6 +389,39 @@ def _exit_on_cooldown(position: Position) -> bool:
     return bool(position.next_exit_retry_at and datetime.now() < position.next_exit_retry_at)
 
 
+async def _capture_supertrend_entry_candle(loop, underlying_symbol: str) -> Optional[datetime]:
+    """Best-effort snapshot of the underlying's current Supertrend candle
+    boundary, taken once at entry and stored on Position.
+    supertrend_entry_candle_start - see _supertrend_signal_for(). A fetch
+    failure here shouldn't block an entry that's already filled; returning
+    None just means the exit check won't have an entry-candle baseline to
+    compare against (treated as "not blocked" - see _supertrend_signal_for)."""
+    if not config.ENABLE_SUPERTREND_EXIT:
+        return None
+    await loop.run_in_executor(None, dhan_wrapper.refresh_supertrend_signal, underlying_symbol)
+    return dhan_wrapper.get_cached_supertrend_candle_start(underlying_symbol)
+
+
+def _supertrend_signal_for(position: Position) -> bool:
+    """Cache-only, synchronous - safe to call from both the poll loop and
+    the WebSocket tick path. Returns whether the underlying is currently
+    bearish AND the cached signal has moved past the candle the position
+    was entered on - a signal still describing the entry candle itself
+    hasn't had a chance to confirm anything since entry (see
+    Position.supertrend_entry_candle_start), it's just re-reading the same
+    breakout candle that triggered the entry. Confirmed live before this
+    guard existed: this was cutting winning trades flat at breakeven the
+    instant they were entered."""
+    bearish = dhan_wrapper.get_cached_supertrend_bearish(position.underlying_symbol)
+    if not bearish:
+        return False
+    candle_start = dhan_wrapper.get_cached_supertrend_candle_start(position.underlying_symbol)
+    entry_candle_start = position.supertrend_entry_candle_start
+    if candle_start is None or entry_candle_start is None:
+        return True  # no entry-candle baseline captured - don't block on it
+    return candle_start > entry_candle_start
+
+
 def _exit_reason_for(position: Position, ltp: float, supertrend_bearish: bool = False) -> Optional[str]:
     """Shared target/stop-loss/Supertrend evaluation - used by both the poll
     loop and the event-driven WebSocket tick handler so the two paths can't
@@ -425,7 +461,7 @@ async def _check_one_position(symbol: str, position: Position) -> None:
         # tick path non-blocking - this poll (every MONITOR_INTERVAL_SECONDS)
         # is what keeps the cache fresh for both paths to read.
         await loop.run_in_executor(None, dhan_wrapper.refresh_supertrend_signal, position.underlying_symbol)
-        supertrend_bearish = bool(dhan_wrapper.get_cached_supertrend_bearish(position.underlying_symbol))
+        supertrend_bearish = _supertrend_signal_for(position)
 
     reason = _exit_reason_for(position, ltp, supertrend_bearish)
     if reason and await position_store.try_start_exit(symbol):
@@ -460,10 +496,7 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
         # Cache-only read (no I/O) - the poll loop's refresh_supertrend_signal()
         # keeps this warm; a blocking REST call here would stall the event
         # loop on every tick.
-        supertrend_bearish = (
-            config.ENABLE_SUPERTREND_EXIT
-            and bool(dhan_wrapper.get_cached_supertrend_bearish(position.underlying_symbol))
-        )
+        supertrend_bearish = config.ENABLE_SUPERTREND_EXIT and _supertrend_signal_for(position)
 
         reason = _exit_reason_for(position, ltp, supertrend_bearish)
         if reason and await position_store.try_start_exit(symbol):
@@ -535,6 +568,7 @@ async def _sync_pending_orders() -> None:
                 fill_price = await loop.run_in_executor(
                     None, dhan_wrapper.get_option_ltp, order.trading_symbol
                 )
+            entry_candle_start = await _capture_supertrend_entry_candle(loop, order.underlying_symbol)
             position = Position(
                 underlying_symbol=order.underlying_symbol,
                 option_trading_symbol=order.trading_symbol,
@@ -547,6 +581,7 @@ async def _sync_pending_orders() -> None:
                 hard_stop_loss=fill_price * (1 - config.STOP_LOSS_PCT),
                 order_id=order.order_id,
                 product_type=config.OPTIONS_PRODUCT,
+                supertrend_entry_candle_start=entry_candle_start,
             )
             await position_store.add_position(position)
             logger.info(

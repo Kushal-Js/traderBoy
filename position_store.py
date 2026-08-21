@@ -104,6 +104,13 @@ class Position:
     # monitor tick (5s) indefinitely.
     exit_failure_count: int = 0
     next_exit_retry_at: Optional[datetime] = None
+    # Start timestamp (IST) of the underlying's 5-min candle the position
+    # was entered on - captured once at entry from
+    # dhan_client.get_cached_supertrend_candle_start(). A Supertrend exit is
+    # only honored once the cached signal has moved past this candle (see
+    # trading_engine._supertrend_signal_for), so entering doesn't get
+    # immediately reversed by the same breakout candle that triggered it.
+    supertrend_entry_candle_start: Optional[datetime] = None
 
     @property
     def current_trailing_sl(self) -> float:

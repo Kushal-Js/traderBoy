@@ -70,6 +70,25 @@ out of git.
    file literally named `Dependencies\<name>` instead of a subdirectory.
    `.gitignore` needs both `Dependencies/` and `Dependencies\\*` to catch it.
 
+9. **The Supertrend exit fired on the same 5-min candle a position was
+   entered on, cutting winners flat at breakeven.** Chartink triggers a
+   stock the instant its 5-min candle shows a breakout; that same candle's
+   *close* can already sit below the Supertrend band if the move faded
+   before the candle closed, so checking the signal right after entry
+   often just re-reads the same breakout candle, not a confirmed reversal.
+   Found via backtesting the exit against a real day's webhook triggers
+   (49 alerts, 23 entries replayed against real Dhan candles): 6 of 9
+   divergent trades were same-candle reads, costing ₹9,796 of forfeited
+   target hits, against only ₹4,580 gained from genuine later reversals —
+   net ₹5,216 worse than target/stop-loss alone. Fixed by capturing the
+   underlying's Supertrend candle boundary at entry
+   (`Position.supertrend_entry_candle_start`) and only honoring a bearish
+   read once the cached signal has moved to a *later* candle (see
+   `trading_engine._supertrend_signal_for`). Re-running the same backtest
+   with the fix flipped the net effect from −₹5,216 to +₹752 vs. baseline,
+   while keeping every genuine multi-candle-later catch (e.g. turning one
+   stock's −₹2,640 stop-loss into +₹810).
+
 ## Design decisions
 
 - **Event-driven exits** — `dhan_client._on_market_tick` fires an

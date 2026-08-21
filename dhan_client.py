@@ -181,9 +181,9 @@ class DhanWrapper:
         # Wired up by main.py to drive event-driven exit checks instead of
         # waiting for monitor_loop's next poll.
         self.on_price_tick: Optional[Callable[[str, float], None]] = None
-        # underlying_symbol -> (fetched_at, is_bearish) - see
+        # underlying_symbol -> (fetched_at, is_bearish, candle_start) - see
         # refresh_supertrend_signal()/get_cached_supertrend_bearish().
-        self._supertrend_cache: dict[str, tuple[datetime, bool]] = {}
+        self._supertrend_cache: dict[str, tuple[datetime, bool, Optional[datetime]]] = {}
         # Observability: proves (or disproves) whether the WebSocket caches
         # are actually being used instead of REST, rather than assuming it.
         self.stats = {
@@ -565,10 +565,14 @@ class DhanWrapper:
             # ("5 min close crossed below 5 min supertrend", not a
             # mid-candle wick). A candle starting at timestamps[-1] is
             # closed once interval minutes have actually elapsed since then.
+            # timestamps is trimmed in lockstep so its last entry always
+            # matches the candle that actually produced closes[-1] - callers
+            # (see get_cached_supertrend_candle_start) rely on that to tell
+            # whether a position's own entry candle is the one being read.
             if timestamps:
                 last_candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST)
                 if datetime.now(IST) < last_candle_start + timedelta(minutes=config.SUPERTREND_INTERVAL_MINUTES):
-                    highs, lows, closes = highs[:-1], lows[:-1], closes[:-1]
+                    highs, lows, closes, timestamps = highs[:-1], lows[:-1], closes[:-1], timestamps[:-1]
             if len(closes) < period + 1:
                 return
 
@@ -578,7 +582,8 @@ class DhanWrapper:
             if last_st is None:
                 return
             is_bearish = closes[-1] < last_st
-            self._supertrend_cache[underlying_symbol] = (datetime.now(IST), is_bearish)
+            candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST) if timestamps else None
+            self._supertrend_cache[underlying_symbol] = (datetime.now(IST), is_bearish, candle_start)
         except Exception:  # noqa: BLE001
             logger.exception("Could not refresh Supertrend signal for %s", underlying_symbol)
 
@@ -590,6 +595,17 @@ class DhanWrapper:
         force an exit on missing data."""
         cached = self._supertrend_cache.get(underlying_symbol)
         return cached[1] if cached else None
+
+    def get_cached_supertrend_candle_start(self, underlying_symbol: str) -> Optional[datetime]:
+        """Start timestamp (IST) of the fully-closed candle the cached
+        signal is based on. Used to skip a Supertrend exit while it's still
+        reading the same candle a position was entered on (see
+        Position.supertrend_entry_candle_start) - a same-candle read means
+        the signal hasn't had a chance to confirm anything since entry, it's
+        just re-describing the same breakout candle that triggered the
+        entry in the first place."""
+        cached = self._supertrend_cache.get(underlying_symbol)
+        return cached[2] if cached else None
 
     # ------------------------------------------------------------------ #
     # Portfolio (positions already open at the broker)
