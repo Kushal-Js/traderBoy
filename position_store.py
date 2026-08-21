@@ -26,6 +26,12 @@ import config
 
 logger = logging.getLogger("position_store")
 
+# Placeholder for Position.pending_exit_order_id while an exit attempt is
+# claimed (via try_start_exit) but doesn't have a real order_id yet -
+# callers reading pending_exit_order_id as if it were a real order_id (e.g.
+# to poll its status) must check for and skip this sentinel.
+EXIT_CLAIMED = "CLAIMED"
+
 
 @dataclass
 class OrderRecord:
@@ -193,15 +199,44 @@ class PositionStore:
             order.updated_at = datetime.now()
             logger.info("Order STATUS: %s (%s) -> %s", order_id, order.trading_symbol, status)
 
+    async def try_start_exit(self, underlying_symbol: str) -> bool:
+        """Atomically checks (not already pending/claimed, not on cooldown)
+        and claims the right to place an exit order for this position, in
+        one locked step. Now that exit checks can fire from two places -
+        the poll loop AND event-driven WebSocket ticks - without this,
+        two near-simultaneous triggers could both pass a check-then-act
+        race and both place a real SELL order for the same position.
+
+        Returns True if the caller now owns the exit attempt and must
+        proceed to place the order; False means someone else already has
+        it (or it's on cooldown) and the caller must NOT place an order.
+        Every code path after a successful claim must release it: either
+        set_pending_exit_order() with the real order_id (on a successful
+        placement) or None (on an exchange-side rejection), or
+        record_exit_failure() (if placement itself failed) - all three
+        clear/replace the placeholder this sets."""
+        async with self._lock:
+            pos = self.live_positions.get(underlying_symbol)
+            if not pos:
+                return False
+            if pos.pending_exit_order_id:
+                return False
+            if pos.next_exit_retry_at and datetime.now() < pos.next_exit_retry_at:
+                return False
+            pos.pending_exit_order_id = EXIT_CLAIMED
+            return True
+
     async def record_exit_failure(self, underlying_symbol: str) -> None:
         """Backs off the next retry after an exit order failed to even get
         placed (as opposed to being placed and then REJECTED - that path
         already retries every tick via _exit_position's normal flow).
-        5s, 10s, 20s, 40s, 80s, 160s, capped at 5 minutes."""
+        5s, 10s, 20s, 40s, 80s, 160s, capped at 5 minutes. Also releases
+        the try_start_exit() claim, since no real order_id resulted."""
         async with self._lock:
             pos = self.live_positions.get(underlying_symbol)
             if not pos:
                 return
+            pos.pending_exit_order_id = None
             pos.exit_failure_count += 1
             backoff = min(5 * (2 ** pos.exit_failure_count), 300)
             pos.next_exit_retry_at = datetime.now() + timedelta(seconds=backoff)

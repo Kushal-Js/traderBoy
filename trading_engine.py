@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo
 
 import config
 from dhan_client import OrderStatus, dhan_wrapper
-from position_store import OrderRecord, Position, position_store
+from position_store import EXIT_CLAIMED, OrderRecord, Position, position_store
 
 logger = logging.getLogger("trading_engine")
 
@@ -278,6 +278,18 @@ async def _enter_single_position(symbol: str) -> dict:
 # Step 3: monitoring / exits
 # --------------------------------------------------------------------------- #
 async def _exit_position(symbol: str, position: Position, exit_price: float, reason: str) -> None:
+    """Caller MUST have already claimed the exit via
+    position_store.try_start_exit(symbol) before calling this - it does not
+    check/claim itself, since exit checks now fire from two places (the
+    poll loop and event-driven WebSocket ticks) and the claim has to happen
+    atomically before either one decides to act.
+
+    The whole body is wrapped in a catch-all as a safety net: any
+    unexpected exception here (not just a failed placement) must still
+    release the claim via record_exit_failure(), or the position would be
+    stuck forever unable to exit - try_start_exit() would keep seeing a
+    non-empty pending_exit_order_id and refuse every future attempt,
+    including from /square-off-now."""
     loop = asyncio.get_running_loop()
     tag = _gen_tag("Ext", symbol)
     try:
@@ -291,57 +303,63 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
         await position_store.record_exit_failure(symbol)
         return  # leave it live; next eligible retry is gated by next_exit_retry_at
 
-    await position_store.clear_exit_failure(symbol)
-    order_id = order_resp["order_id"]
-    is_amo = order_resp["is_amo"]
-    await position_store.record_order(OrderRecord(
-        order_id=order_id,
-        underlying_symbol=symbol,
-        trading_symbol=position.option_trading_symbol,
-        transaction_type="SELL",
-        quantity=position.quantity,
-        status=OrderStatus.TRANSIT,
-        is_amo=is_amo,
-    ))
-    # Mark this position as having an outstanding exit order immediately,
-    # so a concurrent monitor tick doesn't also try to exit it.
-    await position_store.set_pending_exit_order(symbol, order_id, reason)
+    try:
+        await position_store.clear_exit_failure(symbol)
+        order_id = order_resp["order_id"]
+        is_amo = order_resp["is_amo"]
+        await position_store.record_order(OrderRecord(
+            order_id=order_id,
+            underlying_symbol=symbol,
+            trading_symbol=position.option_trading_symbol,
+            transaction_type="SELL",
+            quantity=position.quantity,
+            status=OrderStatus.TRANSIT,
+            is_amo=is_amo,
+        ))
+        # Replaces the try_start_exit() placeholder with the real order_id.
+        await position_store.set_pending_exit_order(symbol, order_id, reason)
 
-    result = await loop.run_in_executor(
-        None, dhan_wrapper.wait_for_order_result, order_id, is_amo
-    )
-    await position_store.update_order_status(order_id, result.status, result.remark)
-
-    if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
-        # The SELL was rejected/cancelled by the exchange - the position is
-        # still genuinely open at the broker. Clear the pending marker and
-        # back off before retrying - confirmed live that a rejection reason
-        # like insufficient margin doesn't resolve within one tick, and
-        # without backoff this retries every 5s indefinitely.
-        logger.warning(
-            "SELL order %s for %s rejected: status=%s remark=%s - backing off before retrying",
-            order_id, symbol, result.status, result.remark,
+        result = await loop.run_in_executor(
+            None, dhan_wrapper.wait_for_order_result, order_id, is_amo
         )
-        await position_store.set_pending_exit_order(symbol, None)
+        await position_store.update_order_status(order_id, result.status, result.remark)
+
+        if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
+            # The SELL was rejected/cancelled by the exchange - the position
+            # is still genuinely open at the broker. Clear the pending
+            # marker and back off before retrying - confirmed live that a
+            # rejection reason like insufficient margin doesn't resolve
+            # within one tick, and without backoff this retries every 5s
+            # indefinitely.
+            logger.warning(
+                "SELL order %s for %s rejected: status=%s remark=%s - backing off before retrying",
+                order_id, symbol, result.status, result.remark,
+            )
+            await position_store.set_pending_exit_order(symbol, None)
+            await position_store.record_exit_failure(symbol)
+            return
+
+        await position_store.clear_exit_failure(symbol)
+
+        if result.is_queued_amo:
+            # Placed outside market hours - queued as an AMO rather than
+            # filled now. Leave the position live with pending_exit_order_id
+            # set (the real order_id, already applied above);
+            # _sync_pending_orders() will close it once the next session
+            # actually fills this order.
+            logger.info(
+                "SELL order %s for %s queued as AMO - will confirm fill next session.",
+                order_id, symbol,
+            )
+            return
+
+        final_exit_price = result.fill_price or exit_price
+        await position_store.close_position(symbol, final_exit_price, reason)
+        await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.option_trading_symbol)
+    except Exception:  # noqa: BLE001
+        logger.exception("Unexpected error resolving SELL order for %s (%s) - backing off before retrying",
+                          symbol, position.option_trading_symbol)
         await position_store.record_exit_failure(symbol)
-        return
-
-    await position_store.clear_exit_failure(symbol)
-
-    if result.is_queued_amo:
-        # Placed outside market hours - queued as an AMO rather than filled
-        # now. Leave the position live with pending_exit_order_id set;
-        # _sync_pending_orders() will close it once the next session
-        # actually fills this order.
-        logger.info(
-            "SELL order %s for %s queued as AMO - will confirm fill next session.",
-            order_id, symbol,
-        )
-        return
-
-    final_exit_price = result.fill_price or exit_price
-    await position_store.close_position(symbol, final_exit_price, reason)
-    await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.option_trading_symbol)
 
 
 async def _get_ltp(trading_symbol: str) -> Optional[float]:
@@ -358,6 +376,18 @@ def _exit_on_cooldown(position: Position) -> bool:
     return bool(position.next_exit_retry_at and datetime.now() < position.next_exit_retry_at)
 
 
+def _exit_reason_for(position: Position, ltp: float) -> Optional[str]:
+    """Shared target/trailing-SL evaluation - used by both the poll loop
+    and the event-driven WebSocket tick handler so the two paths can't
+    drift apart from each other."""
+    if ltp >= position.target_price:
+        return "TARGET_HIT"
+    trailing_sl = position.current_trailing_sl
+    if ltp <= trailing_sl:
+        return "TRAILING_SL_HIT" if trailing_sl > position.hard_stop_loss else "STOP_LOSS_HIT"
+    return None
+
+
 async def _check_one_position(symbol: str, position: Position) -> None:
     if position.pending_exit_order_id or _exit_on_cooldown(position):
         return  # already has an outstanding exit order, or backing off after a placement failure
@@ -369,13 +399,40 @@ async def _check_one_position(symbol: str, position: Position) -> None:
         return
 
     await position_store.update_highest_price(symbol, ltp)
-    trailing_sl = position.current_trailing_sl
-
-    if ltp >= position.target_price:
-        await _exit_position(symbol, position, ltp, "TARGET_HIT")
-    elif ltp <= trailing_sl:
-        reason = "TRAILING_SL_HIT" if trailing_sl > position.hard_stop_loss else "STOP_LOSS_HIT"
+    reason = _exit_reason_for(position, ltp)
+    if reason and await position_store.try_start_exit(symbol):
         await _exit_position(symbol, position, ltp, reason)
+
+
+async def on_price_tick(trading_symbol: str, ltp: float) -> None:
+    """Event-driven exit check, fired as soon as a new price arrives over
+    the WebSocket market feed - instead of waiting for monitor_loop's next
+    poll (up to MONITOR_INTERVAL_SECONDS, 5s by default, late). The poll
+    loop still runs as a fallback/heartbeat (e.g. if the feed is disabled
+    or a position's symbol isn't ticking). Wired up in main.py via
+    dhan_wrapper.on_price_tick, invoked from the feed's own thread via
+    asyncio.run_coroutine_threadsafe - wrapped in try/except here because
+    exceptions from a threadsafe-scheduled coroutine are otherwise silently
+    dropped rather than surfacing anywhere."""
+    try:
+        match = next(
+            ((sym, pos) for sym, pos in position_store.live_positions.items()
+             if pos.option_trading_symbol == trading_symbol),
+            None,
+        )
+        if not match:
+            return
+        symbol, position = match
+
+        if position.pending_exit_order_id or _exit_on_cooldown(position):
+            return
+
+        await position_store.update_highest_price(symbol, ltp)
+        reason = _exit_reason_for(position, ltp)
+        if reason and await position_store.try_start_exit(symbol):
+            await _exit_position(symbol, position, ltp, reason)
+    except Exception:  # noqa: BLE001
+        logger.exception("on_price_tick failed for %s", trading_symbol)
 
 
 async def _square_off_all(reason: str) -> None:
@@ -390,6 +447,8 @@ async def _square_off_all(reason: str) -> None:
             ltp = await _get_ltp(position.option_trading_symbol)
         except Exception:  # noqa: BLE001
             ltp = position.entry_price  # best-effort fallback for logging only
+        if not await position_store.try_start_exit(symbol):
+            continue  # an event-driven tick claimed it in the meantime
         await _exit_position(symbol, position, ltp, reason)
 
 
@@ -456,8 +515,8 @@ async def _sync_pending_orders() -> None:
 
     positions = dict(position_store.live_positions)
     for symbol, position in positions.items():
-        if not position.pending_exit_order_id:
-            continue
+        if not position.pending_exit_order_id or position.pending_exit_order_id == EXIT_CLAIMED:
+            continue  # no exit outstanding, or one's mid-placement right now - nothing to sync yet
         try:
             result = await loop.run_in_executor(
                 None, dhan_wrapper.refresh_order_status, position.pending_exit_order_id, True

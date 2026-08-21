@@ -31,6 +31,7 @@ from position_store import position_store
 from trading_engine import (
     enter_positions_for_stocks,
     monitor_loop,
+    on_price_tick,
     rank_and_pick_top_stocks,
     reconcile_broker_positions,
 )
@@ -48,6 +49,16 @@ _monitor_task: Optional[asyncio.Task] = None
 async def lifespan(app: FastAPI):
     global _monitor_task
     loop = asyncio.get_running_loop()
+
+    # Bridges the market-feed's WebSocket thread back onto the event loop -
+    # on_price_tick is a plain sync function called directly from that
+    # thread (see dhan_client._on_market_tick), so it can't just `await`.
+    # Wired up before start_feed() so no tick can arrive before this exists.
+    def _on_price_tick(trading_symbol: str, ltp: float) -> None:
+        asyncio.run_coroutine_threadsafe(on_price_tick(trading_symbol, ltp), loop)
+
+    dhan_wrapper.on_price_tick = _on_price_tick
+
     # authenticate() and start_feed() are blocking SDK calls; push them to a
     # worker thread rather than calling them directly on the lifespan
     # coroutine (a socket connection spinning up its own event loop
@@ -184,6 +195,13 @@ async def get_orders():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/feed-stats")
+async def feed_stats():
+    """Proves (or disproves) whether the WebSocket caches are actually
+    being used instead of REST fallbacks - see dhan_client.DhanWrapper.stats."""
+    return dhan_wrapper.stats
 
 
 @app.post("/square-off-now")

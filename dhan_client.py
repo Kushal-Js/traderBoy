@@ -21,7 +21,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
 from Dhan_Tradehull import Tradehull
@@ -113,6 +113,24 @@ class DhanWrapper:
         self._order_updates: dict[str, dict] = {}
         # security_id (str) -> last LTP pushed over the socket
         self._ltp_cache: dict[str, float] = {}
+        # security_id (str) -> trading_symbol, for every symbol we've ever
+        # subscribed - lets the market-feed tick callback (which only knows
+        # security_id) find the trading_symbol to fire on_price_tick with.
+        self._security_id_to_symbol: dict[str, str] = {}
+        # Fired synchronously from the market-feed's WebSocket thread on
+        # every tick, as (trading_symbol, ltp) - must be fast/non-blocking.
+        # Wired up by main.py to drive event-driven exit checks instead of
+        # waiting for monitor_loop's next poll.
+        self.on_price_tick: Optional[Callable[[str, float], None]] = None
+        # Observability: proves (or disproves) whether the WebSocket caches
+        # are actually being used instead of REST, rather than assuming it.
+        self.stats = {
+            "ltp_cache_hits": 0,
+            "ltp_cache_misses": 0,
+            "order_status_cache_hits": 0,
+            "order_status_rest_calls": 0,
+            "price_ticks_received": 0,
+        }
 
     # ------------------------------------------------------------------ #
     # Auth
@@ -241,15 +259,31 @@ class DhanWrapper:
         return self._market_feed
 
     def _on_market_tick(self, _feed, tick: dict) -> None:
+        # Runs on the MarketFeed's own background thread, not the asyncio
+        # event loop - on_price_tick (if set) is responsible for hopping
+        # back onto the event loop safely (see main.py's wiring of it).
         if not isinstance(tick, dict):
             return
         security_id = tick.get("security_id")
         ltp = tick.get("LTP")
-        if security_id is not None and ltp is not None:
-            try:
-                self._ltp_cache[str(security_id)] = float(ltp)
-            except (TypeError, ValueError):
-                pass
+        if security_id is None or ltp is None:
+            return
+        try:
+            ltp_val = float(ltp)
+        except (TypeError, ValueError):
+            return
+
+        security_id = str(security_id)
+        self._ltp_cache[security_id] = ltp_val
+        self.stats["price_ticks_received"] += 1
+
+        if self.on_price_tick:
+            trading_symbol = self._security_id_to_symbol.get(security_id)
+            if trading_symbol:
+                try:
+                    self.on_price_tick(trading_symbol, ltp_val)
+                except Exception:  # noqa: BLE001
+                    logger.exception("on_price_tick callback failed for %s", trading_symbol)
 
     def start_feed(self) -> None:
         """Eagerly opens both socket connections (otherwise they lazily open
@@ -264,12 +298,14 @@ class DhanWrapper:
         if not config.ENABLE_WS_FEED:
             return
         meta = self._instrument_meta(trading_symbol)
+        self._security_id_to_symbol[meta["security_id"]] = trading_symbol
         self.market_feed.subscribe_symbols([(MarketFeed.NSE_FNO, meta["security_id"], MarketFeed.Ticker)])
 
     def unsubscribe_option_price(self, trading_symbol: str) -> None:
         if not config.ENABLE_WS_FEED:
             return
         meta = self._instrument_meta(trading_symbol)
+        self._security_id_to_symbol.pop(meta["security_id"], None)
         self.market_feed.unsubscribe_symbols([(MarketFeed.NSE_FNO, meta["security_id"], MarketFeed.Ticker)])
 
     def get_cached_option_ltp(self, trading_symbol: str) -> Optional[float]:
@@ -279,7 +315,12 @@ class DhanWrapper:
         if not config.ENABLE_WS_FEED:
             return None
         meta = self._instrument_meta(trading_symbol)
-        return self._ltp_cache.get(meta["security_id"])
+        ltp = self._ltp_cache.get(meta["security_id"])
+        if ltp is not None:
+            self.stats["ltp_cache_hits"] += 1
+        else:
+            self.stats["ltp_cache_misses"] += 1
+        return ltp
 
     def _order_snapshot_from_cache(self, order_id: str) -> Optional[dict]:
         """Normalizes a socket order-update push to the same shape as
@@ -511,7 +552,9 @@ class DhanWrapper:
             cached = self._order_snapshot_from_cache(order_id)
             if cached and cached["order_status"] in OrderStatus.TERMINAL_STATUSES:
                 snapshot = cached
+                self.stats["order_status_cache_hits"] += 1
                 break
+            self.stats["order_status_rest_calls"] += 1
             snapshot = self._order_snapshot_from_rest(order_id)
             if snapshot["order_status"] in OrderStatus.TERMINAL_STATUSES:
                 break
