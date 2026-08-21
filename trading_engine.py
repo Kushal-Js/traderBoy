@@ -84,6 +84,7 @@ async def reconcile_broker_positions() -> list[Position]:
             target_price=avg_price * (1 + config.TARGET_PCT),
             hard_stop_loss=avg_price * (1 - config.STOP_LOSS_PCT),
             order_id="",
+            product_type=bp["product_type"],
             reconciled=True,
         ))
 
@@ -258,6 +259,7 @@ async def _enter_single_position(symbol: str) -> dict:
         target_price=fill_price * (1 + config.TARGET_PCT),
         hard_stop_loss=fill_price * (1 - config.STOP_LOSS_PCT),
         order_id=order_id,
+        product_type=config.OPTIONS_PRODUCT,
     )
     await position_store.add_position(position)
 
@@ -281,7 +283,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
     try:
         order_resp = await loop.run_in_executor(
             None, dhan_wrapper.place_market_order,
-            position.option_trading_symbol, position.quantity, "SELL", tag,
+            position.option_trading_symbol, position.quantity, "SELL", tag, position.product_type,
         )
     except Exception:  # noqa: BLE001
         logger.exception("SELL order failed for %s (%s) - backing off before retrying",
@@ -313,14 +315,18 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
     if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
         # The SELL was rejected/cancelled by the exchange - the position is
         # still genuinely open at the broker. Clear the pending marker and
-        # leave it live so the next monitor tick retries the exit, instead
-        # of marking it closed.
+        # back off before retrying - confirmed live that a rejection reason
+        # like insufficient margin doesn't resolve within one tick, and
+        # without backoff this retries every 5s indefinitely.
         logger.warning(
-            "SELL order %s for %s rejected: status=%s remark=%s - will retry next tick",
+            "SELL order %s for %s rejected: status=%s remark=%s - backing off before retrying",
             order_id, symbol, result.status, result.remark,
         )
         await position_store.set_pending_exit_order(symbol, None)
+        await position_store.record_exit_failure(symbol)
         return
+
+    await position_store.clear_exit_failure(symbol)
 
     if result.is_queued_amo:
         # Placed outside market hours - queued as an AMO rather than filled
@@ -439,6 +445,7 @@ async def _sync_pending_orders() -> None:
                 target_price=fill_price * (1 + config.TARGET_PCT),
                 hard_stop_loss=fill_price * (1 - config.STOP_LOSS_PCT),
                 order_id=order.order_id,
+                product_type=config.OPTIONS_PRODUCT,
             )
             await position_store.add_position(position)
             logger.info(

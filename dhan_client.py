@@ -429,6 +429,11 @@ class DhanWrapper:
                 "lot_size": meta["lot_size"],
                 "quantity": net_qty,
                 "avg_price": float(p.get("buyAvg") or p.get("costPrice") or 0),
+                # MUST be preserved and used for the exit order later -
+                # confirmed live that a mismatched product_type gets the
+                # SELL RMS-rejected as a fresh naked short rather than
+                # recognized as squaring off this position.
+                "product_type": p.get("productType") or config.OPTIONS_PRODUCT,
             })
         return open_positions
 
@@ -446,15 +451,22 @@ class DhanWrapper:
     # Orders
     # ------------------------------------------------------------------ #
     def place_market_order(
-        self, trading_symbol: str, quantity: int, transaction_type: str, tag: Optional[str] = None
+        self, trading_symbol: str, quantity: int, transaction_type: str,
+        tag: Optional[str] = None, product_type: Optional[str] = None,
     ) -> dict:
         """Places a MARKET order. Outside market hours this is placed as an
         AMO (Dhan requires the explicit afterMarketOrder flag - unlike
-        Groww it does not auto-detect this from placement time)."""
-        is_amo = not self.is_market_open()
+        Groww it does not auto-detect this from placement time).
 
-        logger.info("Placing %s order: %s x%s%s", transaction_type, trading_symbol, quantity,
-                    " (AMO)" if is_amo else "")
+        product_type MUST match whatever the position was actually opened
+        under when this is an exit (SELL) - defaults to
+        config.OPTIONS_PRODUCT, which is only correct for entries we placed
+        ourselves. See Position.product_type's docstring."""
+        is_amo = not self.is_market_open()
+        product_type = product_type or config.OPTIONS_PRODUCT
+
+        logger.info("Placing %s order: %s x%s (product=%s)%s", transaction_type, trading_symbol,
+                    quantity, product_type, " (AMO)" if is_amo else "")
         order_id = self.client.order_placement(
             tradingsymbol=trading_symbol,
             exchange=config.DEFAULT_EXCHANGE,
@@ -463,7 +475,7 @@ class DhanWrapper:
             trigger_price=0,
             order_type="MARKET",
             transaction_type=transaction_type,
-            trade_type=config.OPTIONS_PRODUCT,
+            trade_type=product_type,
             after_market_order=is_amo,
             amo_time="OPEN",
             tag=tag,

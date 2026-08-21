@@ -57,6 +57,12 @@ class Position:
     target_price: float
     hard_stop_loss: float
     order_id: str
+    # Must match whatever product type the position was actually opened
+    # under (Dhan's MIS/MARGIN/CNC/...) - confirmed live that a SELL placed
+    # with a mismatched product type isn't recognized as squaring off the
+    # existing position, and instead gets RMS-rejected as a fresh naked
+    # short requiring full margin ("insufficient funds").
+    product_type: str
     opened_at: datetime = field(default_factory=datetime.now)
     status: str = "OPEN"           # OPEN | CLOSED
     exit_reason: Optional[str] = None
