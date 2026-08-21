@@ -22,7 +22,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, field_validator
 
 import config
@@ -125,12 +125,21 @@ class ChartinkWebhookPayload(BaseModel):
 # --------------------------------------------------------------------------- #
 # Webhook endpoint
 # --------------------------------------------------------------------------- #
+def _check_webhook_secret(x_webhook_secret: Optional[str]) -> None:
+    """No-op if WEBHOOK_SHARED_SECRET isn't configured (local/dev use), but
+    once it IS set, every caller must present it - this endpoint places
+    real trades, and once deployed publicly it's reachable by anyone who
+    finds the URL."""
+    if config.WEBHOOK_SHARED_SECRET and x_webhook_secret != config.WEBHOOK_SHARED_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+
 @app.post("/chartink/webhook")
 async def chartink_webhook(
     payload: ChartinkWebhookPayload,
+    x_webhook_secret: Optional[str] = Header(None, alias="X-Webhook-Secret"),
 ):
-    # if config.WEBHOOK_SHARED_SECRET and x_webhook_secret != config.WEBHOOK_SHARED_SECRET:
-    #     raise HTTPException(status_code=401, detail="Invalid webhook secret")
+    _check_webhook_secret(x_webhook_secret)
 
     await position_store.maybe_reset_for_new_day()
 
@@ -190,8 +199,11 @@ async def health():
 
 
 @app.post("/square-off-now")
-async def manual_square_off():
+async def manual_square_off(
+    x_webhook_secret: Optional[str] = Header(None, alias="X-Webhook-Secret"),
+):
     """Manual kill-switch: closes every live position immediately."""
+    _check_webhook_secret(x_webhook_secret)
     from trading_engine import _square_off_all  # local import to avoid cycles at module load
     await _square_off_all("MANUAL_SQUARE_OFF")
     return await position_store.snapshot()
