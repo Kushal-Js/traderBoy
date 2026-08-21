@@ -1,0 +1,34 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Dhan-Tradehull writes its own log files and daily token/instrument cache
+# here. On macOS/Linux its own path-joining bug (hardcoded "Dependencies\\"
+# - a Windows separator) creates a flat file literally named
+# "Dependencies\<name>" instead of a Dependencies/ subdirectory, so both
+# forms need to be ignored.
+Dependencies/
+Dependencies\\*
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Logs
+*.log

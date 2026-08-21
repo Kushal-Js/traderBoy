@@ -1,0 +1,504 @@
+"""
+Core strategy logic.
+
+Flow:
+  0. reconcile_broker_positions() - at startup, import positions already
+     open at Dhan (e.g. left over from a previous run) so we don't lose
+     track of them and re-enter.
+  1. rank_and_pick_top_stocks()  - from the Chartink alert's stock list, pick
+     the top-N by today's %change (highest first).
+  2. enter_positions_for_stocks() - for each qualifying stock (not already
+     traded today, capacity available), find the ATM option and place a
+     BUY MARKET order (AMO outside market hours).
+  3. monitor_loop() - background asyncio loop, polls every
+     MONITOR_INTERVAL_SECONDS, and exits a leg when target / stop-loss /
+     trailing stop-loss is hit, or force-squares-off everything at
+     SQUARE_OFF_TIME. Also re-syncs any order still queued as AMO.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import random
+import string
+import time
+from datetime import datetime
+from typing import Optional
+from zoneinfo import ZoneInfo
+
+import config
+from dhan_client import OrderStatus, dhan_wrapper
+from position_store import OrderRecord, Position, position_store
+
+logger = logging.getLogger("trading_engine")
+
+IST = ZoneInfo(config.MARKET_TZ)
+
+
+def _now_ist() -> datetime:
+    return datetime.now(IST)
+
+
+def _parse_hhmm_today(hhmm: str) -> datetime:
+    now = _now_ist()
+    hour, minute = map(int, hhmm.split(":"))
+    return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def _gen_tag(prefix: str, symbol: str) -> str:
+    suffix = "".join(random.choices(string.digits, k=6))
+    return f"{prefix}-{symbol[:6]}-{suffix}"[:25]
+
+
+# --------------------------------------------------------------------------- #
+# Step 0: reconcile with positions already open at the broker (call once at
+# startup) so a restart mid-day doesn't lose track of them and re-enter.
+# --------------------------------------------------------------------------- #
+async def reconcile_broker_positions() -> list[Position]:
+    """Best-effort import of positions already open at Dhan (e.g. left open
+    by a previous run of this process) into the local store. Target/stop-
+    loss are computed off the broker's reported average price using the
+    current config, since we don't have the original fill we'd normally use -
+    these are marked Position.reconciled=True so that's visible downstream."""
+    loop = asyncio.get_running_loop()
+    broker_positions = await loop.run_in_executor(None, dhan_wrapper.get_open_fno_positions)
+
+    positions: list[Position] = []
+    for bp in broker_positions:
+        avg_price = bp["avg_price"]
+        if not avg_price:
+            logger.warning(
+                "Skipping reconciliation for %s - broker reported no average price.",
+                bp["trading_symbol"],
+            )
+            continue
+
+        positions.append(Position(
+            underlying_symbol=bp["underlying_symbol"],
+            option_trading_symbol=bp["trading_symbol"],
+            option_type=bp["option_type"] or config.OPTION_TYPE,
+            quantity=bp["quantity"],
+            lot_size=bp["lot_size"],
+            entry_price=avg_price,
+            highest_price=avg_price,
+            target_price=avg_price * (1 + config.TARGET_PCT),
+            hard_stop_loss=avg_price * (1 - config.STOP_LOSS_PCT),
+            order_id="",
+            reconciled=True,
+        ))
+
+    for pos in positions:
+        await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, pos.option_trading_symbol)
+
+    return positions
+
+
+# --------------------------------------------------------------------------- #
+# Step 1: rank stocks from the webhook payload by today's % change
+# --------------------------------------------------------------------------- #
+def rank_and_pick_top_stocks(stock_symbols: list[str], top_n: int = config.TOP_N_STOCKS) -> list[tuple[str, float]]:
+    """Returns [(symbol, pct_change), ...] sorted descending, top_n only.
+    Stocks that error out on the quote lookup are skipped (and logged).
+    Paced with a small delay between calls - Dhan's market-data REST API
+    intermittently rate-limit-fails on rapid back-to-back calls (confirmed
+    live); get_day_change_pct() already retries individually, but pacing
+    keeps that from being needed in the first place for a multi-stock alert."""
+    scored: list[tuple[str, float]] = []
+    for i, symbol in enumerate(stock_symbols):
+        if i > 0:
+            time.sleep(0.35)
+        try:
+            pct = dhan_wrapper.get_day_change_pct(symbol)
+            scored.append((symbol, pct))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Skipping %s - could not fetch day change: %s", symbol, exc)
+
+    scored.sort(key=lambda t: t[1], reverse=True)
+    return scored[:top_n]
+
+
+# --------------------------------------------------------------------------- #
+# Step 2: enter positions
+# --------------------------------------------------------------------------- #
+async def enter_positions_for_stocks(ranked_stocks: list[tuple[str, float]]) -> list[dict]:
+    """Places ATM-option BUY orders for as many of the ranked stocks as
+    capacity and dedup rules allow. Returns a per-stock result log."""
+    results: list[dict] = []
+    loop = asyncio.get_running_loop()
+
+    for symbol, pct_change in ranked_stocks:
+        # Atomically checks dedup + capacity and claims the symbol in one
+        # locked step, so two near-simultaneous calls for the same symbol
+        # (e.g. a duplicate Chartink webhook delivery) can't both pass a
+        # check-then-act race and both end up placing an order.
+        if not await position_store.reserve_symbol(symbol):
+            logger.info("%s: skipped - already traded/live/reserved today, or no capacity", symbol)
+            results.append({"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"})
+            continue
+
+        try:
+            # Belt-and-suspenders: confirm the broker doesn't already show an
+            # open FNO position for this underlying (another process
+            # instance, a manual trade, or state from before this run) -
+            # our own reservation above only guards duplicates within this
+            # process's in-memory state.
+            already_open = await loop.run_in_executor(
+                None, dhan_wrapper.has_open_position_for_underlying, symbol
+            )
+            if already_open:
+                logger.warning("%s: skipped - broker already shows an open FNO position for it", symbol)
+                results.append({"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker"})
+                await position_store.release_symbol(symbol)
+                continue
+
+            entry_result = await _enter_single_position(symbol)
+            # "entered" and "amo_placed" both correspond to a real order
+            # that's now live/queued for this stock - keep the reservation
+            # so a repeat alert today is treated as a duplicate. Any other
+            # outcome (rejected, etc.) frees the symbol up to retry.
+            if entry_result.get("status") not in ("entered", "amo_placed"):
+                await position_store.release_symbol(symbol)
+            results.append(entry_result)
+        except Exception as exc:  # noqa: BLE001
+            await position_store.release_symbol(symbol)
+            logger.exception("Failed to enter position for %s", symbol)
+            results.append({"symbol": symbol, "status": "error", "reason": str(exc)})
+
+    return results
+
+
+async def _enter_single_position(symbol: str) -> dict:
+    loop = asyncio.get_running_loop()
+
+    atm = await loop.run_in_executor(
+        None, dhan_wrapper.get_atm_option, symbol, config.OPTION_TYPE
+    )
+    quantity = atm.lot_size * config.QUANTITY_LOTS
+    tag = _gen_tag(config.ORDER_TAG_PREFIX, symbol)
+
+    # Subscribe to the option's live price over the WebSocket feed as early
+    # as possible so ticks are already flowing by the time we start monitoring.
+    await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, atm.trading_symbol)
+
+    order_resp = await loop.run_in_executor(
+        None, dhan_wrapper.place_market_order, atm.trading_symbol, quantity, "BUY", tag,
+    )
+    order_id = order_resp["order_id"]
+    is_amo = order_resp["is_amo"]
+
+    await position_store.record_order(OrderRecord(
+        order_id=order_id,
+        underlying_symbol=symbol,
+        trading_symbol=atm.trading_symbol,
+        transaction_type="BUY",
+        quantity=quantity,
+        status=OrderStatus.TRANSIT,
+        is_amo=is_amo,
+        lot_size=atm.lot_size,
+        option_type=atm.option_type,
+    ))
+
+    result = await loop.run_in_executor(
+        None, dhan_wrapper.wait_for_order_result, order_id, is_amo
+    )
+    await position_store.update_order_status(order_id, result.status, result.remark)
+
+    if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
+        await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, atm.trading_symbol)
+        logger.warning(
+            "BUY order %s for %s rejected: status=%s remark=%s",
+            order_id, symbol, result.status, result.remark,
+        )
+        return {
+            "symbol": symbol,
+            "status": "rejected",
+            "order_status": result.status,
+            "remark": result.remark,
+            "option_trading_symbol": atm.trading_symbol,
+            "order_id": order_id,
+        }
+
+    if result.is_queued_amo:
+        # Placed outside market hours - queued as an AMO rather than filled
+        # now. Keep the symbol reserved (so a repeat alert for it today is
+        # still treated as a duplicate) but don't create a live Position
+        # yet - nothing has actually been bought. monitor_loop's
+        # _sync_pending_orders() will promote this to a Position once the
+        # next session actually fills it.
+        logger.info(
+            "BUY order %s for %s queued as AMO - will confirm fill next session.",
+            order_id, symbol,
+        )
+        return {
+            "symbol": symbol,
+            "status": "amo_placed",
+            "order_status": result.status,
+            "option_trading_symbol": atm.trading_symbol,
+            "quantity": quantity,
+            "order_id": order_id,
+        }
+
+    fill_price = result.fill_price
+    if not fill_price:
+        # Order reached a terminal "filled" status but the fill price field
+        # hasn't populated yet (rare) - fall back to LTP so target/SL levels
+        # aren't computed off zero.
+        fill_price = await loop.run_in_executor(
+            None, dhan_wrapper.get_option_ltp, atm.trading_symbol
+        )
+
+    position = Position(
+        underlying_symbol=symbol,
+        option_trading_symbol=atm.trading_symbol,
+        option_type=atm.option_type,
+        quantity=quantity,
+        lot_size=atm.lot_size,
+        entry_price=fill_price,
+        highest_price=fill_price,
+        target_price=fill_price * (1 + config.TARGET_PCT),
+        hard_stop_loss=fill_price * (1 - config.STOP_LOSS_PCT),
+        order_id=order_id,
+    )
+    await position_store.add_position(position)
+
+    return {
+        "symbol": symbol,
+        "status": "entered",
+        "order_status": result.status,
+        "option_trading_symbol": atm.trading_symbol,
+        "quantity": quantity,
+        "entry_price": fill_price,
+        "order_id": order_id,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Step 3: monitoring / exits
+# --------------------------------------------------------------------------- #
+async def _exit_position(symbol: str, position: Position, exit_price: float, reason: str) -> None:
+    loop = asyncio.get_running_loop()
+    tag = _gen_tag("Ext", symbol)
+    try:
+        order_resp = await loop.run_in_executor(
+            None, dhan_wrapper.place_market_order,
+            position.option_trading_symbol, position.quantity, "SELL", tag,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("SELL order failed for %s (%s) - backing off before retrying",
+                          symbol, position.option_trading_symbol)
+        await position_store.record_exit_failure(symbol)
+        return  # leave it live; next eligible retry is gated by next_exit_retry_at
+
+    await position_store.clear_exit_failure(symbol)
+    order_id = order_resp["order_id"]
+    is_amo = order_resp["is_amo"]
+    await position_store.record_order(OrderRecord(
+        order_id=order_id,
+        underlying_symbol=symbol,
+        trading_symbol=position.option_trading_symbol,
+        transaction_type="SELL",
+        quantity=position.quantity,
+        status=OrderStatus.TRANSIT,
+        is_amo=is_amo,
+    ))
+    # Mark this position as having an outstanding exit order immediately,
+    # so a concurrent monitor tick doesn't also try to exit it.
+    await position_store.set_pending_exit_order(symbol, order_id, reason)
+
+    result = await loop.run_in_executor(
+        None, dhan_wrapper.wait_for_order_result, order_id, is_amo
+    )
+    await position_store.update_order_status(order_id, result.status, result.remark)
+
+    if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
+        # The SELL was rejected/cancelled by the exchange - the position is
+        # still genuinely open at the broker. Clear the pending marker and
+        # leave it live so the next monitor tick retries the exit, instead
+        # of marking it closed.
+        logger.warning(
+            "SELL order %s for %s rejected: status=%s remark=%s - will retry next tick",
+            order_id, symbol, result.status, result.remark,
+        )
+        await position_store.set_pending_exit_order(symbol, None)
+        return
+
+    if result.is_queued_amo:
+        # Placed outside market hours - queued as an AMO rather than filled
+        # now. Leave the position live with pending_exit_order_id set;
+        # _sync_pending_orders() will close it once the next session
+        # actually fills this order.
+        logger.info(
+            "SELL order %s for %s queued as AMO - will confirm fill next session.",
+            order_id, symbol,
+        )
+        return
+
+    final_exit_price = result.fill_price or exit_price
+    await position_store.close_position(symbol, final_exit_price, reason)
+    await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.option_trading_symbol)
+
+
+async def _get_ltp(trading_symbol: str) -> Optional[float]:
+    """Prefers the WebSocket feed's cached LTP (near-instant); falls back to
+    a REST call if no tick has arrived yet (e.g. subscription just made)."""
+    loop = asyncio.get_running_loop()
+    ltp = await loop.run_in_executor(None, dhan_wrapper.get_cached_option_ltp, trading_symbol)
+    if ltp is not None:
+        return ltp
+    return await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, trading_symbol)
+
+
+def _exit_on_cooldown(position: Position) -> bool:
+    return bool(position.next_exit_retry_at and datetime.now() < position.next_exit_retry_at)
+
+
+async def _check_one_position(symbol: str, position: Position) -> None:
+    if position.pending_exit_order_id or _exit_on_cooldown(position):
+        return  # already has an outstanding exit order, or backing off after a placement failure
+
+    try:
+        ltp = await _get_ltp(position.option_trading_symbol)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not fetch LTP for %s", position.option_trading_symbol)
+        return
+
+    await position_store.update_highest_price(symbol, ltp)
+    trailing_sl = position.current_trailing_sl
+
+    if ltp >= position.target_price:
+        await _exit_position(symbol, position, ltp, "TARGET_HIT")
+    elif ltp <= trailing_sl:
+        reason = "TRAILING_SL_HIT" if trailing_sl > position.hard_stop_loss else "STOP_LOSS_HIT"
+        await _exit_position(symbol, position, ltp, reason)
+
+
+async def _square_off_all(reason: str) -> None:
+    positions = dict(position_store.live_positions)  # snapshot of keys/values
+    if not positions:
+        return
+    logger.info("Square-off triggered (%s) for %d open position(s)", reason, len(positions))
+    for symbol, position in positions.items():
+        if position.pending_exit_order_id or _exit_on_cooldown(position):
+            continue  # already has an outstanding exit order, or backing off after a placement failure
+        try:
+            ltp = await _get_ltp(position.option_trading_symbol)
+        except Exception:  # noqa: BLE001
+            ltp = position.entry_price  # best-effort fallback for logging only
+        await _exit_position(symbol, position, ltp, reason)
+
+
+async def _sync_pending_orders() -> None:
+    """Re-checks orders whose fate was still open last time: queued AMO BUY
+    entries not yet promoted to a live Position, and outstanding exit
+    orders on live positions. Cheap - normally a no-op, since orders placed
+    during market hours already resolve within wait_for_order_result's own
+    retry budget. This only matters for AMO orders that need to be picked
+    up once the next session actually dispatches them."""
+    loop = asyncio.get_running_loop()
+
+    pending_entries = [
+        o for o in position_store.orders_today.values()
+        if o.transaction_type == "BUY"
+        and o.status not in OrderStatus.TERMINAL_STATUSES
+        and o.underlying_symbol not in position_store.live_positions
+    ]
+    for order in pending_entries:
+        try:
+            result = await loop.run_in_executor(
+                None, dhan_wrapper.refresh_order_status, order.order_id, order.is_amo
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not refresh AMO BUY order %s", order.order_id)
+            continue
+
+        await position_store.update_order_status(order.order_id, result.status, result.remark)
+
+        if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
+            logger.warning(
+                "AMO BUY order %s for %s ended as %s - releasing reservation.",
+                order.order_id, order.underlying_symbol, result.status,
+            )
+            await position_store.release_symbol(order.underlying_symbol)
+            await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, order.trading_symbol)
+            continue
+
+        if result.status in OrderStatus.TERMINAL_STATUSES:
+            fill_price = result.fill_price
+            if not fill_price:
+                fill_price = await loop.run_in_executor(
+                    None, dhan_wrapper.get_option_ltp, order.trading_symbol
+                )
+            position = Position(
+                underlying_symbol=order.underlying_symbol,
+                option_trading_symbol=order.trading_symbol,
+                option_type=order.option_type or config.OPTION_TYPE,
+                quantity=order.quantity,
+                lot_size=order.lot_size or config.LOT_SIZE_FALLBACK,
+                entry_price=fill_price,
+                highest_price=fill_price,
+                target_price=fill_price * (1 + config.TARGET_PCT),
+                hard_stop_loss=fill_price * (1 - config.STOP_LOSS_PCT),
+                order_id=order.order_id,
+            )
+            await position_store.add_position(position)
+            logger.info(
+                "AMO BUY order %s for %s filled - position now live.",
+                order.order_id, order.underlying_symbol,
+            )
+        # else: still queued as AMO - nothing to do, check again next tick.
+
+    positions = dict(position_store.live_positions)
+    for symbol, position in positions.items():
+        if not position.pending_exit_order_id:
+            continue
+        try:
+            result = await loop.run_in_executor(
+                None, dhan_wrapper.refresh_order_status, position.pending_exit_order_id, True
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not refresh AMO SELL order %s", position.pending_exit_order_id)
+            continue
+
+        await position_store.update_order_status(position.pending_exit_order_id, result.status, result.remark)
+
+        if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
+            logger.warning(
+                "AMO SELL order %s for %s ended as %s - clearing so the next tick retries the exit.",
+                position.pending_exit_order_id, symbol, result.status,
+            )
+            await position_store.set_pending_exit_order(symbol, None)
+            continue
+
+        if result.status in OrderStatus.TERMINAL_STATUSES:
+            final_exit_price = result.fill_price or position.highest_price
+            await position_store.close_position(symbol, final_exit_price, position.pending_exit_reason or "AMO_EXIT_FILLED")
+            await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.option_trading_symbol)
+        # else: still queued as AMO - nothing to do, check again next tick.
+
+
+async def monitor_loop() -> None:
+    """Runs forever; polls open positions and enforces exits + EOD square-off."""
+    logger.info("Monitor loop started.")
+    squared_off_today_for: set = set()
+
+    while True:
+        try:
+            await position_store.maybe_reset_for_new_day()
+            await _sync_pending_orders()
+
+            now = _now_ist()
+            square_off_at = _parse_hhmm_today(config.SQUARE_OFF_TIME)
+            today_key = now.date()
+
+            if now >= square_off_at and today_key not in squared_off_today_for:
+                await _square_off_all("EOD_SQUARE_OFF_3_15PM")
+                squared_off_today_for.add(today_key)
+            elif now < square_off_at:
+                positions = list(position_store.live_positions.items())
+                await asyncio.gather(
+                    *[_check_one_position(sym, pos) for sym, pos in positions]
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("Error in monitor loop tick")
+
+        await asyncio.sleep(config.MONITOR_INTERVAL_SECONDS)

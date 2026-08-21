@@ -1,0 +1,15 @@
+[project]
+name = "dhanboy"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "dhan-tradehull>=3.3.2",
+    "fastapi[standard]>=0.141.1",
+    "pandas>=3.0.5",
+    "pydantic>=2.13.4",
+    "python-dotenv>=1.2.3",
+    "requests>=2.34.2",
+    "uvicorn>=0.52.4",
+]
