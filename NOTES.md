@@ -164,6 +164,59 @@ out of git.
   always based on a fully-closed 5-min bar. Toggle via
   `ENABLE_SUPERTREND_EXIT`, same reasoning as `ENABLE_TRAILING_SL`.
 
+## Capital requirements
+
+Since this strategy only ever *buys* options (never sells/writes), capital
+needed is just premium × quantity per leg — no additional margin, since
+max loss is capped at premium paid. Derived from 99 real entries across 7
+trading days (13–21 Aug 2026):
+
+| | Cost per leg |
+|---|---|
+| Median | ₹11,257 |
+| 75th percentile | ₹14,980 |
+| 90th percentile | ₹18,000 |
+| Max seen | ₹31,894 (ADANIENSOL) |
+
+With `MAX_LIVE_POSITIONS=3`, that scales to **~₹34k** for a typical day,
+**~₹45k** for a somewhat pricier day, **~₹54k** for a 90th-percentile day,
+and a worst-case tail of **~₹75k–95k** if all 3 concurrent slots happen to
+land on expensive-premium stocks at once. Recommended working minimum:
+**₹50,000–60,000**, covering up to the 90th-percentile day without sizing
+for the rare worst case. This is drawn from one week of data, not a full
+month — typical premium levels can shift with market conditions.
+
+## Backtesting methodology
+
+Built out over three rounds this session (see bugs #9/#10 above) as a
+standalone, read-only script — never modifies the live bot, only reads
+Dhan's historical REST endpoints:
+
+1. Parse the Chartink scanner's exported CSV (`Date,Symbol,...` columns,
+   one row per stock per scan interval) into `{timestamp: [symbols]}`
+   triggers, grouped by trading day.
+2. For each underlying that appears: `dhanhq.intraday_minute_data()` for
+   1-min candles (entry pricing / ranking) and 5-min candles (Supertrend),
+   plus one `historical_daily_data()` call per symbol (not per day) to
+   derive previous-close for %-change ranking — cache and reuse across
+   days to cut API calls.
+3. Replay `rank_and_pick_top_stocks` / dedup / `MAX_LIVE_POSITIONS` capacity
+   logic exactly as production does, at 1-min simulation resolution.
+4. Resolve the ATM strike at entry time from the scrip master (closest
+   strike to spot, nearest expiry) and fetch that specific contract's own
+   1-min candles for real entry/exit pricing — not the underlying's price.
+5. Replay the exit rules (target/SL/Supertrend) minute-by-minute, mirroring
+   the production code's own candle-boundary/lookahead logic exactly (e.g.
+   dropping a still-forming candle) so the backtest can't silently diverge
+   from what the bot actually does live.
+
+Key lesson: **a single day is not enough sample size to trust a backtest
+result** — the Supertrend fix that looked like a clean win on one day
+(bug #9) was net-negative over a full week (bug #10) for reasons the
+single day couldn't have surfaced. Always clarify which grouping
+transformation ("last N days") reflects the intended sample before
+concluding anything from an exit-logic change.
+
 ## Known external constraints (not fixable in code)
 
 - Dhan requires whatever IP the bot runs from to be separately whitelisted
@@ -178,6 +231,21 @@ out of git.
   accumulated `highest_price` (trailing-stop memory) even though
   `reconcile_broker_positions()` recovers the position itself from the
   broker.
+
+## Open questions (unresolved)
+
+- **A position can go flat at the broker without the bot ever marking it
+  closed.** Observed live (2026-08-21): a VMM position sat in `/positions`
+  as `OPEN` with a stale `next_exit_retry_at` timestamp for ~2h45m, while
+  Dhan's own portfolio showed that exact contract already flat (bought and
+  fully sold, realized P&L booked). The exit clearly succeeded at the
+  broker at some point, but whatever placed it didn't go through the code
+  path that calls `close_position()`. A service restart's
+  `reconcile_broker_positions()` silently absorbed the discrepancy (no
+  financial exposure — broker was flat, ₹0 unrealized), but the root cause
+  of *how* it closed without the bot's own bookkeeping updating is still
+  unknown. Worth instrumenting further next time it's observed live rather
+  than only reasoning about it after the fact from logs.
 
 ## Safety practice for anyone working on this repo
 
