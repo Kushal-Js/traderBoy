@@ -330,7 +330,6 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
         return  # leave it live; next eligible retry is gated by next_exit_retry_at
 
     try:
-        await position_store.clear_exit_failure(symbol)
         order_id = order_resp["order_id"]
         is_amo = order_resp["is_amo"]
         await position_store.record_order(OrderRecord(
