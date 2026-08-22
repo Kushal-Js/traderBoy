@@ -150,6 +150,22 @@ out of git.
 
 ## Design decisions
 
+- **Separate capacity caps per option type** (`MAX_LIVE_POSITIONS_CE` /
+  `MAX_LIVE_POSITIONS_PE`, both default 2) replaced the single shared
+  `MAX_LIVE_POSITIONS`. `reserved_symbols` changed from a `set[str]` to a
+  `dict[str, str]` (underlying_symbol -> option_type) so `reserve_symbol()`
+  can count "how many of *this* type are reserved" rather than "how many
+  total" - a burst of bearish alerts filling PE capacity no longer has any
+  effect on CE capacity, or vice versa. Dedup-by-symbol is unchanged and
+  still spans both types: a symbol already reserved/open as either CE or
+  PE still blocks a new entry of the *other* type for that same symbol -
+  no simultaneous CE+PE bet on one underlying. Verified offline before
+  deploying: 10 concurrent CE reservations against a cap of 2 (exactly 2
+  win), 10 CE + 10 PE racing simultaneously (2 CE and 2 PE win,
+  independently, zero cross-contamination), and the same symbol requested
+  as both CE and PE at once (exactly one type wins, confirming dedup still
+  holds across types).
+
 - **Event-driven exits** — `dhan_client._on_market_tick` fires an
   `on_price_tick` callback (bridged from the WebSocket thread to the event
   loop via `asyncio.run_coroutine_threadsafe`) that evaluates
@@ -184,13 +200,16 @@ out of git.
   state, and the still-forming current candle is dropped so the signal is
   always based on a fully-closed 5-min bar. Toggle via
   `ENABLE_SUPERTREND_EXIT`, same reasoning as `ENABLE_TRAILING_SL`.
-- **Two webhooks, one shared position pool.** `POST /chartink/webhook`
-  (bullish, buys ATM CE) and `POST /chartink/webhook-sell` (bearish, buys
-  ATM PE) both funnel into the same `enter_positions_for_stocks()` /
-  `PositionStore` — a symbol already open from one blocks the other from
-  also entering it (`has_open_position_for_underlying()` checks by
-  underlying only, not underlying+option_type), and both count against the
-  same `MAX_LIVE_POSITIONS` cap. `option_type` is threaded through as a
+- **Two webhooks, one shared position pool, separate capacity caps.**
+  `POST /chartink/webhook` (bullish, buys ATM CE) and
+  `POST /chartink/webhook-sell` (bearish, buys ATM PE) both funnel into
+  the same `enter_positions_for_stocks()` / `PositionStore` — a symbol
+  already open from one blocks the other from also entering it
+  (`has_open_position_for_underlying()` checks by underlying only, not
+  underlying+option_type). Capacity itself is *not* shared - each type has
+  its own cap (`MAX_LIVE_POSITIONS_CE` / `MAX_LIVE_POSITIONS_PE`, see bug
+  #11 above for how that's enforced under concurrency). `option_type` is
+  threaded through as a
   parameter (`enter_positions_for_stocks` → `_enter_single_position` →
   `get_atm_option`) rather than read from the global `config.OPTION_TYPE`,
   which now only serves as the fallback for reconciling a broker position
@@ -228,13 +247,20 @@ trading days (13–21 Aug 2026):
 | 90th percentile | ₹18,000 |
 | Max seen | ₹31,894 (ADANIENSOL) |
 
-With `MAX_LIVE_POSITIONS=3`, that scales to **~₹34k** for a typical day,
-**~₹45k** for a somewhat pricier day, **~₹54k** for a 90th-percentile day,
-and a worst-case tail of **~₹75k–95k** if all 3 concurrent slots happen to
-land on expensive-premium stocks at once. Recommended working minimum:
-**₹50,000–60,000**, covering up to the 90th-percentile day without sizing
-for the rare worst case. This is drawn from one week of data, not a full
-month — typical premium levels can shift with market conditions.
+With the original single shared `MAX_LIVE_POSITIONS=3`, that scaled to
+**~₹34k** for a typical day, **~₹45k** for a somewhat pricier day, **~₹54k**
+for a 90th-percentile day, and a worst-case tail of **~₹75k–95k** if all 3
+concurrent slots happened to land on expensive-premium stocks at once.
+
+**Since splitting into separate `MAX_LIVE_POSITIONS_CE=2` /
+`MAX_LIVE_POSITIONS_PE=2` caps, the true worst case is now 4 concurrent
+positions (2 CE + 2 PE), not 3** — both webhooks running actively at once
+can each fill their own 2 slots independently. Scaling the same per-leg
+percentiles to 4 positions: **~₹45k** typical, **~₹60k** pricier day,
+**~₹72k** 90th-percentile day, and a worst-case tail of **~₹100k–125k**.
+Recommended working minimum if running both webhooks: **₹70,000–80,000**.
+This is drawn from one week of data (CE) plus a second week (PE), not a
+full month — typical premium levels can shift with market conditions.
 
 ## Backtesting methodology
 

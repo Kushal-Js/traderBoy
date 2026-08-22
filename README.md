@@ -54,8 +54,11 @@ URLs — matching the `webhook_url` field in your sample payload.
    CE) and `POST /chartink/webhook-sell` (bearish scan, buys ATM PE) both
    accept the standard Chartink payload (`stocks`, `trigger_prices`,
    `triggered_at`, `scan_name`, `scan_url`, `alert_name`, `webhook_url`) and
-   share the same entry/exit/dedup/capacity machinery and position pool -
-   a symbol already open from one blocks the other from also entering it.
+   share the same entry/exit/dedup machinery and position pool - a symbol
+   already open from one blocks the other from also entering it - but each
+   has its own capacity cap (`MAX_LIVE_POSITIONS_CE` /
+   `MAX_LIVE_POSITIONS_PE`), so a run of alerts on one side can't crowd
+   out capacity for the other.
 
 2. **Top-N by %change** — on receipt, `rank_and_pick_top_stocks()` fetches
    OHLC data for each stock and ranks by day's %change - highest first for

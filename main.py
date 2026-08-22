@@ -19,9 +19,12 @@ FastAPI service that:
          direction - optional, see config.ENABLE_SUPERTREND_EXIT
        - config.SQUARE_OFF_TIME hard square-off of everything still open
   5. Won't re-enter a symbol that already has an open or in-flight
-     position (from either webhook), and caps concurrent live positions
-     at config.MAX_LIVE_POSITIONS - once that position closes, the symbol
-     is free to be entered again on a later alert the same day.
+     position of either type, and caps concurrent live positions
+     separately per option type - config.MAX_LIVE_POSITIONS_CE for
+     /chartink/webhook, config.MAX_LIVE_POSITIONS_PE for
+     /chartink/webhook-sell - so a run of alerts on one side can't crowd
+     out capacity for the other. Once a position closes, its symbol is
+     free to be entered again on a later alert the same day.
 
 Run with:
     uv run uvicorn main:app --host 0.0.0.0 --port 8000
@@ -160,14 +163,15 @@ async def _handle_chartink_webhook(
         option_type, payload.scan_name, payload.alert_name, stocks,
     )
 
-    remaining = await position_store.remaining_capacity()
+    cap = config.MAX_LIVE_POSITIONS_CE if option_type == "CE" else config.MAX_LIVE_POSITIONS_PE
+    remaining = await position_store.remaining_capacity(option_type)
     if remaining == 0:
-        logger.info("No capacity left (%s live positions already open) - ignoring alert.",
-                     config.MAX_LIVE_POSITIONS)
+        logger.info("No %s capacity left (%s live/in-flight already) - ignoring alert.", option_type, cap)
         return {
             "status": "ignored",
             "reason": "max_live_positions_reached",
-            "max_live_positions": config.MAX_LIVE_POSITIONS,
+            "option_type": option_type,
+            "max_live_positions": cap,
         }
 
     loop = asyncio.get_running_loop()

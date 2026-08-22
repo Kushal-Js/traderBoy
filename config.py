@@ -28,7 +28,14 @@ ENABLE_WS_FEED = os.getenv("ENABLE_WS_FEED", "true").lower() == "true"
 # Strategy parameters
 # ---------------------------------------------------------------------------
 TOP_N_STOCKS = int(os.getenv("TOP_N_STOCKS", "3"))
-MAX_LIVE_POSITIONS = int(os.getenv("MAX_LIVE_POSITIONS", "3"))
+# Separate caps per option type - CE (from /chartink/webhook) and PE (from
+# /chartink/webhook-sell) each get their own budget rather than sharing one
+# pool, so a run of bearish alerts can't crowd out capacity for bullish
+# ones or vice versa. A symbol already open/in-flight as either type still
+# blocks a new entry of the *other* type for that same symbol - see
+# PositionStore.reserve_symbol().
+MAX_LIVE_POSITIONS_CE = int(os.getenv("MAX_LIVE_POSITIONS_CE", "2"))
+MAX_LIVE_POSITIONS_PE = int(os.getenv("MAX_LIVE_POSITIONS_PE", "2"))
 
 TARGET_PCT = float(os.getenv("TARGET_PCT", "0.10"))          # +10% target
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.03"))    # -3% hard stop loss

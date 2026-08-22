@@ -151,7 +151,7 @@ async def enter_positions_for_stocks(
         # locked step, so two near-simultaneous calls for the same symbol
         # (e.g. a duplicate Chartink webhook delivery) can't both pass a
         # check-then-act race and both end up placing an order.
-        if not await position_store.reserve_symbol(symbol):
+        if not await position_store.reserve_symbol(symbol, option_type):
             logger.info("%s: skipped - already open/in-flight, or no capacity", symbol)
             results.append({"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"})
             continue
