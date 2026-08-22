@@ -148,6 +148,33 @@ out of git.
     single-webhook behavior since that loop is sequential and already kept
     the two sets in sync.
 
+12. **The stepped/"ratchet" dynamic stop-loss (`ENABLE_DYNAMIC_SL`), as
+    first specified (every +4% raises the floor 1%), backtested
+    net-negative on real CE data - not a code bug, a strategy finding.**
+    Replayed against the same 7-day, 99-trade CE dataset used for bugs
+    #9/#10 (see `BACKTEST_RESULTS.md` for the full numbers and mechanism
+    breakdown):
+    - Alone (no Supertrend): **−₹2,170** vs. target/SL-only baseline.
+    - Stacked on the already-deployed Supertrend exit (current
+      production): **+₹1,326.75** vs. baseline - positive, but **−₹1,625**
+      worse than Supertrend alone would have done by itself.
+
+    Mechanism: 18 of 99 trades diverged from baseline. 9 worked exactly as
+    intended (the raised floor caught a real reversal earlier than the
+    fixed stop-loss would have, +₹3,067 combined). But 2 trades whipsawed
+    - rallied enough to raise the floor, pulled back and got stopped out
+    by it, then *recovered* to close near flat under baseline (COFORGE, 19
+    Aug: −₹2,898 under dynamic SL vs. −₹48 under baseline, riding the same
+    whipsaw to EOD). Those 2 whipsaw cases cost more than the 9 genuine
+    catches gained. This is the textbook trade-off of any tightening
+    stop-loss - protection against continued decline vs. sacrificing
+    recoveries after a reversal - and this specific week's data, the
+    whipsaws won. A wider step (tested: 7%, see `BACKTEST_RESULTS.md`)
+    triggers on fewer, more decisive moves and is the natural next lever
+    to try before concluding the whole approach doesn't work - a narrow
+    4% step is inherently more whipsaw-prone than a wider one, independent
+    of whether the ratchet concept itself is sound.
+
 ## Design decisions
 
 - **Separate capacity caps per option type** (`MAX_LIVE_POSITIONS_CE` /
@@ -314,7 +341,10 @@ concluding anything from an exit-logic change.
   before deploying: entry=100, STOP_LOSS_PCT=20%, step=4%/1% - floor
   stays at the fixed 80 below the first step, then climbs step-wise
   (81 at +4%, 82 at +8-9%, 84 at +16%, 85 at +20%) exactly matching the
-  hand-computed expected values.
+  hand-computed expected values. Backtest verdict on the initial 4%/1%
+  spec: see bug #12 above and `BACKTEST_RESULTS.md` - net-negative in
+  isolation, small net-negative on top of Supertrend, on the one week of
+  CE data tested so far.
 
 ## Known external constraints (not fixable in code)
 
