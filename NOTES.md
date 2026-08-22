@@ -237,6 +237,63 @@ out of git.
     PE data accumulate to see whether PE genuinely wants a wider step than
     CE, or whether this VOLTAS case was just one week's noise.
 
+14. **Tested whether an ATR-scaled (volatility-adaptive) dynamic-SL step
+    would fix the VOLTAS whipsaw better than just widening the flat PE
+    step - a flat, wider number won outright, no ATR needed.** Built a
+    second backtest harness that replays the identical 68 PE / 99 CE
+    fixed entries (loaded verbatim from bug #13's own result files, not
+    re-ranked, to avoid the entry-drift problem those files' own history
+    already surfaced), with the ratchet step scaled per-trade as
+    `clamp(K * daily_ATR_pct, 3%, 15%)` - `daily_ATR_pct` from the
+    underlying's 14-day daily ATR (Wilder's smoothing) as of the day
+    *before* entry (no lookahead), `K` swept across 3/5/7. Two real bugs
+    surfaced and were fixed before trusting any result: a dict-shape
+    crash building the output rows, then the *exact* PE-direction-flip
+    bug from bug #13's own history recurring in the new script - using
+    `not bearish` instead of the `is False` identity check, which reads
+    "Supertrend hasn't warmed up yet" (`None`) as a false PE exit signal
+    (`not None` is truthy in Python). Sanity-checked against known numbers
+    (baseline/fixed-7%/Supertrend-alone all reproduced exactly, both CE
+    and PE) before trusting anything past that.
+
+    ATR-scaled result: PE's best K (5, median implied step ≈12.5%,
+    frequently pinned against the 15% ceiling) fully cleared the VOLTAS
+    whipsaw and beat every prior PE variant - combined
+    ₹55,576.25 (+₹242.50 vs. baseline), vs. the deployed fixed-7% combo's
+    −₹2,418.75. CE's best K (3, median implied step ≈7.6%, close to its
+    already-good flat 7%) was statistically a wash vs. the existing fixed
+    7% (−₹75 to −₹275 out of ~₹110k) - no new whipsaws reintroduced
+    (checked COFORGE/GLENMARK specifically), just slightly fewer genuine
+    catches (4 vs. 9) since the ATR-derived step happened to run a touch
+    wider than 7% for this week's CE names.
+
+    The asymmetry itself was the interesting signal: CE wanted a *narrow*
+    multiplier (steps landing near its already-good 7%) while PE wanted a
+    *wide* one (steps mostly pinned at the ceiling, ≈12-15%) - which
+    raised the obvious cheaper question: does PE actually need
+    per-trade ATR scaling, or does it just need a wider *flat* number?
+    Tested directly with a third, much simpler script (no daily-OHLC
+    fetch at all) sweeping flat PE steps 7-15% against the same 68 fixed
+    entries: **a flat 9% step matched the ATR-scaled combined result
+    exactly (₹55,576.25) and beat it in isolation (₹55,980.00, +₹646.25
+    vs. baseline - the single best PE result found this session)** -
+    catching a BIOCON reversal (+₹500) that ATR K=5's wider-on-average
+    step had missed. VOLTAS itself clears the whipsaw at 9% and stays
+    clear all the way through 15%, with zero new whipsaws appearing
+    anywhere in that range - not a knife-edge fit to one trade.
+
+    **Deployed: `DYNAMIC_SL_STEP_PCT_PE` raised from 7% to 9%.**
+    `DYNAMIC_SL_STEP_PCT_CE` left at 7% (its own sweep already won there -
+    no reason to touch it). ATR-scaling itself was *not* built into the
+    live bot - a live daily-OHLC fetch/cache would have been real added
+    complexity and a new failure surface for a result a one-line config
+    change already matched or beat. Same caution as every round before
+    this one: still one calendar week of PE data, and 9% is calibrated to
+    fix the one whipsaw actually observed (VOLTAS) - the flat plateau
+    from 9-15% is reassuring but not proof against a whipsaw shape we
+    simply haven't seen yet. See `BACKTEST_RESULTS.md`'s PE Round 3 for
+    the full comparison table.
+
 ## Design decisions
 
 - **Separate capacity caps per option type** (`MAX_LIVE_POSITIONS_CE` /
@@ -390,9 +447,9 @@ concluding anything from an exit-logic change.
   not the live price, so a pullback after a step doesn't undo protection
   already earned - the stop-loss floor moves up `DYNAMIC_SL_INCREASE_PCT`
   (default 1%) of entry price. Step width is configured separately per
-  option type - `DYNAMIC_SL_STEP_PCT_CE` / `DYNAMIC_SL_STEP_PCT_PE`, both
-  default 7% - since backtesting found the same width doesn't necessarily
-  suit both legs equally (see bug #13). `TARGET_PCT` is untouched; this
+  option type - `DYNAMIC_SL_STEP_PCT_CE` (7%) / `DYNAMIC_SL_STEP_PCT_PE`
+  (9%) - since backtesting found the same width doesn't necessarily suit
+  both legs equally (see bugs #13/#14). `TARGET_PCT` is untouched; this
   only tightens how much room a trade has to give back before target. The
   mechanism itself is symmetric for CE and PE with no direction-awareness
   needed, unlike the Supertrend exit - both are always a BUY of the option

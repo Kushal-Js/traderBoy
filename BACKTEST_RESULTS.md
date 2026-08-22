@@ -107,8 +107,43 @@ other 4 divergent trades' combined +₹1,398 of genuine catches. Same class
 of whipsaw risk as the CE 4%-step finding (bug #12) - just resurfacing
 for PE at the 7% width that had fully eliminated it for CE. See NOTES.md
 bug #13 for the full writeup and the resulting decision to split
-`DYNAMIC_SL_STEP_PCT` into `DYNAMIC_SL_STEP_PCT_CE` / `_PE` (both still
-default 7%, strategy unchanged pending more data - see below).
+`DYNAMIC_SL_STEP_PCT` into `DYNAMIC_SL_STEP_PCT_CE` / `_PE`.
+
+**Round 3** (fixing the VOLTAS whipsaw: ATR-scaled step vs. a simple
+wider flat step): same 68 fixed entries as Round 2, loaded verbatim from
+Round 2's own result file - not re-ranked, so this sidesteps the
+entry-drift issue Round 2 itself surfaced. Two variants tested, both
+detailed in NOTES.md bug #14:
+
+1. **ATR-scaled step** - `clamp(K × underlying's 14-day daily ATR%, 3%, 15%)`,
+   captured once per trade at entry, K swept 3/5/7. Best PE result at
+   K=5 (median implied step ≈12.5%): fully cleared VOLTAS, combined
+   ₹55,576.25 (+₹242.50 vs. baseline). CE's best K (3, median implied
+   step ≈7.6%, close to its existing flat 7%) was a statistical wash
+   vs. the existing fixed 7% (−₹75 to −₹275 out of ~₹110k) - no new
+   whipsaws, just marginally fewer genuine catches.
+2. **Flat, wider PE step** (no ATR, just sweeping 7-15% directly) -
+   **a flat 9% step matched the ATR-scaled combined result exactly
+   (₹55,576.25) and beat it in isolation (₹55,980.00, +₹646.25 vs.
+   baseline - the best PE result found this session)**, catching a
+   BIOCON reversal (+₹500) the wider-on-average ATR step had missed.
+   VOLTAS clears the whipsaw at 9% and stays clear through 15% - not a
+   knife-edge fit to one trade.
+
+| Variant | P&L | Win rate | Δ vs. baseline |
+|---|---:|---:|---:|
+| Baseline (target/SL only) | ₹55,333.75 | 70.6% (48/68) | — |
+| Fixed 7% dynamic SL + Supertrend (prior prod) | ₹52,915.00 | 67.6% (46/68) | −₹2,418.75 |
+| ATR-scaled dynamic SL (K=5) + Supertrend | ₹55,576.25 | 69.1% (47/68) | +₹242.50 |
+| Flat 9% dynamic SL alone | ₹55,980.00 | 70.6% (48/68) | **+₹646.25** |
+| Flat 9% dynamic SL + Supertrend (**deployed**) | ₹55,576.25 | 69.1% (47/68) | +₹242.50 |
+
+Since a one-line config change matched or beat the ATR-scaled version
+outright, ATR-scaling was **not** built into the live bot - it would have
+added a live daily-OHLC fetch/cache and a new failure surface for no
+extra return on this dataset. **Deployed: `DYNAMIC_SL_STEP_PCT_PE` raised
+from 7% to 9%.** `DYNAMIC_SL_STEP_PCT_CE` stays at 7% - CE's own sweep
+already won there.
 
 ## Capital sizing
 
@@ -120,21 +155,19 @@ concurrent positions), recommended working minimum is ₹70,000–80,000.
 
 ## Open questions for future tuning
 
-- **Dynamic SL step width - resolved for CE, open again for PE.** 4%
-  backtested net-negative for CE; 7% (round 4 above) fixed it, eliminating
-  both known whipsaw cases while keeping the genuine catches. Whether 7%
-  is actually the *best* CE width, or just better than 4%, is still open -
-  8-10% hasn't been tried and could plausibly do even better (or could
-  start losing genuine catches if too wide). Not urgent to chase further
-  given 7% already beats Supertrend-alone on the CE dataset. For PE,
-  however, 7% backtested net-*negative* on a later dataset (PE Round 2
-  above) - one severe whipsaw (VOLTAS) outweighed the genuine catches,
-  the same failure mode bug #12 found for CE at 4%, just at a wider step.
-  `DYNAMIC_SL_STEP_PCT` is now split into `DYNAMIC_SL_STEP_PCT_CE` /
-  `DYNAMIC_SL_STEP_PCT_PE` (both still default 7%, strategy unchanged) so
-  the two legs can be tuned independently once more PE data accumulates -
-  next candidate to try is a wider PE step (e.g. 10%), same way 4%→7%
-  was tried for CE.
+- **Dynamic SL step width - resolved for CE at 7%, resolved for PE at 9%
+  (PE Round 3 above).** 4% backtested net-negative for CE; 7% fixed it,
+  eliminating both known whipsaw cases while keeping the genuine catches.
+  Whether 7% is actually the *best* CE width, or just better than 4%, is
+  still open - untested beyond 7-8%, and not urgent to chase further
+  given 7% already beats Supertrend-alone on the CE dataset. For PE, 7%
+  itself whipsawed on a later dataset (VOLTAS, PE Round 2) the same way
+  4% had for CE - fixed by widening PE's own step to 9% (Round 3), tested
+  against both an ATR-scaled adaptive step and a plain flat step; the
+  flat step won outright, so ATR-scaling wasn't shipped. Whether 9% is
+  the *best* PE width (vs. just wide enough to clear the one whipsaw
+  observed) is open the same way CE's 7% is - the 9-15% plateau found in
+  Round 3 is reassuring but drawn from one dataset.
 - **The 10:10 Supertrend warmup cluster** (bug #10) still fires under
   the deployed 5-min-grace fix - its net effect happened to be
   roughly neutral on the one week tested, but it isn't a real per-stock
@@ -143,13 +176,6 @@ concurrent positions), recommended working minimum is ₹70,000–80,000.
   regardless of actual trend). Worth a smarter seed or a longer
   mandatory warmup if a future backtest shows this cluster turning
   net-harmful.
-- **PE dynamic SL** hasn't been independently backtested - the
-  mechanism is symmetric by construction (reads only the option's own
-  premium, never underlying direction) so it should behave the same as
-  CE in principle, but "should" isn't "confirmed" per this repo's own
-  house rule (see NOTES.md's backtesting-methodology lesson: a single
-  day - or an untested case - is not enough to trust without a real
-  backtest).
 - **Sample size.** Every result above is one calendar week. NOTES.md's
   own lesson from bugs #9→#10: a single day wasn't enough to trust:
   the same caution applies to one week vs. a full month. Re-run
