@@ -294,6 +294,38 @@ out of git.
     simply haven't seen yet. See `BACKTEST_RESULTS.md`'s PE Round 3 for
     the full comparison table.
 
+15. **A restart on 22 Aug 2026 landed in a ~3.5-minute window where Dhan
+    was rejecting the access token, self-healed by `Restart=always`, and
+    would have left zero trace once journald's retention passed.**
+    `dhanboy.service` crash-looped from 08:08:16 to 08:11:57 UTC (~30
+    rapid restarts, `RestartSec=5`), each attempt failing with `DH-901
+    Invalid_Authentication` on the *same* access token that had worked
+    right before and worked again immediately after - not a bad token, a
+    transient rejection on Dhan's side. `Restart=always` did exactly what
+    it should: kept retrying until Dhan started accepting the token again,
+    then came up clean.
+
+    Investigating this exposed a real footgun: **the droplet's system
+    clock is UTC, but journalctl prints bare local timestamps with no
+    timezone label** - "08:08" in the log is 13:38 IST, squarely mid-
+    trading-session on a weekday, not the pre-market time it looks like
+    at a glance. Misread this exact way during the initial investigation
+    before catching it with `timedatectl`. Also confirmed (via the
+    `Stopping dhanboy.service...` log line, which only appears for a
+    deliberate `systemctl restart`/`stop`, never an organic crash, plus a
+    concurrent SSH session from 08:04-08:30 UTC) that this was a
+    deliberate restart landing badly, not a spontaneous crash - though
+    which restart specifically (a deploy from earlier the same session,
+    most likely) couldn't be pinned down from available logs.
+
+    No live-trading impact this time (22 Aug 2026 was a Saturday), but
+    the underlying risk is real: any ordinary deploy restart - the kind
+    covered by the existing "check `/positions` is empty first" checklist
+    - could occasionally take a few minutes instead of ~5-8 seconds if it
+    lands in one of these Dhan-side blips, during which no entries/exits
+    fire, with no prior mechanism to detect or record it happening. See
+    the watchdog design decision below for the fix.
+
 ## Design decisions
 
 - **Separate capacity caps per option type** (`MAX_LIVE_POSITIONS_CE` /
@@ -378,6 +410,29 @@ out of git.
   backtest only covered CE trades, so this specific direction hasn't been
   independently backtested yet; worth doing once there's a real day of PE
   trades to replay.
+
+- **`watchdog.py` + `dhanboy-watchdog.service`** - a separate,
+  independent process (own systemd unit, own `Restart=always`) that polls
+  `GET /health` every 5s and, if the app is unreachable for
+  ≥30s (`INCIDENT_THRESHOLD_SECONDS`), appends a self-contained record to
+  `incidents.log` on the droplet: start/end time in IST (explicit
+  timezone label, after bug #15's UTC/IST mix-up during investigation),
+  duration, resolved/ongoing status, and the actual `dhanboy.service`
+  journal output for that exact window - captured *then*, not relying on
+  journald's own retention later. Runs as its own unit specifically
+  because it needs to detect the main app being *down*, which the app
+  obviously can't do about itself. If an outage is still ongoing past the
+  threshold, re-logs an updated record every 5 minutes
+  (`ONGOING_UPDATE_SECONDS`) rather than staying silent indefinitely.
+  Exposed read-only via `GET /incidents` (`main.py`) - most recent
+  incidents first, so they're checkable over HTTP without SSHing in.
+  Deliberately stdlib-only (no `requests`, no importing `config`/
+  `dhan_client`) to stay cheap to run continuously on a ~1GB droplet
+  regardless of what the main app's venv has installed. Built after bug
+  #15's incident (a restart landing in a transient Dhan auth-rejection
+  window, self-healed by `Restart=always`, would have left no trace once
+  journald's retention passed) surfaced that the bot had no way to detect
+  or remember this class of event on its own.
 
 ## Capital requirements
 

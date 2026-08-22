@@ -242,6 +242,27 @@ async def feed_stats():
     return dhan_wrapper.stats
 
 
+@app.get("/incidents")
+async def get_incidents(limit: int = 20):
+    """Records from watchdog.py - a separate process/systemd unit that
+    polls /health independently of this app (so it can see this app being
+    down) and logs any outage past its threshold to incidents.log,
+    including the actual dhanboy.service journal output for that window.
+    Exists because journald's own retention is limited and a restart that
+    lands in a transient failure (e.g. a Dhan auth blip) can otherwise
+    self-heal via systemd's Restart=always and leave no lasting trace.
+    Returns the most recent `limit` incidents, newest first."""
+    path = "/root/apps/traderBoy/incidents.log"
+    try:
+        with open(path) as f:
+            content = f.read()
+    except FileNotFoundError:
+        return {"incidents": [], "note": "no incidents recorded yet"}
+    blocks = [b.strip() for b in content.split("=== INCIDENT ") if b.strip()]
+    incidents = [("=== INCIDENT " + b) for b in blocks]
+    return {"incidents": list(reversed(incidents))[:limit], "total_recorded": len(incidents)}
+
+
 @app.post("/square-off-now")
 async def manual_square_off():
     """Manual kill-switch: closes every live position immediately."""
