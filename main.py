@@ -1,19 +1,27 @@
 """
 FastAPI service that:
-  1. Accepts Chartink scanner webhook alerts on POST /chartink/webhook
-  2. Picks the top-N stocks (by today's %change) from the alert
-  3. Buys the ATM option (default: CE) for each, at market price (AMO if
-     placed outside market hours)
+  1. Accepts Chartink scanner webhook alerts on two endpoints:
+       - POST /chartink/webhook       (bullish scan -> buys ATM CE)
+       - POST /chartink/webhook-sell  (bearish scan -> buys ATM PE)
+     Same entry/exit/dedup/capacity machinery either way, sharing one
+     position pool - only the ATM leg and which end of the %change
+     ranking counts as "strongest" differ.
+  2. Picks the top-N stocks by today's %change from the alert (highest
+     first for the bullish webhook, lowest/most negative first for the
+     bearish one)
+  3. Buys the ATM option for each, at market price (AMO if placed outside
+     market hours)
   4. Runs a background monitor loop that exits a leg on:
-       - +10% target
-       - -3% hard stop loss
+       - target / hard stop-loss (config.TARGET_PCT / STOP_LOSS_PCT)
        - trailing stop-loss (trails the peak price in the trade's favor) -
          optional, see config.ENABLE_TRAILING_SL
-       - 3:15 PM hard square-off of everything still open
+       - the underlying's 5-min Supertrend turning against the position's
+         direction - optional, see config.ENABLE_SUPERTREND_EXIT
+       - config.SQUARE_OFF_TIME hard square-off of everything still open
   5. Won't re-enter a symbol that already has an open or in-flight
-     position, and caps concurrent live positions at 3 - once that
-     position closes, the symbol is free to be entered again on a later
-     alert the same day.
+     position (from either webhook), and caps concurrent live positions
+     at config.MAX_LIVE_POSITIONS - once that position closes, the symbol
+     is free to be entered again on a later alert the same day.
 
 Run with:
     uv run uvicorn main:app --host 0.0.0.0 --port 8000
@@ -137,18 +145,19 @@ class ChartinkWebhookPayload(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# Webhook endpoint
+# Webhook endpoints
 # --------------------------------------------------------------------------- #
-@app.post("/chartink/webhook")
-async def chartink_webhook(
-    payload: ChartinkWebhookPayload,
-):
+async def _handle_chartink_webhook(
+    payload: ChartinkWebhookPayload, option_type: str, prefer_highest: bool,
+) -> dict:
+    """Shared by both webhooks below - only the ATM leg (CE/PE) and which
+    end of the %change ranking counts as "strongest" differ."""
     await position_store.maybe_reset_for_new_day()
 
     stocks = payload.stock_list()
     logger.info(
-        "Webhook received: scan=%s alert=%s stocks=%s",
-        payload.scan_name, payload.alert_name, stocks,
+        "Webhook received (%s): scan=%s alert=%s stocks=%s",
+        option_type, payload.scan_name, payload.alert_name, stocks,
     )
 
     remaining = await position_store.remaining_capacity()
@@ -163,19 +172,36 @@ async def chartink_webhook(
 
     loop = asyncio.get_running_loop()
     ranked = await loop.run_in_executor(
-        None, rank_and_pick_top_stocks, stocks, config.TOP_N_STOCKS
+        None, rank_and_pick_top_stocks, stocks, config.TOP_N_STOCKS, prefer_highest
     )
 
     if not ranked:
         return {"status": "no_action", "reason": "could_not_rank_any_stock"}
 
-    results = await enter_positions_for_stocks(ranked)
+    results = await enter_positions_for_stocks(ranked, option_type)
 
     return {
         "status": "processed",
         "ranked_by_day_change_pct": ranked,
         "entries": results,
     }
+
+
+@app.post("/chartink/webhook")
+async def chartink_webhook(payload: ChartinkWebhookPayload):
+    """Bullish scan - buys ATM CE (call) on the alerted stocks with the
+    highest %change."""
+    return await _handle_chartink_webhook(payload, option_type="CE", prefer_highest=True)
+
+
+@app.post("/chartink/webhook-sell")
+async def chartink_webhook_sell(payload: ChartinkWebhookPayload):
+    """Bearish scan - buys ATM PE (put) on the alerted stocks with the
+    lowest %change (biggest decliners). Same entry/exit/dedup/capacity
+    machinery as /chartink/webhook, sharing the same position pool - a
+    symbol already open from either webhook blocks the other from also
+    entering it."""
+    return await _handle_chartink_webhook(payload, option_type="PE", prefer_highest=False)
 
 
 # --------------------------------------------------------------------------- #

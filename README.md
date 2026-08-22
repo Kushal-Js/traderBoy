@@ -1,8 +1,9 @@
 # Chartink → Dhan Algo Bot
 
-Receives Chartink scanner webhook alerts, buys ATM options on the top-3
-%-change stocks in the alert, and manages exits (target / stop-loss /
-trailing stop-loss / EOD square-off) automatically - using Dhan's
+Receives Chartink scanner webhook alerts on two endpoints - a bullish scan
+(buys ATM CE) and a bearish scan (buys ATM PE) - on the top-3 %-change
+stocks in each alert, and manages exits (target / stop-loss / trailing
+stop-loss / Supertrend / EOD square-off) automatically - using Dhan's
 [Dhan-Tradehull](https://pypi.org/project/Dhan-Tradehull/) package for REST
 calls and the underlying [`dhanhq`](https://pypi.org/project/dhanhq/) SDK's
 WebSocket classes for live order updates and market data.
@@ -43,25 +44,31 @@ uv run uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 Expose it to the internet (e.g. via `ngrok http 8000` or a real deployment),
-and set that public URL + `/chartink/webhook` as your Chartink scanner's
-webhook URL — matching the `webhook_url` field in your sample payload.
+and set that public URL + `/chartink/webhook` (bullish scan) and/or
+`/chartink/webhook-sell` (bearish scan) as your Chartink scanners' webhook
+URLs — matching the `webhook_url` field in your sample payload.
 
 ## How the strategy works
 
-1. **Webhook ingestion** — `POST /chartink/webhook` accepts the standard
-   Chartink payload (`stocks`, `trigger_prices`, `triggered_at`, `scan_name`,
-   `scan_url`, `alert_name`, `webhook_url`).
+1. **Webhook ingestion** — `POST /chartink/webhook` (bullish scan, buys ATM
+   CE) and `POST /chartink/webhook-sell` (bearish scan, buys ATM PE) both
+   accept the standard Chartink payload (`stocks`, `trigger_prices`,
+   `triggered_at`, `scan_name`, `scan_url`, `alert_name`, `webhook_url`) and
+   share the same entry/exit/dedup/capacity machinery and position pool -
+   a symbol already open from one blocks the other from also entering it.
 
 2. **Top-N by %change** — on receipt, `rank_and_pick_top_stocks()` fetches
-   OHLC data for each stock and ranks by day's %change (highest first),
-   taking the top `TOP_N_STOCKS`.
+   OHLC data for each stock and ranks by day's %change - highest first for
+   the bullish webhook, lowest/most negative first (biggest decliners) for
+   the bearish one - taking the top `TOP_N_STOCKS`.
 
 3. **Entry** — for each ranked stock that doesn't already have an open or
-   in-flight position (and there's capacity), `Tradehull.ATM_Strike_Selection()` picks the ATM
-   `OPTION_TYPE` (CE/PE) contract for the nearest expiry, and a MARKET BUY
-   is placed. Outside market hours this is automatically placed as an
-   **AMO** (After Market Order) — Dhan requires this to be an explicit flag
-   at placement time, unlike some brokers that auto-detect it.
+   in-flight position (and there's capacity), `Tradehull.ATM_Strike_Selection()`
+   picks the ATM CE or PE contract (CE for `/chartink/webhook`, PE for
+   `/chartink/webhook-sell`) for the nearest expiry, and a MARKET BUY is
+   placed. Outside market hours this is automatically placed as an **AMO**
+   (After Market Order) — Dhan requires this to be an explicit flag at
+   placement time, unlike some brokers that auto-detect it.
 
 4. **Exit monitoring** — a background loop polls every
    `MONITOR_INTERVAL_SECONDS` and exits a leg on:
@@ -103,7 +110,8 @@ webhook URL — matching the `webhook_url` field in your sample payload.
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /chartink/webhook` | Main entry point for Chartink alerts |
+| `POST /chartink/webhook` | Bullish scan entry point - buys ATM CE |
+| `POST /chartink/webhook-sell` | Bearish scan entry point - buys ATM PE |
 | `GET /positions` | Live + closed positions for today |
 | `GET /orders` | Every order placed today, with Dhan's real order_status |
 | `GET /health` | Liveness check |

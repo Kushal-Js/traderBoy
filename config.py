@@ -61,8 +61,10 @@ SUPERTREND_REFRESH_SECONDS = int(os.getenv("SUPERTREND_REFRESH_SECONDS", "60"))
 # candle of grace was the best-performing setting tested.
 SUPERTREND_ENTRY_GRACE_MINUTES = int(os.getenv("SUPERTREND_ENTRY_GRACE_MINUTES", "5"))
 
-# Options are bought as ATM CALL (CE) since the strategy trades "Buy" /
-# breakout style Chartink alerts. Flip to "PE" if you wire up a bearish scan.
+# Default ATM leg for /chartink/webhook (the bullish scan) and the
+# fallback used when reconciling a broker position of unknown origin.
+# /chartink/webhook-sell (bearish scan) always buys PE regardless of this -
+# see main.py's two webhook handlers.
 OPTION_TYPE = os.getenv("OPTION_TYPE", "CE").upper()
 
 QUANTITY_LOTS = int(os.getenv("QUANTITY_LOTS", "1"))  # number of lots per leg

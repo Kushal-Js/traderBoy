@@ -163,6 +163,35 @@ out of git.
   state, and the still-forming current candle is dropped so the signal is
   always based on a fully-closed 5-min bar. Toggle via
   `ENABLE_SUPERTREND_EXIT`, same reasoning as `ENABLE_TRAILING_SL`.
+- **Two webhooks, one shared position pool.** `POST /chartink/webhook`
+  (bullish, buys ATM CE) and `POST /chartink/webhook-sell` (bearish, buys
+  ATM PE) both funnel into the same `enter_positions_for_stocks()` /
+  `PositionStore` — a symbol already open from one blocks the other from
+  also entering it (`has_open_position_for_underlying()` checks by
+  underlying only, not underlying+option_type), and both count against the
+  same `MAX_LIVE_POSITIONS` cap. `option_type` is threaded through as a
+  parameter (`enter_positions_for_stocks` → `_enter_single_position` →
+  `get_atm_option`) rather than read from the global `config.OPTION_TYPE`,
+  which now only serves as the fallback for reconciling a broker position
+  of unknown origin. `rank_and_pick_top_stocks()` also takes a
+  `prefer_highest` flag — the bearish webhook ranks by *lowest* %change
+  (biggest decliners) rather than highest, since "strongest signal in the
+  alert" points the opposite direction for a bearish scan.
+- **The Supertrend exit direction depends on option_type, not just
+  bearish/bullish.** A CE (long call) profits when the underlying rises,
+  so a bearish crossover is the reversal-against-it signal — that's what
+  the exit was originally built and backtested against. A PE (long put)
+  profits when the underlying *falls*, so the reversal-against-it signal
+  is the opposite: a *bullish* crossover. Using the same "bearish = exit"
+  check for both would have exited PE positions exactly backwards —
+  treating the move that confirms the PE thesis as the exit trigger.
+  `trading_engine._supertrend_signal_for()` now branches on
+  `position.option_type` to pick the correct direction. Caught by
+  reasoning through the exit math while wiring up PE support, before any
+  PE position had a chance to hit it live — the existing 7-day/99-trade
+  backtest only covered CE trades, so this specific direction hasn't been
+  independently backtested yet; worth doing once there's a real day of PE
+  trades to replay.
 
 ## Capital requirements
 

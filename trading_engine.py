@@ -104,8 +104,14 @@ async def reconcile_broker_positions() -> list[Position]:
 # --------------------------------------------------------------------------- #
 # Step 1: rank stocks from the webhook payload by today's % change
 # --------------------------------------------------------------------------- #
-def rank_and_pick_top_stocks(stock_symbols: list[str], top_n: int = config.TOP_N_STOCKS) -> list[tuple[str, float]]:
-    """Returns [(symbol, pct_change), ...] sorted descending, top_n only.
+def rank_and_pick_top_stocks(
+    stock_symbols: list[str], top_n: int = config.TOP_N_STOCKS, prefer_highest: bool = True
+) -> list[tuple[str, float]]:
+    """Returns [(symbol, pct_change), ...] sorted by %change, top_n only.
+    prefer_highest=True (the bullish /chartink/webhook) picks the biggest
+    gainers first; False (the bearish /chartink/webhook-sell) picks the
+    biggest decliners first - same "strongest signal among the alerted
+    list" idea, just pointed the other way for a PE/bearish scan.
     Stocks that error out on the quote lookup are skipped (and logged).
     Paced with a small delay between calls - Dhan's market-data REST API
     intermittently rate-limit-fails on rapid back-to-back calls (confirmed
@@ -121,7 +127,7 @@ def rank_and_pick_top_stocks(stock_symbols: list[str], top_n: int = config.TOP_N
         except Exception as exc:  # noqa: BLE001
             logger.warning("Skipping %s - could not fetch day change: %s", symbol, exc)
 
-    scored.sort(key=lambda t: t[1], reverse=True)
+    scored.sort(key=lambda t: t[1], reverse=prefer_highest)
     return scored[:top_n]
 
 
@@ -129,9 +135,14 @@ def rank_and_pick_top_stocks(stock_symbols: list[str], top_n: int = config.TOP_N
 # --------------------------------------------------------------------------- #
 # Step 2: enter positions
 # --------------------------------------------------------------------------- #
-async def enter_positions_for_stocks(ranked_stocks: list[tuple[str, float]]) -> list[dict]:
+async def enter_positions_for_stocks(
+    ranked_stocks: list[tuple[str, float]], option_type: str = config.OPTION_TYPE
+) -> list[dict]:
     """Places ATM-option BUY orders for as many of the ranked stocks as
-    capacity and dedup rules allow. Returns a per-stock result log."""
+    capacity and dedup rules allow. Returns a per-stock result log.
+    option_type is "CE" for the bullish webhook, "PE" for the bearish
+    /chartink/webhook-sell one - same entry/exit machinery either way,
+    just a different ATM leg."""
     results: list[dict] = []
     loop = asyncio.get_running_loop()
 
@@ -160,7 +171,7 @@ async def enter_positions_for_stocks(ranked_stocks: list[tuple[str, float]]) -> 
                 await position_store.release_symbol(symbol)
                 continue
 
-            entry_result = await _enter_single_position(symbol)
+            entry_result = await _enter_single_position(symbol, option_type)
             # "entered" and "amo_placed" both correspond to a real order
             # that's now live/queued for this stock - keep the reservation
             # so a repeat alert today is treated as a duplicate. Any other
@@ -176,11 +187,11 @@ async def enter_positions_for_stocks(ranked_stocks: list[tuple[str, float]]) -> 
     return results
 
 
-async def _enter_single_position(symbol: str) -> dict:
+async def _enter_single_position(symbol: str, option_type: str = config.OPTION_TYPE) -> dict:
     loop = asyncio.get_running_loop()
 
     atm = await loop.run_in_executor(
-        None, dhan_wrapper.get_atm_option, symbol, config.OPTION_TYPE
+        None, dhan_wrapper.get_atm_option, symbol, option_type
     )
     quantity = atm.lot_size * config.QUANTITY_LOTS
     tag = _gen_tag(config.ORDER_TAG_PREFIX, symbol)
@@ -404,22 +415,33 @@ async def _capture_supertrend_entry_candle(loop, underlying_symbol: str) -> Opti
 
 def _supertrend_signal_for(position: Position) -> bool:
     """Cache-only, synchronous - safe to call from both the poll loop and
-    the WebSocket tick path. Returns whether the underlying is currently
-    bearish AND the cached signal has moved at least
-    config.SUPERTREND_ENTRY_GRACE_MINUTES past the candle the position was
-    entered on.
+    the WebSocket tick path. Returns whether the underlying's Supertrend
+    has turned against the position's own direction AND the cached signal
+    has moved at least config.SUPERTREND_ENTRY_GRACE_MINUTES past the
+    candle the position was entered on.
 
-    Backtested across 7 real trading days (99 trades): skipping only the
-    entry candle itself (0 grace) still let the very next candle exit a
-    position that was still riding the same breakout's aftershock - 9 of
+    Direction depends on option_type: a CE (long call) profits when the
+    underlying rises, so a *bearish* crossover is the reversal-against-it
+    signal. A PE (long put) profits when the underlying falls, so the
+    reversal-against-it signal is the opposite - a *bullish* crossover,
+    not a bearish one. Using the same "bearish = exit" check for both
+    would exit CE positions correctly but PE positions exactly backwards
+    (treating the move that confirms the PE thesis as the exit trigger).
+
+    Backtested across 7 real trading days (99 CE trades): skipping only
+    the entry candle itself (0 grace) still let the very next candle exit
+    a position that was still riding the same breakout's aftershock - 9 of
     11 non-warmup divergent trades exited exactly one candle after entry.
     A 5-minute grace (one extra candle) flipped the week's net effect from
     -5,964 to +2,951 vs. target/stop-loss alone, with a better win rate
     using fewer, higher-quality exits. Confirmed live before the 0-grace
     version existed: without the entry-candle skip at all, this was cutting
     winning trades flat at breakeven the instant they were entered."""
-    bearish = dhan_wrapper.get_cached_supertrend_bearish(position.underlying_symbol)
-    if not bearish:
+    is_bearish = dhan_wrapper.get_cached_supertrend_bearish(position.underlying_symbol)
+    if is_bearish is None:
+        return False  # no signal yet - never force an exit on missing data
+    against_position = is_bearish if position.option_type == "CE" else (not is_bearish)
+    if not against_position:
         return False
     candle_start = dhan_wrapper.get_cached_supertrend_candle_start(position.underlying_symbol)
     entry_candle_start = position.supertrend_entry_candle_start
@@ -428,20 +450,21 @@ def _supertrend_signal_for(position: Position) -> bool:
     return candle_start > entry_candle_start + timedelta(minutes=config.SUPERTREND_ENTRY_GRACE_MINUTES)
 
 
-def _exit_reason_for(position: Position, ltp: float, supertrend_bearish: bool = False) -> Optional[str]:
+def _exit_reason_for(position: Position, ltp: float, supertrend_against_position: bool = False) -> Optional[str]:
     """Shared target/stop-loss/Supertrend evaluation - used by both the poll
     loop and the event-driven WebSocket tick handler so the two paths can't
-    drift apart from each other. supertrend_bearish reflects the
-    underlying's 5-min close vs. its 5-min Supertrend (see
-    dhan_client.get_cached_supertrend_bearish) - caller's responsibility to
-    fetch/pass it, since that read can involve I/O and this function stays
-    synchronous."""
+    drift apart from each other. supertrend_against_position reflects the
+    underlying's 5-min close crossing to the wrong side of its 5-min
+    Supertrend for this position's direction (see
+    trading_engine._supertrend_signal_for - CE vs. PE flips which crossover
+    counts) - caller's responsibility to fetch/pass it, since that read can
+    involve I/O and this function stays synchronous."""
     if ltp >= position.target_price:
         return "TARGET_HIT"
     trailing_sl = position.current_trailing_sl
     if ltp <= trailing_sl:
         return "TRAILING_SL_HIT" if trailing_sl > position.hard_stop_loss else "STOP_LOSS_HIT"
-    if config.ENABLE_SUPERTREND_EXIT and supertrend_bearish:
+    if config.ENABLE_SUPERTREND_EXIT and supertrend_against_position:
         return "SUPERTREND_EXIT"
     return None
 
@@ -458,7 +481,7 @@ async def _check_one_position(symbol: str, position: Position) -> None:
 
     await position_store.update_highest_price(symbol, ltp)
 
-    supertrend_bearish = False
+    supertrend_against_position = False
     if config.ENABLE_SUPERTREND_EXIT:
         loop = asyncio.get_running_loop()
         # Blocking REST call, cached internally (see refresh_supertrend_signal) -
@@ -467,9 +490,9 @@ async def _check_one_position(symbol: str, position: Position) -> None:
         # tick path non-blocking - this poll (every MONITOR_INTERVAL_SECONDS)
         # is what keeps the cache fresh for both paths to read.
         await loop.run_in_executor(None, dhan_wrapper.refresh_supertrend_signal, position.underlying_symbol)
-        supertrend_bearish = _supertrend_signal_for(position)
+        supertrend_against_position = _supertrend_signal_for(position)
 
-    reason = _exit_reason_for(position, ltp, supertrend_bearish)
+    reason = _exit_reason_for(position, ltp, supertrend_against_position)
     if reason and await position_store.try_start_exit(symbol):
         await _exit_position(symbol, position, ltp, reason)
 
@@ -502,9 +525,9 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
         # Cache-only read (no I/O) - the poll loop's refresh_supertrend_signal()
         # keeps this warm; a blocking REST call here would stall the event
         # loop on every tick.
-        supertrend_bearish = config.ENABLE_SUPERTREND_EXIT and _supertrend_signal_for(position)
+        supertrend_against_position = config.ENABLE_SUPERTREND_EXIT and _supertrend_signal_for(position)
 
-        reason = _exit_reason_for(position, ltp, supertrend_bearish)
+        reason = _exit_reason_for(position, ltp, supertrend_against_position)
         if reason and await position_store.try_start_exit(symbol):
             await _exit_position(symbol, position, ltp, reason)
     except Exception:  # noqa: BLE001
