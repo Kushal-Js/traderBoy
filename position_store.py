@@ -119,16 +119,41 @@ class Position:
 
     @property
     def current_trailing_sl(self) -> float:
-        """Trailing stop measured off the highest price seen so far, never
-        below the hard stop loss. When config.ENABLE_TRAILING_SL is False,
-        this is just the fixed hard_stop_loss - highest_price is still
-        tracked (for observability/the /positions snapshot) but no longer
-        used to raise the exit floor, so a position only exits on
-        TARGET_PCT or the fixed STOP_LOSS_PCT."""
-        if not config.ENABLE_TRAILING_SL:
-            return self.hard_stop_loss
-        trail = self.highest_price * (1 - config.TRAILING_SL_PCT)
-        return max(trail, self.hard_stop_loss)
+        """The effective stop-loss floor right now - the most protective
+        (highest) of the fixed hard stop-loss and whichever trailing
+        mechanisms are enabled below. Both mechanisms are measured off
+        highest_price (the peak ever seen), not the live price, so a
+        pullback after the floor has been raised doesn't undo the
+        protection already earned - and both can be enabled together,
+        since the result is just whichever floor is currently higher.
+
+        - ENABLE_TRAILING_SL: continuous - floor trails TRAILING_SL_PCT
+          below highest_price.
+        - ENABLE_DYNAMIC_SL: stepped ("ratchet") - every
+          DYNAMIC_SL_STEP_PCT the price has climbed from entry, the floor
+          moves up DYNAMIC_SL_INCREASE_PCT of entry price. E.g. with the
+          defaults (4%, 1%), a position up 9% from entry has completed 2
+          steps, raising the floor from -STOP_LOSS_PCT to
+          -(STOP_LOSS_PCT - 2%). Enough accumulated steps can push the
+          floor above entry price entirely, locking in a guaranteed
+          profit - not capped, since that's the intended behavior of a
+          ratchet once the price has moved far enough in the trade's
+          favor. TARGET_PCT itself is never touched by this.
+
+        When both are disabled, this is just the fixed hard_stop_loss -
+        highest_price is still tracked (for observability/the /positions
+        snapshot) but no longer used to raise the exit floor, so a
+        position only exits on TARGET_PCT or the fixed STOP_LOSS_PCT."""
+        floor = self.hard_stop_loss
+        if config.ENABLE_TRAILING_SL:
+            floor = max(floor, self.highest_price * (1 - config.TRAILING_SL_PCT))
+        if config.ENABLE_DYNAMIC_SL and self.entry_price:
+            pct_up = (self.highest_price - self.entry_price) / self.entry_price
+            steps = int(pct_up // config.DYNAMIC_SL_STEP_PCT) if pct_up > 0 else 0
+            if steps > 0:
+                dynamic_sl_pct = config.STOP_LOSS_PCT - steps * config.DYNAMIC_SL_INCREASE_PCT
+                floor = max(floor, self.entry_price * (1 - dynamic_sl_pct))
+        return floor
 
 
 def _cap_for(option_type: str) -> int:

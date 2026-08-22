@@ -13,8 +13,12 @@ FastAPI service that:
      market hours)
   4. Runs a background monitor loop that exits a leg on:
        - target / hard stop-loss (config.TARGET_PCT / STOP_LOSS_PCT)
-       - trailing stop-loss (trails the peak price in the trade's favor) -
-         optional, see config.ENABLE_TRAILING_SL
+       - continuous trailing stop-loss (trails the peak price in the
+         trade's favor) - optional, see config.ENABLE_TRAILING_SL
+       - stepped/"ratchet" stop-loss (every DYNAMIC_SL_STEP_PCT the
+         option's own premium climbs from entry, the floor moves up
+         DYNAMIC_SL_INCREASE_PCT) - optional, stacks with the continuous
+         trailing stop above, see config.ENABLE_DYNAMIC_SL
        - the underlying's 5-min Supertrend turning against the position's
          direction - optional, see config.ENABLE_SUPERTREND_EXIT
        - config.SQUARE_OFF_TIME hard square-off of everything still open

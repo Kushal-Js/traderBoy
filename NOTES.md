@@ -293,6 +293,29 @@ single day couldn't have surfaced. Always clarify which grouping
 transformation ("last N days") reflects the intended sample before
 concluding anything from an exit-logic change.
 
+- **Stepped/"ratchet" dynamic stop-loss** (`ENABLE_DYNAMIC_SL`,
+  `Position.current_trailing_sl`) - independent of and stackable with the
+  continuous `ENABLE_TRAILING_SL` mechanism above (the effective floor is
+  whichever is more protective). Every `DYNAMIC_SL_STEP_PCT` (default 4%)
+  the option's own premium climbs from entry - measured off `highest_price`
+  (the peak ever seen), not the live price, so a pullback after a step
+  doesn't undo protection already earned - the stop-loss floor moves up
+  `DYNAMIC_SL_INCREASE_PCT` (default 1%) of entry price. `TARGET_PCT` is
+  untouched; this only tightens how much room a trade has to give back
+  before target. Symmetric for CE and PE with no direction-awareness
+  needed, unlike the Supertrend exit - both are always a BUY of the option
+  itself, so "premium rising" means profit either way. Not capped at
+  breakeven: enough accumulated steps can push the floor above entry
+  price, locking in a guaranteed profit - intended behavior, not a bug,
+  though in practice `TARGET_PCT` usually fires first at the configured
+  defaults (e.g. steps only reach breakeven-and-beyond past
+  `STOP_LOSS_PCT / DYNAMIC_SL_INCREASE_PCT` steps - 20 steps = 80% up, at
+  the defaults - while target is typically 10-25%). Verified offline
+  before deploying: entry=100, STOP_LOSS_PCT=20%, step=4%/1% - floor
+  stays at the fixed 80 below the first step, then climbs step-wise
+  (81 at +4%, 82 at +8-9%, 84 at +16%, 85 at +20%) exactly matching the
+  hand-computed expected values.
+
 ## Known external constraints (not fixable in code)
 
 - Dhan requires whatever IP the bot runs from to be separately whitelisted

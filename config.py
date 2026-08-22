@@ -47,6 +47,21 @@ STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.03"))    # -3% hard stop los
 ENABLE_TRAILING_SL = os.getenv("ENABLE_TRAILING_SL", "true").lower() == "true"
 TRAILING_SL_PCT = float(os.getenv("TRAILING_SL_PCT", "0.01"))  # 1% trailing stop
 
+# Stepped/"ratchet" stop-loss, independent of ENABLE_TRAILING_SL above and
+# can run alongside it (the effective floor is whichever mechanism is more
+# protective). For every DYNAMIC_SL_STEP_PCT the option's own premium has
+# climbed from entry (peak seen, not live price - so a pullback after a
+# step doesn't undo protection already earned), the stop-loss floor moves
+# up DYNAMIC_SL_INCREASE_PCT of entry price. TARGET_PCT is untouched -
+# this only tightens how much room a trade has to give back before target,
+# it never changes where target itself sits. Symmetric for CE and PE:
+# both are always a BUY of the option itself, so "premium rising" means
+# the same thing (profit) either way, no direction-awareness needed - see
+# Position.current_trailing_sl.
+ENABLE_DYNAMIC_SL = os.getenv("ENABLE_DYNAMIC_SL", "true").lower() == "true"
+DYNAMIC_SL_STEP_PCT = float(os.getenv("DYNAMIC_SL_STEP_PCT", "0.04"))      # every +4% premium move...
+DYNAMIC_SL_INCREASE_PCT = float(os.getenv("DYNAMIC_SL_INCREASE_PCT", "0.01"))  # ...raises the floor 1%
+
 # Exits a position when the underlying's 5-min candle closes below its 5-min
 # Supertrend (trend-reversal exit), in addition to target/stop-loss - see
 # dhan_client.refresh_supertrend_signal(). Computed on the underlying stock,
