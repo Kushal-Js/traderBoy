@@ -59,7 +59,11 @@ TRAILING_SL_PCT = float(os.getenv("TRAILING_SL_PCT", "0.01"))  # 1% trailing sto
 # the same thing (profit) either way, no direction-awareness needed - see
 # Position.current_trailing_sl.
 ENABLE_DYNAMIC_SL = os.getenv("ENABLE_DYNAMIC_SL", "true").lower() == "true"
-DYNAMIC_SL_STEP_PCT = float(os.getenv("DYNAMIC_SL_STEP_PCT", "0.04"))      # every +4% premium move...
+# 7%, not the originally-specified 4% - backtested net-negative at 4%
+# (two whipsaw cases outweighed the genuine catches), net-positive and
+# better than Supertrend alone at 7% (both whipsaw cases gone entirely) -
+# see NOTES.md bug #12 and BACKTEST_RESULTS.md round 4.
+DYNAMIC_SL_STEP_PCT = float(os.getenv("DYNAMIC_SL_STEP_PCT", "0.07"))      # every +7% premium move...
 DYNAMIC_SL_INCREASE_PCT = float(os.getenv("DYNAMIC_SL_INCREASE_PCT", "0.01"))  # ...raises the floor 1%
 
 # Exits a position when the underlying's 5-min candle closes below its 5-min

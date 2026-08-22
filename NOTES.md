@@ -184,10 +184,8 @@ out of git.
     - Stacked on Supertrend: **+₹3,226.75** vs. baseline - now *better*
       than Supertrend alone (+₹2,951.75), not worse. Confirms the
       hypothesis above: the 4% figure was the problem, not the ratchet
-      concept. See `BACKTEST_RESULTS.md` for the full comparison table -
-      check there (or `git log` on `config.py`) for whether 7% has since
-      been deployed, since this file isn't updated retroactively when
-      that happens.
+      concept. **Deployed** - `DYNAMIC_SL_STEP_PCT` default is now 7%,
+      not 4%. See `BACKTEST_RESULTS.md` for the full comparison table.
 
 ## Design decisions
 
