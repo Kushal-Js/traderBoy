@@ -175,6 +175,20 @@ out of git.
     4% step is inherently more whipsaw-prone than a wider one, independent
     of whether the ratchet concept itself is sound.
 
+    **Follow-up: widening the step from 4% to 7% (increase left at 1%)
+    fixed it.** Same 99-trade dataset, same mechanism, both known
+    whipsaw cases (COFORGE, GLENMARK) gone entirely - 0 of 9 divergent
+    trades were negative, vs. 2 of 18 at 4%:
+    - Alone (no Supertrend): **+₹1,779.50** vs. baseline (was −₹2,170 at
+      4%).
+    - Stacked on Supertrend: **+₹3,226.75** vs. baseline - now *better*
+      than Supertrend alone (+₹2,951.75), not worse. Confirms the
+      hypothesis above: the 4% figure was the problem, not the ratchet
+      concept. See `BACKTEST_RESULTS.md` for the full comparison table -
+      check there (or `git log` on `config.py`) for whether 7% has since
+      been deployed, since this file isn't updated retroactively when
+      that happens.
+
 ## Design decisions
 
 - **Separate capacity caps per option type** (`MAX_LIVE_POSITIONS_CE` /

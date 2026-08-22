@@ -42,7 +42,9 @@ CE round so the numbers are comparable to each other.
 | 2 | Supertrend, 10-min grace | ₹108,767.55 | 68.7% | +₹1,233.00 | |
 | 2 | Supertrend, 15-min grace | ₹109,422.55 | 67.7% | +₹1,888.00 | |
 | 3 | Dynamic SL only (4% step / 1% raise, no Supertrend) | ₹105,364.55 | 67.7% | −₹2,170.00 | 9 genuine catches (+₹3,067) outweighed by 2 whipsaw cases that would have recovered to near-flat under baseline |
-| 3 | Supertrend (5-min grace) + Dynamic SL (4%/1%) (**current production**) | ₹108,861.30 | 70.7% | +₹1,326.75 | −₹1,625 vs. Supertrend alone - dynamic SL is a net drag on top of Supertrend too, just a smaller one |
+| 3 | Supertrend (5-min grace) + Dynamic SL (4%/1%) | ₹108,861.30 | 70.7% | +₹1,326.75 | −₹1,625 vs. Supertrend alone - dynamic SL was a net drag on top of Supertrend too, just a smaller one |
+| 4 | Dynamic SL only (7% step / 1% raise, no Supertrend) | ₹109,314.05 | 67.7% | **+₹1,779.50** | Both known whipsaw cases (COFORGE, GLENMARK) gone entirely - 0 of 9 divergent trades negative, vs. 2 of 18 at 4% |
+| 4 | Supertrend (5-min grace) + Dynamic SL (7%/1%) | ₹110,761.30 | 70.7% | **+₹3,226.75** | Now *better* than Supertrend alone (+₹2,951.75) - the 4% figure was the problem, not the ratchet concept |
 
 ## PE webhook — exit logic validation
 
@@ -74,11 +76,13 @@ concurrent positions), recommended working minimum is ₹70,000–80,000.
 
 ## Open questions for future tuning
 
-- **Dynamic SL step width.** 4% was the first-specified value and
-  backtested net-negative (see above). A wider step (7% queued next -
-  results to be added here once run) should trigger on fewer, more
-  decisive moves and may avoid most of the whipsaw cases without losing
-  the genuine catches - untested until run.
+- **Dynamic SL step width - resolved for now.** 4% backtested
+  net-negative; 7% (round 4 above) fixed it, eliminating both known
+  whipsaw cases while keeping the genuine catches. Whether 7% is
+  actually the *best* width, or just better than 4%, is still open -
+  8-10% hasn't been tried and could plausibly do even better (or could
+  start losing genuine catches if too wide). Not urgent to chase further
+  given 7% already beats Supertrend-alone on this dataset.
 - **The 10:10 Supertrend warmup cluster** (bug #10) still fires under
   the deployed 5-min-grace fix - its net effect happened to be
   roughly neutral on the one week tested, but it isn't a real per-stock
