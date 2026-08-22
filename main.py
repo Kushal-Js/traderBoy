@@ -15,10 +15,11 @@ FastAPI service that:
        - target / hard stop-loss (config.TARGET_PCT / STOP_LOSS_PCT)
        - continuous trailing stop-loss (trails the peak price in the
          trade's favor) - optional, see config.ENABLE_TRAILING_SL
-       - stepped/"ratchet" stop-loss (every DYNAMIC_SL_STEP_PCT the
-         option's own premium climbs from entry, the floor moves up
-         DYNAMIC_SL_INCREASE_PCT) - optional, stacks with the continuous
-         trailing stop above, see config.ENABLE_DYNAMIC_SL
+       - stepped/"ratchet" stop-loss (every step % the option's own
+         premium climbs from entry, the floor moves up
+         DYNAMIC_SL_INCREASE_PCT; step width is per-leg -
+         config.DYNAMIC_SL_STEP_PCT_CE / _PE) - optional, stacks with the
+         continuous trailing stop above, see config.ENABLE_DYNAMIC_SL
        - the underlying's 5-min Supertrend turning against the position's
          direction - optional, see config.ENABLE_SUPERTREND_EXIT
        - config.SQUARE_OFF_TIME hard square-off of everything still open

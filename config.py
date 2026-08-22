@@ -49,22 +49,26 @@ TRAILING_SL_PCT = float(os.getenv("TRAILING_SL_PCT", "0.01"))  # 1% trailing sto
 
 # Stepped/"ratchet" stop-loss, independent of ENABLE_TRAILING_SL above and
 # can run alongside it (the effective floor is whichever mechanism is more
-# protective). For every DYNAMIC_SL_STEP_PCT the option's own premium has
-# climbed from entry (peak seen, not live price - so a pullback after a
-# step doesn't undo protection already earned), the stop-loss floor moves
-# up DYNAMIC_SL_INCREASE_PCT of entry price. TARGET_PCT is untouched -
-# this only tightens how much room a trade has to give back before target,
-# it never changes where target itself sits. Symmetric for CE and PE:
-# both are always a BUY of the option itself, so "premium rising" means
-# the same thing (profit) either way, no direction-awareness needed - see
-# Position.current_trailing_sl.
+# protective). For every step % the option's own premium has climbed from
+# entry (peak seen, not live price - so a pullback after a step doesn't
+# undo protection already earned), the stop-loss floor moves up
+# DYNAMIC_SL_INCREASE_PCT of entry price. TARGET_PCT is untouched - this
+# only tightens how much room a trade has to give back before target, it
+# never changes where target itself sits. The mechanism itself is
+# symmetric for CE and PE (both are always a BUY of the option itself, so
+# "premium rising" means the same thing either way - see
+# Position.current_trailing_sl), but the step width is configured
+# separately per option type since backtesting found they don't
+# necessarily need the same value: 7% backtested net-positive for CE
+# (NOTES.md bug #12, BACKTEST_RESULTS.md round 4) but net-negative for PE
+# on a later dataset - one severe single-trade whipsaw (VOLTAS, 17 Aug)
+# outweighed the genuine catches - see BACKTEST_RESULTS.md's PE section.
+# Both default to 7% for now (strategy unchanged pending more data); split
+# out so either can be tuned independently once there's enough history.
 ENABLE_DYNAMIC_SL = os.getenv("ENABLE_DYNAMIC_SL", "true").lower() == "true"
-# 7%, not the originally-specified 4% - backtested net-negative at 4%
-# (two whipsaw cases outweighed the genuine catches), net-positive and
-# better than Supertrend alone at 7% (both whipsaw cases gone entirely) -
-# see NOTES.md bug #12 and BACKTEST_RESULTS.md round 4.
-DYNAMIC_SL_STEP_PCT = float(os.getenv("DYNAMIC_SL_STEP_PCT", "0.07"))      # every +7% premium move...
-DYNAMIC_SL_INCREASE_PCT = float(os.getenv("DYNAMIC_SL_INCREASE_PCT", "0.01"))  # ...raises the floor 1%
+DYNAMIC_SL_STEP_PCT_CE = float(os.getenv("DYNAMIC_SL_STEP_PCT_CE", "0.07"))
+DYNAMIC_SL_STEP_PCT_PE = float(os.getenv("DYNAMIC_SL_STEP_PCT_PE", "0.07"))
+DYNAMIC_SL_INCREASE_PCT = float(os.getenv("DYNAMIC_SL_INCREASE_PCT", "0.01"))  # raises the floor 1% per step
 
 # Exits a position when the underlying's 5-min candle closes below its 5-min
 # Supertrend (trend-reversal exit), in addition to target/stop-loss - see

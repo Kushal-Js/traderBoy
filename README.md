@@ -79,9 +79,10 @@ URLs — matching the `webhook_url` field in your sample payload.
    - `-STOP_LOSS_PCT` hard stop loss
    - `TRAILING_SL_PCT` continuous trailing stop (trails the peak price in
      the trade's favor) - set `ENABLE_TRAILING_SL=false` to disable
-   - stepped/"ratchet" stop (every `DYNAMIC_SL_STEP_PCT` the option's own
-     premium climbs from entry, the floor moves up
-     `DYNAMIC_SL_INCREASE_PCT`) - stacks with the continuous trailing stop
+   - stepped/"ratchet" stop (every step % the option's own premium climbs
+     from entry, the floor moves up `DYNAMIC_SL_INCREASE_PCT`) - step
+     width is set separately per leg, `DYNAMIC_SL_STEP_PCT_CE` /
+     `DYNAMIC_SL_STEP_PCT_PE` - stacks with the continuous trailing stop
      above, set `ENABLE_DYNAMIC_SL=false` to disable. `TARGET_PCT` is
      never touched by either trailing mechanism.
    - the underlying's 5-min Supertrend turning against the position's

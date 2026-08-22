@@ -184,8 +184,58 @@ out of git.
     - Stacked on Supertrend: **+₹3,226.75** vs. baseline - now *better*
       than Supertrend alone (+₹2,951.75), not worse. Confirms the
       hypothesis above: the 4% figure was the problem, not the ratchet
-      concept. **Deployed** - `DYNAMIC_SL_STEP_PCT` default is now 7%,
-      not 4%. See `BACKTEST_RESULTS.md` for the full comparison table.
+      concept. **Deployed** - CE's dynamic SL step defaulted to 7% at this
+      point (before the CE/PE split below). See `BACKTEST_RESULTS.md` for
+      the full comparison table.
+
+13. **7% wasn't automatically safe for PE too - a single severe whipsaw
+    showed the same failure mode can still happen, on real PE data, at
+    the width that fully fixed it for CE.** Ran the same Supertrend +
+    Dynamic SL (7%/1%) combo against a 7-day, 68-trade PE dataset (see
+    `BACKTEST_RESULTS.md`'s PE section for the full table and day-by-day
+    breakdown). Note: this run pulled 68 completed trades vs. 61 in the
+    original PE Supertrend-only validation on the *same* CSV - not a bug,
+    confirmed by checking `MAX_POS`/`TOP_N`/ranking direction/strike
+    selection all match the working script exactly. PE's `%change` values
+    cluster far more tightly than CE's (mostly −0.1% to −3%), so which 3
+    symbols rank in the top-N is more sensitive to small precision/timing
+    differences between separate historical-data fetches from Dhan than
+    it was for CE. All variants below are compared within this one
+    68-trade run, so the comparison itself is still apples-to-apples even
+    though the absolute baseline number isn't comparable to the old
+    61-trade run's ₹79,653.50.
+    - Baseline (this run): ₹55,333.75.
+    - Supertrend alone: +₹96.25 vs. baseline - roughly flat, consistent
+      with the original PE validation (bug/entry above - only a few
+      trades ever hit the Supertrend exit in this dataset).
+    - Dynamic SL alone (7%/1%): **−₹2,015.00** vs. baseline.
+    - Combined (then-current production): **−₹2,418.75** vs. baseline.
+
+    Mechanism: almost entirely one trade. VOLTAS, 17 Aug, entered 09:35 @
+    ₹20.30. The option spiked >7% within 14 minutes, so the ratchet raised
+    the floor and stopped it out at 09:49 for −₹1,406. Left alone
+    (baseline, and separately confirmed under Supertrend-only too - this
+    was purely a dynamic-SL effect, not a Supertrend one), it kept climbing
+    and hit the 25% target at 11:02 for +₹2,006. A single −₹3,412 swing,
+    outweighing the other 4 divergent trades' combined +₹1,398 of genuine
+    catches. Same class of risk as bug #12's COFORGE/GLENMARK whipsaws at
+    4% on CE - just occurring for PE at a step width (7%) that had fully
+    eliminated it for CE. One severe trade in one week isn't enough
+    evidence that 7% is *wrong* for PE (same "don't trust a small sample"
+    lesson as bugs #9→#10, just cutting the other way this time) - but
+    it's also not evidence 7% is *right* for PE, since the two legs never
+    had independent evidence either way until this run.
+
+    **Decision: split `DYNAMIC_SL_STEP_PCT` into
+    `DYNAMIC_SL_STEP_PCT_CE` / `DYNAMIC_SL_STEP_PCT_PE`, both still
+    defaulting to 7% (strategy unchanged for now).** The mechanism itself
+    is symmetric by construction (reads only the option's own premium),
+    but there's no reason the two legs' *optimal* width has to match -
+    CE and PE options behave differently (different underlyings' typical
+    volatility, different premium price levels day to day). Deployed as a
+    config split only, not a behavior change; revisit once more weeks of
+    PE data accumulate to see whether PE genuinely wants a wider step than
+    CE, or whether this VOLTAS case was just one week's noise.
 
 ## Design decisions
 
@@ -335,13 +385,16 @@ concluding anything from an exit-logic change.
 - **Stepped/"ratchet" dynamic stop-loss** (`ENABLE_DYNAMIC_SL`,
   `Position.current_trailing_sl`) - independent of and stackable with the
   continuous `ENABLE_TRAILING_SL` mechanism above (the effective floor is
-  whichever is more protective). Every `DYNAMIC_SL_STEP_PCT` (default 4%)
-  the option's own premium climbs from entry - measured off `highest_price`
-  (the peak ever seen), not the live price, so a pullback after a step
-  doesn't undo protection already earned - the stop-loss floor moves up
-  `DYNAMIC_SL_INCREASE_PCT` (default 1%) of entry price. `TARGET_PCT` is
-  untouched; this only tightens how much room a trade has to give back
-  before target. Symmetric for CE and PE with no direction-awareness
+  whichever is more protective). Every step % the option's own premium
+  climbs from entry - measured off `highest_price` (the peak ever seen),
+  not the live price, so a pullback after a step doesn't undo protection
+  already earned - the stop-loss floor moves up `DYNAMIC_SL_INCREASE_PCT`
+  (default 1%) of entry price. Step width is configured separately per
+  option type - `DYNAMIC_SL_STEP_PCT_CE` / `DYNAMIC_SL_STEP_PCT_PE`, both
+  default 7% - since backtesting found the same width doesn't necessarily
+  suit both legs equally (see bug #13). `TARGET_PCT` is untouched; this
+  only tightens how much room a trade has to give back before target. The
+  mechanism itself is symmetric for CE and PE with no direction-awareness
   needed, unlike the Supertrend exit - both are always a BUY of the option
   itself, so "premium rising" means profit either way. Not capped at
   breakeven: enough accumulated steps can push the floor above entry
