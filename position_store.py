@@ -149,11 +149,26 @@ class PositionStore:
     async def reserve_symbol(self, underlying_symbol: str) -> bool:
         """Atomically checks dedup + capacity and claims the symbol in one
         locked step, so two near-simultaneous calls (e.g. a duplicate
-        Chartink webhook delivery) can't both pass the check and both go on
-        to place an order for the same underlying. Returns True if the
-        caller now owns the reservation and should proceed to enter;
-        False means someone/something already has this symbol (or there's
-        no capacity) and the caller must NOT place an order.
+        Chartink webhook delivery, or /chartink/webhook and
+        /chartink/webhook-sell firing at the same time) can't both pass the
+        check and both go on to place an order. Returns True if the caller
+        now owns the reservation and should proceed to enter; False means
+        someone/something already has this symbol (or there's no capacity)
+        and the caller must NOT place an order.
+
+        Capacity is gated on len(reserved_symbols), not len(live_positions).
+        A symbol joins reserved_symbols the instant it's reserved here, but
+        only joins live_positions later, after its order is placed AND
+        filled - a multi-second (or, for an AMO, much longer) window.
+        Gating on live_positions left that whole window capacity-blind: two
+        concurrent entries (e.g. one from each webhook) could each see
+        live_positions still under the cap and both proceed, landing one
+        over MAX_LIVE_POSITIONS once both fill. reserved_symbols is always
+        a superset of live_positions (every add_position()/
+        reconcile_from_broker() call adds to both), so this is a strictly
+        tighter, correct gate - confirmed live-adjacent by code inspection
+        while reasoning through the two-webhook concurrency question, not
+        yet by a live double-fire.
 
         Callers that end up not entering (order rejected, exception, etc.)
         must call release_symbol() so a later, non-duplicate alert can still
@@ -161,7 +176,7 @@ class PositionStore:
         async with self._lock:
             if underlying_symbol in self.reserved_symbols or underlying_symbol in self.live_positions:
                 return False
-            if len(self.live_positions) >= config.MAX_LIVE_POSITIONS:
+            if len(self.reserved_symbols) >= config.MAX_LIVE_POSITIONS:
                 return False
             self.reserved_symbols.add(underlying_symbol)
             return True
@@ -173,8 +188,12 @@ class PositionStore:
                 self.reserved_symbols.discard(underlying_symbol)
 
     async def remaining_capacity(self) -> int:
+        """Matches reserve_symbol()'s gate (reserved_symbols, not just
+        live_positions) - see its docstring. This is only used for an
+        early "don't even bother ranking" bail-out in the webhook handler;
+        reserve_symbol() is what actually enforces the cap."""
         async with self._lock:
-            return max(0, config.MAX_LIVE_POSITIONS - len(self.live_positions))
+            return max(0, config.MAX_LIVE_POSITIONS - len(self.reserved_symbols))
 
     async def add_position(self, pos: Position) -> None:
         async with self._lock:

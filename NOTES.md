@@ -127,6 +127,27 @@ out of git.
     the next thing to try if a future backtest shows that cluster turning
     net-harmful.
 
+11. **`reserve_symbol()`'s capacity check counted the wrong set, leaving a
+    window where concurrent entries could exceed `MAX_LIVE_POSITIONS`.**
+    A symbol joins `reserved_symbols` the instant it's reserved, but only
+    joins `live_positions` later, after its order is placed *and* filled -
+    a multi-second (or, for an AMO, much longer) window. The capacity gate
+    checked `len(live_positions)`, not `len(reserved_symbols)`, so two
+    entries reserved concurrently (e.g. one from `/chartink/webhook`, one
+    from `/chartink/webhook-sell`, firing near-simultaneously) could each
+    see `live_positions` still under the cap and both proceed - landing
+    one over the configured cap once both filled. Low-risk with a single
+    webhook (Chartink rarely double-fires the same alert at the exact same
+    instant); became a real path once two independent webhooks could both
+    be entering at once. Found by reasoning through exactly that scenario
+    when asked whether the two-webhook setup could handle concurrent
+    triggers safely - not caught live. Fixed by gating on
+    `len(reserved_symbols)` instead, which is always a superset of
+    `live_positions` (every `add_position()` / `reconcile_from_broker()`
+    call adds to both) - strictly tighter, no change to normal
+    single-webhook behavior since that loop is sequential and already kept
+    the two sets in sync.
+
 ## Design decisions
 
 - **Event-driven exits** — `dhan_client._on_market_tick` fires an
