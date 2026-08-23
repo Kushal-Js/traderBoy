@@ -408,6 +408,38 @@ out of git.
     `BACKTEST_RESULTS.md`'s 14-day validation section for the full
     tables.
 
+17. **The `Options/` package-split deploy (23 Aug 2026) crash-looped for
+    ~2m15s on restart - not a refactor bug, a genuinely expired access
+    token on the droplet that had silently drifted out of sync with the
+    local one.** Restarting after the code refactor failed with the same
+    `DH-901 Invalid_Authentication` error as bug #15, but this one didn't
+    self-heal - because unlike bug #15's transient Dhan-side rejection,
+    this token was *actually* expired: the droplet's `.env` still had a
+    token with `exp` 2026-08-23 08:10:55 UTC while the restart attempt
+    was at 14:53 UTC, nearly 7 hours past expiry. The local `.env` (this
+    machine) already had a newer, valid token (`exp` 2026-08-24 10:53:51
+    UTC) - it had been refreshed at some point without ever being pushed
+    to the droplet. Confirmed by decoding both tokens' JWT `exp` claims
+    directly rather than guessing from the error message alone. Fixed by
+    copying the valid token's line into the droplet's `.env` (only that
+    line - the droplet's `.env` has other intentionally-divergent values,
+    see the deployment memory file) and restarting.
+
+    The watchdog (bug #15's fix) caught this cleanly - first real,
+    non-test incident it's recorded, with the full ~135s outage and
+    journal excerpt captured automatically via `GET /incidents`. It did
+    exactly the job it was built for.
+
+    **Open gap, not yet fixed:** nothing currently keeps the droplet's
+    `DHAN_ACCESS_TOKEN` in sync with a locally-refreshed one. If the
+    token gets regenerated locally (or any other way) without a matching
+    push to the droplet's `.env`, the bot will run fine until its next
+    restart, then crash-loop indefinitely on a token that looks identical
+    in shape to a normal transient rejection - nothing distinguishes
+    "temporarily rejected" from "actually expired" in the error message
+    itself, only decoding the JWT's own `exp` claim does. See "Open
+    questions" below.
+
 ## Design decisions
 
 - **Separate capacity caps per option type** (`MAX_LIVE_POSITIONS_CE` /
@@ -664,6 +696,22 @@ concluding anything from an exit-logic change.
   of *how* it closed without the bot's own bookkeeping updating is still
   unknown. Worth instrumenting further next time it's observed live rather
   than only reasoning about it after the fact from logs.
+
+- **Nothing keeps the droplet's `DHAN_ACCESS_TOKEN` in sync with a
+  locally-refreshed one** (bug #17, 23 Aug 2026). The droplet's `.env`
+  silently ran on a token that had actually expired ~7 hours earlier -
+  the bot itself doesn't notice or alert on this until its *next
+  restart*, at which point it crash-loops indefinitely (not the
+  self-healing kind from bug #15 - a genuinely expired token never
+  starts working again). Nothing in the error message distinguishes a
+  transient rejection from an actually-expired token; only decoding the
+  JWT's own `exp` claim does. Options going forward: (a) a pre-deploy
+  checklist step that diffs/checks token expiry on both sides before any
+  restart, (b) a watchdog-side check that decodes and warns when the
+  configured token is within some threshold of expiring, or (c) accept
+  manual syncing as fine for now given restarts are infrequent and
+  deliberate. Not fixed yet - flagged here so it isn't rediscovered from
+  scratch next time.
 
 ## Safety practice for anyone working on this repo
 
