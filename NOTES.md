@@ -440,6 +440,53 @@ out of git.
     itself, only decoding the JWT's own `exp` claim does. See "Open
     questions" below.
 
+18. **Explored a NIFTY/BANKNIFTY index-options scalping strategy
+    (opening-range breakout + short EMA momentum, tight target/stop/
+    time-box exits) - backtested it, found a hard data ceiling specific
+    to index options, and shipped it as paper-trading only.** Confirmed
+    technically feasible first: both indices' ATM options resolve via
+    the same `ATM_Strike_Selection` call already used for stock options,
+    live index ticks come from the same `dhanhq` `MarketFeed` already
+    wired up (security IDs: NIFTY=13, BANKNIFTY=25, segment `IDX_I`), and
+    1-min historical candles are available for both.
+
+    **The real constraint: index options are weekly/near-term, and
+    Dhan's instrument master only lists currently-live contracts** -
+    unlike stock options' monthly expiry (which stays resolvable for the
+    whole month, how every other backtest this session worked), an
+    expired index contract is gone entirely, no security_id to fetch
+    historical candles for. Both NIFTY and BANKNIFTY's nearest listed
+    expiry was 2026-08-25 at test time; their previous expiry (~18 Aug)
+    was already delisted. That left only 19-21 Aug 2026 (3 trading days)
+    historically resolvable via this API at all - a hard ceiling, not a
+    "not enough time to fetch more" limitation.
+
+    Backtested that 3-day window anyway as a mechanism sanity-check, not
+    a real validation (this session's own repeated lesson - a single day
+    wasn't enough to trust in bugs #9→#10, a week wasn't always enough
+    either - 3 days is worse than both): NIFTY 9 trades, gross ≈breakeven
+    (+₹27.89), **net −₹332.11** once a flat ₹40/trade cost + 0.5%/side
+    slippage were applied - the entire result is transaction-cost
+    erosion, not a real losing signal. BANKNIFTY looked better on the
+    surface (12 trades, net +₹2,199.25) but checking trade-level
+    concentration showed **2 of 12 trades (both `TARGET_HIT` on 21 Aug)
+    account for 100% of that net total** - the other 10 trades wash out
+    to roughly zero. Neither number should be read as a validated edge;
+    the one structural finding worth keeping regardless of sample size
+    is that NIFTY's lower option premiums (~₹60-150 here vs.
+    BANKNIFTY's ~₹280-420) make this exact target/stop sizing far more
+    cost-sensitive on NIFTY than BankNifty, independent of signal
+    quality. See `BACKTEST_RESULTS.md` for the full trade tables.
+
+    **Decision: ship it as `IndexScalping/`, paper-trading only
+    (`config.PAPER_TRADING_ONLY = True`, asserted at startup in both
+    `paper_engine.poll_loop()` and `index_main.lifespan()`).** Since the
+    data ceiling above means no amount of additional backtesting can
+    produce a bigger historical sample, the only way to get real evidence
+    is to run the signal logic live and log what it would have done -
+    see the design-decision entry below for how that's built and why
+    it's deliberately REST-polling rather than tick-driven.
+
 ## Design decisions
 
 - **Separate capacity caps per option type** (`MAX_LIVE_POSITIONS_CE` /
@@ -577,6 +624,50 @@ out of git.
   before deploying - full lifespan (real Dhan auth, WebSocket feed,
   monitor loop) plus a live request against every endpoint, both the
   common ones and the ones routed through `include_router`.
+
+- **`IndexScalping/` - a second strategy package, PAPER TRADING ONLY**
+  (see bug #18 for why it's paper-only). Same `router` + `lifespan`
+  export pattern as `Options/option_main.py`, mounted the same way in
+  `main.py`. Two deliberate design choices worth knowing if this is ever
+  touched again:
+  - **Imports `Options.dhan_client`'s already-authenticated singleton
+    directly**, rather than getting its own Dhan connection. Broker
+    connectivity is genuinely shared infrastructure (auth, instrument
+    master, WebSocket feed), so standing up a second one would double
+    API/rate-limit usage and open a second redundant WebSocket for no
+    benefit. The cleaner long-term shape would promote `dhan_client.py`
+    out of `Options/` into a truly shared location - not done now,
+    specifically to avoid touching a live, real-money-integrated module
+    for a paper-only feature. Worth doing if a third strategy needs the
+    same connection.
+  - **REST-polling (`config.POLL_INTERVAL_SECONDS`, default 15s), not
+    tick-driven off the WebSocket feed** like the options bot's exits.
+    Building a real-time 1-min-bar aggregator from raw index ticks is a
+    meaningfully bigger engineering lift, and the open question right
+    now is whether the *signal logic* holds up over more data, not
+    execution speed - 15s is fast enough to test that honestly without
+    adding that complexity or hammering Dhan's rate limits (bug #5).
+    Revisit if paper results ever look good enough to consider real
+    capital, where execution latency would start to matter for real.
+
+  **Hard safety invariant, not just a convention**:
+  `config.PAPER_TRADING_ONLY = True`, asserted (not just documented) at
+  the top of both `paper_engine.poll_loop()` and `index_main.lifespan()`
+  - the process refuses to start if this is ever flipped without also
+  removing the assertions. Every Dhan/Tradehull call in `paper_engine.py`
+  is read-only (`instruments()`, `ATM_Strike_Selection`,
+  `intraday_minute_data`, `get_option_ltp`) - it never calls
+  `dhan_wrapper.place_market_order` (the only real order-placement entry
+  point in `dhan_client.py`) or `dhan_wrapper.client.order_placement`
+  directly. Completed paper trades persist to `paper_trades.log` (JSONL,
+  gitignored) so a multi-week paper-trading run survives a process
+  restart - unlike the live options bot, there's no broker to reconcile
+  paper trades from, so this file *is* the only record. Exposed
+  read-only via `GET /scalping/paper-trades` (gross vs. net P&L tracked
+  separately, current open paper position if any, most recent trades
+  first). Verified locally end-to-end via `TestClient` before deploying,
+  same as the `Options/` split - both strategies' lifespans starting
+  together, both routers reachable, no errors.
 
 ## Capital requirements
 

@@ -255,3 +255,45 @@ concurrent positions), recommended working minimum is ₹70,000–80,000.
   own lesson from bugs #9→#10: a single day wasn't enough to trust:
   the same caution applies to one week vs. a full month. Re-run
   periodically as more webhook trigger history accumulates.
+
+## Index scalping (NIFTY / BANKNIFTY) - 3-day mechanism sanity-check
+
+Different strategy from everything above - no Chartink scan involved,
+signal computed directly from the index's own 1-min candles (opening-
+range breakout + short EMA momentum), buying ATM CE/PE with a tight
+target/stop/time-boxed exit. See NOTES.md bug #18 for the full writeup.
+
+**Hard data ceiling, not a sample-size choice:** index options are
+weekly/near-term, and Dhan's instrument master only lists currently-live
+contracts - an expired one is gone entirely, no security_id left to
+fetch historical candles for (unlike stock options' monthly expiry,
+which stays resolvable all month). Both NIFTY and BANKNIFTY's nearest
+listed expiry at test time was 2026-08-25; their previous expiry (~18
+Aug) was already delisted. That left only **19-21 Aug 2026 (3 trading
+days)** historically resolvable at all.
+
+| Underlying | Trades | Gross P&L | Net P&L (after ₹40/trade + 0.5%/side slippage) | Win rate (net) |
+|---|---:|---:|---:|---:|
+| NIFTY | 9 | +₹27.89 | **−₹332.11** | 2/9 (22%) |
+| BANKNIFTY | 12 | +₹2,679.25 | **+₹2,199.25** | 8/12 (67%) |
+
+Neither number is a validated edge:
+- **NIFTY's result is pure cost erosion** - gross P&L was ≈breakeven;
+  the flat cost + slippage assumptions alone are what pushed it negative.
+- **BANKNIFTY's positive net is 2 trades, not 12.** Both `TARGET_HIT`
+  trades on 21 Aug (+₹928.78, +₹1,267.49) account for **100%** of the
+  +₹2,199.25 total - the other 10 trades wash out to roughly zero. This
+  is small-sample fragility, not a demonstrated repeatable edge.
+
+**Structural finding worth keeping regardless of sample size:** NIFTY's
+option premiums here (~₹60-150) are much lower than BANKNIFTY's
+(~₹280-420), so the same flat ₹40 round-trip cost is a far bigger
+fraction of NIFTY's edge for this exact target/stop sizing - a real,
+mechanical effect independent of whether the signal itself is any good.
+
+**Decision:** since no further backtesting can grow this sample (the
+data ceiling is permanent, not a "fetch more" problem), shipped as
+`IndexScalping/` in **paper-trading mode only** - logs what it would
+have done against live prices, places no real orders - to accumulate
+real evidence over time instead. See `GET /scalping/paper-trades` on the
+deployed bot for live-accumulating results.

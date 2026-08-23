@@ -21,12 +21,15 @@ This is the Dhan counterpart to the Groww version of this bot (see the
 | `Options/dhan_client.py` | Thin wrapper over Tradehull (REST) + dhanhq's `OrderUpdate`/`MarketFeed` (WebSocket) |
 | `Options/position_store.py` | In-memory state: live positions, daily traded-symbols dedup, orders, capacity cap |
 | `Options/config.py` | All tunables for the options strategy, sourced from environment variables |
+| `IndexScalping/index_main.py` | Index scalping strategy's FastAPI router + lifespan - **paper trading only**, no real orders placed |
+| `IndexScalping/paper_engine.py` | Signal (opening-range breakout + EMA momentum on NIFTY/BankNifty) + paper entry/exit logic, gross/net P&L tracking |
+| `IndexScalping/config.py` | All tunables for the scalping strategy, sourced from environment variables |
 | `.env` | Your local credentials/config (gitignored - never commit this) |
 
 A future non-options strategy would live in its own top-level package the
-same way `Options/` does, exporting `router` + `lifespan` and getting
-mounted in `main.py` alongside it - see NOTES.md's design-decision entry
-for why this split exists.
+same way `Options/` and `IndexScalping/` do, exporting `router` +
+`lifespan` and getting mounted in `main.py` alongside them - see NOTES.md's
+design-decision entries for why this split exists.
 
 ## Setup
 

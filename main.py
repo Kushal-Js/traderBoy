@@ -2,10 +2,16 @@
 Shared entry point across all trading strategies. Each strategy owns its
 own package (its own lifespan, its own FastAPI router, its own state) -
 this file just composes them onto one app so they can run side by side
-in the same process. Today that's just the options strategy
-(Options/option_main.py); adding a second, non-options strategy later
-means adding its own package the same way and mounting it here, without
-touching the options code at all.
+in the same process. Two are mounted today:
+  - Options/option_main.py - the live options-buying strategy (real
+    orders, real money).
+  - IndexScalping/index_main.py - a NIFTY/BankNifty scalping strategy,
+    PAPER TRADING ONLY (see IndexScalping/paper_engine.py's safety
+    invariant) - runs its own signal/exit logic and logs what it would
+    have done, places no real orders.
+A third strategy would be added the same way - its own package,
+exporting `router` + `lifespan`, mounted below - without touching either
+existing one.
 
 Run with:
     uv run uvicorn main:app --host 0.0.0.0 --port 8000
@@ -18,6 +24,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from Options import option_main
+from IndexScalping import index_main
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,13 +37,19 @@ logger = logging.getLogger("main")
 async def lifespan(app: FastAPI):
     """Combines every mounted strategy's own lifespan. Add a new
     strategy's context manager to this stack the same way to bring its
-    startup/shutdown along without touching the others."""
+    startup/shutdown along without touching the others. Options' lifespan
+    runs first since IndexScalping reuses its already-authenticated Dhan
+    connection (see IndexScalping/paper_engine.py's docstring) - keep it
+    first in this nesting if more strategies are added later that also
+    depend on it."""
     async with option_main.lifespan(app):
-        yield
+        async with index_main.lifespan(app):
+            yield
 
 
 app = FastAPI(title="Chartink -> Dhan Algo Bot", lifespan=lifespan)
 app.include_router(option_main.router)
+app.include_router(index_main.router)
 
 
 # --------------------------------------------------------------------------- #
