@@ -23,9 +23,16 @@ rule's own effect.
 | `Backtest DanDanaDan- Last 6 days.csv` | CE (`/chartink/webhook`) | 13,14,17,18,19,20,21 Aug 2026 | ~250 | 127 | 99 |
 | `Backtest DanDanaDanBecho-Last 6 days.csv` | PE (`/chartink/webhook-sell`) | 13,14,17,18,19,20,21 Aug 2026 | ~200 | 140 | 61 |
 | `Backtest DanDanaDan 01.csv` | CE | 21 Aug 2026 only | 49 | 25 | 23 |
+| `Backtest DanDanaDan-Last 15 days.csv` | CE | 4,5,6,7,10,11,12,13,14,17,18,19,20,21 Aug 2026 (14 trading days) | ~600 | ~250 | 104 |
+| `Backtest DanDanaDanBecho-Last 15 days.csv` | PE | same 14 days | ~550 | ~230 | 69 |
 
-All three cover the same calendar week; the single-day CE file is a
+The first three cover the same calendar week; the single-day CE file is a
 subset used for the first (later found insufficient) Supertrend backtest.
+The 15-day pair is a superset of that week plus 7 new earlier trading
+days - used for the 14-day validation round below, run against the
+*current* deployed capacity (`MAX_LIVE_POSITIONS_CE/_PE=2`), not the
+`MAX_POS=3` convention the earlier rounds used (which pre-dates the
+CE/PE cap split).
 
 ## CE webhook — exit logic rounds
 
@@ -145,6 +152,69 @@ extra return on this dataset. **Deployed: `DYNAMIC_SL_STEP_PCT_PE` raised
 from 7% to 9%.** `DYNAMIC_SL_STEP_PCT_CE` stays at 7% - CE's own sweep
 already won there.
 
+## 14-day validation + Supertrend warmup fix
+
+Fresh 14-trading-day CE+PE datasets (4-21 Aug 2026, see Datasets used
+above), run against the then-current deployed config (Supertrend 5-min
+grace + Dynamic SL 7% CE / 9% PE) at the *true* production capacity
+(`MAX_LIVE_POSITIONS_CE/_PE=2`). Purpose: validate the whole strategy on
+data roughly double the size of anything tested so far, including 7
+trading days never backtested before.
+
+| Variant | CE (104 trades) | Δ vs. baseline | PE (69 trades) | Δ vs. baseline |
+|---|---:|---:|---:|---:|
+| Baseline (target/SL only) | ₹152,913.50 | — | ₹77,313.50 | — |
+| Dynamic SL alone (7%/9%) | ₹154,048.50 | +₹1,135.00 | ₹77,802.25 | +₹488.75 |
+| Supertrend alone | ₹123,388.25 | **−₹29,525.25** | ₹76,651.00 | −₹662.50 |
+| Combined (then-production) | ₹123,683.25 | **−₹29,230.25** | ₹76,892.25 | −₹421.25 |
+
+Dynamic SL held up cleanly - 6 divergent trades total across both legs,
+all genuine catches, zero whipsaws, confirming the 7%/9% tuning survives
+entirely new data. Supertrend did not: CE flipped from +₹2,951.75 on the
+original 7-day week to **−₹29,525.25** here - see NOTES.md bug #16 for
+the full mechanism (14 of 104 trades exited at exactly 10:10, netting
+−₹20,559.75 alone - the "roughly neutral" bug #10 warmup cluster turning
+decisively harmful, exactly the risk that bug flagged as possible).
+
+**Fix comparison** (same 104 CE / 69 PE fixed entries, replayed with
+different Supertrend seed/warmup logic - both compared against this
+run's own "current behavior" figure, since a separate data re-fetch
+shifted 15 CE trades' Supertrend readings just enough to move the
+absolute total without changing anything about the fix comparison
+itself - see NOTES.md bug #16's methodology note):
+
+| CE variant | P&L | Δ vs. current behavior |
+|---|---:|---:|
+| Current behavior (this run) | ₹115,965.50 | — |
+| Fix B, 15-candle warmup | ₹123,935.50 | +₹7,970.00 |
+| **Fix B, 20-candle warmup** | **₹137,993.00** | **+₹22,027.50** |
+| Fix B, 25-candle warmup | ₹131,260.50 | +₹15,295.00 |
+| Fix A (smart seed) alone | ₹134,975.75 | +₹19,010.25 |
+| Fix A + B (20/25-candle) | ₹135,913.50 | +₹19,948.00 |
+
+| PE variant | P&L | Δ vs. current behavior |
+|---|---:|---:|
+| Current behavior (this run) | ₹76,892.25 | — |
+| Fix B, 15/20-candle warmup | ₹76,892.25 | +0.00 (no PE trades hit these thresholds) |
+| Fix B, 25-candle warmup | ₹77,662.25 | +₹770.00 |
+| Fix A (smart seed) alone | ₹69,731.00 | **−₹7,582.50** |
+| Fix A + B (any warmup) | ₹69,948–73,817 | **−₹7,365 to −₹3,496** |
+
+Fix A (smarter seed) is rejected outright - it hurts PE substantially in
+every combination tested. Fix B (just requiring more warmup candles, no
+seed change) is non-monotonic - 20 candles is a clear local optimum,
+beating both 15 and 25 - and never hurts PE. **Deployed: Fix B at
+20 candles (`SUPERTREND_MIN_WARMUP_CANDLES=20`)**.
+
+Honest caveat: even Fix B still leaves CE's Supertrend contribution at
+**−₹14,920.50 vs. plain target/SL** on this dataset (`combined_naive_baseline`
+₹115,965.50 vs. `combined_naive_warmup20` ₹137,993.00, netted against
+the ₹152,913.50 baseline) - roughly half the damage of the unfixed
+behavior, not a full recovery, and a long way from the original week's
++₹2,951.75. Supertrend's edge for CE has shown real inconsistency across
+two different weeks even with a working fix applied; dynamic-SL has been
+the more reliably positive component on both weeks tested so far.
+
 ## Capital sizing
 
 See `NOTES.md`'s "Capital requirements" section for the full
@@ -168,14 +238,19 @@ concurrent positions), recommended working minimum is ₹70,000–80,000.
   the *best* PE width (vs. just wide enough to clear the one whipsaw
   observed) is open the same way CE's 7% is - the 9-15% plateau found in
   Round 3 is reassuring but drawn from one dataset.
-- **The 10:10 Supertrend warmup cluster** (bug #10) still fires under
-  the deployed 5-min-grace fix - its net effect happened to be
-  roughly neutral on the one week tested, but it isn't a real per-stock
-  signal (every underlying's indicator finishes warmup at the same
-  wall-clock moment, seeded from a heuristic biased toward "bearish"
-  regardless of actual trend). Worth a smarter seed or a longer
-  mandatory warmup if a future backtest shows this cluster turning
-  net-harmful.
+- **The 10:10 Supertrend warmup cluster (bug #10) - fixed, but not fully
+  resolved.** Turned decisively net-harmful on the 14-day CE dataset
+  (see the validation section above and NOTES.md bug #16), exactly the
+  risk bug #10 flagged as possible. `SUPERTREND_MIN_WARMUP_CANDLES=20`
+  deployed to mitigate it - roughly halves the damage on this dataset,
+  but CE's Supertrend contribution is still net-negative
+  (−₹14,920.50 vs. plain target/SL) even after the fix. Open question:
+  is Supertrend's edge for CE real-but-noisy (worth keeping through more
+  data), or not actually there (worth disabling for CE specifically)?
+  One more distinct week of data would help distinguish these - the
+  current evidence is two weeks pointing in opposite directions, one
+  strongly positive (+₹2,951.75) and one strongly negative even after
+  the fix.
 - **Sample size.** Every result above is one calendar week. NOTES.md's
   own lesson from bugs #9→#10: a single day wasn't enough to trust:
   the same caution applies to one week vs. a full month. Re-run

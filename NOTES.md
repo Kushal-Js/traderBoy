@@ -326,6 +326,88 @@ out of git.
     fire, with no prior mechanism to detect or record it happening. See
     the watchdog design decision below for the fix.
 
+16. **The 10:10 Supertrend warmup cluster (bug #10), backtested as
+    "roughly neutral" on the original 7-day week, turned decisively
+    net-harmful on a larger 14-day dataset - exactly the risk bug #10
+    flagged as worth fixing "if a future backtest shows this cluster
+    turning net-harmful."** User supplied a fresh 15-day CSV (4-21 Aug
+    2026, 14 actual trading days - the original week plus 7 new earlier
+    days), replayed against the current deployed config
+    (`MAX_LIVE_POSITIONS_CE/_PE=2`, matching true production capacity,
+    not the old `MAX_POS=3` convention). Results, target/SL baseline
+    ₹152,913.50 (CE) / ₹77,313.50 (PE):
+    - CE Supertrend alone: **−₹29,525.25** vs. baseline (was +₹2,951.75
+      on the original week) - combined (then-production): −₹29,230.25.
+    - PE Supertrend alone: −₹662.50 (small, not the same mechanism - see
+      below).
+    - Dynamic SL (7% CE / 9% PE) stayed clean: 6 divergent trades total
+      across both legs, all genuine catches, zero whipsaws - confirms
+      that tuning is holding up on entirely new data.
+
+    Mechanism, confirmed directly: **14 of 104 CE trades exited at
+    exactly 10:10 via SUPERTREND_EXIT, netting −₹20,559.75 by
+    themselves** - about 70% of the total damage. Real winners got cut
+    flat: HINDALCO would have hit target at 14:50 for +₹8,505, instead
+    exited at 10:10 for +₹420; same story for HEROMOTOCO, BOSCHLTD,
+    MPHASIS, POLYCAB, HYUNDAI, TATASTEEL, BAJFINANCE. A few genuine
+    catches (AMBER, PGEL, OBEROIRLTY, ADANIGREEN, +₹8,712 combined) don't
+    come close to offsetting it. **Zero PE trades exited at 10:10** -
+    confirmed why: the naive seed (see bug #10) is structurally biased
+    toward reading "bearish" on the indicator's first computable bar,
+    which is exactly the direction CE's exit condition needs but the
+    *opposite* of what PE's exit condition needs, so the same artifact
+    that hammers CE structurally almost never fires for PE.
+
+    **Investigated two candidate fixes, backtested against the same
+    14-day CE+PE data (identical fixed entries, not re-ranked):**
+    - **Fix A - smarter seed**: replace the naive band-width-comparison
+      seed with a comparison against the SMA of closes seen so far
+      (roughly balanced instead of structurally biased). Result: helped
+      CE (+₹19,010 vs. the unfixed behavior measured in this run) but
+      **hurt PE badly in every combination tested (−₹3,496 to −₹7,583)**
+      - whatever bias it removes from CE's seed introduces new false
+        signals that specifically hit PE. Rejected for this reason alone.
+    - **Fix B - longer mandatory warmup**: gate ANY Supertrend signal
+      behind a minimum candle count above the bare `SUPERTREND_PERIOD`
+      minimum, independent of any position's own entry+grace gating.
+      Doesn't fix the seed's bias, just delays when the (still-biased)
+      first signal can fire. Swept 15/20/25 candles: **20 was the clear
+      best (+₹22,027.50 vs. unfixed CE), non-monotonically - 25 was
+      worse than 20** (a longer warmup isn't simply "safer," there's a
+      real sweet spot). PE was unaffected at 15/20 (no PE trades ever
+      hit those thresholds anyway) and mildly *improved* at 25 (+₹770) -
+      no case where Fix B hurt PE, unlike Fix A.
+
+    One methodology note surfaced while sanity-checking the fix script
+    against the known 14-day numbers: re-fetching a historical day's
+    underlying candles from Dhan **on a separate call** returned a
+    slightly different value for 15 of 104 CE trades' Supertrend
+    readings than the original run's fetch had - not a script bug
+    (traced and confirmed the full ₹7,717.75 gap came from exactly those
+    15 trades), but the same underlying-data non-determinism already
+    seen in this session as entry-ranking drift (see bug in PE Round 2's
+    68-vs-61-trade discrepancy), now manifesting as exit-signal drift
+    instead. Since every variant in a given run shares the same
+    (re-)fetched data, within-run comparisons stay valid; only exact
+    cross-run number reproduction is affected.
+
+    **Honest bottom line: even Fix B (the better fix) still leaves CE's
+    Supertrend contribution at −₹14,920.50 vs. plain target/SL on this
+    14-day set** - roughly half the damage of the unfixed behavior, not
+    a full recovery, and a long way from the +₹2,951.75 it scored on the
+    original week. Supertrend's edge for CE has now shown real
+    inconsistency across two different weeks even with a working fix
+    applied, unlike dynamic-SL, which has been clean and modestly
+    positive on both weeks tested. **Deployed Fix B anyway** (per
+    explicit instruction) as a genuine improvement over the broken
+    behavior - not a claim that Supertrend is now reliably good for CE,
+    which the data doesn't yet support either way. `SUPERTREND_MIN_WARMUP_CANDLES=20`
+    added to `config.py`/`dhan_client.refresh_supertrend_signal()`; Fix A
+    (smart seed) was not implemented anywhere, since Fix B alone
+    outperformed it on CE and Fix A actively hurt PE. See
+    `BACKTEST_RESULTS.md`'s 14-day validation section for the full
+    tables.
+
 ## Design decisions
 
 - **Separate capacity caps per option type** (`MAX_LIVE_POSITIONS_CE` /
@@ -378,6 +460,13 @@ out of git.
   state, and the still-forming current candle is dropped so the signal is
   always based on a fully-closed 5-min bar. Toggle via
   `ENABLE_SUPERTREND_EXIT`, same reasoning as `ENABLE_TRAILING_SL`.
+  `SUPERTREND_MIN_WARMUP_CANDLES` (default 20) additionally withholds any
+  signal at all until that many candles have formed since open,
+  independent of `SUPERTREND_PERIOD` and independent of any position's
+  own entry+grace gating - fixes the 10:10 warmup-cluster bug (#10/#16)
+  by delaying when the indicator's still-biased first value can fire,
+  not by fixing the bias itself. See bug #16 for why this fix was chosen
+  over a smarter seed (which backtested worse for PE).
 - **Two webhooks, one shared position pool, separate capacity caps.**
   `POST /chartink/webhook` (bullish, buys ATM CE) and
   `POST /chartink/webhook-sell` (bearish, buys ATM PE) both funnel into

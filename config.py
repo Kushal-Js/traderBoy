@@ -90,6 +90,27 @@ SUPERTREND_REFRESH_SECONDS = int(os.getenv("SUPERTREND_REFRESH_SECONDS", "60"))
 # exit a position riding the same breakout's aftershock; one extra 5-min
 # candle of grace was the best-performing setting tested.
 SUPERTREND_ENTRY_GRACE_MINUTES = int(os.getenv("SUPERTREND_ENTRY_GRACE_MINUTES", "5"))
+# Minimum 5-min candles since market open before ANY Supertrend signal is
+# trusted, independent of SUPERTREND_PERIOD and independent of any single
+# position's own entry+grace gating above - see
+# dhan_client.refresh_supertrend_signal(). SUPERTREND_PERIOD=10 means the
+# indicator's very first computable value lands at exactly 10:10 for every
+# underlying (10th 5-min candle from a 09:15 open) - but that first value
+# has no prior trend/band to seed from, so it defaults via a naive
+# band-width comparison that reads "bearish" on ~every underlying
+# regardless of actual trend (see NOTES.md bug #10). Backtested on a
+# 14-day, 104-trade CE dataset: this cluster went from "roughly neutral"
+# (the original 7-day test) to -36,948 vs. target/SL alone - the risk bug
+# #10 flagged as worth revisiting if a future backtest showed it turning
+# net-harmful. Swept 15/20/25 candles: 20 was the clear best (+22,027.50
+# vs. the unfixed behavior on that dataset, non-monotonic - 25 was worse
+# than 20) - see NOTES.md bug #16 and BACKTEST_RESULTS.md's 14-day
+# validation section. Doesn't fix the seed's bias, just delays when the
+# (still-biased) first signal can fire, so fewer freshly-entered positions
+# are still open and exposed by the time it does - positions still exit
+# normally via target/stop-loss/dynamic-SL during the warmup window, they
+# just can't exit via Supertrend until it completes.
+SUPERTREND_MIN_WARMUP_CANDLES = int(os.getenv("SUPERTREND_MIN_WARMUP_CANDLES", "20"))
 
 # Default ATM leg for /chartink/webhook (the bullish scan) and the
 # fallback used when reconciling a broker position of unknown origin.
