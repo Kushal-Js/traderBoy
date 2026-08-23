@@ -27,9 +27,9 @@ from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-import config
-from dhan_client import OrderStatus, dhan_wrapper
-from position_store import EXIT_CLAIMED, OrderRecord, Position, position_store
+from . import config
+from .dhan_client import OrderStatus, dhan_wrapper
+from .position_store import EXIT_CLAIMED, OrderRecord, Position, position_store
 
 logger = logging.getLogger("trading_engine")
 

@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
-import config
+from . import config
 
 logger = logging.getLogger("position_store")
 

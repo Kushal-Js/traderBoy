@@ -14,12 +14,19 @@ This is the Dhan counterpart to the Groww version of this bot (see the
 ## Files
 | File | Purpose |
 |---|---|
-| `main.py` | FastAPI app — webhook endpoint + status endpoints + app lifecycle |
-| `trading_engine.py` | Ranking, entry, exit-condition monitoring, square-off logic, AMO order sync |
-| `dhan_client.py` | Thin wrapper over Tradehull (REST) + dhanhq's `OrderUpdate`/`MarketFeed` (WebSocket) |
-| `position_store.py` | In-memory state: live positions, daily traded-symbols dedup, orders, capacity cap |
-| `config.py` | All tunables, sourced from environment variables |
+| `main.py` | Shared entry point - the `FastAPI` app instance, strategy-agnostic endpoints (`/health`, `/incidents`), and composes each strategy's router + lifespan onto the app |
+| `watchdog.py` | Standalone health-check watchdog (own systemd unit) - see NOTES.md |
+| `Options/option_main.py` | Options strategy's FastAPI router + lifespan - webhook endpoints + status endpoints, mounted onto `main.py`'s app |
+| `Options/trading_engine.py` | Ranking, entry, exit-condition monitoring, square-off logic, AMO order sync |
+| `Options/dhan_client.py` | Thin wrapper over Tradehull (REST) + dhanhq's `OrderUpdate`/`MarketFeed` (WebSocket) |
+| `Options/position_store.py` | In-memory state: live positions, daily traded-symbols dedup, orders, capacity cap |
+| `Options/config.py` | All tunables for the options strategy, sourced from environment variables |
 | `.env` | Your local credentials/config (gitignored - never commit this) |
+
+A future non-options strategy would live in its own top-level package the
+same way `Options/` does, exporting `router` + `lifespan` and getting
+mounted in `main.py` alongside it - see NOTES.md's design-decision entry
+for why this split exists.
 
 ## Setup
 

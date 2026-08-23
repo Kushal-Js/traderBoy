@@ -523,6 +523,29 @@ out of git.
   journald's retention passed) surfaced that the bot had no way to detect
   or remember this class of event on its own.
 
+- **Options strategy code lives in its own `Options/` package
+  (`config.py`, `dhan_client.py`, `position_store.py`, `trading_engine.py`,
+  `option_main.py`), separate from the shared top-level `main.py`.**
+  Done in preparation for adding non-options strategies later without
+  entangling them with this one. `main.py` owns only what's genuinely
+  strategy-agnostic - the `FastAPI` app instance, `/health`, `/incidents`
+  (reads a file path, not any strategy's state) - and composes each
+  strategy's own router + lifespan onto it (`Options/option_main.py`
+  exports `router` and `lifespan`; a future second strategy would export
+  the same two names from its own package and get mounted the same way
+  in `main.py`, side by side). The four inner modules now use relative
+  imports (`from . import config`, etc.) since they're a package, not
+  loose top-level scripts - everything else about them is unchanged.
+  `main.py` still lives at the repo root and is still run the exact same
+  way (`uv run uvicorn main:app`) - no `WorkingDirectory`/systemd change
+  needed, since Python resolves `Options` as a subpackage from the
+  existing working directory rather than needing to *be* the working
+  directory. `watchdog.py` needed no changes (already stdlib-only, no
+  app imports). Verified locally end-to-end via FastAPI's `TestClient`
+  before deploying - full lifespan (real Dhan auth, WebSocket feed,
+  monitor loop) plus a live request against every endpoint, both the
+  common ones and the ones routed through `include_router`.
+
 ## Capital requirements
 
 Since this strategy only ever *buys* options (never sells/writes), capital

@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 from Dhan_Tradehull import Tradehull
 from dhanhq import MarketFeed, OrderUpdate
 
-import config
+from . import config
 
 logger = logging.getLogger("dhan_client")
 
