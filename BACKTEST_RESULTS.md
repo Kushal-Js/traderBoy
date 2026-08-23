@@ -297,3 +297,47 @@ data ceiling is permanent, not a "fetch more" problem), shipped as
 have done against live prices, places no real orders - to accumulate
 real evidence over time instead. See `GET /scalping/paper-trades` on the
 deployed bot for live-accumulating results.
+
+## Copper (MCX) options - backtest inconclusive (data-quality ceiling, not a strategy verdict)
+
+Different failure mode from the index-scalping ceiling above - not a
+sample-size problem, a data-quality one. See NOTES.md bug #20 for the
+full writeup. Backtested the ~20 trading days actually available
+(24 Jul - 20 Aug 2026, bounded by MCX 5-min intraday retention), using
+the August-2026 option expiry fixed throughout (the only cycle actually
+listed/tradeable on those historical days).
+
+| | Trades | Net P&L | Win rate |
+|---|---:|---:|---:|
+| Raw output | 14 | ≈+₹4.34 | 21.4% |
+| After excluding stale-data artifacts | 3 | — | 3/3 positive but n=3 |
+
+**11 of 14 trades showed entry price exactly equal to exit price** -
+not a genuine flat outcome. Traced directly: `COPPER 24 AUG 1360 CALL`
+on 30 Jul has 1-min historical data only from 10:34 to **17:59**, then
+nothing for the rest of the day. Copper *futures* have full 5-min
+coverage to 23:30; Copper *options'* historical data thins out or stops
+entirely partway through the day, inconsistently by contract/day - and
+this strategy's operating window (15:31 onward) sits right in the part
+of the day this happens most. The backtest's price lookup silently
+reused the last known price whenever a signal fired after data went
+stale, turning "we don't know what happened" into a fake ₹0.00 trade.
+
+Only 3 trades had genuine price movement between entry and exit, all
+modestly positive (+₹2.64, +₹1.32, +₹0.38) - far too few to conclude
+anything, and not even a representative sample (specifically the
+trades lucky enough to fire before that day's data went quiet).
+
+**This may not carry over to live paper-trading.** The deployed engine
+(`CopperOptions/paper_engine.py`) uses a live LTP quote, not historical
+candles, so it doesn't inherit this *specific* artifact - whether the
+live quote itself also goes stale on a thin evening contract is a real
+open question, but only the actual paper-trading run can answer it.
+Watch for the same telltale sign live: an open position's unrealized
+P&L not moving for a long stretch despite the underlying clearly moving.
+
+**Verdict: inconclusive, not negative** - the backtest couldn't get a
+trustworthy read, which is different from "the strategy loses." Real
+evidence is the live paper-trading results now accumulating via
+`GET /copper/paper-trades`, with `config.STRATEGY_ENABLED` in place to
+turn it off if that evidence turns out unfavorable.

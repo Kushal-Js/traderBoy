@@ -540,6 +540,52 @@ out of git.
     symmetric ATM+/-20 strikes (1410 CE / 1370 PE around a shared ATM of
     ~1390) from the real strike chain.
 
+20. **Backtested the Copper strategy against the ~20-day window (24 Jul
+    - 20 Aug 2026) and found the backtest itself unreliable - not a
+    strategy-negative result, a data-quality ceiling specific to MCX
+    Copper *options'* historical intraday data.** Used the August-2026
+    expiry (the only cycle actually listed throughout that window) fixed
+    for the whole run - a fair approach given that's genuinely all that
+    would have been tradeable on those historical days.
+
+    Raw output: 14 trades, net ≈+₹4.34, 21.4% win rate - looked flat, but
+    **11 of 14 trades showed entry price exactly equal to exit price**,
+    which is not a real flat outcome. Traced one directly: `COPPER 24 AUG
+    1360 CALL` on 30 Jul has 1-min data only from 10:34 to **17:59** -
+    nothing after, all day. Unlike the Copper *futures* (full 5-min
+    coverage to 23:30), the *options'* historical data thins out or stops
+    entirely partway through the day, inconsistently by contract/day -
+    and this strategy's whole operating window (15:31 onward) sits right
+    in the part of the day where that data goes quiet most often. The
+    backtest script's price lookup silently fell back to "last known
+    price" whenever a signal fired after data went stale, turning a
+    "we don't actually know what happened" case into a fake ₹0.00 trade.
+
+    Only 3 of 14 trades had genuine price movement between entry and
+    exit (all modestly positive: +₹2.64, +₹1.32, +₹0.38, all Supertrend
+    exits that happened to fire before that day's data went quiet) - n=3
+    across ~20 days is nowhere near enough to conclude anything, and
+    isn't even a representative sample of the strategy's actual signals
+    (it's specifically the subset lucky enough to avoid the data gap).
+
+    **Important distinction: this may not be a live-trading problem, only
+    a backtesting one.** The live paper-trading engine
+    (`CopperOptions/paper_engine.py`) uses `get_option_ltp()` - a live
+    quote - not historical candles, so it doesn't inherit this *specific*
+    artifact. Whether the live LTP itself also effectively goes stale on
+    a thin evening contract is a real open question, but it's one only
+    the actual paper-trading run can answer - watch for the same
+    telltale sign (an open position's unrealized P&L not moving for a
+    long stretch despite the underlying moving) rather than assuming the
+    backtest's problem does or doesn't carry over.
+
+    **Verdict: inconclusive, not negative.** Treat this backtest as
+    "couldn't get a trustworthy read," not "the strategy loses." The
+    live paper-trading results (already running, `STRATEGY_ENABLED`
+    flag already in place for turning it off if warranted) are the real
+    evidence to watch going forward. See `BACKTEST_RESULTS.md` for the
+    full trade table.
+
 ## Design decisions
 
 - **Separate capacity caps per option type** (`MAX_LIVE_POSITIONS_CE` /
