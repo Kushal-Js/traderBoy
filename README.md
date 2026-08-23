@@ -24,10 +24,13 @@ This is the Dhan counterpart to the Groww version of this bot (see the
 | `IndexScalping/index_main.py` | Index scalping strategy's FastAPI router + lifespan - **paper trading only**, no real orders placed |
 | `IndexScalping/paper_engine.py` | Signal (opening-range breakout + EMA momentum on NIFTY/BankNifty) + paper entry/exit logic, gross/net P&L tracking |
 | `IndexScalping/config.py` | All tunables for the scalping strategy, sourced from environment variables |
+| `CopperOptions/copper_main.py` | Copper (MCX) options strategy's FastAPI router + lifespan - **paper trading only**, no real orders placed |
+| `CopperOptions/paper_engine.py` | Gap + daily-RSI + dual-Supertrend signal, paper entry/exit logic, expiry-cycle rolling |
+| `CopperOptions/config.py` | All tunables, including `STRATEGY_ENABLED` (independent on/off switch) |
 | `.env` | Your local credentials/config (gitignored - never commit this) |
 
-A future non-options strategy would live in its own top-level package the
-same way `Options/` and `IndexScalping/` do, exporting `router` +
+A future strategy would live in its own top-level package the same way
+`Options/`, `IndexScalping/`, and `CopperOptions/` do, exporting `router` +
 `lifespan` and getting mounted in `main.py` alongside them - see NOTES.md's
 design-decision entries for why this split exists.
 

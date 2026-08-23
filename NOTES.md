@@ -487,6 +487,59 @@ out of git.
     see the design-decision entry below for how that's built and why
     it's deliberately REST-polling rather than tick-driven.
 
+19. **Added a third strategy, `CopperOptions/` - MCX Copper options
+    buying, paper trading only.** Rules as given: buy ATM+20-point CE
+    when today's open > yesterday's close AND today's daily RSI(14) >
+    yesterday's, AND the underlying's 5-min close is above both
+    Supertrend(12,3) and Supertrend(11,2); PE is the exact mirror. Exit
+    on a 5-min close crossing back through Supertrend(12,3), or a
+    ₹5,000 unrealized loss, whichever first. Active only from 15:31 IST
+    until commodity market close, and only when `config.STRATEGY_ENABLED`
+    is true (the explicit on/off flag requested for after paper results
+    are in - separate from `PAPER_TRADING_ONLY`, which is a hard
+    invariant, not a switch).
+
+    **Assumptions made explicit** where the given rules were
+    underspecified (see `CopperOptions/config.py`'s own docstring for
+    the same list, kept in sync):
+    - *"ATM + 20 points" for both legs* would make the CE cheaper
+      (more OTM) but the PE *more expensive* (more ITM) if taken
+      literally on both sides - contradicts the stated goal ("so that
+      option contract is little cheaper") for PE. Read instead as
+      "20 points more OTM than ATM" for each leg - CE uses
+      `ATM_strike + 20`, PE uses `ATM_strike - 20`.
+    - *"Today's"/"yesterday's" open, close, RSI* are DAILY-timeframe
+      values. MCX commodities have no continuously-quoted spot via this
+      API - only futures - so these are computed on the underlying
+      Copper futures contract, not a spot price.
+    - *"Crossed above/below"* is read as a plain state check (is the
+      close currently on that side of the Supertrend line right now),
+      not edge-detection against the prior bar - algebraically
+      equivalent for a loop re-evaluating every poll.
+    - *MCX metals-segment close time* isn't exposed directly via this
+      API; 23:30 IST is used, matching the time component on every
+      Copper contract's own expiry timestamp in Dhan's instrument
+      master - a reasonable proxy, worth confirming against Dhan's
+      published session times if this ever needs to be exact.
+
+    **A real, unavoidable timing issue found while building this**:
+    Copper options expire monthly, and the nearest listed expiry at
+    build time (2026-08-24) was literally the next calendar day - the
+    first live/paper test would otherwise have traded a same-day-expiry
+    (extreme gamma/theta) contract purely because it happened to be
+    "nearest," not because anyone chose that risk deliberately.
+    Fixed with `config.MIN_DAYS_TO_EXPIRY` (default 3): the engine
+    resolves the nearest expiry with at least that many days left and
+    automatically rolls to the next monthly cycle otherwise, then finds
+    the futures contract for the *same calendar month* to use as the
+    signal's underlying (Aug options -> Aug future, Sep options -> Sep
+    future, etc. - verified this pairing holds in the real instrument
+    data). Verified end-to-end against live data before deploying:
+    correctly skipped the expiring-tomorrow Aug cycle for Sep, computed
+    a sane daily RSI/gate from real Copper futures history, and resolved
+    symmetric ATM+/-20 strikes (1410 CE / 1370 PE around a shared ATM of
+    ~1390) from the real strike chain.
+
 ## Design decisions
 
 - **Separate capacity caps per option type** (`MAX_LIVE_POSITIONS_CE` /
@@ -668,6 +721,26 @@ out of git.
   first). Verified locally end-to-end via `TestClient` before deploying,
   same as the `Options/` split - both strategies' lifespans starting
   together, both routers reachable, no errors.
+
+- **`CopperOptions/` - a third strategy package, PAPER TRADING ONLY,
+  with its own independent on/off flag.** Same `router` + `lifespan`
+  export pattern, same shared-`dhan_client` reasoning, same REST-polling
+  design as `IndexScalping/` - see that entry above and bug #19 for the
+  strategy-specific details (rules, assumptions, the expiry-rolling
+  fix). Two things specific to this one:
+  - **`config.STRATEGY_ENABLED`, separate from `config.PAPER_TRADING_ONLY`.**
+    The latter is a hard invariant (asserted at startup, not meant to be
+    toggled casually); the former is the actual requested on/off switch
+    for after paper results are evaluated - when false, the poll loop
+    keeps running (no restart needed to flip it) but does nothing at
+    all: no data fetches, no signal checks, no side effects. Checked
+    first thing in `_poll_copper()`.
+  - **Options here are on futures (MCX `OPTFUT`), not a spot index** -
+    every rule (open/RSI/Supertrend) reads the Copper *futures*
+    contract's own price series, resolved to match the chosen option
+    expiry's calendar month (see bug #19). `GET /copper/paper-trades`
+    surfaces which expiry cycle is currently in use, alongside the usual
+    trade history and today's daily gate state.
 
 ## Capital requirements
 

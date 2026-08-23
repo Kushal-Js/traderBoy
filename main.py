@@ -2,15 +2,20 @@
 Shared entry point across all trading strategies. Each strategy owns its
 own package (its own lifespan, its own FastAPI router, its own state) -
 this file just composes them onto one app so they can run side by side
-in the same process. Two are mounted today:
+in the same process. Three are mounted today:
   - Options/option_main.py - the live options-buying strategy (real
     orders, real money).
   - IndexScalping/index_main.py - a NIFTY/BankNifty scalping strategy,
     PAPER TRADING ONLY (see IndexScalping/paper_engine.py's safety
     invariant) - runs its own signal/exit logic and logs what it would
     have done, places no real orders.
-A third strategy would be added the same way - its own package,
-exporting `router` + `lifespan`, mounted below - without touching either
+  - CopperOptions/copper_main.py - an MCX Copper options-buying strategy
+    (gap + daily-RSI momentum, dual-Supertrend confirmed), also PAPER
+    TRADING ONLY (see CopperOptions/paper_engine.py's safety invariant),
+    with its own on/off flag (config.STRATEGY_ENABLED) independent of
+    the paper-trading invariant.
+A fourth strategy would be added the same way - its own package,
+exporting `router` + `lifespan`, mounted below - without touching any
 existing one.
 
 Run with:
@@ -25,6 +30,7 @@ from fastapi import FastAPI
 
 from Options import option_main
 from IndexScalping import index_main
+from CopperOptions import copper_main
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,12 +50,14 @@ async def lifespan(app: FastAPI):
     depend on it."""
     async with option_main.lifespan(app):
         async with index_main.lifespan(app):
-            yield
+            async with copper_main.lifespan(app):
+                yield
 
 
 app = FastAPI(title="Chartink -> Dhan Algo Bot", lifespan=lifespan)
 app.include_router(option_main.router)
 app.include_router(index_main.router)
+app.include_router(copper_main.router)
 
 
 # --------------------------------------------------------------------------- #
