@@ -36,6 +36,15 @@ counts as "strongest" differ.
      /chartink/webhook-sell - so a run of alerts on one side can't crowd
      out capacity for the other. Once a position closes, its symbol is
      free to be entered again on a later alert the same day.
+
+Also mounts POST /chartink/webhook-papertrade (paper_webhook.py) - a
+third, independent Chartink endpoint for evaluating a new scan before
+trusting it with real money. Bullish/CE only, entirely separate
+position pool/capacity from the two real webhooks above, reuses this
+same file's ranking/exit logic for fidelity, and never places a real
+order - see paper_webhook.py's own module docstring for the safety
+invariant and NOTES.md's design-decision entry for why it lives here
+rather than as its own top-level package.
 """
 from __future__ import annotations
 

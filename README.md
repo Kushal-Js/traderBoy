@@ -21,6 +21,7 @@ This is the Dhan counterpart to the Groww version of this bot (see the
 | `Options/dhan_client.py` | Thin wrapper over Tradehull (REST) + dhanhq's `OrderUpdate`/`MarketFeed` (WebSocket) |
 | `Options/position_store.py` | In-memory state: live positions, daily traded-symbols dedup, orders, capacity cap |
 | `Options/config.py` | All tunables for the options strategy, sourced from environment variables |
+| `Options/paper_webhook.py` | Second, independent Chartink endpoint (`/chartink/webhook-papertrade`) for evaluating a new scan before trusting it with real money - **paper trading only**, reuses the real strategy's own ranking/ATM/exit logic so only the new scan's stock-picking is under test |
 | `IndexScalping/index_main.py` | Index scalping strategy's FastAPI router + lifespan - **paper trading only**, no real orders placed |
 | `IndexScalping/paper_engine.py` | Signal (opening-range breakout + EMA momentum on NIFTY/BankNifty) + paper entry/exit logic, gross/net P&L tracking |
 | `IndexScalping/config.py` | All tunables for the scalping strategy, sourced from environment variables |
@@ -135,8 +136,10 @@ URLs — matching the `webhook_url` field in your sample payload.
 |---|---|
 | `POST /chartink/webhook` | Bullish scan entry point - buys ATM CE |
 | `POST /chartink/webhook-sell` | Bearish scan entry point - buys ATM PE |
+| `POST /chartink/webhook-papertrade` | Paper-trading entry point for a second, unproven Chartink scan - bullish/CE only, places no real orders |
 | `GET /positions` | Live + closed positions for today |
 | `GET /orders` | Every order placed today, with Dhan's real order_status |
+| `GET /papertrade/trades` | Results of the paper-trading webhook above - open position, completed trades, win rate |
 | `GET /health` | Liveness check |
 | `POST /square-off-now` | Manual kill-switch: closes every live position immediately |
 
