@@ -184,11 +184,22 @@ async def enter_positions_for_stocks(
                 continue
 
             entry_result = await _enter_single_position(symbol, option_type)
-            # "entered" and "amo_placed" both correspond to a real order
-            # that's now live/queued for this stock - keep the reservation
-            # so a repeat alert today is treated as a duplicate. Any other
-            # outcome (rejected, etc.) frees the symbol up to retry.
-            if entry_result.get("status") not in ("entered", "amo_placed"):
+            # "entered", "amo_placed", and "pending_confirmation" all
+            # correspond to a real order that's now live/queued for this
+            # stock - keep the reservation so a repeat alert today is
+            # treated as a duplicate, and so this stock's slot still counts
+            # against MAX_LIVE_POSITIONS_CE/_PE. Any other outcome
+            # (rejected, etc.) frees the symbol up to retry.
+            # "pending_confirmation" (bug #22's fix) was missing from this
+            # allow-list until now - _enter_single_position deliberately
+            # calls release_order_ownership (not release_symbol) to keep
+            # this same reservation alive when it defers a slow-filling
+            # order to _sync_pending_orders, but this caller was undoing
+            # that by releasing the symbol anyway, right after. Confirmed
+            # live on 24 Aug 2026: let a 3rd CE position (PETRONET) through
+            # past the 2-position cap once its deferred order filled for
+            # real - see NOTES.md bug #24.
+            if entry_result.get("status") not in ("entered", "amo_placed", "pending_confirmation"):
                 await position_store.release_symbol(symbol)
             results.append(entry_result)
         except Exception as exc:  # noqa: BLE001

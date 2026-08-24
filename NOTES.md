@@ -667,6 +667,53 @@ out of git.
     behavior change for the normal (fast, well within budget) case - this
     only activates when six retries genuinely aren't enough.
 
+23. **`reconcile_broker_positions()` copied the broker's own display
+    label into `Position.product_type` instead of the order-placement
+    code our own API needs**, breaking every exit on a reconciled
+    position. Found live on 24 Aug 2026, minutes after a routine restart:
+    BIOCON's stop-loss triggered correctly but the SELL failed to place
+    at all (`'Got exception in place_order as 'INTRADAY''`), retrying
+    with growing backoff while the loss grew from a routine stop-out into
+    a much larger one before being caught. Root cause: Dhan's positions
+    API reports `product_type: "INTRADAY"` (a human-readable label), but
+    `dhan_client.place_market_order`'s `trade_type` parameter needs the
+    actual product code (`"MIS"`) - Tradehull's `order_placement()`
+    swallows the resulting mapping failure and returns `None` instead of
+    raising, so the only trace was that one console line. Fix:
+    `reconcile_broker_positions()` now always uses
+    `config.OPTIONS_PRODUCT` for a reconciled position's `product_type`,
+    since this strategy only ever trades that one product type itself -
+    the broker's label was never actually needed. Deployed same-day;
+    confirmed working on the very next real exit (CONCOR) seconds after
+    the restart.
+
+24. **A gap in bug #22's own fix let a 3rd CE position through past the
+    2-position cap** (`MAX_LIVE_POSITIONS_CE=2`), found live the same
+    morning. `_enter_single_position` (bug #22's fix) returns
+    `status="pending_confirmation"` for an order deferred to background
+    sync, deliberately calling `release_order_ownership` (not
+    `release_symbol`) to keep that stock's capacity reservation alive
+    while its fate is still open. But `enter_positions_for_stocks` (the
+    caller, in the per-stock loop) had its own separate allow-list -
+    `if entry_result.get("status") not in ("entered", "amo_placed"):
+    release_symbol(...)` - written before "pending_confirmation" existed,
+    so it treated the deferred order as a failure and released the
+    reservation anyway, undoing what the inner fix had just protected.
+    Confirmed live: CE was already at its 2-position cap (VEDL, one slot
+    free) when a single webhook alert ranked two more CE stocks
+    (LODHA, PETRONET); LODHA entered normally, PETRONET hit the slow-fill
+    path, got its reservation wrongly released, and its order filled for
+    real minutes later via `_sync_pending_orders` - landing a 3rd CE
+    position with no capacity check having ever refused it. Same gap
+    would also have let a duplicate alert for PETRONET re-enter it while
+    the order was still pending, since the dedup guard uses the same
+    reservation. Fix: added `"pending_confirmation"` to
+    `enter_positions_for_stocks`'s allow-list. The 3 CE positions this
+    produced (VEDL, LODHA, PETRONET) were left open rather than force-
+    closed - they're all genuine, already-funded positions; the cap is a
+    forward-looking entry control, not a reason to unwind a real position
+    early.
+
 ## Design decisions
 
 - **Separate capacity caps per option type** (`MAX_LIVE_POSITIONS_CE` /
