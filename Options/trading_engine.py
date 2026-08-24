@@ -91,7 +91,19 @@ async def reconcile_broker_positions() -> list[Position]:
             target_price=avg_price * (1 + config.TARGET_PCT),
             hard_stop_loss=avg_price * (1 - config.STOP_LOSS_PCT),
             order_id="",
-            product_type=bp["product_type"],
+            # NOT bp["product_type"]: the broker's positions API reports a
+            # human-readable label ("INTRADAY"), not the product code our
+            # own order_placement() call needs ("MIS") - passing the label
+            # straight through made every exit attempt on a reconciled
+            # position fail silently (Tradehull's order_placement()
+            # swallows the mapping error and returns None, logged only as
+            # "Got exception in place_order as 'INTRADAY'"). Confirmed live
+            # on 24 Aug 2026: all 4 positions reconciled after a mid-day
+            # restart got this wrong, and BIOCON's stop-loss couldn't
+            # place a SELL at all until this was fixed - see NOTES.md bug
+            # #23. This strategy only ever trades config.OPTIONS_PRODUCT
+            # ("MIS") itself, so that's always the correct code here too.
+            product_type=config.OPTIONS_PRODUCT,
             reconciled=True,
         ))
 
