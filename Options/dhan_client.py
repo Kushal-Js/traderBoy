@@ -198,20 +198,27 @@ class DhanWrapper:
     # Auth
     # ------------------------------------------------------------------ #
     def authenticate(self) -> None:
-        if not config.DHAN_CLIENT_ID or not config.DHAN_ACCESS_TOKEN:
-            raise ValueError("DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN are not set")
+        mode = config.DHAN_AUTH_MODE
+        if mode == "pin_totp":
+            if not config.DHAN_CLIENT_ID or not config.DHAN_PIN or not config.DHAN_TOTP_SECRET:
+                raise ValueError("DHAN_CLIENT_ID / DHAN_PIN / DHAN_TOTP_SECRET are not set")
+            tsl = Tradehull(config.DHAN_CLIENT_ID, mode="pin_totp",
+                             pin=config.DHAN_PIN, totp_secret=config.DHAN_TOTP_SECRET)
+        else:
+            if not config.DHAN_CLIENT_ID or not config.DHAN_ACCESS_TOKEN:
+                raise ValueError("DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN are not set")
+            tsl = Tradehull(config.DHAN_CLIENT_ID, config.DHAN_ACCESS_TOKEN, mode="access_token")
 
-        tsl = Tradehull(config.DHAN_CLIENT_ID, config.DHAN_ACCESS_TOKEN, mode="access_token")
         # Tradehull's __init__ swallows login failures internally (prints
         # and returns a half-initialized object instead of raising), so we
         # have to verify the attributes it only sets on success ourselves.
         if not getattr(tsl, "Dhan", None) or not getattr(tsl, "dhan_context", None):
             raise RuntimeError(
-                "Dhan login failed - Tradehull did not initialize its REST client. "
-                "Check DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN and Tradehull's own console output above."
+                f"Dhan login failed (mode={mode}) - Tradehull did not initialize its REST client. "
+                "Check the relevant DHAN_* env vars and Tradehull's own console output above."
             )
         self._client = tsl
-        logger.info("Authenticated with Dhan (Tradehull, mode=access_token)")
+        logger.info("Authenticated with Dhan (Tradehull, mode=%s)", mode)
 
     @property
     def client(self) -> Tradehull:

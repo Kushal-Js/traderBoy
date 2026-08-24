@@ -9,11 +9,30 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# Dhan authentication (access-token mode - see Dhan-Tradehull docs)
+# Dhan authentication - see Dhan-Tradehull docs
 #   https://pypi.org/project/Dhan-Tradehull/
+# Two modes:
+#   "access_token" (default) - DHAN_ACCESS_TOKEN, manually generated from
+#     web.dhan.co, expires every 24h (a SEBI/exchange-mandated cap since
+#     1 Oct 2025, not a Dhan choice - no token lasts longer, regardless of
+#     how it's generated). Needs manual refresh - see NOTES.md bug #17 for
+#     the incident this caused once (a stale droplet-side token, silently
+#     out of sync with a locally-refreshed one).
+#   "pin_totp" - DHAN_PIN + DHAN_TOTP_SECRET, both static/long-lived
+#     credentials (TOTP secret doesn't rotate - it's the RFC 6238 seed,
+#     not the 6-digit code; Tradehull computes the current code from it
+#     internally via pyotp on every login). Fully automated - no manual
+#     step, no expiry to track, since Tradehull re-authenticates from
+#     scratch each time using these two values. Verified working
+#     end-to-end before switching over. DHAN_PIN is the account's trading
+#     PIN - meaningfully more sensitive than an access token since it
+#     doesn't expire/rotate on its own; treat this .env with that in mind.
 # ---------------------------------------------------------------------------
 DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "")
 DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN", "")
+DHAN_AUTH_MODE = os.getenv("DHAN_AUTH_MODE", "access_token").lower()
+DHAN_PIN = os.getenv("DHAN_PIN", "")
+DHAN_TOTP_SECRET = os.getenv("DHAN_TOTP_SECRET", "")
 
 # Shared secret the webhook caller must send back to us, since Chartink
 # webhooks are unauthenticated by default. Optional but recommended.

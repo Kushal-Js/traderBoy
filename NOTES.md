@@ -586,6 +586,43 @@ out of git.
     evidence to watch going forward. See `BACKTEST_RESULTS.md` for the
     full trade table.
 
+21. **Fixed the stale-token gap from bug #17 at its root, instead of
+    just monitoring for it - switched authentication from a manually-
+    refreshed access token to Dhan's `pin_totp` mode.** Confirmed first
+    (bug #17's own open question): Dhan access tokens are capped at 24h
+    *by regulation* (SEBI/exchange rule, effective 1 Oct 2025) regardless
+    of which flow generates them - there's no "longer-lived token"
+    option to switch to instead, from Dhan or anyone else.
+
+    What *is* long-lived: a TOTP secret (the RFC 6238 seed, not the
+    rotating 6-digit code - captured once from web.dhan.co's API
+    settings page, under "Optional Settings -> Set-up TOTP") and the
+    account's trading PIN. `Dhan_Tradehull` (already the library this
+    bot uses) supports generating a session from these two directly -
+    `Tradehull(ClientCode, mode="pin_totp", pin=..., totp_secret=...)` -
+    computing the current TOTP code from the secret internally via
+    `pyotp` on every call, no browser, no manual step, no expiry to
+    track. Verified working twice before switching over: once as an
+    isolated script against the real account (confirmed genuine
+    success, not a cached-token false positive), once as a full local
+    `TestClient` run of the whole app - both showed a freshly-generated
+    token each time ("New PIN + TOTP access token validated
+    successfully"), not a reused one.
+
+    `DHAN_AUTH_MODE` added to `config.py` (`"access_token"` default,
+    `"pin_totp"` opt-in) so the change is backward-compatible - nothing
+    breaks for anyone not setting the new env vars.
+    `dhan_client.authenticate()` branches on it; `DHAN_ACCESS_TOKEN` is
+    left in `.env`, unused while `pin_totp` is active, as a fallback to
+    revert to without needing to regenerate anything if `pin_totp` ever
+    needs troubleshooting.
+
+    **`DHAN_PIN` is meaningfully more sensitive than an access token** -
+    it doesn't expire or rotate on its own the way a token does, and
+    it's the credential that authorizes transactions on the account, not
+    just data access. Worth remembering next time this `.env` is
+    touched, copied, or included in a handoff folder.
+
 ## Design decisions
 
 - **Separate capacity caps per option type** (`MAX_LIVE_POSITIONS_CE` /
@@ -907,21 +944,11 @@ concluding anything from an exit-logic change.
   unknown. Worth instrumenting further next time it's observed live rather
   than only reasoning about it after the fact from logs.
 
-- **Nothing keeps the droplet's `DHAN_ACCESS_TOKEN` in sync with a
-  locally-refreshed one** (bug #17, 23 Aug 2026). The droplet's `.env`
-  silently ran on a token that had actually expired ~7 hours earlier -
-  the bot itself doesn't notice or alert on this until its *next
-  restart*, at which point it crash-loops indefinitely (not the
-  self-healing kind from bug #15 - a genuinely expired token never
-  starts working again). Nothing in the error message distinguishes a
-  transient rejection from an actually-expired token; only decoding the
-  JWT's own `exp` claim does. Options going forward: (a) a pre-deploy
-  checklist step that diffs/checks token expiry on both sides before any
-  restart, (b) a watchdog-side check that decodes and warns when the
-  configured token is within some threshold of expiring, or (c) accept
-  manual syncing as fine for now given restarts are infrequent and
-  deliberate. Not fixed yet - flagged here so it isn't rediscovered from
-  scratch next time.
+- ~~Nothing keeps the droplet's `DHAN_ACCESS_TOKEN` in sync with a
+  locally-refreshed one~~ **- resolved, see bug #21.** Switched to
+  `DHAN_AUTH_MODE=pin_totp`, which regenerates its own fresh token from
+  scratch on every authentication - there's no more manually-managed
+  token to go stale or fall out of sync in the first place.
 
 ## Safety practice for anyone working on this repo
 
