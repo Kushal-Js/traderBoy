@@ -261,6 +261,38 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
             "order_id": order_id,
         }
 
+    if result.status not in OrderStatus.TERMINAL_STATUSES:
+        # Didn't reach a terminal status within the poll budget - seen live
+        # during a Dhan-side slow-fill period where a plain market order
+        # took well over a minute to settle (NOTES.md bug #22). Not
+        # rejected/cancelled and not AMO, so the order is still genuinely
+        # live at the broker and may yet fill (or reject) - guessing a
+        # price via LTP here would let target/SL be computed off a value
+        # that can diverge materially from the real eventual fill price
+        # (confirmed live: LTP fallback of 0.59 vs a real average fill of
+        # 0.46 on the same order - a false stop-loss trigger and a wrong
+        # P&L). Deferring to _sync_pending_orders's existing AMO-style
+        # polling instead - it already re-checks non-terminal BUY orders
+        # every monitor tick and promotes to a Position using the REAL
+        # fill price once Dhan confirms it, or releases the reservation if
+        # it ends up rejected/cancelled. release_order_ownership (not
+        # release_symbol) keeps this symbol reserved in the meantime, so a
+        # repeat alert can't also enter it while its fate is still open.
+        await position_store.release_order_ownership(order_id)
+        logger.warning(
+            "BUY order %s for %s still %s after poll budget - deferring to "
+            "background sync instead of guessing a fill price.",
+            order_id, symbol, result.status,
+        )
+        return {
+            "symbol": symbol,
+            "status": "pending_confirmation",
+            "order_status": result.status,
+            "option_trading_symbol": atm.trading_symbol,
+            "quantity": quantity,
+            "order_id": order_id,
+        }
+
     fill_price = result.fill_price
     if not fill_price:
         # Order reached a terminal "filled" status but the fill price field

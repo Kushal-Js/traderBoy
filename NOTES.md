@@ -623,6 +623,50 @@ out of git.
     just data access. Worth remembering next time this `.env` is
     touched, copied, or included in a handoff folder.
 
+22. **A market BUY order that took longer than `wait_for_order_result`'s
+    poll budget (6 retries, ~6s) to reach a terminal status caused two
+    distinct failures**, both observed live during market open on 24 Aug
+    2026 (a session where Dhan's order-status/OHLC/LTP APIs were
+    noticeably slower/flakier than usual - several unrelated `OHLC`/`ltp`
+    calls failed transiently the same morning). Previously,
+    `_enter_single_position` treated "not rejected, not cancelled, not
+    AMO" as good enough to proceed as if filled:
+    - **UNOMINDA PE**: the order never reached a terminal status within
+      the poll budget and stayed `PENDING` (0 filled qty) for several
+      minutes at the broker. The code's fallback-to-LTP call itself threw
+      (a transient Dhan API failure), the exception propagated up and was
+      caught by `enter_positions_for_stocks`'s outer handler, which called
+      `release_symbol` - freeing the symbol reservation entirely while the
+      order was still live and un-cancelled at the broker. Confirmed via a
+      direct read-only broker check (`get_order_by_id` +
+      `get_open_fno_positions`) that no position ever materialized;
+      manually cancelled the stuck order once confirmed abandoned.
+    - **INOXWIND CE**: the order also didn't reach a terminal status
+      within the poll budget, but this time the LTP fallback call
+      *succeeded* - so the code created a Position using that LTP
+      (0.59) as `entry_price`. The order actually filled moments later for
+      real, but at a materially different average price (0.46, confirmed
+      via a follow-up `get_order_by_id` check) - a ~19% discrepancy
+      between the assumed and actual entry price. This pushed the
+      computed stop-loss level (based on the wrong 0.59 basis) to trigger
+      a real exit that wouldn't have fired against the true 0.46 basis,
+      and misreported the trade's P&L as -832 when the real economic
+      result (0.46 entry, 0.44 real exit fill) was roughly -128.
+
+    **Fix**: added a branch in `_enter_single_position` - if
+    `wait_for_order_result` returns a non-terminal, non-AMO status (not
+    rejected/cancelled either), don't guess a fill price or create a
+    Position at all. Call `release_order_ownership` (not `release_symbol`
+    - this keeps the symbol reserved so a repeat alert can't also enter it
+    while the order's fate is still open) and return early. This hands the
+    order off to `_sync_pending_orders` - already-existing machinery
+    originally built for AMO orders, which re-polls non-terminal BUY
+    orders every monitor tick (`MONITOR_INTERVAL_SECONDS`) and promotes to
+    a Position using the real fill price once Dhan actually confirms it,
+    or releases the reservation if it ends up rejected/cancelled. No
+    behavior change for the normal (fast, well within budget) case - this
+    only activates when six retries genuinely aren't enough.
+
 ## Design decisions
 
 - **Separate capacity caps per option type** (`MAX_LIVE_POSITIONS_CE` /
