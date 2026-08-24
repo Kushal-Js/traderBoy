@@ -14,7 +14,13 @@ in the same process. Three are mounted today:
     TRADING ONLY (see CopperOptions/paper_engine.py's safety invariant),
     with its own on/off flag (config.STRATEGY_ENABLED) independent of
     the paper-trading invariant.
-A fourth strategy would be added the same way - its own package,
+  - Futures/futures_main.py - PLACEHOLDER strategy (buys ATM CE options
+    via the identical mechanics as Options/, standing in until real
+    futures-contract buying replaces it, by explicit request), REAL
+    orders, own separate position pool/capacity - see
+    Futures/trading_engine.py's module docstring for why it skips broker
+    reconciliation at startup.
+A fifth strategy would be added the same way - its own package,
 exporting `router` + `lifespan`, mounted below - without touching any
 existing one.
 
@@ -31,6 +37,7 @@ from fastapi import FastAPI
 from Options import option_main
 from IndexScalping import index_main
 from CopperOptions import copper_main
+from Futures import futures_main
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,20 +51,22 @@ async def lifespan(app: FastAPI):
     """Combines every mounted strategy's own lifespan. Add a new
     strategy's context manager to this stack the same way to bring its
     startup/shutdown along without touching the others. Options' lifespan
-    runs first since IndexScalping reuses its already-authenticated Dhan
-    connection (see IndexScalping/paper_engine.py's docstring) - keep it
-    first in this nesting if more strategies are added later that also
-    depend on it."""
+    runs first since IndexScalping/Futures reuse its already-authenticated
+    Dhan connection (see IndexScalping/paper_engine.py's and
+    Futures/futures_main.py's docstrings) - keep it first in this nesting
+    if more strategies are added later that also depend on it."""
     async with option_main.lifespan(app):
         async with index_main.lifespan(app):
             async with copper_main.lifespan(app):
-                yield
+                async with futures_main.lifespan(app):
+                    yield
 
 
 app = FastAPI(title="Chartink -> Dhan Algo Bot", lifespan=lifespan)
 app.include_router(option_main.router)
 app.include_router(index_main.router)
 app.include_router(copper_main.router)
+app.include_router(futures_main.router)
 
 
 # --------------------------------------------------------------------------- #

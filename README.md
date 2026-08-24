@@ -28,6 +28,11 @@ This is the Dhan counterpart to the Groww version of this bot (see the
 | `CopperOptions/copper_main.py` | Copper (MCX) options strategy's FastAPI router + lifespan - **paper trading only**, no real orders placed |
 | `CopperOptions/paper_engine.py` | Gap + daily-RSI + dual-Supertrend signal, paper entry/exit logic, expiry-cycle rolling |
 | `CopperOptions/config.py` | All tunables, including `STRATEGY_ENABLED` (independent on/off switch) |
+| `Futures/futures_main.py` | Futures strategy's FastAPI router + lifespan - **PLACEHOLDER** (buys ATM CE options via Options'-identical mechanics until real futures-contract buying replaces it), real orders, own separate position pool |
+| `Futures/trading_engine.py` | Near-verbatim copy of `Options/trading_engine.py`'s ranking/entry/exit logic against this package's own config/position_store |
+| `Futures/position_store.py` | Futures' own independent in-memory state - separate capacity/dedup from Options' |
+| `Futures/config.py` | All tunables for the Futures strategy, `FUTURES_`-prefixed env vars |
+| `Futures/dhan_client.py` | Re-exports `Options.dhan_client.dhan_wrapper` - reuses the one authenticated Dhan connection rather than opening a second |
 | `.env` | Your local credentials/config (gitignored - never commit this) |
 
 A future strategy would live in its own top-level package the same way
@@ -140,6 +145,10 @@ URLs — matching the `webhook_url` field in your sample payload.
 | `GET /positions` | Live + closed positions for today |
 | `GET /orders` | Every order placed today, with Dhan's real order_status |
 | `GET /papertrade/trades` | Results of the paper-trading webhook above - open position, completed trades, win rate |
+| `POST /chartink/webhook-futures` | Futures strategy entry point - PLACEHOLDER (buys ATM CE options), real orders, own separate position pool |
+| `GET /futures/positions` | Futures strategy's own live + closed positions |
+| `GET /futures/orders` | Futures strategy's own orders today |
+| `POST /futures/square-off-now` | Futures strategy's own manual kill-switch |
 | `GET /health` | Liveness check |
 | `POST /square-off-now` | Manual kill-switch: closes every live position immediately |
 

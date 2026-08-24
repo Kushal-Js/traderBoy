@@ -93,7 +93,7 @@ async def lifespan(app: FastAPI):
     def _on_price_tick(trading_symbol: str, ltp: float) -> None:
         asyncio.run_coroutine_threadsafe(on_price_tick(trading_symbol, ltp), loop)
 
-    dhan_wrapper.on_price_tick = _on_price_tick
+    dhan_wrapper.add_price_tick_subscriber(_on_price_tick)
 
     # authenticate() and start_feed() are blocking SDK calls; push them to a
     # worker thread rather than calling them directly on the lifespan

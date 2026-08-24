@@ -801,6 +801,51 @@ out of git.
 
 ## Design decisions
 
+- **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
+  2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
+  A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM
+  CE *options* via mechanics identical to `Options/` (same ranking, entry,
+  exit rules, near-verbatim copies of `trading_engine.py`/
+  `position_store.py`), standing in until real futures-contract buying
+  replaces it. Places REAL orders (explicitly requested, not paper) - own
+  independent position pool/capacity (`FUTURES_*` env vars), own
+  `dhan_client.py` that just re-exports `Options.dhan_client.dhan_wrapper`
+  rather than opening a second Dhan session (same reuse pattern
+  IndexScalping/CopperOptions already use).
+
+  **Does NOT run `reconcile_broker_positions()` at startup**, unlike every
+  other real-order strategy. `get_open_fno_positions()` returns every open
+  FNO position in the account with no notion of which strategy placed it -
+  if Futures also reconciled the same way Options does, a restart could
+  re-import Options' own live positions into Futures' separate tracker
+  too, and both strategies could then try to independently manage/exit
+  the same real broker position. Trades restart-resilience (a real
+  Futures position open across a restart won't be automatically
+  recovered) for correctness (never double-tracking) - the right
+  tradeoff for a new package. Also accepted, not fixed: since Options and
+  Futures both rank/enter independently with identical instrument-
+  selection logic, they could each open their own separate position on
+  the same underlying if both alert on it around the same time - same
+  class of tradeoff already accepted for the paper-trade webhook, now
+  with real money on both sides. Worth revisiting if it's ever observed
+  live.
+
+  **Found and fixed while building this, before it could cause a live
+  incident**: `dhan_wrapper.on_price_tick` was a single
+  `Optional[Callable]` slot, set via direct assignment
+  (`dhan_wrapper.on_price_tick = _on_price_tick`) in `option_main.py`'s
+  lifespan. Had Futures' lifespan done the same thing, whichever
+  strategy's lifespan ran last would have silently overwritten the
+  other's handler - degrading the *already-live* Options strategy's
+  instant tick-driven exits down to poll-only (`MONITOR_INTERVAL_SECONDS`,
+  5s) with no error anywhere. Fixed in `Options/dhan_client.py`: replaced
+  the single slot with `_on_price_tick_subscribers: list[Callable]` and a
+  new `add_price_tick_subscriber()` method: `_on_market_tick` now calls
+  every registered subscriber, each wrapped in its own try/except so one
+  strategy's handler failing can't block another's. Verified offline
+  (mocked, no real Dhan calls) that both Options' and Futures' handlers
+  fire independently on the same tick before this was deployed.
+
 - **`POST /chartink/webhook-papertrade` (`Options/paper_webhook.py`, added
   24 Aug 2026)** - a second, independent Chartink endpoint for evaluating
   a new scan before trusting it with real money, without touching the

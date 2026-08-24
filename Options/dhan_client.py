@@ -178,9 +178,17 @@ class DhanWrapper:
         self._security_id_to_symbol: dict[str, str] = {}
         # Fired synchronously from the market-feed's WebSocket thread on
         # every tick, as (trading_symbol, ltp) - must be fast/non-blocking.
-        # Wired up by main.py to drive event-driven exit checks instead of
-        # waiting for monitor_loop's next poll.
-        self.on_price_tick: Optional[Callable[[str, float], None]] = None
+        # A list, not a single slot: multiple strategies share this one
+        # Dhan connection (Options, Futures, ...), each registering its own
+        # handler via add_price_tick_subscriber() to drive its own
+        # event-driven exit checks instead of waiting for its monitor_loop's
+        # next poll. A single `Optional[Callable]` slot here would let
+        # whichever strategy's lifespan runs last silently overwrite an
+        # earlier one's handler, degrading it down to poll-only exits with
+        # no error - confirmed as a real risk when the Futures package was
+        # added (see NOTES.md's design-decision entry), fixed before it
+        # could actually happen rather than after.
+        self._on_price_tick_subscribers: list[Callable[[str, float], None]] = []
         # underlying_symbol -> (fetched_at, is_bearish, candle_start) - see
         # refresh_supertrend_signal()/get_cached_supertrend_bearish().
         self._supertrend_cache: dict[str, tuple[datetime, bool, Optional[datetime]]] = {}
@@ -355,6 +363,12 @@ class DhanWrapper:
             logger.info("Dhan market-data WebSocket connecting in the background.")
         return self._market_feed
 
+    def add_price_tick_subscriber(self, callback: Callable[[str, float], None]) -> None:
+        """Registers a callback to fire on every price tick, as
+        (trading_symbol, ltp) - see _on_price_tick_subscribers' docstring
+        for why this is additive rather than a single-slot assignment."""
+        self._on_price_tick_subscribers.append(callback)
+
     def _on_market_tick(self, _feed, tick: dict) -> None:
         # Runs on the MarketFeed's own background thread, not the asyncio
         # event loop - on_price_tick (if set) is responsible for hopping
@@ -374,13 +388,14 @@ class DhanWrapper:
         self._ltp_cache[security_id] = ltp_val
         self.stats["price_ticks_received"] += 1
 
-        if self.on_price_tick:
+        if self._on_price_tick_subscribers:
             trading_symbol = self._security_id_to_symbol.get(security_id)
             if trading_symbol:
-                try:
-                    self.on_price_tick(trading_symbol, ltp_val)
-                except Exception:  # noqa: BLE001
-                    logger.exception("on_price_tick callback failed for %s", trading_symbol)
+                for callback in self._on_price_tick_subscribers:
+                    try:
+                        callback(trading_symbol, ltp_val)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("on_price_tick subscriber failed for %s", trading_symbol)
 
     def start_feed(self) -> None:
         """Eagerly opens both socket connections (otherwise they lazily open

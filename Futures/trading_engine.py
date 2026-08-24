@@ -1,19 +1,35 @@
 """
-Core strategy logic.
+Core strategy logic for the Futures package - PLACEHOLDER: currently buys
+ATM CE options via the identical mechanics as Options/trading_engine.py
+(that file's docstring/comments cover the full rationale behind each
+piece; this is a near-verbatim copy, not reimplemented from scratch, so
+the two strategies can't silently drift apart in how they rank/enter/exit
+while both still do the same thing). Adapted only where it must differ:
+
+  - No reconcile_broker_positions() / step 0. Dhan's get_open_fno_positions()
+    returns every open FNO position in the account with no notion of which
+    strategy placed it - if this package also ran broker reconciliation
+    the same way Options does, a restart would re-import Options' own live
+    positions into this package's separate position_store too, and both
+    strategies could then try to independently manage (and exit) the same
+    real position. Skipping it trades restart-resilience (a real Futures
+    position open across a restart won't be automatically recovered here)
+    for correctness (never double-tracking) - the right tradeoff for a
+    new package, see NOTES.md's design-decision entry.
+  - CE only - no prefer_highest=False/PE path is wired up in futures_main.py,
+    since only one bullish webhook was requested for this package.
 
 Flow:
-  0. reconcile_broker_positions() - at startup, import positions already
-     open at Dhan (e.g. left over from a previous run) so we don't lose
-     track of them and re-enter.
-  1. rank_and_pick_top_stocks()  - from the Chartink alert's stock list, pick
-     the top-N by today's %change (highest first).
+  1. rank_and_pick_top_stocks() - from the Chartink alert's stock list,
+     pick the top-N by today's %change (highest first).
   2. enter_positions_for_stocks() - for each qualifying stock (not already
      traded today, capacity available), find the ATM option and place a
      BUY MARKET order (AMO outside market hours).
   3. monitor_loop() - background asyncio loop, polls every
      MONITOR_INTERVAL_SECONDS, and exits a leg when target / stop-loss /
-     trailing stop-loss is hit, or force-squares-off everything at
-     SQUARE_OFF_TIME. Also re-syncs any order still queued as AMO.
+     trailing stop-loss / Supertrend is hit, or force-squares-off
+     everything at SQUARE_OFF_TIME. Also re-syncs any order still queued
+     as AMO.
 """
 from __future__ import annotations
 
@@ -31,7 +47,7 @@ from . import config
 from .dhan_client import OrderStatus, dhan_wrapper
 from .position_store import EXIT_CLAIMED, OrderRecord, Position, position_store
 
-logger = logging.getLogger("trading_engine")
+logger = logging.getLogger("futures_trading_engine")
 
 IST = ZoneInfo(config.MARKET_TZ)
 
@@ -47,82 +63,18 @@ def _parse_hhmm_today(hhmm: str) -> datetime:
 
 
 def is_past_square_off_time() -> bool:
-    """True once today's config.SQUARE_OFF_TIME has passed. Webhook entry
-    handlers use this to refuse new positions past that point - see
-    NOTES.md bug #25. monitor_loop's own square-off only fires once
-    (squared_off_today_for), so any position entered after that one-time
-    pass would otherwise sit with no further target/SL/square-off
-    monitoring for the rest of the day - confirmed live on 24 Aug 2026: a
-    webhook arrived seconds after square-off fired and entered a position
-    that then had zero automated exit protection."""
+    """See Options/trading_engine.py's is_past_square_off_time (bug #25) -
+    identical rationale, this package's own SQUARE_OFF_TIME."""
     return _now_ist() >= _parse_hhmm_today(config.SQUARE_OFF_TIME)
 
 
 def _gen_tag(prefix: str, symbol: str) -> str:
-    """Dhan's correlationId rejects special characters (confirmed live:
-    GVT&D's "&" caused a hard "Invalid correlationId" rejection on order
-    placement, DH-905) - strip anything that isn't alphanumeric before
-    embedding the symbol, since several real NSE tickers contain "&"
-    (GVT&D, M&M, M&MFIN, ...)."""
+    """Dhan's correlationId rejects special characters - see Options'
+    equivalent for the live incident (GVT&D, DH-905) that made this
+    necessary."""
     safe_symbol = re.sub(r"[^A-Za-z0-9]", "", symbol)
     suffix = "".join(random.choices(string.digits, k=6))
     return f"{prefix}-{safe_symbol[:6]}-{suffix}"[:25]
-
-
-# --------------------------------------------------------------------------- #
-# Step 0: reconcile with positions already open at the broker (call once at
-# startup) so a restart mid-day doesn't lose track of them and re-enter.
-# --------------------------------------------------------------------------- #
-async def reconcile_broker_positions() -> list[Position]:
-    """Best-effort import of positions already open at Dhan (e.g. left open
-    by a previous run of this process) into the local store. Target/stop-
-    loss are computed off the broker's reported average price using the
-    current config, since we don't have the original fill we'd normally use -
-    these are marked Position.reconciled=True so that's visible downstream."""
-    loop = asyncio.get_running_loop()
-    broker_positions = await loop.run_in_executor(None, dhan_wrapper.get_open_fno_positions)
-
-    positions: list[Position] = []
-    for bp in broker_positions:
-        avg_price = bp["avg_price"]
-        if not avg_price:
-            logger.warning(
-                "Skipping reconciliation for %s - broker reported no average price.",
-                bp["trading_symbol"],
-            )
-            continue
-
-        positions.append(Position(
-            underlying_symbol=bp["underlying_symbol"],
-            option_trading_symbol=bp["trading_symbol"],
-            option_type=bp["option_type"] or config.OPTION_TYPE,
-            quantity=bp["quantity"],
-            lot_size=bp["lot_size"],
-            entry_price=avg_price,
-            highest_price=avg_price,
-            target_price=avg_price * (1 + config.TARGET_PCT),
-            hard_stop_loss=avg_price * (1 - config.STOP_LOSS_PCT),
-            order_id="",
-            # NOT bp["product_type"]: the broker's positions API reports a
-            # human-readable label ("INTRADAY"), not the product code our
-            # own order_placement() call needs ("MIS") - passing the label
-            # straight through made every exit attempt on a reconciled
-            # position fail silently (Tradehull's order_placement()
-            # swallows the mapping error and returns None, logged only as
-            # "Got exception in place_order as 'INTRADAY'"). Confirmed live
-            # on 24 Aug 2026: all 4 positions reconciled after a mid-day
-            # restart got this wrong, and BIOCON's stop-loss couldn't
-            # place a SELL at all until this was fixed - see NOTES.md bug
-            # #23. This strategy only ever trades config.OPTIONS_PRODUCT
-            # ("MIS") itself, so that's always the correct code here too.
-            product_type=config.OPTIONS_PRODUCT,
-            reconciled=True,
-        ))
-
-    for pos in positions:
-        await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, pos.option_trading_symbol)
-
-    return positions
 
 
 # --------------------------------------------------------------------------- #
@@ -131,16 +83,8 @@ async def reconcile_broker_positions() -> list[Position]:
 def rank_and_pick_top_stocks(
     stock_symbols: list[str], top_n: int = config.TOP_N_STOCKS, prefer_highest: bool = True
 ) -> list[tuple[str, float]]:
-    """Returns [(symbol, pct_change), ...] sorted by %change, top_n only.
-    prefer_highest=True (the bullish /chartink/webhook) picks the biggest
-    gainers first; False (the bearish /chartink/webhook-sell) picks the
-    biggest decliners first - same "strongest signal among the alerted
-    list" idea, just pointed the other way for a PE/bearish scan.
-    Stocks that error out on the quote lookup are skipped (and logged).
-    Paced with a small delay between calls - Dhan's market-data REST API
-    intermittently rate-limit-fails on rapid back-to-back calls (confirmed
-    live); get_day_change_pct() already retries individually, but pacing
-    keeps that from being needed in the first place for a multi-stock alert."""
+    """See Options/trading_engine.py's rank_and_pick_top_stocks - identical
+    logic, reusing the shared dhan_wrapper's get_day_change_pct."""
     scored: list[tuple[str, float]] = []
     for i, symbol in enumerate(stock_symbols):
         if i > 0:
@@ -155,37 +99,24 @@ def rank_and_pick_top_stocks(
     return scored[:top_n]
 
 
-
 # --------------------------------------------------------------------------- #
 # Step 2: enter positions
 # --------------------------------------------------------------------------- #
 async def enter_positions_for_stocks(
     ranked_stocks: list[tuple[str, float]], option_type: str = config.OPTION_TYPE
 ) -> list[dict]:
-    """Places ATM-option BUY orders for as many of the ranked stocks as
-    capacity and dedup rules allow. Returns a per-stock result log.
-    option_type is "CE" for the bullish webhook, "PE" for the bearish
-    /chartink/webhook-sell one - same entry/exit machinery either way,
-    just a different ATM leg."""
+    """See Options/trading_engine.py's enter_positions_for_stocks - identical
+    logic, this package's own position_store."""
     results: list[dict] = []
     loop = asyncio.get_running_loop()
 
     for symbol, pct_change in ranked_stocks:
-        # Atomically checks dedup + capacity and claims the symbol in one
-        # locked step, so two near-simultaneous calls for the same symbol
-        # (e.g. a duplicate Chartink webhook delivery) can't both pass a
-        # check-then-act race and both end up placing an order.
         if not await position_store.reserve_symbol(symbol, option_type):
             logger.info("%s: skipped - already open/in-flight, or no capacity", symbol)
             results.append({"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"})
             continue
 
         try:
-            # Belt-and-suspenders: confirm the broker doesn't already show an
-            # open FNO position for this underlying (another process
-            # instance, a manual trade, or state from before this run) -
-            # our own reservation above only guards duplicates within this
-            # process's in-memory state.
             already_open = await loop.run_in_executor(
                 None, dhan_wrapper.has_open_position_for_underlying, symbol
             )
@@ -196,21 +127,6 @@ async def enter_positions_for_stocks(
                 continue
 
             entry_result = await _enter_single_position(symbol, option_type)
-            # "entered", "amo_placed", and "pending_confirmation" all
-            # correspond to a real order that's now live/queued for this
-            # stock - keep the reservation so a repeat alert today is
-            # treated as a duplicate, and so this stock's slot still counts
-            # against MAX_LIVE_POSITIONS_CE/_PE. Any other outcome
-            # (rejected, etc.) frees the symbol up to retry.
-            # "pending_confirmation" (bug #22's fix) was missing from this
-            # allow-list until now - _enter_single_position deliberately
-            # calls release_order_ownership (not release_symbol) to keep
-            # this same reservation alive when it defers a slow-filling
-            # order to _sync_pending_orders, but this caller was undoing
-            # that by releasing the symbol anyway, right after. Confirmed
-            # live on 24 Aug 2026: let a 3rd CE position (PETRONET) through
-            # past the 2-position cap once its deferred order filled for
-            # real - see NOTES.md bug #24.
             if entry_result.get("status") not in ("entered", "amo_placed", "pending_confirmation"):
                 await position_store.release_symbol(symbol)
             results.append(entry_result)
@@ -231,8 +147,6 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
     quantity = atm.lot_size * config.QUANTITY_LOTS
     tag = _gen_tag(config.ORDER_TAG_PREFIX, symbol)
 
-    # Subscribe to the option's live price over the WebSocket feed as early
-    # as possible so ticks are already flowing by the time we start monitoring.
     await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, atm.trading_symbol)
 
     order_resp = await loop.run_in_executor(
@@ -274,14 +188,6 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
         }
 
     if result.is_queued_amo:
-        # Placed outside market hours - queued as an AMO rather than filled
-        # now. Keep the symbol reserved (so a repeat alert for it today is
-        # still treated as a duplicate) but don't create a live Position
-        # yet - nothing has actually been bought. Hand off ownership so
-        # monitor_loop's _sync_pending_orders() is now allowed to pick this
-        # order up and promote it to a Position once the next session
-        # actually fills it - before this point (NEW/ACKED/etc., still
-        # being resolved right here), it must not touch it.
         await position_store.release_order_ownership(order_id)
         logger.info(
             "BUY order %s for %s queued as AMO - will confirm fill next session.",
@@ -297,22 +203,8 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
         }
 
     if result.status not in OrderStatus.TERMINAL_STATUSES:
-        # Didn't reach a terminal status within the poll budget - seen live
-        # during a Dhan-side slow-fill period where a plain market order
-        # took well over a minute to settle (NOTES.md bug #22). Not
-        # rejected/cancelled and not AMO, so the order is still genuinely
-        # live at the broker and may yet fill (or reject) - guessing a
-        # price via LTP here would let target/SL be computed off a value
-        # that can diverge materially from the real eventual fill price
-        # (confirmed live: LTP fallback of 0.59 vs a real average fill of
-        # 0.46 on the same order - a false stop-loss trigger and a wrong
-        # P&L). Deferring to _sync_pending_orders's existing AMO-style
-        # polling instead - it already re-checks non-terminal BUY orders
-        # every monitor tick and promotes to a Position using the REAL
-        # fill price once Dhan confirms it, or releases the reservation if
-        # it ends up rejected/cancelled. release_order_ownership (not
-        # release_symbol) keeps this symbol reserved in the meantime, so a
-        # repeat alert can't also enter it while its fate is still open.
+        # See Options/trading_engine.py's _enter_single_position (bug #22) -
+        # defer to _sync_pending_orders instead of guessing a fill price.
         await position_store.release_order_ownership(order_id)
         logger.warning(
             "BUY order %s for %s still %s after poll budget - deferring to "
@@ -330,9 +222,6 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
 
     fill_price = result.fill_price
     if not fill_price:
-        # Order reached a terminal "filled" status but the fill price field
-        # hasn't populated yet (rare) - fall back to LTP so target/SL levels
-        # aren't computed off zero.
         fill_price = await loop.run_in_executor(
             None, dhan_wrapper.get_option_ltp, atm.trading_symbol
         )
@@ -376,18 +265,7 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
 # Step 3: monitoring / exits
 # --------------------------------------------------------------------------- #
 async def _exit_position(symbol: str, position: Position, exit_price: float, reason: str) -> None:
-    """Caller MUST have already claimed the exit via
-    position_store.try_start_exit(symbol) before calling this - it does not
-    check/claim itself, since exit checks now fire from two places (the
-    poll loop and event-driven WebSocket ticks) and the claim has to happen
-    atomically before either one decides to act.
-
-    The whole body is wrapped in a catch-all as a safety net: any
-    unexpected exception here (not just a failed placement) must still
-    release the claim via record_exit_failure(), or the position would be
-    stuck forever unable to exit - try_start_exit() would keep seeing a
-    non-empty pending_exit_order_id and refuse every future attempt,
-    including from /square-off-now."""
+    """See Options/trading_engine.py's _exit_position - identical logic."""
     loop = asyncio.get_running_loop()
     tag = _gen_tag("Ext", symbol)
     try:
@@ -399,7 +277,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
         logger.exception("SELL order failed for %s (%s) - backing off before retrying",
                           symbol, position.option_trading_symbol)
         await position_store.record_exit_failure(symbol)
-        return  # leave it live; next eligible retry is gated by next_exit_retry_at
+        return
 
     try:
         order_id = order_resp["order_id"]
@@ -413,7 +291,6 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             status=OrderStatus.TRANSIT,
             is_amo=is_amo,
         ))
-        # Replaces the try_start_exit() placeholder with the real order_id.
         await position_store.set_pending_exit_order(symbol, order_id, reason)
 
         result = await loop.run_in_executor(
@@ -422,12 +299,6 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
         await position_store.update_order_status(order_id, result.status, result.remark)
 
         if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
-            # The SELL was rejected/cancelled by the exchange - the position
-            # is still genuinely open at the broker. Clear the pending
-            # marker and back off before retrying - confirmed live that a
-            # rejection reason like insufficient margin doesn't resolve
-            # within one tick, and without backoff this retries every 5s
-            # indefinitely.
             logger.warning(
                 "SELL order %s for %s rejected: status=%s remark=%s - backing off before retrying",
                 order_id, symbol, result.status, result.remark,
@@ -439,11 +310,6 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
         await position_store.clear_exit_failure(symbol)
 
         if result.is_queued_amo:
-            # Placed outside market hours - queued as an AMO rather than
-            # filled now. Leave the position live with pending_exit_order_id
-            # set (the real order_id, already applied above);
-            # _sync_pending_orders() will close it once the next session
-            # actually fills this order.
             logger.info(
                 "SELL order %s for %s queued as AMO - will confirm fill next session.",
                 order_id, symbol,
@@ -466,8 +332,6 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
 
 
 async def _get_ltp(trading_symbol: str) -> Optional[float]:
-    """Prefers the WebSocket feed's cached LTP (near-instant); falls back to
-    a REST call if no tick has arrived yet (e.g. subscription just made)."""
     loop = asyncio.get_running_loop()
     ltp = await loop.run_in_executor(None, dhan_wrapper.get_cached_option_ltp, trading_symbol)
     if ltp is not None:
@@ -480,12 +344,11 @@ def _exit_on_cooldown(position: Position) -> bool:
 
 
 async def _capture_supertrend_entry_candle(loop, underlying_symbol: str) -> Optional[datetime]:
-    """Best-effort snapshot of the underlying's current Supertrend candle
-    boundary, taken once at entry and stored on Position.
-    supertrend_entry_candle_start - see _supertrend_signal_for(). A fetch
-    failure here shouldn't block an entry that's already filled; returning
-    None just means the exit check won't have an entry-candle baseline to
-    compare against (treated as "not blocked" - see _supertrend_signal_for)."""
+    """See Options/trading_engine.py's version - identical logic. Note the
+    underlying Supertrend computation itself (period/multiplier/warmup) is
+    governed by Options/config.py's values, since refresh_supertrend_signal
+    lives in the shared dhan_client.py - see Futures/config.py's own
+    docstring for why those knobs aren't duplicated here."""
     if not config.ENABLE_SUPERTREND_EXIT:
         return None
     await loop.run_in_executor(None, dhan_wrapper.refresh_supertrend_signal, underlying_symbol)
@@ -493,51 +356,22 @@ async def _capture_supertrend_entry_candle(loop, underlying_symbol: str) -> Opti
 
 
 def _supertrend_signal_for(position: Position) -> bool:
-    """Cache-only, synchronous - safe to call from both the poll loop and
-    the WebSocket tick path. Returns whether the underlying's Supertrend
-    has turned against the position's own direction AND the cached signal
-    has moved at least config.SUPERTREND_ENTRY_GRACE_MINUTES past the
-    candle the position was entered on.
-
-    Direction depends on option_type: a CE (long call) profits when the
-    underlying rises, so a *bearish* crossover is the reversal-against-it
-    signal. A PE (long put) profits when the underlying falls, so the
-    reversal-against-it signal is the opposite - a *bullish* crossover,
-    not a bearish one. Using the same "bearish = exit" check for both
-    would exit CE positions correctly but PE positions exactly backwards
-    (treating the move that confirms the PE thesis as the exit trigger).
-
-    Backtested across 7 real trading days (99 CE trades): skipping only
-    the entry candle itself (0 grace) still let the very next candle exit
-    a position that was still riding the same breakout's aftershock - 9 of
-    11 non-warmup divergent trades exited exactly one candle after entry.
-    A 5-minute grace (one extra candle) flipped the week's net effect from
-    -5,964 to +2,951 vs. target/stop-loss alone, with a better win rate
-    using fewer, higher-quality exits. Confirmed live before the 0-grace
-    version existed: without the entry-candle skip at all, this was cutting
-    winning trades flat at breakeven the instant they were entered."""
+    """See Options/trading_engine.py's version - identical logic/rationale."""
     is_bearish = dhan_wrapper.get_cached_supertrend_bearish(position.underlying_symbol)
     if is_bearish is None:
-        return False  # no signal yet - never force an exit on missing data
+        return False
     against_position = is_bearish if position.option_type == "CE" else (not is_bearish)
     if not against_position:
         return False
     candle_start = dhan_wrapper.get_cached_supertrend_candle_start(position.underlying_symbol)
     entry_candle_start = position.supertrend_entry_candle_start
     if candle_start is None or entry_candle_start is None:
-        return True  # no entry-candle baseline captured - don't block on it
+        return True
     return candle_start > entry_candle_start + timedelta(minutes=config.SUPERTREND_ENTRY_GRACE_MINUTES)
 
 
 def _exit_reason_for(position: Position, ltp: float, supertrend_against_position: bool = False) -> Optional[str]:
-    """Shared target/stop-loss/Supertrend evaluation - used by both the poll
-    loop and the event-driven WebSocket tick handler so the two paths can't
-    drift apart from each other. supertrend_against_position reflects the
-    underlying's 5-min close crossing to the wrong side of its 5-min
-    Supertrend for this position's direction (see
-    trading_engine._supertrend_signal_for - CE vs. PE flips which crossover
-    counts) - caller's responsibility to fetch/pass it, since that read can
-    involve I/O and this function stays synchronous."""
+    """See Options/trading_engine.py's version - identical logic."""
     if ltp >= position.target_price:
         return "TARGET_HIT"
     trailing_sl = position.current_trailing_sl
@@ -550,7 +384,7 @@ def _exit_reason_for(position: Position, ltp: float, supertrend_against_position
 
 async def _check_one_position(symbol: str, position: Position) -> None:
     if position.pending_exit_order_id or _exit_on_cooldown(position):
-        return  # already has an outstanding exit order, or backing off after a placement failure
+        return
 
     try:
         ltp = await _get_ltp(position.option_trading_symbol)
@@ -563,11 +397,6 @@ async def _check_one_position(symbol: str, position: Position) -> None:
     supertrend_against_position = False
     if config.ENABLE_SUPERTREND_EXIT:
         loop = asyncio.get_running_loop()
-        # Blocking REST call, cached internally (see refresh_supertrend_signal) -
-        # safe to call every poll tick since it's a no-op unless the cache is
-        # stale. Only done here, not in on_price_tick, to keep the WebSocket
-        # tick path non-blocking - this poll (every MONITOR_INTERVAL_SECONDS)
-        # is what keeps the cache fresh for both paths to read.
         await loop.run_in_executor(None, dhan_wrapper.refresh_supertrend_signal, position.underlying_symbol)
         supertrend_against_position = _supertrend_signal_for(position)
 
@@ -577,16 +406,12 @@ async def _check_one_position(symbol: str, position: Position) -> None:
 
 
 async def on_price_tick(trading_symbol: str, ltp: float) -> None:
-    """Event-driven exit check, fired as soon as a new price arrives over
-    the WebSocket market feed - instead of waiting for monitor_loop's next
-    poll (up to MONITOR_INTERVAL_SECONDS, 5s by default, late). The poll
-    loop still runs as a fallback/heartbeat (e.g. if the feed is disabled
-    or a position's symbol isn't ticking). Wired up in option_main.py's
-    lifespan via dhan_wrapper.add_price_tick_subscriber(), invoked from the
-    feed's own thread via asyncio.run_coroutine_threadsafe - wrapped in
-    try/except here because exceptions from a threadsafe-scheduled
-    coroutine are otherwise silently dropped rather than surfacing
-    anywhere."""
+    """See Options/trading_engine.py's version - identical logic, this
+    package's own position_store. Wired up in futures_main.py's lifespan
+    via dhan_wrapper.add_price_tick_subscriber() - a list, not a single
+    slot, specifically so this can coexist with Options' own subscriber
+    without either silently overwriting the other (see dhan_client.py's
+    _on_price_tick_subscribers docstring)."""
     try:
         match = next(
             ((sym, pos) for sym, pos in position_store.live_positions.items()
@@ -601,10 +426,6 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
             return
 
         await position_store.update_highest_price(symbol, ltp)
-
-        # Cache-only read (no I/O) - the poll loop's refresh_supertrend_signal()
-        # keeps this warm; a blocking REST call here would stall the event
-        # loop on every tick.
         supertrend_against_position = config.ENABLE_SUPERTREND_EXIT and _supertrend_signal_for(position)
 
         reason = _exit_reason_for(position, ltp, supertrend_against_position)
@@ -615,29 +436,26 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
 
 
 async def _square_off_all(reason: str) -> None:
-    positions = dict(position_store.live_positions)  # snapshot of keys/values
+    positions = dict(position_store.live_positions)
     if not positions:
         return
     logger.info("Square-off triggered (%s) for %d open position(s)", reason, len(positions))
     for symbol, position in positions.items():
         if position.pending_exit_order_id or _exit_on_cooldown(position):
-            continue  # already has an outstanding exit order, or backing off after a placement failure
+            continue
         try:
             ltp = await _get_ltp(position.option_trading_symbol)
         except Exception:  # noqa: BLE001
-            ltp = position.entry_price  # best-effort fallback for logging only
+            ltp = position.entry_price
         if not await position_store.try_start_exit(symbol):
-            continue  # an event-driven tick claimed it in the meantime
+            continue
         await _exit_position(symbol, position, ltp, reason)
 
 
 async def _sync_pending_orders() -> None:
-    """Re-checks orders whose fate was still open last time: queued AMO BUY
-    entries not yet promoted to a live Position, and outstanding exit
-    orders on live positions. Cheap - normally a no-op, since orders placed
-    during market hours already resolve within wait_for_order_result's own
-    retry budget. This only matters for AMO orders that need to be picked
-    up once the next session actually dispatches them."""
+    """See Options/trading_engine.py's version - identical logic, operates
+    only on orders this package itself placed (position_store.orders_today),
+    so it works correctly without broker reconciliation."""
     loop = asyncio.get_running_loop()
 
     pending_entries = [
@@ -645,10 +463,6 @@ async def _sync_pending_orders() -> None:
         if o.transaction_type == "BUY"
         and o.status not in OrderStatus.TERMINAL_STATUSES
         and o.underlying_symbol not in position_store.live_positions
-        # Confirmed live: without this, a monitor_loop tick landing while
-        # _enter_single_position is still inline-resolving a fresh order
-        # (e.g. delayed by a rate-limit retry) races the placer to promote
-        # the same order to a Position twice.
         and not o.owned_by_placer
     ]
     for order in pending_entries:
@@ -697,12 +511,11 @@ async def _sync_pending_orders() -> None:
                 "AMO BUY order %s for %s filled - position now live.",
                 order.order_id, order.underlying_symbol,
             )
-        # else: still queued as AMO - nothing to do, check again next tick.
 
     positions = dict(position_store.live_positions)
     for symbol, position in positions.items():
         if not position.pending_exit_order_id or position.pending_exit_order_id == EXIT_CLAIMED:
-            continue  # no exit outstanding, or one's mid-placement right now - nothing to sync yet
+            continue
         try:
             result = await loop.run_in_executor(
                 None, dhan_wrapper.refresh_order_status, position.pending_exit_order_id, True
@@ -725,12 +538,11 @@ async def _sync_pending_orders() -> None:
             final_exit_price = result.fill_price or position.highest_price
             await position_store.close_position(symbol, final_exit_price, position.pending_exit_reason or "AMO_EXIT_FILLED")
             await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.option_trading_symbol)
-        # else: still queued as AMO - nothing to do, check again next tick.
 
 
 async def monitor_loop() -> None:
     """Runs forever; polls open positions and enforces exits + EOD square-off."""
-    logger.info("Monitor loop started.")
+    logger.info("Futures monitor loop started.")
     squared_off_today_for: set = set()
 
     while True:
@@ -751,6 +563,6 @@ async def monitor_loop() -> None:
                     *[_check_one_position(sym, pos) for sym, pos in positions]
                 )
         except Exception:  # noqa: BLE001
-            logger.exception("Error in monitor loop tick")
+            logger.exception("Error in Futures monitor loop tick")
 
         await asyncio.sleep(config.MONITOR_INTERVAL_SECONDS)
