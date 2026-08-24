@@ -738,6 +738,31 @@ out of git.
     for positions that existed *before* the cutoff, this only stops new
     ones from slipping in after it.
 
+26. **`CopperOptions/paper_engine.py`'s open paper position lives in
+    memory only, same limitation as the live Options strategy's
+    `position_store` (see "Known external constraints" below) - but
+    unlike that strategy, nothing reconciles it back from a real broker
+    position on restart, because there isn't one (it's paper trading).**
+    Only *completed* trades are persisted (`PaperTradeStore._load_from_disk`
+    / `.record()`); `_state.open_position` is a plain module-level
+    variable. Found live on 24 Aug 2026: a COPPER 1410 CE paper position
+    (entered 15:31, the strategy's activation time) was still open when
+    `dhanboy.service` was restarted for an unrelated config change (the
+    live Options strategy's target/SL update) - the restart silently
+    dropped it with no exit ever recorded, no trace of how it would have
+    resolved. Not a financial loss (paper trading), but a loss of the
+    evidence this strategy exists to accumulate (see `BACKTEST_RESULTS.md`'s
+    Copper section - the whole point of running this in paper mode is
+    building a trustworthy live track record after the backtest itself
+    came back inconclusive). A fresh position (1420 CE) was entered
+    normally after the restart and closed normally via
+    `SUPERTREND_EXIT`. **Not fixed** - noting for awareness: any restart
+    while Copper has an open paper position will silently lose that
+    trade's outcome. Worth fixing the same way if this strategy ever
+    goes live for real (persist the open position too, not just
+    completed trades), but low urgency while paper-only and restarts
+    during Copper's 15:31-market-close window are infrequent.
+
 ## Design decisions
 
 - **Separate capacity caps per option type** (`MAX_LIVE_POSITIONS_CE` /
