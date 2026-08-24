@@ -46,6 +46,18 @@ def _parse_hhmm_today(hhmm: str) -> datetime:
     return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
+def is_past_square_off_time() -> bool:
+    """True once today's config.SQUARE_OFF_TIME has passed. Webhook entry
+    handlers use this to refuse new positions past that point - see
+    NOTES.md bug #25. monitor_loop's own square-off only fires once
+    (squared_off_today_for), so any position entered after that one-time
+    pass would otherwise sit with no further target/SL/square-off
+    monitoring for the rest of the day - confirmed live on 24 Aug 2026: a
+    webhook arrived seconds after square-off fired and entered a position
+    that then had zero automated exit protection."""
+    return _now_ist() >= _parse_hhmm_today(config.SQUARE_OFF_TIME)
+
+
 def _gen_tag(prefix: str, symbol: str) -> str:
     """Dhan's correlationId rejects special characters (confirmed live:
     GVT&D's "&" caused a hard "Invalid correlationId" rejection on order

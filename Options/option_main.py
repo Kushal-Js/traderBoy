@@ -52,6 +52,7 @@ from .dhan_client import dhan_wrapper
 from .position_store import position_store
 from .trading_engine import (
     enter_positions_for_stocks,
+    is_past_square_off_time,
     monitor_loop,
     on_price_tick,
     rank_and_pick_top_stocks,
@@ -163,6 +164,21 @@ async def _handle_chartink_webhook(
     """Shared by both webhooks below - only the ATM leg (CE/PE) and which
     end of the %change ranking counts as "strongest" differ."""
     await position_store.maybe_reset_for_new_day()
+
+    if is_past_square_off_time():
+        # monitor_loop's own square-off (config.SQUARE_OFF_TIME) only fires
+        # once per day - a position entered after that one-time pass would
+        # otherwise sit with no further target/SL/square-off monitoring for
+        # the rest of the day. See NOTES.md bug #25.
+        logger.info(
+            "Ignoring alert (%s) - past today's %s square-off time, not opening new positions.",
+            option_type, config.SQUARE_OFF_TIME,
+        )
+        return {
+            "status": "ignored",
+            "reason": "past_square_off_time",
+            "square_off_time": config.SQUARE_OFF_TIME,
+        }
 
     stocks = payload.stock_list()
     logger.info(

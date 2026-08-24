@@ -714,6 +714,30 @@ out of git.
     forward-looking entry control, not a reason to unwind a real position
     early.
 
+25. **A webhook alert arriving after `config.SQUARE_OFF_TIME` could open a
+    position with zero further automated exit monitoring for the rest of
+    the day.** Found live on 24 Aug 2026, seconds after square-off itself
+    fired: a Chartink alert for INDIANB arrived at 09:45:07 UTC (square-off
+    fired at 09:45:03), the webhook handler had no time gate at all and
+    entered it normally. `monitor_loop`'s square-off is a one-time pass
+    per day (`squared_off_today_for`, keyed by date) - once it's fired,
+    every later loop iteration fails *both* branches of `if now >=
+    square_off_at and today_key not in squared_off_today_for: ... elif now
+    < square_off_at: ...` (the first because the date's already in the
+    set, the second because time has passed), so a position entered after
+    that point gets no target/SL check and no square-off for the rest of
+    the process's life - not caught until the broker's own MIS
+    auto-square-off (if the position survives that long) or the next
+    day's `reconcile_broker_positions()`. Manually closed by hand once
+    spotted live. Fix: added `trading_engine.is_past_square_off_time()`,
+    checked at the top of `_handle_chartink_webhook` (`option_main.py`) -
+    an alert arriving after `SQUARE_OFF_TIME` is now ignored outright
+    (`status: "ignored", reason: "past_square_off_time"`) rather than
+    silently entering an unmonitored position. Doesn't touch
+    `monitor_loop` itself - the one-time square-off pass is still correct
+    for positions that existed *before* the cutoff, this only stops new
+    ones from slipping in after it.
+
 ## Design decisions
 
 - **Separate capacity caps per option type** (`MAX_LIVE_POSITIONS_CE` /
