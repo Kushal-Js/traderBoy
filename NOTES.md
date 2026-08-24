@@ -763,6 +763,42 @@ out of git.
     completed trades), but low urgency while paper-only and restarts
     during Copper's 15:31-market-close window are infrequent.
 
+27. **Bug #21's `pin_totp` switch automated *generating* a fresh Dhan
+    token, but nothing automated actually getting the long-running
+    process to *pick one up* before the previous one expires.**
+    `authenticate()` only runs once, at process startup
+    (`option_main.lifespan`) - there's no re-authentication anywhere in
+    the running process's lifetime after that. Dhan tokens are still
+    capped at ~24h by regulation regardless of how they're generated
+    (this was already known - see bug #21's own writeup - the part that
+    was missed is what happens to a process that's simply never
+    restarted across that boundary). Found live on 24/25 Aug 2026: a
+    process last (re)started at 18:24 IST on 24 Aug logged
+    `Token validity: 25/08/2026 06:24` - meaning without a restart after
+    that point, every Dhan API call from 06:24 IST onward on 25 Aug
+    (including the market open at 09:15 and the new paper-trade
+    webhook's first expected alert at 09:16 - see the design-decision
+    entry below) would have started failing with an expired-token error,
+    silently, with nothing about the process itself signaling that
+    anything was wrong.
+
+    **Fix**: a new systemd timer, `dhanboy-morning-refresh.timer`
+    (`OnCalendar=*-*-* 02:30:00` UTC = 08:00 IST daily, `Persistent=true`),
+    triggers `dhanboy-morning-refresh.service` (a oneshot
+    `systemctl restart dhanboy.service`) every trading day - 1h36m past
+    the observed ~06:24 IST expiry boundary (so a still-cached token from
+    the day before is guaranteed to have actually expired and gets
+    freshly regenerated, not just reused) and 1h15m before the 09:15
+    market open. Deliberately a *restart*, not an in-process re-auth
+    call - `authenticate()` already fully replaces `dhan_wrapper.client`
+    on every call, and restarting reuses the exact same startup path
+    already proven correct (reconcile_broker_positions, WS feed
+    reconnect, etc.) rather than adding a second, less-tested code path
+    for the same outcome. No live-position risk at 08:00 IST specifically
+    - nothing can be open that early, so this is the same "positions
+    guaranteed empty" safety window every other same-day restart this
+    session had to check for manually.
+
 ## Design decisions
 
 - **`POST /chartink/webhook-papertrade` (`Options/paper_webhook.py`, added
