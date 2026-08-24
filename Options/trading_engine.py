@@ -288,6 +288,12 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
     )
     await position_store.add_position(position)
 
+    logger.info(
+        "BUY order %s FILLED for %s (%s): qty=%s entry_price=%s target=%.2f sl=%.2f",
+        order_id, symbol, atm.trading_symbol, quantity, fill_price,
+        position.target_price, position.hard_stop_loss,
+    )
+
     return {
         "symbol": symbol,
         "status": "entered",
@@ -380,6 +386,12 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
         final_exit_price = result.fill_price or exit_price
         await position_store.close_position(symbol, final_exit_price, reason)
         await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.option_trading_symbol)
+        pnl = (final_exit_price - position.entry_price) * position.quantity
+        logger.info(
+            "SELL order %s FILLED for %s (%s): reason=%s entry=%s exit=%s qty=%s pnl=%.2f",
+            order_id, symbol, position.option_trading_symbol, reason,
+            position.entry_price, final_exit_price, position.quantity, pnl,
+        )
     except Exception:  # noqa: BLE001
         logger.exception("Unexpected error resolving SELL order for %s (%s) - backing off before retrying",
                           symbol, position.option_trading_symbol)
