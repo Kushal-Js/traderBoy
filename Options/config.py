@@ -56,6 +56,14 @@ TOP_N_STOCKS = int(os.getenv("TOP_N_STOCKS", "3"))
 MAX_LIVE_POSITIONS_CE = int(os.getenv("MAX_LIVE_POSITIONS_CE", "2"))
 MAX_LIVE_POSITIONS_PE = int(os.getenv("MAX_LIVE_POSITIONS_PE", "2"))
 
+# /chartink/webhook-papertrade (paper_webhook.py) - a second, independent
+# position pool for evaluating a new Chartink scan before trusting it with
+# real money. Deliberately separate from TOP_N_STOCKS/MAX_LIVE_POSITIONS_CE
+# so a burst of alerts on this scan can't starve the real strategy's
+# capacity, or vice versa.
+PAPERTRADE_TOP_N_STOCKS = int(os.getenv("PAPERTRADE_TOP_N_STOCKS", "3"))
+PAPERTRADE_MAX_POSITIONS = int(os.getenv("PAPERTRADE_MAX_POSITIONS", "2"))
+
 TARGET_PCT = float(os.getenv("TARGET_PCT", "0.10"))          # +10% target
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.03"))    # -3% hard stop loss
 

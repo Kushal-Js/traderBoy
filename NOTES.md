@@ -765,6 +765,28 @@ out of git.
 
 ## Design decisions
 
+- **`POST /chartink/webhook-papertrade` (`Options/paper_webhook.py`, added
+  24 Aug 2026)** - a second, independent Chartink endpoint for evaluating
+  a new scan before trusting it with real money, without touching the
+  live strategy at all. Bullish/CE only, matching `/chartink/webhook`'s
+  own convention (PE wasn't requested). Deliberately reuses the real
+  strategy's own `rank_and_pick_top_stocks`, `Position`,
+  `_exit_reason_for`, and `_supertrend_signal_for` (imported from
+  `trading_engine.py`, not reimplemented) so the only variable under test
+  is the new scan's stock-picking quality, not a different set of exit
+  rules - the same principle the Robot01 CSV backtest used. Entirely
+  separate position pool from the real strategy (`PAPERTRADE_TOP_N_STOCKS`
+  / `PAPERTRADE_MAX_POSITIONS`, independent of `TOP_N_STOCKS` /
+  `MAX_LIVE_POSITIONS_CE`) so a burst of alerts on either side can't
+  starve the other's capacity. `PAPER_TRADING_ONLY = True` is a hardcoded
+  module-level constant (not an env var), matching the
+  IndexScalping/CopperOptions pattern - this module never imports
+  `place_market_order`. Unlike CopperOptions' paper engine (bug #26), the
+  open position here is persisted to disk on every change, not just
+  completed trades - fixes that same restart-loses-history gap at the
+  design stage instead of hitting it live first. Check results via
+  `GET /papertrade/trades`.
+
 - **Separate capacity caps per option type** (`MAX_LIVE_POSITIONS_CE` /
   `MAX_LIVE_POSITIONS_PE`, both default 2) replaced the single shared
   `MAX_LIVE_POSITIONS`. `reserved_symbols` changed from a `set[str]` to a

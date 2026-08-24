@@ -47,7 +47,7 @@ from typing import Optional
 from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel, field_validator
 
-from . import config
+from . import config, paper_webhook
 from .dhan_client import dhan_wrapper
 from .position_store import position_store
 from .trading_engine import (
@@ -62,8 +62,10 @@ from .trading_engine import (
 logger = logging.getLogger("option_main")
 
 router = APIRouter()
+router.include_router(paper_webhook.router)
 
 _monitor_task: Optional[asyncio.Task] = None
+_paper_monitor_task: Optional[asyncio.Task] = None
 
 
 @asynccontextmanager
@@ -72,7 +74,7 @@ async def lifespan(app: FastAPI):
     starts its market-data feed, reconciles any broker positions left
     open from a previous run, and starts this strategy's monitor loop.
     Composed into the shared app's lifespan by main.py."""
-    global _monitor_task
+    global _monitor_task, _paper_monitor_task
     loop = asyncio.get_running_loop()
 
     # Bridges the market-feed's WebSocket thread back onto the event loop -
@@ -115,10 +117,13 @@ async def lifespan(app: FastAPI):
         logger.exception("Could not reconcile broker positions at startup - continuing without them.")
 
     _monitor_task = asyncio.create_task(monitor_loop())
-    logger.info("Options strategy startup complete: authenticated + monitor loop running.")
+    _paper_monitor_task = asyncio.create_task(paper_webhook.poll_loop())
+    logger.info("Options strategy startup complete: authenticated + monitor loop + paper-trade poll loop running.")
     yield
     if _monitor_task:
         _monitor_task.cancel()
+    if _paper_monitor_task:
+        _paper_monitor_task.cancel()
 
 
 # --------------------------------------------------------------------------- #
