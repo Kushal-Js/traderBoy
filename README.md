@@ -86,8 +86,21 @@ URLs — matching the `webhook_url` field in your sample payload.
    (default), new entries are allowed all day up to market
    hours/`SQUARE_OFF_TIME`, unaffected by this flag. Independent of
    `SQUARE_OFF_TIME`, which governs closing *existing* positions, not
-   opening new ones — positions already open when the cutoff passes keep
-   full target/stop-loss/Supertrend/square-off monitoring regardless.
+   opening new ones.
+
+   **What happens to a position still open when the cutoff passes:**
+   nothing — it's untouched. `is_past_allowed_trading_time()` is only
+   checked in the webhook handlers, before ranking/entering anything new;
+   it's never referenced anywhere in the exit path
+   (`monitor_loop`/`_check_one_position`/`on_price_tick`/`_square_off_all`).
+   A position opened at, say, 11:05 keeps getting evaluated on every exit
+   condition exactly as if this feature didn't exist - target, hard/
+   trailing/dynamic stop-loss, the `MAX_LOSS_PER_TRADE_RS` rupee cap, and
+   the Supertrend reversal exit all keep firing normally, right up through
+   `SQUARE_OFF_TIME` (which force-closes it then, same as any other day).
+   The cutoff's only effect is blocking a *new* alert after 11:30 from
+   opening something new - it has no interaction with anything already
+   live.
 
 2. **Top-N by %change** — on receipt, `rank_and_pick_top_stocks()` fetches
    OHLC data for each stock and ranks by day's %change - highest first for
