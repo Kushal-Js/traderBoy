@@ -492,13 +492,38 @@ class DhanWrapper:
     def get_atm_option(self, underlying_symbol: str, option_type: str) -> AtmOption:
         """Delegates ATM strike selection to Tradehull's own
         ATM_Strike_Selection (nearest expiry via Expiry=0), then looks up
-        security_id/lot_size for the chosen leg from the instrument master.
-        Retried (see _retry) - this is on the critical entry path and
-        Dhan's market-data calls can transiently rate-limit-fail."""
-        return _retry(self._get_atm_option_once, underlying_symbol, option_type)
+        security_id/lot_size/expiry for the chosen leg from the instrument
+        master. Retried (see _retry) - this is on the critical entry path
+        and Dhan's market-data calls can transiently rate-limit-fail.
 
-    def _get_atm_option_once(self, underlying_symbol: str, option_type: str) -> AtmOption:
-        result = self.client.ATM_Strike_Selection(Underlying=underlying_symbol, Expiry=0)
+        Rolls forward to the NEXT listed expiry (Expiry=1) if the nearest
+        one expires today - Dhan blocks new positions in a stock option on
+        its own expiry day regardless of product type (confirmed live on
+        25 Aug 2026, see NOTES.md bug #28: every stock-option order that
+        day was RMS-rejected because it's a monthly-expiry Tuesday and
+        stock options only have a monthly series). Rolling to next month's
+        contract instead of just skipping keeps the strategy trading
+        through what would otherwise be a dead day every month. Falls back
+        to the nearest contract as-is if the roll itself still lands on
+        today (e.g. only one expiry currently listed) - the caller's own
+        expiry-day guard is the last line of defense in that edge case."""
+        atm = _retry(self._get_atm_option_once, underlying_symbol, option_type, 0)
+        if atm.expiry_date == datetime.now(IST).date():
+            logger.info(
+                "%s: nearest contract (%s) expires today - rolling to next month's expiry instead",
+                underlying_symbol, atm.trading_symbol,
+            )
+            rolled = _retry(self._get_atm_option_once, underlying_symbol, option_type, 1)
+            if rolled.expiry_date != atm.expiry_date:
+                return rolled
+            logger.warning(
+                "%s: rolled-forward contract (%s) still expires today - no further expiry listed yet",
+                underlying_symbol, rolled.trading_symbol,
+            )
+        return atm
+
+    def _get_atm_option_once(self, underlying_symbol: str, option_type: str, expiry_index: int = 0) -> AtmOption:
+        result = self.client.ATM_Strike_Selection(Underlying=underlying_symbol, Expiry=expiry_index)
         if not result:
             raise ValueError(f"Could not determine ATM strike for {underlying_symbol}")
         ce_symbol, pe_symbol, strike = result

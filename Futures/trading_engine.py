@@ -147,10 +147,11 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
 
     if atm.expiry_date == _now_ist().date():
         # See Options/trading_engine.py's identical guard (NOTES.md bug #28)
-        # for the full rationale - stock options are blocked from new
-        # entries on their own (monthly, last-Tuesday) expiry day.
+        # for the full rationale - get_atm_option() already rolls forward
+        # to next month's contract on expiry day; reaching here means even
+        # that rolled-forward contract still expires today.
         logger.info(
-            "%s: skipped - %s expires today, new stock-option positions are blocked on expiry day",
+            "%s: skipped - %s expires today and no later expiry is available yet",
             symbol, atm.trading_symbol,
         )
         return {

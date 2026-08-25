@@ -822,21 +822,31 @@ out of git.
     in the same window but looks like an unrelated, likely transient
     Dhan-side data-feed issue - not confirmed as expiry-related.
 
-    **Fix**: `_enter_single_position()` in both `Options/trading_engine.py`
-    and `Futures/trading_engine.py` now checks the ATM contract's own
-    `expiry_date` (added to `AtmOption`/`_instrument_meta` in
-    `dhan_client.py`, read from the scrip master's `SEM_EXPIRY_DATE`
-    column - the same field Tradehull's own `ATM_Strike_Selection` uses
-    internally) against today's date *before* subscribing to the price
-    feed or placing any order. A match returns `"skipped_expiry_day"`
-    immediately - releasing the symbol reservation via the same allow-list
-    path `"rejected"` already used - instead of burning an API call and a
-    noisy rejection log line on an order that would always fail today.
-    This is a real, recurring monthly condition (every last Tuesday), not
-    a one-off - verified fully offline (mocked `dhan_wrapper`, zero real
-    network calls reachable) in
-    `/private/tmp/.../scratchpad/test_expiry_guard.py` before deploy, per
-    the stricter-verification practice established after the Futures
+    **Fix (v1, same day)**: `_enter_single_position()` in both
+    `Options/trading_engine.py` and `Futures/trading_engine.py` checked the
+    ATM contract's own `expiry_date` (added to `AtmOption`/
+    `_instrument_meta` in `dhan_client.py`, read from the scrip master's
+    `SEM_EXPIRY_DATE` column) against today's date and skipped the entry
+    outright on a match.
+
+    **Fix (v2, same day, supersedes v1)**: skipping loses a trading day
+    every month for no real reason - the underlying stock still has a
+    tradeable option chain, just under next month's contract. Rather than
+    skip, `DhanWrapper.get_atm_option()` now **rolls forward to the next
+    listed expiry** (`ATM_Strike_Selection(..., Expiry=1)`) whenever the
+    nearest one (`Expiry=0`) expires today, and only returns the
+    still-expiring-today contract if the roll itself lands on the same
+    date too (i.e. no further expiry is listed yet for that stock - an
+    edge case, not the normal case). `_enter_single_position()`'s
+    expiry-date check is now just the last line of defense for that edge
+    case, not the primary behavior - normal days and stocks with a next
+    expiry already listed trade straight through expiry day on the rolled
+    contract, with no rejection and no skip. Verified fully offline
+    (mocked `dhan_wrapper._get_atm_option_once`, zero real network calls
+    reachable) in `/private/tmp/.../scratchpad/test_expiry_guard.py` -
+    covers the roll succeeding, the no-further-expiry fallback, and a
+    normal (non-expiry) day being unaffected - before deploy, per the
+    stricter-verification practice established after the Futures
     package's testing incident (see the design-decision entry below).
 
 ## Design decisions
