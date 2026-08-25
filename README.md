@@ -79,6 +79,16 @@ URLs — matching the `webhook_url` field in your sample payload.
    `MAX_LIVE_POSITIONS_PE`), so a run of alerts on one side can't crowd
    out capacity for the other.
 
+1b. **Entry cutoff** — `POST /chartink/webhook`, `/chartink/webhook-sell`,
+   and `/chartink/webhook-futures` all refuse to open new positions once
+   `config.ALLOWED_TRADING_TIME` (default `11:30`) has passed, but only
+   when `config.ENABLE_TRADING_TIME_LIMIT` is `true` — when `false`
+   (default), new entries are allowed all day up to market
+   hours/`SQUARE_OFF_TIME`, unaffected by this flag. Independent of
+   `SQUARE_OFF_TIME`, which governs closing *existing* positions, not
+   opening new ones — positions already open when the cutoff passes keep
+   full target/stop-loss/Supertrend/square-off monitoring regardless.
+
 2. **Top-N by %change** — on receipt, `rank_and_pick_top_stocks()` fetches
    OHLC data for each stock and ranks by day's %change - highest first for
    the bullish webhook, lowest/most negative first (biggest decliners) for

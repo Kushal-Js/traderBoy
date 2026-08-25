@@ -168,6 +168,17 @@ DEFAULT_EXCHANGE = "NFO"  # Dhan-Tradehull's exchange code for NSE F&O
 MARKET_TZ = "Asia/Kolkata"
 MARKET_OPEN_TIME = "09:15"
 SQUARE_OFF_TIME = os.getenv("SQUARE_OFF_TIME", "15:15")
+
+# Restricts NEW entries to before a cutoff time - independent of
+# SQUARE_OFF_TIME above, which governs closing EXISTING positions, not
+# opening new ones. When false (default), new entries are allowed all day
+# up to market hours/SQUARE_OFF_TIME, same as before this flag existed.
+# When true, no new entry is opened once ALLOWED_TRADING_TIME has passed -
+# already-open positions are unaffected either way and keep full
+# target/SL/Supertrend/square-off monitoring regardless of this flag; it
+# only gates new entries (see option_main.py's webhook handler).
+ENABLE_TRADING_TIME_LIMIT = os.getenv("ENABLE_TRADING_TIME_LIMIT", "false").lower() == "true"
+ALLOWED_TRADING_TIME = os.getenv("ALLOWED_TRADING_TIME", "11:30")
 MARKET_CLOSE_TIME = "15:30"
 
 MONITOR_INTERVAL_SECONDS = int(os.getenv("MONITOR_INTERVAL_SECONDS", "5"))

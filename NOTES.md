@@ -1143,6 +1143,36 @@ out of git.
   option types, the cap firing before a distant percentage SL would, and
   a profitable position being unaffected - 18/18 checks passed.
 
+- **New-entry time cutoff added to both `Options/` and `Futures/` (25 Aug
+  2026, user request): `ENABLE_TRADING_TIME_LIMIT` +
+  `ALLOWED_TRADING_TIME`, deliberately separate from `SQUARE_OFF_TIME`.**
+  `SQUARE_OFF_TIME` (default `15:15`) governs closing *existing* open
+  positions at end of day; this new pair governs whether a *new* position
+  is allowed to open at all. `is_past_allowed_trading_time()` (mirrors the
+  existing `is_past_square_off_time()`, bug #25's pattern) is checked in
+  each webhook handler (`option_main.py`'s two endpoints,
+  `futures_main.py`'s one) before any ranking or order placement - a match
+  returns `{"status": "ignored", "reason": "past_allowed_trading_time"}`
+  without touching the Dhan API at all. When `ENABLE_TRADING_TIME_LIMIT`
+  is `false` (the code default), this always returns `False` - entries are
+  allowed all day exactly as before this feature existed, gated only by
+  `SQUARE_OFF_TIME` as always. Positions already open when the cutoff
+  passes are completely unaffected - they keep full target/stop-loss/
+  dynamic-SL/Supertrend/square-off monitoring regardless of this flag,
+  since it only intercepts new entries at the webhook layer.
+
+  Env vars: `ENABLE_TRADING_TIME_LIMIT` / `ALLOWED_TRADING_TIME` (Options),
+  `FUTURES_ENABLE_TRADING_TIME_LIMIT` / `FUTURES_ALLOWED_TRADING_TIME`
+  (Futures) - **both currently set to `true` / `11:30` in `.env`** (the
+  user's request came with a concrete value they wanted active
+  immediately, not just a new off-by-default option) - flip the
+  `ENABLE_*` var to `false` to go back to all-day entries without
+  removing the code. Verified fully offline in
+  `/private/tmp/.../scratchpad/test_trading_time_limit.py`: the on/off
+  flag itself, before/at/after the cutoff, and both webhook handlers
+  short-circuiting before `rank_and_pick_top_stocks`/order placement are
+  ever reached - 16/16 checks passed, zero real network calls reachable.
+
 ## Capital requirements
 
 Since this strategy only ever *buys* options (never sells/writes), capital

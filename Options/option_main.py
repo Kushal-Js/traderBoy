@@ -61,6 +61,7 @@ from .dhan_client import dhan_wrapper
 from .position_store import position_store
 from .trading_engine import (
     enter_positions_for_stocks,
+    is_past_allowed_trading_time,
     is_past_square_off_time,
     monitor_loop,
     on_price_tick,
@@ -178,6 +179,20 @@ async def _handle_chartink_webhook(
     """Shared by both webhooks below - only the ATM leg (CE/PE) and which
     end of the %change ranking counts as "strongest" differ."""
     await position_store.maybe_reset_for_new_day()
+
+    if is_past_allowed_trading_time():
+        # Only gates NEW entries, and only when config.ENABLE_TRADING_TIME_LIMIT
+        # is on - existing open positions keep full exit monitoring
+        # regardless. See NOTES.md's design-decision entry.
+        logger.info(
+            "Ignoring alert (%s) - past today's allowed trading cutoff (%s), not opening new positions.",
+            option_type, config.ALLOWED_TRADING_TIME,
+        )
+        return {
+            "status": "ignored",
+            "reason": "past_allowed_trading_time",
+            "allowed_trading_time": config.ALLOWED_TRADING_TIME,
+        }
 
     if is_past_square_off_time():
         # monitor_loop's own square-off (config.SQUARE_OFF_TIME) only fires

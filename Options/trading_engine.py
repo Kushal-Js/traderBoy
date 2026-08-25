@@ -58,6 +58,20 @@ def is_past_square_off_time() -> bool:
     return _now_ist() >= _parse_hhmm_today(config.SQUARE_OFF_TIME)
 
 
+def is_past_allowed_trading_time() -> bool:
+    """True once today's config.ALLOWED_TRADING_TIME has passed, but only
+    when config.ENABLE_TRADING_TIME_LIMIT is on - webhook entry handlers
+    use this to refuse NEW positions past that point, the same way
+    is_past_square_off_time() already does for SQUARE_OFF_TIME. When the
+    flag is off, this always returns False - new entries are allowed all
+    day up to market hours/SQUARE_OFF_TIME, same as before this feature
+    existed. Existing open positions are unaffected either way - this only
+    gates new entries, not exit monitoring."""
+    if not config.ENABLE_TRADING_TIME_LIMIT:
+        return False
+    return _now_ist() >= _parse_hhmm_today(config.ALLOWED_TRADING_TIME)
+
+
 def _gen_tag(prefix: str, symbol: str) -> str:
     """Dhan's correlationId rejects special characters (confirmed live:
     GVT&D's "&" caused a hard "Invalid correlationId" rejection on order

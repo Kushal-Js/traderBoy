@@ -45,6 +45,7 @@ from .dhan_client import dhan_wrapper
 from .position_store import position_store
 from .trading_engine import (
     enter_positions_for_stocks,
+    is_past_allowed_trading_time,
     is_past_square_off_time,
     monitor_loop,
     on_price_tick,
@@ -112,6 +113,17 @@ async def chartink_webhook_futures(payload: ChartinkWebhookPayload):
     """Bullish scan - buys ATM CE (placeholder for a real futures contract
     buy) on the alerted stocks with the highest %change."""
     await position_store.maybe_reset_for_new_day()
+
+    if is_past_allowed_trading_time():
+        logger.info(
+            "Ignoring alert - past today's allowed trading cutoff (%s), not opening new positions.",
+            config.ALLOWED_TRADING_TIME,
+        )
+        return {
+            "status": "ignored",
+            "reason": "past_allowed_trading_time",
+            "allowed_trading_time": config.ALLOWED_TRADING_TIME,
+        }
 
     if is_past_square_off_time():
         logger.info(

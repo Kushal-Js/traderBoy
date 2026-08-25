@@ -70,6 +70,11 @@ OPTIONS_PRODUCT = "MIS"  # rename to reflect futures once real contracts replace
 MARKET_TZ = "Asia/Kolkata"
 SQUARE_OFF_TIME = os.getenv("FUTURES_SQUARE_OFF_TIME", "15:15")
 
+# See Options/config.py's identical flag - this package's own independently-
+# tunable cutoff for NEW entries only.
+ENABLE_TRADING_TIME_LIMIT = os.getenv("FUTURES_ENABLE_TRADING_TIME_LIMIT", "false").lower() == "true"
+ALLOWED_TRADING_TIME = os.getenv("FUTURES_ALLOWED_TRADING_TIME", "11:30")
+
 MONITOR_INTERVAL_SECONDS = int(os.getenv("FUTURES_MONITOR_INTERVAL_SECONDS", "5"))
 
 LOT_SIZE_FALLBACK = int(os.getenv("FUTURES_LOT_SIZE_FALLBACK", "1"))

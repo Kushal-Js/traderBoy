@@ -68,6 +68,14 @@ def is_past_square_off_time() -> bool:
     return _now_ist() >= _parse_hhmm_today(config.SQUARE_OFF_TIME)
 
 
+def is_past_allowed_trading_time() -> bool:
+    """See Options/trading_engine.py's identical function - same rationale,
+    this package's own config.ENABLE_TRADING_TIME_LIMIT / ALLOWED_TRADING_TIME."""
+    if not config.ENABLE_TRADING_TIME_LIMIT:
+        return False
+    return _now_ist() >= _parse_hhmm_today(config.ALLOWED_TRADING_TIME)
+
+
 def _gen_tag(prefix: str, symbol: str) -> str:
     """Dhan's correlationId rejects special characters - see Options'
     equivalent for the live incident (GVT&D, DH-905) that made this
