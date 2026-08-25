@@ -228,6 +228,32 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
     atm = await loop.run_in_executor(
         None, dhan_wrapper.get_atm_option, symbol, option_type
     )
+
+    if atm.expiry_date == _now_ist().date():
+        # Stock options only have a monthly series (no weekly expiry), and
+        # NSE moved the monthly expiry for every single-stock contract to
+        # the last Tuesday of the month from 1-Sept-2025. Dhan (like every
+        # broker) blocks *new* positions in a stock option on its own
+        # expiry day regardless of product type, citing liquidity risk near
+        # expiry. Confirmed live on 25 Aug 2026 (itself a last-Tuesday-of-
+        # the-month expiry day): literally every stock the bot tried that
+        # day failed with an identical "transactions are blocked by our
+        # risk systems" RMS rejection, because every stock-option contract
+        # shares this same monthly expiry calendar - see NOTES.md bug #28.
+        # Skip before placing (or even subscribing to) anything, so this
+        # doesn't burn an API call and a noisy rejection log line on an
+        # order that will always fail today.
+        logger.info(
+            "%s: skipped - %s expires today, new stock-option positions are blocked on expiry day",
+            symbol, atm.trading_symbol,
+        )
+        return {
+            "symbol": symbol,
+            "status": "skipped_expiry_day",
+            "option_trading_symbol": atm.trading_symbol,
+            "expiry_date": str(atm.expiry_date),
+        }
+
     quantity = atm.lot_size * config.QUANTITY_LOTS
     tag = _gen_tag(config.ORDER_TAG_PREFIX, symbol)
 

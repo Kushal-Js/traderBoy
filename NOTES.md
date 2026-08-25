@@ -799,6 +799,46 @@ out of git.
     guaranteed empty" safety window every other same-day restart this
     session had to check for manually.
 
+28. **Every stock-option order placed on 25 Aug 2026 was RMS-rejected
+    ("transactions are blocked by our risk systems for this stock") -
+    across 14+ unrelated stocks, 100% failure rate.** Diagnosed via Dhan
+    MCP (orderbook/portfolio agent tools): funds/margin were healthy
+    (₹89,304.77 available, 0% utilized), so this wasn't a margin issue,
+    and the identical message across every unrelated stock ruled out a
+    genuinely per-scrip surveillance flag. Root cause: **25 Aug 2026 was
+    the monthly F&O expiry day for every single-stock option contract.**
+    NSE moved monthly expiry for all single-stock contracts to the *last
+    Tuesday* of the month from 1-Sept-2025 (previously the last Thursday);
+    25 Aug 2026 is that day. Stock options only have a monthly series (no
+    weekly expiry exists for single stocks), so every stock-option
+    contract available to buy that day had its current-month expiry
+    landing that same day. Dhan (confirmed via a Dhan rep's statement on
+    their own community forum) blocks *new* positions in a stock option on
+    its own expiry day, across all product types, citing liquidity risk
+    near expiry - not a bug, not an account-wide ban, just every candidate
+    stock hitting the same routine, predictable, monthly restriction at
+    once. A separate batch of LTP/OHLC API failures (empty error bodies,
+    also briefly breaking IndexScalping's paper-trade pricing) showed up
+    in the same window but looks like an unrelated, likely transient
+    Dhan-side data-feed issue - not confirmed as expiry-related.
+
+    **Fix**: `_enter_single_position()` in both `Options/trading_engine.py`
+    and `Futures/trading_engine.py` now checks the ATM contract's own
+    `expiry_date` (added to `AtmOption`/`_instrument_meta` in
+    `dhan_client.py`, read from the scrip master's `SEM_EXPIRY_DATE`
+    column - the same field Tradehull's own `ATM_Strike_Selection` uses
+    internally) against today's date *before* subscribing to the price
+    feed or placing any order. A match returns `"skipped_expiry_day"`
+    immediately - releasing the symbol reservation via the same allow-list
+    path `"rejected"` already used - instead of burning an API call and a
+    noisy rejection log line on an order that would always fail today.
+    This is a real, recurring monthly condition (every last Tuesday), not
+    a one-off - verified fully offline (mocked `dhan_wrapper`, zero real
+    network calls reachable) in
+    `/private/tmp/.../scratchpad/test_expiry_guard.py` before deploy, per
+    the stricter-verification practice established after the Futures
+    package's testing incident (see the design-decision entry below).
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

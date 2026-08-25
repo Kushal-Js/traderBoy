@@ -144,6 +144,22 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
     atm = await loop.run_in_executor(
         None, dhan_wrapper.get_atm_option, symbol, option_type
     )
+
+    if atm.expiry_date == _now_ist().date():
+        # See Options/trading_engine.py's identical guard (NOTES.md bug #28)
+        # for the full rationale - stock options are blocked from new
+        # entries on their own (monthly, last-Tuesday) expiry day.
+        logger.info(
+            "%s: skipped - %s expires today, new stock-option positions are blocked on expiry day",
+            symbol, atm.trading_symbol,
+        )
+        return {
+            "symbol": symbol,
+            "status": "skipped_expiry_day",
+            "option_trading_symbol": atm.trading_symbol,
+            "expiry_date": str(atm.expiry_date),
+        }
+
     quantity = atm.lot_size * config.QUANTITY_LOTS
     tag = _gen_tag(config.ORDER_TAG_PREFIX, symbol)
 

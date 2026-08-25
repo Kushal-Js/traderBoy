@@ -20,10 +20,11 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 from Dhan_Tradehull import Tradehull
 from dhanhq import MarketFeed, OrderUpdate
 
@@ -158,6 +159,7 @@ class AtmOption:
     option_type: str          # "CE" or "PE"
     lot_size: int
     security_id: str
+    expiry_date: Optional[date] = None
 
 
 class DhanWrapper:
@@ -274,6 +276,11 @@ class DhanWrapper:
             "security_id": str(int(r["SEM_SMST_SECURITY_ID"])),
             "lot_size": int(float(r["SEM_LOT_UNITS"])),
             "underlying_symbol": self._underlying_from_trading_symbol(str(r["SEM_TRADING_SYMBOL"])),
+            # Used to skip a doomed entry on a stock option's own expiry day
+            # (see get_atm_option's expiry-day guard) - Tradehull's own
+            # ATM_Strike_Selection parses this same column the same way
+            # (pd.to_datetime(...).dt.date) internally.
+            "expiry_date": pd.to_datetime(r["SEM_EXPIRY_DATE"], errors="coerce").date(),
         }
 
     def _instrument_meta_by_security_id(self, security_id: str) -> dict:
@@ -506,6 +513,7 @@ class DhanWrapper:
             option_type=option_type,
             lot_size=meta["lot_size"],
             security_id=meta["security_id"],
+            expiry_date=meta["expiry_date"],
         )
 
     # ------------------------------------------------------------------ #
