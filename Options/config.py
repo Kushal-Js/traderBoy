@@ -67,6 +67,15 @@ PAPERTRADE_MAX_POSITIONS = int(os.getenv("PAPERTRADE_MAX_POSITIONS", "2"))
 TARGET_PCT = float(os.getenv("TARGET_PCT", "0.10"))          # +10% target
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.03"))    # -3% hard stop loss
 
+# Absolute per-trade rupee-loss cap, independent of STOP_LOSS_PCT above - a
+# large-quantity position can still lose more than this in rupee terms
+# before its percentage stop-loss fires (e.g. a low-premium, high-lot-size
+# contract). Checked first in _exit_reason_for(), ahead of every other exit
+# condition - a hard risk ceiling on any single trade, applies identically
+# to CE and PE since both are long-premium positions (loss = (entry_price -
+# ltp) * quantity either way).
+MAX_LOSS_PER_TRADE_RS = float(os.getenv("MAX_LOSS_PER_TRADE_RS", "3000"))
+
 # Trailing stop-loss: raises the exit floor as price rises above entry,
 # instead of only exiting at the fixed hard stop loss. When disabled, a
 # position only exits on TARGET_PCT or the fixed STOP_LOSS_PCT - see

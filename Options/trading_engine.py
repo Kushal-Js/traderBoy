@@ -559,7 +559,19 @@ def _exit_reason_for(position: Position, ltp: float, supertrend_against_position
     Supertrend for this position's direction (see
     trading_engine._supertrend_signal_for - CE vs. PE flips which crossover
     counts) - caller's responsibility to fetch/pass it, since that read can
-    involve I/O and this function stays synchronous."""
+    involve I/O and this function stays synchronous.
+
+    Checks config.MAX_LOSS_PER_TRADE_RS first, ahead of every other exit
+    condition - an absolute per-trade rupee-loss cap independent of
+    STOP_LOSS_PCT, since a large-quantity/low-premium position can still
+    lose more than this cap in rupee terms before its percentage stop-loss
+    fires. Applies identically to CE and PE - both are long-premium
+    positions (this strategy only ever buys options, never sells), so a
+    loss is (entry_price - ltp) * quantity either way, no direction-
+    specific logic needed."""
+    loss_rs = (position.entry_price - ltp) * position.quantity
+    if loss_rs >= config.MAX_LOSS_PER_TRADE_RS:
+        return "MAX_LOSS_HIT"
     if ltp >= position.target_price:
         return "TARGET_HIT"
     trailing_sl = position.current_trailing_sl

@@ -388,7 +388,11 @@ def _supertrend_signal_for(position: Position) -> bool:
 
 
 def _exit_reason_for(position: Position, ltp: float, supertrend_against_position: bool = False) -> Optional[str]:
-    """See Options/trading_engine.py's version - identical logic."""
+    """See Options/trading_engine.py's version - identical logic, including
+    the config.MAX_LOSS_PER_TRADE_RS absolute rupee-loss cap checked first."""
+    loss_rs = (position.entry_price - ltp) * position.quantity
+    if loss_rs >= config.MAX_LOSS_PER_TRADE_RS:
+        return "MAX_LOSS_HIT"
     if ltp >= position.target_price:
         return "TARGET_HIT"
     trailing_sl = position.current_trailing_sl

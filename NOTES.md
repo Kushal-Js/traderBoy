@@ -1118,6 +1118,31 @@ out of git.
     surfaces which expiry cycle is currently in use, alongside the usual
     trade history and today's daily gate state.
 
+- **Absolute per-trade rupee-loss cap added to both `Options/` and
+  `Futures/` (25 Aug 2026, user request), on top of the existing
+  percentage-based stop-loss.** `config.MAX_LOSS_PER_TRADE_RS` (default
+  ₹3,000, `MAX_LOSS_PER_TRADE_RS` / `FUTURES_MAX_LOSS_PER_TRADE_RS` env
+  vars) is checked first in `_exit_reason_for()`, ahead of target,
+  trailing/dynamic stop-loss, and the Supertrend exit - as soon as
+  `(entry_price - ltp) * quantity` reaches this cap, the position exits
+  immediately with reason `MAX_LOSS_HIT`, regardless of what the
+  percentage stop-loss would otherwise allow.
+
+  The reason this is a genuinely separate control from `STOP_LOSS_PCT`,
+  not a duplicate of it: the percentage stop-loss is relative to entry
+  premium, so a low-premium/high-lot-size contract can lose far more than
+  ₹3,000 in rupee terms before its own percentage SL ever fires (e.g. a
+  ₹10 entry × 5,000 qty position's 16% SL sits at a ₹8,000 loss - this cap
+  now exits it at ₹3,000 instead, well before that). Applies identically
+  to CE and PE without any direction-specific logic, since this strategy
+  only ever *buys* options (never sells) for either leg - a loss is
+  `(entry_price - ltp) * quantity` the same way regardless of option type.
+  Verified fully offline (no network calls involved - pure function of
+  `Position` + a given LTP) in
+  `/private/tmp/.../scratchpad/test_max_loss_exit.py`: both packages, both
+  option types, the cap firing before a distant percentage SL would, and
+  a profitable position being unaffected - 18/18 checks passed.
+
 ## Capital requirements
 
 Since this strategy only ever *buys* options (never sells/writes), capital
