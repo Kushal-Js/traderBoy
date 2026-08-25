@@ -156,6 +156,14 @@ URLs — matching the `webhook_url` field in your sample payload.
      design-decision entry for the backtest results that motivated this
      and the (already-fixed) day-boundary state bug it required fixing
      first.
+   - **Friday carve-out** — even when `ENABLE_SQUARE_OFF=false`, Friday
+     still gets its own mandatory cutoff via `ENABLE_FRIDAY_SQUARE_OFF`
+     (default `true`) + `FRIDAY_SQUARE_OFF_TIME` (default `15:20`): no new
+     entries past that time and every open position force-closed then, so
+     nothing carries into the weekend gap - a much longer, riskier window
+     than a single overnight one. Monday–Thursday are unaffected by this
+     flag; `ENABLE_SQUARE_OFF=true` (every day) still takes priority over
+     it when set. See NOTES.md's design-decision entry.
 
 5. **AMO order lifecycle** — a BUY/SELL placed outside market hours doesn't
    fill immediately; `_sync_pending_orders()` re-checks queued AMO orders

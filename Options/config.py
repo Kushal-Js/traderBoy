@@ -195,6 +195,21 @@ SQUARE_OFF_TIME = os.getenv("SQUARE_OFF_TIME", "15:15")
 # orphaned from all future monitoring).
 ENABLE_SQUARE_OFF = os.getenv("ENABLE_SQUARE_OFF", "true").lower() == "true"
 
+# Friday-specific carve-out, applies REGARDLESS of ENABLE_SQUARE_OFF above -
+# even when weekday carry-forward is on (ENABLE_SQUARE_OFF=false), a
+# position still must not be carried into the WEEKEND, a much longer and
+# riskier gap than a single weeknight (confirmed live in a 25 Aug 2026
+# backtest: a position carried Thu->Mon with no data in between took a
+# materially worse exit than it would have with same-day protection - see
+# NOTES.md's design-decision entry). When true (default) and today is
+# Friday, both is_past_square_off_time() (blocks new entries) and
+# monitor_loop's force-close trigger switch to FRIDAY_SQUARE_OFF_TIME
+# instead of the normal SQUARE_OFF_TIME/ENABLE_SQUARE_OFF logic. Has no
+# effect Monday-Thursday, and no effect at all if ENABLE_SQUARE_OFF is
+# already true (that already covers every day, Friday included).
+ENABLE_FRIDAY_SQUARE_OFF = os.getenv("ENABLE_FRIDAY_SQUARE_OFF", "true").lower() == "true"
+FRIDAY_SQUARE_OFF_TIME = os.getenv("FRIDAY_SQUARE_OFF_TIME", "15:20")
+
 # Restricts NEW entries to before a cutoff time - independent of
 # SQUARE_OFF_TIME above, which governs closing EXISTING positions, not
 # opening new ones. When false (default), new entries are allowed all day

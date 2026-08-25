@@ -1244,6 +1244,50 @@ out of git.
   (paper trading, no real money), not something this change tried to
   avoid.
 
+- **Friday-specific square-off carve-out added to both `Options/` and
+  `Futures/` (26 Aug 2026, user request), on top of the NRML/overnight-
+  carry mode above - `ENABLE_FRIDAY_SQUARE_OFF` (default `true`) +
+  `FRIDAY_SQUARE_OFF_TIME` (default `15:20`).** Motivated directly by the
+  EICHERMOT example found in that same day's backtesting: a position
+  carried Thursday evening through the following Monday morning (skipping
+  a data-sparse Fri/weekend) with zero exit checks the whole way, landing
+  a materially worse `MAX_LOSS_HIT` than it would have with same-day
+  protection. A weekend gap is categorically worse than a single overnight
+  one - two-plus days of zero monitoring instead of one night - so Friday
+  gets its own mandatory cutoff regardless of `ENABLE_SQUARE_OFF`'s
+  Mon-Thu setting.
+
+  Implementation: both packages' `is_past_square_off_time()` and
+  `monitor_loop()` were refactored around a new shared
+  `_todays_square_off_time()` helper that returns the effective cutoff for
+  *today specifically* - `config.SQUARE_OFF_TIME` if `ENABLE_SQUARE_OFF`
+  is on (unconditional, every day, unchanged from before), else
+  `config.FRIDAY_SQUARE_OFF_TIME` if today is Friday
+  (`datetime.weekday() == 4`) and `ENABLE_FRIDAY_SQUARE_OFF` is on, else
+  `None` (no square-off at all - the Mon-Thu NRML-carry default).
+  `is_past_square_off_time()` and `monitor_loop`'s force-close branch both
+  now key off this one helper instead of duplicating the day-of-week
+  check, so the two can't drift out of sync with each other. The force-
+  close reason is logged as `EOD_SQUARE_OFF_FRIDAY` (vs. the existing
+  `EOD_SQUARE_OFF_3_15PM`) so a Friday-specific close is distinguishable
+  in `/positions`/`/futures/positions` from an every-day one.
+  `ENABLE_SQUARE_OFF=true` still takes priority when set (it already
+  covers every day including Friday, so the carve-out is a no-op then).
+
+  Verified fully offline (mocked `_now_ist`/`_check_one_position`/
+  `_square_off_all`, zero real network calls reachable) in
+  `/private/tmp/.../scratchpad/test_friday_square_off.py`, using
+  2026-08-21 (a real Friday) and 2026-08-24 (a real Monday) as reference
+  dates: the priority ordering (`ENABLE_SQUARE_OFF` > Friday carve-out >
+  neither), `is_past_square_off_time()` at before/at/after the Friday
+  cutoff and on an unaffected Monday, `monitor_loop` actually force-
+  closing on Friday past cutoff vs. still running normal monitoring
+  before it, and Monday being completely unaffected in both packages -
+  20/20 checks passed. Also re-ran the earlier NRML-carryforward suite to
+  confirm this refactor didn't regress it - unchanged behaviorally, same
+  4 failures as before (those check code defaults against the currently-
+  loaded `.env`, not a regression).
+
 ## Capital requirements
 
 Since this strategy only ever *buys* options (never sells/writes), capital

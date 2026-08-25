@@ -77,6 +77,11 @@ SQUARE_OFF_TIME = os.getenv("FUTURES_SQUARE_OFF_TIME", "15:15")
 # tunable master switch for the automatic EOD square-off.
 ENABLE_SQUARE_OFF = os.getenv("FUTURES_ENABLE_SQUARE_OFF", "true").lower() == "true"
 
+# See Options/config.py's identical flags - this package's own independently-
+# tunable Friday carve-out (applies regardless of ENABLE_SQUARE_OFF above).
+ENABLE_FRIDAY_SQUARE_OFF = os.getenv("FUTURES_ENABLE_FRIDAY_SQUARE_OFF", "true").lower() == "true"
+FRIDAY_SQUARE_OFF_TIME = os.getenv("FUTURES_FRIDAY_SQUARE_OFF_TIME", "15:20")
+
 # See Options/config.py's identical flag - this package's own independently-
 # tunable cutoff for NEW entries only.
 ENABLE_TRADING_TIME_LIMIT = os.getenv("FUTURES_ENABLE_TRADING_TIME_LIMIT", "false").lower() == "true"

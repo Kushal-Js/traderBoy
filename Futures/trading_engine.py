@@ -62,12 +62,24 @@ def _parse_hhmm_today(hhmm: str) -> datetime:
     return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
+def _todays_square_off_time() -> Optional[str]:
+    """See Options/trading_engine.py's identical function - this package's
+    own config.ENABLE_SQUARE_OFF/ENABLE_FRIDAY_SQUARE_OFF/FRIDAY_SQUARE_OFF_TIME."""
+    if config.ENABLE_SQUARE_OFF:
+        return config.SQUARE_OFF_TIME
+    if config.ENABLE_FRIDAY_SQUARE_OFF and _now_ist().weekday() == 4:
+        return config.FRIDAY_SQUARE_OFF_TIME
+    return None
+
+
 def is_past_square_off_time() -> bool:
     """See Options/trading_engine.py's is_past_square_off_time (bug #25) -
-    identical rationale, this package's own SQUARE_OFF_TIME/ENABLE_SQUARE_OFF."""
-    if not config.ENABLE_SQUARE_OFF:
+    identical rationale, this package's own SQUARE_OFF_TIME/ENABLE_SQUARE_OFF/
+    Friday carve-out."""
+    cutoff = _todays_square_off_time()
+    if cutoff is None:
         return False
-    return _now_ist() >= _parse_hhmm_today(config.SQUARE_OFF_TIME)
+    return _now_ist() >= _parse_hhmm_today(cutoff)
 
 
 def is_past_allowed_trading_time() -> bool:
@@ -572,10 +584,10 @@ async def _sync_pending_orders() -> None:
 
 
 async def monitor_loop() -> None:
-    """Runs forever; polls open positions and enforces exits + EOD square-off
-    (when config.ENABLE_SQUARE_OFF is on - see Options/trading_engine.py's
-    identical structure and NOTES.md's design-decision entry for the off
-    case)."""
+    """Runs forever; polls open positions and enforces exits + a square-off
+    on whichever days _todays_square_off_time() says apply one - see
+    Options/trading_engine.py's identical structure and NOTES.md's design-
+    decision entry."""
     logger.info("Futures monitor loop started.")
     squared_off_today_for: set = set()
 
@@ -584,13 +596,15 @@ async def monitor_loop() -> None:
             await position_store.maybe_reset_for_new_day()
             await _sync_pending_orders()
 
-            if config.ENABLE_SQUARE_OFF:
+            cutoff = _todays_square_off_time()
+            if cutoff is not None:
                 now = _now_ist()
-                square_off_at = _parse_hhmm_today(config.SQUARE_OFF_TIME)
+                square_off_at = _parse_hhmm_today(cutoff)
                 today_key = now.date()
 
                 if now >= square_off_at and today_key not in squared_off_today_for:
-                    await _square_off_all("EOD_SQUARE_OFF_3_15PM")
+                    reason = "EOD_SQUARE_OFF_FRIDAY" if not config.ENABLE_SQUARE_OFF else "EOD_SQUARE_OFF_3_15PM"
+                    await _square_off_all(reason)
                     squared_off_today_for.add(today_key)
                 elif now < square_off_at:
                     positions = list(position_store.live_positions.items())

@@ -46,20 +46,37 @@ def _parse_hhmm_today(hhmm: str) -> datetime:
     return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
+def _todays_square_off_time() -> Optional[str]:
+    """Returns the HH:MM cutoff that applies TODAY, or None if no square-
+    off/entry-cutoff applies today at all (the NRML/carry-forward default -
+    see NOTES.md's design-decision entry). config.ENABLE_SQUARE_OFF (every
+    day, unconditional) takes priority if on. Otherwise, Friday gets its
+    own carve-out via config.ENABLE_FRIDAY_SQUARE_OFF/FRIDAY_SQUARE_OFF_TIME
+    REGARDLESS of ENABLE_SQUARE_OFF - so a position still can't be carried
+    into the weekend even when weekday carry-forward is otherwise enabled.
+    datetime.weekday(): Monday=0 ... Friday=4."""
+    if config.ENABLE_SQUARE_OFF:
+        return config.SQUARE_OFF_TIME
+    if config.ENABLE_FRIDAY_SQUARE_OFF and _now_ist().weekday() == 4:
+        return config.FRIDAY_SQUARE_OFF_TIME
+    return None
+
+
 def is_past_square_off_time() -> bool:
-    """True once today's config.SQUARE_OFF_TIME has passed, but only when
-    config.ENABLE_SQUARE_OFF is on - see NOTES.md's design-decision entry on
-    NRML/overnight carry for when/why that's turned off. Webhook entry
-    handlers use this to refuse new positions past that point - see
+    """True once today's effective square-off cutoff (see
+    _todays_square_off_time - SQUARE_OFF_TIME every day, or
+    FRIDAY_SQUARE_OFF_TIME on Fridays specifically) has passed. Webhook
+    entry handlers use this to refuse new positions past that point - see
     NOTES.md bug #25. monitor_loop's own square-off only fires once
     (squared_off_today_for), so any position entered after that one-time
     pass would otherwise sit with no further target/SL/square-off
     monitoring for the rest of the day - confirmed live on 24 Aug 2026: a
     webhook arrived seconds after square-off fired and entered a position
     that then had zero automated exit protection."""
-    if not config.ENABLE_SQUARE_OFF:
+    cutoff = _todays_square_off_time()
+    if cutoff is None:
         return False
-    return _now_ist() >= _parse_hhmm_today(config.SQUARE_OFF_TIME)
+    return _now_ist() >= _parse_hhmm_today(cutoff)
 
 
 def is_past_allowed_trading_time() -> bool:
@@ -781,9 +798,12 @@ async def _sync_pending_orders() -> None:
 
 
 async def monitor_loop() -> None:
-    """Runs forever; polls open positions and enforces exits + EOD square-off
-    (when config.ENABLE_SQUARE_OFF is on - see NOTES.md's design-decision
-    entry on NRML/overnight carry for the off case, added 25 Aug 2026)."""
+    """Runs forever; polls open positions and enforces exits + a square-off
+    on whichever days _todays_square_off_time() says apply one - every day
+    (config.ENABLE_SQUARE_OFF), Fridays only
+    (config.ENABLE_FRIDAY_SQUARE_OFF, so a position never carries into the
+    weekend), or neither (NRML/overnight carry Mon-Thu) - see NOTES.md's
+    design-decision entry."""
     logger.info("Monitor loop started.")
     squared_off_today_for: set = set()
 
@@ -792,13 +812,15 @@ async def monitor_loop() -> None:
             await position_store.maybe_reset_for_new_day()
             await _sync_pending_orders()
 
-            if config.ENABLE_SQUARE_OFF:
+            cutoff = _todays_square_off_time()
+            if cutoff is not None:
                 now = _now_ist()
-                square_off_at = _parse_hhmm_today(config.SQUARE_OFF_TIME)
+                square_off_at = _parse_hhmm_today(cutoff)
                 today_key = now.date()
 
                 if now >= square_off_at and today_key not in squared_off_today_for:
-                    await _square_off_all("EOD_SQUARE_OFF_3_15PM")
+                    reason = "EOD_SQUARE_OFF_FRIDAY" if not config.ENABLE_SQUARE_OFF else "EOD_SQUARE_OFF_3_15PM"
+                    await _square_off_all(reason)
                     squared_off_today_for.add(today_key)
                 elif now < square_off_at:
                     positions = list(position_store.live_positions.items())
@@ -806,8 +828,9 @@ async def monitor_loop() -> None:
                         *[_check_one_position(sym, pos) for sym, pos in positions]
                     )
             elif dhan_wrapper.is_market_open():
-                # No forced square-off - keep evaluating every live
-                # position's own exit conditions (target/SL/dynamic-SL/
+                # No forced square-off today at all (Mon-Thu, both flags
+                # off, or Friday-carve-out disabled) - keep evaluating every
+                # live position's own exit conditions (target/SL/dynamic-SL/
                 # Supertrend/MAX_LOSS_HIT) for as long as it takes, including
                 # across a day boundary (see PositionStore.maybe_reset_for_
                 # new_day, which deliberately does NOT clear live_positions
