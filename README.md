@@ -91,6 +91,13 @@ URLs — matching the `webhook_url` field in your sample payload.
    placed. Outside market hours this is automatically placed as an **AMO**
    (After Market Order) — Dhan requires this to be an explicit flag at
    placement time, unlike some brokers that auto-detect it.
+   - **Expiry-day roll-forward** — stock options only have a monthly
+     series, and Dhan blocks new positions in one on its own expiry day
+     (NSE moved every single-stock contract's monthly expiry to the last
+     Tuesday of the month from 1-Sept-2025). If the nearest contract
+     expires today, `get_atm_option()` automatically retries with the next
+     listed expiry and trades that instead, rather than skipping the stock
+     for the day — see NOTES.md bug #28.
 
 4. **Exit monitoring** — a background loop polls every
    `MONITOR_INTERVAL_SECONDS` and exits a leg on:
