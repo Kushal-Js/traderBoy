@@ -174,12 +174,34 @@ class PositionStore:
         self._trading_day: date = date.today()
 
     async def maybe_reset_for_new_day(self) -> None:
+        """Resets per-day state at the first check after midnight. Whether
+        live_positions/reserved_symbols get cleared here depends on
+        config.ENABLE_SQUARE_OFF (added 25 Aug 2026, see NOTES.md's design-
+        decision entry on NRML/overnight carry):
+          - True (default, MIS mode): everything should already be flat by
+            SQUARE_OFF_TIME the day before, so a full clear is safe - also
+            the fallback that recovers cleanly if anything was somehow
+            still open.
+          - False (NRML/carry-forward mode): a position still open here is
+            REAL MONEY still open at the broker. Clearing it would silently
+            orphan it from all future exit monitoring - reconcile_broker_
+            positions() only runs at process STARTUP, not on this periodic
+            day-rollover check, so an in-memory clear here would have NO
+            recovery path until the next restart. Must be preserved so
+            monitor_loop keeps evaluating its target/stop-loss/Supertrend/
+            MAX_LOSS_HIT once the next session's ticks resume."""
         async with self._lock:
             today = date.today()
             if today != self._trading_day:
-                logger.info("New trading day detected (%s) - resetting state.", today)
-                self.live_positions.clear()
-                self.reserved_symbols.clear()
+                logger.info("New trading day detected (%s) - resetting daily state.", today)
+                if config.ENABLE_SQUARE_OFF:
+                    self.live_positions.clear()
+                    self.reserved_symbols.clear()
+                elif self.live_positions:
+                    logger.info(
+                        "ENABLE_SQUARE_OFF=false - carrying %d live position(s) over the day boundary: %s",
+                        len(self.live_positions), list(self.live_positions.keys()),
+                    )
                 self.closed_positions_today.clear()
                 self.orders_today.clear()
                 self._trading_day = today

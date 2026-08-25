@@ -47,7 +47,9 @@ def _parse_hhmm_today(hhmm: str) -> datetime:
 
 
 def is_past_square_off_time() -> bool:
-    """True once today's config.SQUARE_OFF_TIME has passed. Webhook entry
+    """True once today's config.SQUARE_OFF_TIME has passed, but only when
+    config.ENABLE_SQUARE_OFF is on - see NOTES.md's design-decision entry on
+    NRML/overnight carry for when/why that's turned off. Webhook entry
     handlers use this to refuse new positions past that point - see
     NOTES.md bug #25. monitor_loop's own square-off only fires once
     (squared_off_today_for), so any position entered after that one-time
@@ -55,6 +57,8 @@ def is_past_square_off_time() -> bool:
     monitoring for the rest of the day - confirmed live on 24 Aug 2026: a
     webhook arrived seconds after square-off fired and entered a position
     that then had zero automated exit protection."""
+    if not config.ENABLE_SQUARE_OFF:
+        return False
     return _now_ist() >= _parse_hhmm_today(config.SQUARE_OFF_TIME)
 
 
@@ -777,7 +781,9 @@ async def _sync_pending_orders() -> None:
 
 
 async def monitor_loop() -> None:
-    """Runs forever; polls open positions and enforces exits + EOD square-off."""
+    """Runs forever; polls open positions and enforces exits + EOD square-off
+    (when config.ENABLE_SQUARE_OFF is on - see NOTES.md's design-decision
+    entry on NRML/overnight carry for the off case, added 25 Aug 2026)."""
     logger.info("Monitor loop started.")
     squared_off_today_for: set = set()
 
@@ -786,14 +792,32 @@ async def monitor_loop() -> None:
             await position_store.maybe_reset_for_new_day()
             await _sync_pending_orders()
 
-            now = _now_ist()
-            square_off_at = _parse_hhmm_today(config.SQUARE_OFF_TIME)
-            today_key = now.date()
+            if config.ENABLE_SQUARE_OFF:
+                now = _now_ist()
+                square_off_at = _parse_hhmm_today(config.SQUARE_OFF_TIME)
+                today_key = now.date()
 
-            if now >= square_off_at and today_key not in squared_off_today_for:
-                await _square_off_all("EOD_SQUARE_OFF_3_15PM")
-                squared_off_today_for.add(today_key)
-            elif now < square_off_at:
+                if now >= square_off_at and today_key not in squared_off_today_for:
+                    await _square_off_all("EOD_SQUARE_OFF_3_15PM")
+                    squared_off_today_for.add(today_key)
+                elif now < square_off_at:
+                    positions = list(position_store.live_positions.items())
+                    await asyncio.gather(
+                        *[_check_one_position(sym, pos) for sym, pos in positions]
+                    )
+            elif dhan_wrapper.is_market_open():
+                # No forced square-off - keep evaluating every live
+                # position's own exit conditions (target/SL/dynamic-SL/
+                # Supertrend/MAX_LOSS_HIT) for as long as it takes, including
+                # across a day boundary (see PositionStore.maybe_reset_for_
+                # new_day, which deliberately does NOT clear live_positions
+                # in this mode). Gated on is_market_open() rather than
+                # running unconditionally, so this doesn't hammer Dhan's LTP
+                # REST endpoint every MONITOR_INTERVAL_SECONDS for the ~17.75
+                # hours the market is shut overnight - a position genuinely
+                # gets zero exit protection during that window (the real
+                # risk this mode accepts), and simply resumes being checked
+                # the moment the next session's ticks start.
                 positions = list(position_store.live_positions.items())
                 await asyncio.gather(
                     *[_check_one_position(sym, pos) for sym, pos in positions]

@@ -141,7 +141,21 @@ URLs — matching the `webhook_url` field in your sample payload.
      never touched by either trailing mechanism.
    - the underlying's 5-min Supertrend turning against the position's
      direction - set `ENABLE_SUPERTREND_EXIT=false` to disable
-   - `SQUARE_OFF_TIME` hard square-off of everything still open
+   - `SQUARE_OFF_TIME` hard square-off of everything still open - only
+     when `ENABLE_SQUARE_OFF=true` (default). When `false`, there is no
+     forced end-of-day exit at all: a position rides past market close and
+     keeps being evaluated on every rule above once the next session's
+     ticks resume, instead of being flattened and re-entered fresh each
+     day. Pairs with `OPTIONS_PRODUCT=MARGIN` (Dhan-Tradehull's code for
+     what's commonly called NRML/carry-forward - "NRML" itself is not a
+     value it accepts) instead of the default `"MIS"`, since MIS otherwise
+     implies a same-day-only position. **The real cost of turning this
+     off: zero exit protection while the market is shut** - a position is
+     fully exposed to whatever gap happens by the next session's open,
+     with no automated response possible during that window. See NOTES.md's
+     design-decision entry for the backtest results that motivated this
+     and the (already-fixed) day-boundary state bug it required fixing
+     first.
 
 5. **AMO order lifecycle** — a BUY/SELL placed outside market hours doesn't
    fill immediately; `_sync_pending_orders()` re-checks queued AMO orders

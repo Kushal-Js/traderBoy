@@ -1173,6 +1173,77 @@ out of git.
   short-circuiting before `rank_and_pick_top_stocks`/order placement are
   ever reached - 16/16 checks passed, zero real network calls reachable.
 
+- **NRML/overnight-carry mode added to both `Options/` and `Futures/` (25
+  Aug 2026, user request, backtested first) - `OPTIONS_PRODUCT=MARGIN` +
+  `ENABLE_SQUARE_OFF=false`, letting a position ride past market close into
+  the next trading day instead of being force-flattened at 15:15.**
+  Requested after two backtests on a new scan source ("Krishvi") showed
+  this materially helping - the "no cutoff, no EOD exit" variant beat the
+  "MIS + 11:30 cutoff" baseline by +₹34,531.55 (61 → 103 trades), almost
+  entirely from 4 trades that genuinely carried overnight (net positive)
+  and from the 11:30 cutoff no longer excluding an entire day's alerts.
+
+  **Three separate pieces had to change together, not just a config flip:**
+  1. `OPTIONS_PRODUCT`: "MIS" → **"MARGIN"**, not "NRML" - confirmed by
+     reading Tradehull's own `order_placement()` source
+     (`Dhan_Tradehull.py`): its `trade_type` param only recognizes
+     MIS/MARGIN/MTF/CO/BO/CNC as dict keys, and "MARGIN" is exactly what
+     the account's own real carry-forward Copper positions already showed
+     up as (`[MARGIN] LONG`) via the Dhan MCP portfolio check earlier this
+     session. Passing the literal string "NRML" would have KeyError'd
+     inside Tradehull on the very first live order. Note this changes
+     nothing about the actual P&L math for this strategy - it only ever
+     *buys* options (long premium), so max loss is always the premium paid
+     regardless of product type; the real difference is purely that
+     "MARGIN" doesn't get an automatic broker-side intraday square-off.
+  2. New `config.ENABLE_SQUARE_OFF` (default `true`, unchanged behavior)
+     gates BOTH `is_past_square_off_time()` (now always `False` when off -
+     stops blocking new entries late in the day too, matching the
+     backtest's "no cutoff" semantics) AND `monitor_loop`'s automatic
+     `_square_off_all` call. When off, `monitor_loop` instead keeps
+     evaluating every live position's target/stop-loss/dynamic-SL/
+     Supertrend/`MAX_LOSS_HIT` for as long as it takes - but gated on
+     `dhan_wrapper.is_market_open()`, not unconditionally, so it doesn't
+     hammer Dhan's LTP REST endpoint every `MONITOR_INTERVAL_SECONDS`
+     (5s) for the ~17.75 hours the market is shut each night. That
+     overnight window is exactly where the real risk lives: **zero exit
+     protection while the market is closed** - a position is fully
+     exposed to whatever gap happens by next session's open, with no
+     automated response possible. The backtest's 4 overnight holds were
+     all net-neutral-to-positive, but that's 4 data points, not a
+     guarantee gap risk won't bite on some other day.
+  3. **`PositionStore.maybe_reset_for_new_day()` in BOTH packages had to
+     stop unconditionally clearing `live_positions`/`reserved_symbols` on
+     a day-boundary tick when `ENABLE_SQUARE_OFF` is off.** This was found
+     *during this same change*, not a pre-existing bug someone hit live -
+     without this fix, turning off square-off would have made things
+     actively WORSE than before: a position still genuinely open at the
+     broker overnight would get silently deleted from the bot's own
+     in-memory state the moment the calendar date rolled over, orphaning
+     it from all future exit monitoring. For Options, the only recovery
+     path would be `reconcile_broker_positions()` - which only runs at
+     process STARTUP, not on this periodic check - so the position would
+     sit unmanaged until the next restart at the earliest. For Futures
+     it's worse still: that package never runs broker reconciliation at
+     all (by design, see the `Futures/` design-decision entry above), so
+     an in-memory clear here would have had **no recovery path, ever**.
+     Fixed by only clearing `closed_positions_today`/`orders_today` (safe,
+     purely historical logs) when `ENABLE_SQUARE_OFF` is off, while
+     preserving `live_positions`/`reserved_symbols` across the boundary.
+
+  Verified fully offline (mocked `dhan_wrapper`/`_check_one_position`/
+  `_square_off_all`, zero real network calls reachable) in
+  `/private/tmp/.../scratchpad/test_nrml_carryforward.py` - the env-var
+  product-type override, `is_past_square_off_time()`'s on/off behavior,
+  `monitor_loop`'s four branches (square-off on/before, on/after, off/
+  market-open, off/market-closed), and `maybe_reset_for_new_day` actually
+  preserving vs. clearing live positions in both packages - 21/21 checks
+  passed. Side effect worth knowing: `Options/paper_webhook.py`'s entry
+  gate also reuses the shared `is_past_square_off_time()`, so paper-trade
+  alerts also stop being blocked past 15:15 once this is on - harmless
+  (paper trading, no real money), not something this change tried to
+  avoid.
+
 ## Capital requirements
 
 Since this strategy only ever *buys* options (never sells/writes), capital

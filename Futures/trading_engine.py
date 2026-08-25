@@ -64,7 +64,9 @@ def _parse_hhmm_today(hhmm: str) -> datetime:
 
 def is_past_square_off_time() -> bool:
     """See Options/trading_engine.py's is_past_square_off_time (bug #25) -
-    identical rationale, this package's own SQUARE_OFF_TIME."""
+    identical rationale, this package's own SQUARE_OFF_TIME/ENABLE_SQUARE_OFF."""
+    if not config.ENABLE_SQUARE_OFF:
+        return False
     return _now_ist() >= _parse_hhmm_today(config.SQUARE_OFF_TIME)
 
 
@@ -570,7 +572,10 @@ async def _sync_pending_orders() -> None:
 
 
 async def monitor_loop() -> None:
-    """Runs forever; polls open positions and enforces exits + EOD square-off."""
+    """Runs forever; polls open positions and enforces exits + EOD square-off
+    (when config.ENABLE_SQUARE_OFF is on - see Options/trading_engine.py's
+    identical structure and NOTES.md's design-decision entry for the off
+    case)."""
     logger.info("Futures monitor loop started.")
     squared_off_today_for: set = set()
 
@@ -579,14 +584,20 @@ async def monitor_loop() -> None:
             await position_store.maybe_reset_for_new_day()
             await _sync_pending_orders()
 
-            now = _now_ist()
-            square_off_at = _parse_hhmm_today(config.SQUARE_OFF_TIME)
-            today_key = now.date()
+            if config.ENABLE_SQUARE_OFF:
+                now = _now_ist()
+                square_off_at = _parse_hhmm_today(config.SQUARE_OFF_TIME)
+                today_key = now.date()
 
-            if now >= square_off_at and today_key not in squared_off_today_for:
-                await _square_off_all("EOD_SQUARE_OFF_3_15PM")
-                squared_off_today_for.add(today_key)
-            elif now < square_off_at:
+                if now >= square_off_at and today_key not in squared_off_today_for:
+                    await _square_off_all("EOD_SQUARE_OFF_3_15PM")
+                    squared_off_today_for.add(today_key)
+                elif now < square_off_at:
+                    positions = list(position_store.live_positions.items())
+                    await asyncio.gather(
+                        *[_check_one_position(sym, pos) for sym, pos in positions]
+                    )
+            elif dhan_wrapper.is_market_open():
                 positions = list(position_store.live_positions.items())
                 await asyncio.gather(
                     *[_check_one_position(sym, pos) for sym, pos in positions]

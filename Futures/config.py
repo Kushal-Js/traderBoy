@@ -65,10 +65,17 @@ SUPERTREND_ENTRY_GRACE_MINUTES = int(os.getenv("FUTURES_SUPERTREND_ENTRY_GRACE_M
 OPTION_TYPE = "CE"
 
 QUANTITY_LOTS = int(os.getenv("FUTURES_QUANTITY_LOTS", "1"))
-OPTIONS_PRODUCT = "MIS"  # rename to reflect futures once real contracts replace the placeholder
+
+# See Options/config.py's identical OPTIONS_PRODUCT for the full rationale -
+# "MARGIN" is Tradehull's code for NRML/carry-forward, not "NRML" itself.
+OPTIONS_PRODUCT = os.getenv("FUTURES_OPTIONS_PRODUCT", "MIS")  # rename to reflect futures once real contracts replace the placeholder
 
 MARKET_TZ = "Asia/Kolkata"
 SQUARE_OFF_TIME = os.getenv("FUTURES_SQUARE_OFF_TIME", "15:15")
+
+# See Options/config.py's identical flag - this package's own independently-
+# tunable master switch for the automatic EOD square-off.
+ENABLE_SQUARE_OFF = os.getenv("FUTURES_ENABLE_SQUARE_OFF", "true").lower() == "true"
 
 # See Options/config.py's identical flag - this package's own independently-
 # tunable cutoff for NEW entries only.

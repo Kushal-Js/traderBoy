@@ -156,9 +156,18 @@ OPTION_TYPE = os.getenv("OPTION_TYPE", "CE").upper()
 
 QUANTITY_LOTS = int(os.getenv("QUANTITY_LOTS", "1"))  # number of lots per leg
 
-# Order product for options: MIS = intraday (auto square-off by broker as a
-# safety net; we still explicitly square off ourselves at SQUARE_OFF_TIME).
-OPTIONS_PRODUCT = "MIS"
+# Order product for options: "MIS" = intraday (auto square-off by broker as
+# a safety net; we still explicitly square off ourselves at SQUARE_OFF_TIME
+# when ENABLE_SQUARE_OFF is on). "MARGIN" is Dhan-Tradehull's code for what's
+# commonly called NRML/carry-forward - no broker-side auto square-off, and a
+# position can survive past market close into the next session. Changed to
+# "MARGIN" by user request 25 Aug 2026 alongside ENABLE_SQUARE_OFF=false
+# below - see NOTES.md's design-decision entry on NRML/overnight carry for
+# the real risk this introduces (no exit protection while the market is
+# shut - a position is exposed to the full overnight gap with zero
+# automated response). "NRML" itself is NOT a value Tradehull accepts here -
+# its order_placement() only recognizes MIS/MARGIN/MTF/CO/BO/CNC.
+OPTIONS_PRODUCT = os.getenv("OPTIONS_PRODUCT", "MIS")
 
 DEFAULT_EXCHANGE = "NFO"  # Dhan-Tradehull's exchange code for NSE F&O
 
@@ -168,6 +177,23 @@ DEFAULT_EXCHANGE = "NFO"  # Dhan-Tradehull's exchange code for NSE F&O
 MARKET_TZ = "Asia/Kolkata"
 MARKET_OPEN_TIME = "09:15"
 SQUARE_OFF_TIME = os.getenv("SQUARE_OFF_TIME", "15:15")
+
+# Master on/off switch for the automatic end-of-day square-off, separate
+# from the SQUARE_OFF_TIME value itself. When true (default), monitor_loop
+# force-closes every live position at SQUARE_OFF_TIME and is_past_square_off_
+# time() blocks new entries past that point - the behavior that has always
+# existed. When false, NEITHER of those happens - a position rides past
+# market close and keeps being evaluated (target/stop-loss/Supertrend/
+# MAX_LOSS_HIT) once the next session's ticks resume, letting a trade
+# genuinely continue into the next trading day (paired with
+# OPTIONS_PRODUCT=MARGIN above, since MIS carries an implicit same-day-only
+# assumption). Set false by user request 25 Aug 2026 - see NOTES.md's
+# design-decision entry for the overnight gap-risk this introduces (no exit
+# protection while the market is shut) and PositionStore.maybe_reset_for_
+# new_day's matching change (a day-boundary reset must NOT clear live
+# positions in this mode, or a real overnight position would be silently
+# orphaned from all future monitoring).
+ENABLE_SQUARE_OFF = os.getenv("ENABLE_SQUARE_OFF", "true").lower() == "true"
 
 # Restricts NEW entries to before a cutoff time - independent of
 # SQUARE_OFF_TIME above, which governs closing EXISTING positions, not

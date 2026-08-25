@@ -114,12 +114,24 @@ class PositionStore:
         self._trading_day: date = date.today()
 
     async def maybe_reset_for_new_day(self) -> None:
+        """See Options/position_store.py's identical function - same
+        ENABLE_SQUARE_OFF-gated rationale. Doubly important here since this
+        package doesn't run broker reconciliation at startup at all (see
+        trading_engine.py's module docstring) - an in-memory clear of a
+        real overnight position here would have NO recovery path, ever,
+        not even after a future restart."""
         async with self._lock:
             today = date.today()
             if today != self._trading_day:
-                logger.info("New trading day detected (%s) - resetting state.", today)
-                self.live_positions.clear()
-                self.reserved_symbols.clear()
+                logger.info("New trading day detected (%s) - resetting daily state.", today)
+                if config.ENABLE_SQUARE_OFF:
+                    self.live_positions.clear()
+                    self.reserved_symbols.clear()
+                elif self.live_positions:
+                    logger.info(
+                        "ENABLE_SQUARE_OFF=false - carrying %d live position(s) over the day boundary: %s",
+                        len(self.live_positions), list(self.live_positions.keys()),
+                    )
                 self.closed_positions_today.clear()
                 self.orders_today.clear()
                 self._trading_day = today
