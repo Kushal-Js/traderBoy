@@ -1151,6 +1151,16 @@ out of git.
   (still 18/18, values shifted from 2999/3050 to 1999/2050 around the new
   cap).
 
+  **Lowered again to ₹1,500 later the same day, by user request, alongside
+  `PROFIT_PROTECTION_THRESHOLD_RS` also moving to ₹1,500** (was ₹2,000) -
+  same code/`.env` update pattern. This time the test suite itself was
+  rewritten to compute its boundary values off the LIVE `cfg.
+  MAX_LOSS_PER_TRADE_RS`/`cfg.PROFIT_PROTECTION_THRESHOLD_RS` rather than
+  hardcoded literals, since this threshold has now changed twice in one
+  day - future tuning shouldn't require editing the test's numbers each
+  time, only re-running it. Re-verified: 18/18 (max-loss) and 30/30
+  (profit-protection) still passing against the new ₹1,500 value.
+
 - **New-entry time cutoff added to both `Options/` and `Futures/` (25 Aug
   2026, user request): `ENABLE_TRADING_TIME_LIMIT` +
   `ALLOWED_TRADING_TIME`, deliberately separate from `SQUARE_OFF_TIME`.**
@@ -1298,8 +1308,9 @@ out of git.
 
 - **Absolute per-trade rupee profit-protection added to both `Options/`
   and `Futures/` (26 Aug 2026, user request) - `PROFIT_PROTECTION_
-  THRESHOLD_RS` (default ₹2,000), the mirror image of
-  `MAX_LOSS_PER_TRADE_RS` but on the upside.** Once a trade's PEAK
+  THRESHOLD_RS` (originally ₹2,000, lowered to ₹1,500 later the same day -
+  see `MAX_LOSS_PER_TRADE_RS`'s entry above for that change), the mirror
+  image of `MAX_LOSS_PER_TRADE_RS` but on the upside.** Once a trade's PEAK
   unrealized profit (`(highest_price - entry_price) * quantity` -
   `highest_price` is already maintained for the trailing-SL mechanism,
   reused here rather than adding a new field) exceeds this threshold,
