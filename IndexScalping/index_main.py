@@ -1,14 +1,21 @@
 """
 Index scalping strategy - PAPER TRADING ONLY (see paper_engine.py's
 safety invariant docstring; config.PAPER_TRADING_ONLY is asserted at
-startup). Signal: opening-range breakout + short EMA momentum on
-NIFTY/BANKNIFTY's own 1-min index candles - buy ATM CE/PE, exit on a
-tight target/stop or a hard time-box, whichever comes first. See
-NOTES.md's index-scalping entry for the backtest that motivated this
-(a 3-day mechanism sanity-check, not a validated edge - real validation
-needs the sample size only paper-trading over real weeks can provide,
-since index options' weekly/near-term expiry means Dhan's instrument
-master doesn't retain enough historical contracts to backtest further).
+startup). Signal (replaces the original opening-range-breakout + EMA
+signal, user request 26 Aug 2026): a daily gap+RSI momentum gate on
+NIFTY/BANKNIFTY's own index spot, confirmed by the index's 5-min close
+being on the right side of its own 5-min Supertrend, triggered by the
+index's 1-min close crossing the right way through its own 1-min
+Supertrend - buy ATM CE/PE, exit on the 1-min close crossing back the
+other way or a Rs.1,000 unrealized loss, whichever comes first. See
+config.py's docstring for the exact rules and the assumptions made where
+they were underspecified, and NOTES.md's index-scalping entry for the
+original 3-day backtest that motivated shipping this paper-only in the
+first place (a mechanism sanity-check, not a validated edge - real
+validation needs the sample size only paper-trading over real weeks can
+provide, since index options' weekly/near-term expiry means Dhan's
+instrument master doesn't retain enough historical contracts to
+backtest further).
 
 Deliberately REST-polling (config.POLL_INTERVAL_SECONDS, default 15s),
 not tick-driven off the WebSocket feed like the options bot's exits.

@@ -849,6 +849,73 @@ out of git.
     stricter-verification practice established after the Futures
     package's testing incident (see the design-decision entry below).
 
+29. **Replaced `IndexScalping/`'s original opening-range-breakout +
+    EMA-momentum signal entirely with a new rule set (user request, 26
+    Aug 2026) - still paper-trading only.** New rules:
+
+    CE entry: today's daily open > yesterday's daily close AND today's
+    daily RSI(14) > yesterday's daily RSI [both on the NIFTY/BANKNIFTY
+    index spot] AND the index's 5-min close is above its own 5-min
+    Supertrend(10,3) AND the index's 1-min close just crossed ABOVE its
+    own 1-min Supertrend(10,3). PE is the exact mirror. Exit (either
+    side): the index's 1-min close crosses back the other way through its
+    own 1-min Supertrend, or the paper position's unrealized loss exceeds
+    ₹1,000 - whichever first. Still force-closed at `SQUARE_OFF_TIME`
+    regardless, same as before.
+
+    **Assumptions made explicit** (same practice as bug #19's Copper
+    entry, kept in sync with `IndexScalping/config.py`'s own docstring):
+    - "Today's"/"yesterday's" open, close, RSI are DAILY values on the
+      index SPOT itself (NIFTY=13, BANKNIFTY=25, segment `IDX_I` - the
+      same segment the original signal already used successfully for
+      1-min candles). RSI includes today's still-forming daily close
+      (today's price-so-far), same interpretation as Copper's identical
+      rule. The daily gate is computed once per day and frozen from the
+      first successful poll - since this strategy starts right at
+      `MARKET_OPEN`, that first poll's price-so-far is very close to the
+      actual day's open.
+    - The 5-min condition ("close is greater/lesser than") is read as a
+      plain current-state check, matching Copper's precedent. The 1-min
+      condition is explicitly worded "crossed above/below" - different
+      wording from the 5-min rule - so **unlike Copper's blanket
+      state-check interpretation, this one gets genuine edge-detection**:
+      `_crossed()` only returns true on the bar where the close was on
+      the wrong side of the 1-min Supertrend the PRIOR confirmed bar and
+      is on the right side THIS confirmed bar. The daily gate and the
+      5-min check are the slower "regime" filters; the 1-min crossover is
+      the precise entry/exit timing trigger. This is a deliberate
+      departure from bug #19's "crossed = plain state check, algebraically
+      equivalent" reasoning - that equivalence holds when a poll loop
+      exits/enters the instant a state becomes true, but here the 1-min
+      condition is explicitly worded differently from the 5-min one in
+      the same rule set, which reads as intentional (fast precise trigger
+      vs. slower regime filter), not incidental phrasing.
+    - Both Supertrends and the crossover check only look at COMPLETED
+      candles - the current still-forming bar (poll landed before its own
+      close time) is dropped first, same reasoning as
+      `Options/dhan_client.py`'s `refresh_supertrend_signal` - otherwise a
+      crossover could flicker true/false multiple times within one
+      still-forming minute as new ticks arrive.
+
+    Cost modeling (`ROUND_TRIP_COST_RS`, `SLIPPAGE_PCT`) carried over
+    unchanged from the original strategy - gross vs. net P&L is still
+    tracked separately. The old `MAX_TRADES_PER_DAY` cap, opening-range,
+    and EMA tunables were removed outright (not part of the new rules,
+    and the new signal already self-limits via one-position-at-a-time +
+    the daily gate).
+
+    Verified fully offline (mocked every I/O boundary -
+    `_fetch_index_daily`, `_fetch_index_intraday`, `_lot_size_for`,
+    `dhan_wrapper.get_option_ltp`, and `dhan_wrapper.client.ATM_Strike_Selection`
+    via a fake pre-injected `_client` so the lazily-authenticating
+    `.client` property is never actually touched - zero real network
+    calls reachable) in `/private/tmp/.../scratchpad/test_index_scalping_v2.py`:
+    RSI correctness, `_crossed()`'s edge-detection (fires on a genuine
+    cross, does NOT fire when already on the right side with no edge),
+    still-forming-candle exclusion, a full CE entry end-to-end, a full
+    PE entry end-to-end (mirror), exit via 1-min crossed-below, and exit
+    via the ₹1,000 max-loss cap - 22/22 checks passed.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

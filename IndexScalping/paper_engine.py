@@ -5,40 +5,36 @@ SAFETY INVARIANT: this module must NEVER call `dhan_wrapper.place_market_order`
 (the only real order-placement entry point in Options/dhan_client.py) or
 `dhan_wrapper.client.order_placement` directly. Every Dhan/Tradehull call
 in this file is read-only: `instruments()`, `ATM_Strike_Selection`,
-`intraday_minute_data`, `get_option_ltp`. A "PAPER ENTRY"/"PAPER EXIT"
-log line and an in-memory/on-disk trade record are the only side effects
-- no broker interaction ever results from a signal firing. If this
-strategy is ever promoted to placing real orders, that is a deliberate,
-separate, explicitly-requested change - not something this file does or
-should be modified to do casually.
+`intraday_minute_data`, `historical_daily_data`, `get_option_ltp`. A
+"PAPER ENTRY"/"PAPER EXIT" log line and an in-memory/on-disk trade record
+are the only side effects - no broker interaction ever results from a
+signal firing. If this strategy is ever promoted to placing real orders,
+that is a deliberate, separate, explicitly-requested change - not
+something this file does or should be modified to do casually.
 
-Same signal/exit logic already backtested (see NOTES.md's index-scalping
-entry and BACKTEST_RESULTS.md): opening-range breakout + short EMA
-momentum on the index's own 1-min candles, buy ATM CE/PE, exit on a
-tight target/stop (on the option's own premium) or a hard time-box,
-whichever comes first. Reused here as a live polling loop rather than a
-backtest replay - see index_main.py's docstring for why this is
-REST-polling rather than tick-driven.
+Rules implemented: see config.py's module docstring for the full
+CE/PE entry/exit rules and the assumptions made where they were
+underspecified (RSI/open timeframe, plain-state vs. edge-detected
+"crossed", still-forming-candle handling).
 
 Deliberately imports the ALREADY-authenticated Options.dhan_client
 singleton rather than creating a second Dhan connection/WebSocket/
 instrument-master download - broker connectivity is genuinely shared
 infrastructure, not options-specific, even though the module still lives
-under Options/ today. Worth promoting to a real shared location if a
-third strategy ever needs it too - not done now to avoid touching a
-live, real-money-integrated module for a paper-only feature.
+under Options/ today. See index_main.py's docstring for why this is
+REST-polling rather than tick-driven.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, time as dtime
 from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from Options.dhan_client import dhan_wrapper
+from Options.dhan_client import dhan_wrapper, _compute_supertrend
 
 from . import config
 
@@ -54,21 +50,15 @@ class PaperPosition:
     quantity: int
     entry_time: datetime
     entry_price: float
-    target_price: float
-    stop_price: float
-    hold_until: datetime
-    signal_bar_time: datetime
 
 
 @dataclass
 class IndexState:
     underlying: str
     security_id: str
-    trades_today_date: Optional[object] = None
-    trades_today: int = 0
-    or_high: Optional[float] = None
-    or_low: Optional[float] = None
-    last_acted_bar_time: Optional[datetime] = None
+    gate_date: Optional[object] = None
+    bullish_gate: Optional[bool] = None
+    bearish_gate: Optional[bool] = None
     open_position: Optional[PaperPosition] = None
 
 
@@ -115,6 +105,9 @@ class PaperTradeStore:
             "gross_pnl_total": gross_total,
             "net_pnl_total": net_total,
             "win_rate_net": (wins / len(self.completed)) if self.completed else None,
+            "daily_gate": {
+                u: {"bullish": s.bullish_gate, "bearish": s.bearish_gate} for u, s in states.items()
+            },
             "open_positions": {
                 u: vars(s.open_position) for u, s in states.items() if s.open_position
             },
@@ -125,20 +118,42 @@ class PaperTradeStore:
 paper_trade_store = PaperTradeStore()
 
 
-def _compute_ema(values: list[float], period: int) -> list[float]:
-    if not values:
-        return []
-    k = 2 / (period + 1)
-    ema = [values[0]]
-    for v in values[1:]:
-        ema.append(v * k + ema[-1] * (1 - k))
-    return ema
+def _compute_rsi(closes: list[float], period: int) -> list[Optional[float]]:
+    """Standard RSI(period), Wilder smoothing - see CopperOptions/paper_engine.py's
+    identical helper. Pure function, duplicated rather than shared across
+    packages per this repo's existing per-package independence convention."""
+    n = len(closes)
+    rsi: list[Optional[float]] = [None] * n
+    if n < period + 1:
+        return rsi
+    deltas = [closes[i] - closes[i - 1] for i in range(1, n)]
+    gains = [max(d, 0.0) for d in deltas]
+    losses = [max(-d, 0.0) for d in deltas]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    rsi[period] = 100.0 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss)
+    for i in range(period + 1, n):
+        gain, loss = gains[i - 1], losses[i - 1]
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+        rsi[i] = 100.0 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss)
+    return rsi
 
 
-def _fetch_index_candles(security_id: str, date_str: str) -> dict:
+def _fetch_index_daily(security_id: str) -> dict:
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    from_str = (datetime.now(IST) - timedelta(days=45)).strftime("%Y-%m-%d")
+    resp = dhan_wrapper.client.Dhan.historical_daily_data(
+        security_id=security_id, exchange_segment="IDX_I", instrument_type="INDEX",
+        from_date=from_str, to_date=today_str,
+    )
+    return resp.get("data") or {}
+
+
+def _fetch_index_intraday(security_id: str, date_str: str, interval: int) -> dict:
     resp = dhan_wrapper.client.Dhan.intraday_minute_data(
         security_id=security_id, exchange_segment="IDX_I", instrument_type="INDEX",
-        from_date=date_str, to_date=date_str, interval=1,
+        from_date=date_str, to_date=date_str, interval=interval,
     )
     return resp.get("data") or {}
 
@@ -151,6 +166,31 @@ def _lot_size_for(trading_symbol: str) -> Optional[int]:
     return int(float(row.iloc[0]["SEM_LOT_UNITS"]))
 
 
+def _drop_forming_bar(bar_times: list[datetime], highs: list[float], lows: list[float],
+                       closes: list[float], interval_minutes: int, now: datetime) -> tuple:
+    """Drops the last candle if it hasn't reached its own close time yet -
+    same reasoning as Options/dhan_client.py's refresh_supertrend_signal.
+    Without this, a Supertrend/crossover computed against a still-forming
+    bar can flicker true/false multiple times within that same minute as
+    new ticks arrive."""
+    if bar_times and now < bar_times[-1] + timedelta(minutes=interval_minutes):
+        return bar_times[:-1], highs[:-1], lows[:-1], closes[:-1]
+    return bar_times, highs, lows, closes
+
+
+def _crossed(closes: list[float], st: list[Optional[float]], above: bool) -> bool:
+    """Edge-detected crossover against the prior confirmed bar - True only
+    on the bar where the close was on the wrong side of the Supertrend the
+    PRIOR bar and is on the right side THIS bar. See config.py's docstring
+    for why this (not a plain state check) is used for the 1-min
+    condition specifically."""
+    if len(closes) < 2 or st[-1] is None or st[-2] is None:
+        return False
+    if above:
+        return closes[-2] <= st[-2] and closes[-1] > st[-1]
+    return closes[-2] >= st[-2] and closes[-1] < st[-1]
+
+
 async def _record_exit(state: IndexState, exit_ltp: float, reason: str, now: datetime) -> None:
     pos = state.open_position
     exit_price = exit_ltp * (1 - config.SLIPPAGE_PCT)
@@ -159,9 +199,9 @@ async def _record_exit(state: IndexState, exit_ltp: float, reason: str, now: dat
     trade = {
         "date": pos.entry_time.date().isoformat(), "underlying": pos.underlying,
         "option_type": pos.option_type, "trading_symbol": pos.trading_symbol,
-        "signal_time": pos.signal_bar_time.isoformat(), "entry_time": pos.entry_time.isoformat(),
-        "entry_price": pos.entry_price, "exit_time": now.isoformat(), "exit_price": exit_price,
-        "exit_reason": reason, "quantity": pos.quantity, "gross_pnl": gross_pnl, "net_pnl": net_pnl,
+        "entry_time": pos.entry_time.isoformat(), "entry_price": pos.entry_price,
+        "exit_time": now.isoformat(), "exit_price": exit_price, "exit_reason": reason,
+        "quantity": pos.quantity, "gross_pnl": gross_pnl, "net_pnl": net_pnl,
     }
     paper_trade_store.record(trade)
     logger.info(
@@ -169,18 +209,16 @@ async def _record_exit(state: IndexState, exit_ltp: float, reason: str, now: dat
         pos.underlying, pos.option_type, pos.trading_symbol, reason, net_pnl,
     )
     state.open_position = None
-    state.trades_today += 1
 
 
 async def _poll_one_index(loop: asyncio.AbstractEventLoop, state: IndexState) -> None:
     now = datetime.now(IST)
     today = now.date()
 
-    if state.trades_today_date != today:
-        state.trades_today_date = today
-        state.trades_today = 0
-        state.or_high = state.or_low = None
-        state.last_acted_bar_time = None
+    if state.gate_date != today:
+        state.gate_date = today
+        state.bullish_gate = None
+        state.bearish_gate = None
         if state.open_position:
             logger.warning(
                 "%s: paper position from a previous day never closed (%s) - "
@@ -204,28 +242,57 @@ async def _poll_one_index(loop: asyncio.AbstractEventLoop, state: IndexState) ->
     if now < market_open_dt or now > square_off_dt:
         return
 
+    if state.bullish_gate is None:
+        try:
+            daily = await loop.run_in_executor(None, _fetch_index_daily, state.security_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: daily candle fetch failed", state.underlying)
+            return
+        opens, closes_d = daily.get("open") or [], daily.get("close") or []
+        if len(closes_d) < config.RSI_PERIOD + 2:
+            return
+        rsi = _compute_rsi(closes_d, config.RSI_PERIOD)
+        if rsi[-1] is None or rsi[-2] is None:
+            return
+        today_open, yesterday_close = opens[-1], closes_d[-2]
+        today_rsi, yesterday_rsi = rsi[-1], rsi[-2]
+        state.bullish_gate = today_open > yesterday_close and today_rsi > yesterday_rsi
+        state.bearish_gate = today_open < yesterday_close and today_rsi < yesterday_rsi
+        logger.info(
+            "%s daily gate: bullish=%s bearish=%s (open=%.2f prev_close=%.2f rsi=%.2f prev_rsi=%.2f)",
+            state.underlying, state.bullish_gate, state.bearish_gate,
+            today_open, yesterday_close, today_rsi, yesterday_rsi,
+        )
+
     try:
-        candles = await loop.run_in_executor(None, _fetch_index_candles, state.security_id, today.isoformat())
+        candles_5m = await loop.run_in_executor(
+            None, _fetch_index_intraday, state.security_id, today.isoformat(), 5)
+        candles_1m = await loop.run_in_executor(
+            None, _fetch_index_intraday, state.security_id, today.isoformat(), 1)
     except Exception:  # noqa: BLE001
         logger.exception("%s: index candle fetch failed", state.underlying)
         return
 
-    ts = candles.get("timestamp") or []
-    if not ts:
+    t5 = [datetime.fromtimestamp(e, tz=IST) for e in (candles_5m.get("timestamp") or [])]
+    t5, h5, l5, c5 = _drop_forming_bar(
+        t5, candles_5m.get("high") or [], candles_5m.get("low") or [], candles_5m.get("close") or [], 5, now)
+    if len(c5) < config.SUPERTREND_5MIN_PERIOD + 1:
         return
-    highs, lows, closes = candles.get("high") or [], candles.get("low") or [], candles.get("close") or []
-    bar_times = [datetime.fromtimestamp(e, tz=IST) for e in ts]
+    st5 = _compute_supertrend(h5, l5, c5, period=config.SUPERTREND_5MIN_PERIOD,
+                               multiplier=config.SUPERTREND_5MIN_MULTIPLIER)
+    if st5[-1] is None:
+        return
+    close5 = c5[-1]
 
-    if state.or_high is None:
-        or_end = market_open_dt + timedelta(minutes=config.OPENING_RANGE_MINUTES)
-        if bar_times[-1] < or_end:
-            return  # opening range still forming
-        or_bars = [i for i, t in enumerate(bar_times) if t < or_end]
-        if not or_bars:
-            return
-        state.or_high = max(highs[i] for i in or_bars)
-        state.or_low = min(lows[i] for i in or_bars)
-        logger.info("%s: opening range set high=%.2f low=%.2f", state.underlying, state.or_high, state.or_low)
+    t1 = [datetime.fromtimestamp(e, tz=IST) for e in (candles_1m.get("timestamp") or [])]
+    t1, h1, l1, c1 = _drop_forming_bar(
+        t1, candles_1m.get("high") or [], candles_1m.get("low") or [], candles_1m.get("close") or [], 1, now)
+    if len(c1) < config.SUPERTREND_1MIN_PERIOD + 2:
+        return
+    st1 = _compute_supertrend(h1, l1, c1, period=config.SUPERTREND_1MIN_PERIOD,
+                               multiplier=config.SUPERTREND_1MIN_MULTIPLIER)
+    crossed_above_1min = _crossed(c1, st1, above=True)
+    crossed_below_1min = _crossed(c1, st1, above=False)
 
     if state.open_position is not None:
         pos = state.open_position
@@ -234,31 +301,19 @@ async def _poll_one_index(loop: asyncio.AbstractEventLoop, state: IndexState) ->
         except Exception:  # noqa: BLE001
             logger.exception("%s: paper LTP fetch failed for open position", state.underlying)
             return
-        if ltp >= pos.target_price:
-            await _record_exit(state, ltp, "TARGET_HIT", now)
-        elif ltp <= pos.stop_price:
-            await _record_exit(state, ltp, "STOP_LOSS_HIT", now)
-        elif now >= pos.hold_until:
-            await _record_exit(state, ltp, "TIME_EXIT", now)
+        unrealized = (ltp - pos.entry_price) * pos.quantity
+        exit_signal = crossed_below_1min if pos.option_type == "CE" else crossed_above_1min
+        if exit_signal:
+            await _record_exit(state, ltp, "SUPERTREND_EXIT", now)
+        elif unrealized < -config.MAX_LOSS_RS:
+            await _record_exit(state, ltp, "MAX_LOSS_HIT", now)
         return  # one position at a time per index
 
-    if state.trades_today >= config.MAX_TRADES_PER_DAY:
-        return
-    if len(closes) < config.EMA_SLOW_PERIOD + 1:
-        return
-
-    ema_fast = _compute_ema(closes, config.EMA_FAST_PERIOD)
-    ema_slow = _compute_ema(closes, config.EMA_SLOW_PERIOD)
-    last_i = len(closes) - 1
-    last_bar_time = bar_times[last_i]
-    if state.last_acted_bar_time is not None and last_bar_time <= state.last_acted_bar_time:
-        return  # already evaluated this bar - wait for the next one
-
-    close = closes[last_i]
-    bullish = close > state.or_high and ema_fast[last_i] > ema_slow[last_i]
-    bearish = close < state.or_low and ema_fast[last_i] < ema_slow[last_i]
-    option_type = "CE" if bullish else ("PE" if bearish else None)
-    state.last_acted_bar_time = last_bar_time
+    option_type = None
+    if state.bullish_gate and close5 > st5[-1] and crossed_above_1min:
+        option_type = "CE"
+    elif state.bearish_gate and close5 < st5[-1] and crossed_below_1min:
+        option_type = "PE"
     if option_type is None:
         return
 
@@ -287,15 +342,10 @@ async def _poll_one_index(loop: asyncio.AbstractEventLoop, state: IndexState) ->
     state.open_position = PaperPosition(
         underlying=state.underlying, option_type=option_type, trading_symbol=trading_symbol,
         quantity=lot_size * config.QUANTITY_LOTS, entry_time=now, entry_price=entry_price,
-        target_price=entry_price * (1 + config.TARGET_PCT),
-        stop_price=entry_price * (1 - config.STOP_LOSS_PCT),
-        hold_until=now + timedelta(minutes=config.MAX_HOLD_MINUTES),
-        signal_bar_time=last_bar_time,
     )
     logger.info(
-        "PAPER ENTRY (no real order placed) %s %s %s @ %.2f target=%.2f stop=%.2f",
+        "PAPER ENTRY (no real order placed) %s %s %s @ %.2f",
         state.underlying, option_type, trading_symbol, entry_price,
-        state.open_position.target_price, state.open_position.stop_price,
     )
 
 

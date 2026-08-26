@@ -23,7 +23,7 @@ This is the Dhan counterpart to the Groww version of this bot (see the
 | `Options/config.py` | All tunables for the options strategy, sourced from environment variables |
 | `Options/paper_webhook.py` | Second, independent Chartink endpoint (`/chartink/webhook-papertrade`) for evaluating a new scan before trusting it with real money - **paper trading only**, reuses the real strategy's own ranking/ATM/exit logic so only the new scan's stock-picking is under test |
 | `IndexScalping/index_main.py` | Index scalping strategy's FastAPI router + lifespan - **paper trading only**, no real orders placed |
-| `IndexScalping/paper_engine.py` | Signal (opening-range breakout + EMA momentum on NIFTY/BankNifty) + paper entry/exit logic, gross/net P&L tracking |
+| `IndexScalping/paper_engine.py` | Signal (daily gap+RSI gate, 5-min Supertrend state check, 1-min Supertrend edge-detected crossover trigger on NIFTY/BankNifty) + paper entry/exit logic, gross/net P&L tracking |
 | `IndexScalping/config.py` | All tunables for the scalping strategy, sourced from environment variables |
 | `CopperOptions/copper_main.py` | Copper (MCX) options strategy's FastAPI router + lifespan - **paper trading only**, no real orders placed |
 | `CopperOptions/paper_engine.py` | Gap + daily-RSI + dual-Supertrend signal, paper entry/exit logic, expiry-cycle rolling |

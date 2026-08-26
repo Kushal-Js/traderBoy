@@ -1,19 +1,61 @@
 """
-Tunables for the index scalping strategy - deliberately separate from
-Options/config.py since this is a different strategy with a different
-risk profile (seconds-to-minutes holds vs. the options bot's
-minutes-to-hours), not because it needs different broker credentials
-(it reuses Options.dhan_client's already-authenticated connection - see
-IndexScalping/index_main.py's own docstring for why).
+Tunables for the index scalping strategy - paper trading only, see
+paper_engine.py's safety invariant.
 
-Defaults mirror the backtest run against 19-21 Aug 2026 real NIFTY/
-BANKNIFTY data (see NOTES.md's index-scalping entry and
-BACKTEST_RESULTS.md) - that backtest was only a 3-day mechanism
-sanity-check (index options' weekly/near-term expiry means older
-contracts are delisted from Dhan's instrument master entirely, so
-further history isn't resolvable), not a validated edge. This strategy
-runs in PAPER mode only until real evidence says otherwise - see
-PAPER_TRADING_ONLY below.
+Rules implemented (user request, 26 Aug 2026 - replaces the original
+opening-range-breakout + EMA-momentum signal entirely; see NOTES.md's
+index-scalping design-decision entry for the full history):
+
+  CE entry: today's daily open > yesterday's daily close AND today's
+            daily RSI(RSI_PERIOD) > yesterday's daily RSI [both on the
+            index spot, NIFTY/BANKNIFTY] AND the index's 5-min close is
+            above its own 5-min Supertrend(SUPERTREND_5MIN_PERIOD,
+            SUPERTREND_5MIN_MULTIPLIER) AND the index's 1-min close just
+            crossed ABOVE its own 1-min
+            Supertrend(SUPERTREND_1MIN_PERIOD, SUPERTREND_1MIN_MULTIPLIER)
+            - a genuine edge-detected crossover against the prior
+            confirmed 1-min bar, not a plain state check (see
+            ASSUMPTIONS below for why this one condition gets
+            edge-detection and the 5-min one doesn't).
+  PE entry: the exact mirror (open <, RSI <, 5-min close below its own
+            Supertrend, 1-min close crossed BELOW its own Supertrend).
+  Exit (either side): the index's 1-min close crosses back the other way
+            through its own 1-min Supertrend, or the paper position's
+            unrealized loss exceeds MAX_LOSS_RS - whichever comes first.
+            Also force-closed at SQUARE_OFF_TIME regardless.
+
+ASSUMPTIONS MADE EXPLICIT (same practice as CopperOptions/config.py's
+docstring, for the same reason - flagged here for correction if wrong):
+  - "Today's"/"yesterday's" open, close, RSI are DAILY-timeframe values
+    on the index SPOT itself (NIFTY/BANKNIFTY, security IDs 13/25,
+    segment IDX_I - the same segment the original index-scalping signal
+    already fetched 1-min candles from successfully). RSI is computed on
+    daily closes including today's still-forming daily close (i.e.
+    today's index price-so-far) - same interpretation already used for
+    CopperOptions's identical rule wording. The daily gate is computed
+    once per day and frozen (recomputed only the first successful poll
+    each day, same as CopperOptions) - since this strategy starts
+    evaluating right at MARKET_OPEN, that first poll's "price-so-far" is
+    very close to the actual day's open, so this doesn't distort the
+    intended "today's open"/"today's RSI at the open" reading much.
+  - The 5-min condition ("5 min close is greater/lesser than 5 min
+    supertrend") is read as a plain current-state check, matching
+    CopperOptions's precedent for its analogous rule. The 1-min
+    condition is explicitly worded "crossed above/below" - different
+    wording from the 5-min rule - so unlike Copper's blanket
+    state-check interpretation, this one gets genuine edge-detection:
+    it only fires on the bar where the close was on the wrong side of
+    the 1-min Supertrend the PRIOR confirmed bar and is on the right
+    side on THIS confirmed bar. The daily gate and the 5-min check are
+    the slower-moving "regime" filters; the 1-min crossover is the
+    precise entry/exit timing trigger.
+  - Both Supertrends and the crossover check only ever look at
+    COMPLETED candles - the current still-forming bar (this poll cycle
+    landed before that bar's own close time) is dropped before computing
+    anything, same reasoning as Options/dhan_client.py's
+    refresh_supertrend_signal - otherwise a crossover could flicker
+    true/false multiple times within one still-forming minute as new
+    ticks arrive.
 """
 import os
 
@@ -21,23 +63,22 @@ PAPER_TRADING_ONLY = True  # see IndexScalping/paper_engine.py - hard safety inv
 
 INDEX_SECURITY_ID = {"NIFTY": "13", "BANKNIFTY": "25"}  # NSE index (spot) segment IDX_I
 
-TOP_N_OPTIONS = 1  # always ATM only for now, no ranking needed (single underlying per signal)
+RSI_PERIOD = int(os.getenv("SCALP_RSI_PERIOD", "14"))
 
-OPENING_RANGE_MINUTES = int(os.getenv("SCALP_OPENING_RANGE_MINUTES", "15"))
-EMA_FAST_PERIOD = int(os.getenv("SCALP_EMA_FAST_PERIOD", "3"))
-EMA_SLOW_PERIOD = int(os.getenv("SCALP_EMA_SLOW_PERIOD", "8"))
-TARGET_PCT = float(os.getenv("SCALP_TARGET_PCT", "0.10"))
-STOP_LOSS_PCT = float(os.getenv("SCALP_STOP_LOSS_PCT", "0.06"))
-MAX_HOLD_MINUTES = int(os.getenv("SCALP_MAX_HOLD_MINUTES", "3"))
-MAX_TRADES_PER_DAY = int(os.getenv("SCALP_MAX_TRADES_PER_DAY", "4"))
+SUPERTREND_5MIN_PERIOD = int(os.getenv("SCALP_SUPERTREND_5MIN_PERIOD", "10"))
+SUPERTREND_5MIN_MULTIPLIER = float(os.getenv("SCALP_SUPERTREND_5MIN_MULTIPLIER", "3.0"))
+SUPERTREND_1MIN_PERIOD = int(os.getenv("SCALP_SUPERTREND_1MIN_PERIOD", "10"))
+SUPERTREND_1MIN_MULTIPLIER = float(os.getenv("SCALP_SUPERTREND_1MIN_MULTIPLIER", "3.0"))
 
-# Cost modeling - the whole point of tracking gross vs. net separately in
-# paper mode, since transaction costs dominate scalping economics far
-# more than the options bot's minutes-to-hours holds. Flat estimate for
-# brokerage + statutory charges (STT, exchange fees, GST, stamp duty) per
-# completed round-trip trade, plus a slippage haircut applied to both
-# entry and exit fills as a stand-in for bid-ask spread (no L2/order-book
-# data available via this API).
+MAX_LOSS_RS = float(os.getenv("SCALP_MAX_LOSS_RS", "1000.0"))
+
+# Cost modeling carried over from the original strategy - transaction
+# costs dominate scalping economics far more than the options bot's
+# minutes-to-hours holds, so gross vs. net P&L is tracked separately.
+# Flat estimate for brokerage + statutory charges (STT, exchange fees,
+# GST, stamp duty) per completed round-trip trade, plus a slippage
+# haircut applied to both entry and exit fills as a stand-in for
+# bid-ask spread (no L2/order-book data available via this API).
 ROUND_TRIP_COST_RS = float(os.getenv("SCALP_ROUND_TRIP_COST_RS", "40.0"))
 SLIPPAGE_PCT = float(os.getenv("SCALP_SLIPPAGE_PCT", "0.005"))
 
