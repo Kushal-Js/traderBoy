@@ -1448,6 +1448,54 @@ out of git.
   and bottom-N/top-N producing the identical result when candidates don't
   exceed `TOP_N_STOCKS` - 11/11 checks passed.
 
+- **Supertrend exit signal moved from the underlying's 5-min timeframe to
+  1-min, with the entry grace period also moved from 5 minutes to 1
+  minute (26 Aug 2026, user request).** `SUPERTREND_INTERVAL_MINUTES`
+  5->1 (Options/config.py, shared with Futures via the shared
+  `dhan_client.py` - not duplicated there by design, see that package's
+  own module docstring) and `SUPERTREND_ENTRY_GRACE_MINUTES` 5->1 in BOTH
+  `Options/config.py` and `Futures/config.py` (this one - unlike the
+  interval - genuinely is independent per package). No code changes were
+  needed beyond the two config values: `dhan_client.refresh_supertrend_
+  signal()` already reads `SUPERTREND_INTERVAL_MINUTES` for both the
+  candle-fetch interval and the still-forming-candle-drop check, and
+  `trading_engine._supertrend_signal_for()` already reads `SUPERTREND_
+  ENTRY_GRACE_MINUTES` for the grace comparison - both fully config-driven
+  already.
+
+  Net effect: the Supertrend exit now reacts to much shorter-term
+  reversals (1-min closes instead of 5-min) and can fire as early as 2
+  minutes after entry (skip the entry candle + 1 grace candle, same
+  relative shape as the old 5-min/5-min pairing which allowed a trigger
+  starting 10 minutes after entry) instead of needing up to 10 minutes.
+  This is inherently a noisier, more twitchy signal than 5-min - expect
+  more Supertrend exits overall, including some that would have been
+  filtered out as short-term noise on the old 5-min timeframe.
+
+  **Important side effect NOT part of what was requested, left unchanged
+  but flagged**: `SUPERTREND_MIN_WARMUP_CANDLES` (still 20, see bug
+  #10/#16 above) is expressed in CANDLES, not minutes. At the old 5-min
+  interval, 20 candles meant a ~100-minute warmup (signal not trusted
+  until ~10:55). At the new 1-min interval, the SAME 20-candle count now
+  completes warmup at ~09:35 - a much shorter window than the one bug
+  #10/#16's fix was actually validated against. This isn't necessarily
+  wrong, but it is genuinely untested at this new, faster interval - if
+  Supertrend exits start looking biased or erratic particularly in the
+  first 20-30 minutes of a session, this is the first thing to revisit
+  (e.g. raising `SUPERTREND_MIN_WARMUP_CANDLES` to restore something
+  closer to the original ~100-minute real-world warmup window - at 1-min
+  candles that would be closer to 100 than 20).
+
+  Verified fully offline (mocked `dhan_wrapper`'s Supertrend cache reads,
+  zero real network calls reachable - `_supertrend_signal_for()` is
+  otherwise a pure function) in
+  `/private/tmp/.../scratchpad/test_supertrend_1min.py`: both packages,
+  both option types, the entry-candle-itself never triggering, the exact
+  grace-boundary candle still not triggering (strict `>`), the candle one
+  step past grace correctly triggering, a favorable-direction signal
+  never triggering regardless of timing, and no cached signal yet
+  correctly not being treated as an exit signal - 23/23 checks passed.
+
 ## Capital requirements
 
 Since this strategy only ever *buys* options (never sells/writes), capital

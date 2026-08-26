@@ -143,7 +143,7 @@ DYNAMIC_SL_INCREASE_PCT = float(os.getenv("DYNAMIC_SL_INCREASE_PCT", "0.01"))  #
 ENABLE_SUPERTREND_EXIT = os.getenv("ENABLE_SUPERTREND_EXIT", "true").lower() == "true"
 SUPERTREND_PERIOD = int(os.getenv("SUPERTREND_PERIOD", "10"))
 SUPERTREND_MULTIPLIER = float(os.getenv("SUPERTREND_MULTIPLIER", "3.0"))
-SUPERTREND_INTERVAL_MINUTES = int(os.getenv("SUPERTREND_INTERVAL_MINUTES", "5"))
+SUPERTREND_INTERVAL_MINUTES = int(os.getenv("SUPERTREND_INTERVAL_MINUTES", "1"))
 # How long a cached Supertrend signal is reused before re-fetching candles -
 # doesn't need to track candle closes exactly (the poll loop refreshes it
 # every tick anyway, this just caps REST call frequency).
@@ -151,30 +151,44 @@ SUPERTREND_REFRESH_SECONDS = int(os.getenv("SUPERTREND_REFRESH_SECONDS", "60"))
 # Extra minutes past a position's own entry candle before a Supertrend exit
 # is honored, on top of always skipping the entry candle itself - see
 # trading_engine._supertrend_signal_for(). Backtested across 7 real trading
-# days: skipping only the entry candle (0) still let the very next candle
-# exit a position riding the same breakout's aftershock; one extra 5-min
-# candle of grace was the best-performing setting tested.
-SUPERTREND_ENTRY_GRACE_MINUTES = int(os.getenv("SUPERTREND_ENTRY_GRACE_MINUTES", "5"))
-# Minimum 5-min candles since market open before ANY Supertrend signal is
-# trusted, independent of SUPERTREND_PERIOD and independent of any single
-# position's own entry+grace gating above - see
+# days (against the ORIGINAL 5-min Supertrend/grace pairing): skipping only
+# the entry candle (0) still let the very next candle exit a position
+# riding the same breakout's aftershock; one extra 5-min candle of grace
+# was the best-performing setting tested THERE. Both this and
+# SUPERTREND_INTERVAL_MINUTES above were moved to 1-min by user request 26
+# Aug 2026 (was 5-min/5-min) - one extra 1-min candle of grace hasn't been
+# separately backtested at this faster interval, so treat it as a
+# reasonable starting point carried over from the 5-min tuning, not a
+# re-validated one.
+SUPERTREND_ENTRY_GRACE_MINUTES = int(os.getenv("SUPERTREND_ENTRY_GRACE_MINUTES", "1"))
+# Minimum SUPERTREND_INTERVAL_MINUTES-candles since market open before ANY
+# Supertrend signal is trusted, independent of SUPERTREND_PERIOD and
+# independent of any single position's own entry+grace gating above - see
 # dhan_client.refresh_supertrend_signal(). SUPERTREND_PERIOD=10 means the
-# indicator's very first computable value lands at exactly 10:10 for every
-# underlying (10th 5-min candle from a 09:15 open) - but that first value
-# has no prior trend/band to seed from, so it defaults via a naive
-# band-width comparison that reads "bearish" on ~every underlying
-# regardless of actual trend (see NOTES.md bug #10). Backtested on a
-# 14-day, 104-trade CE dataset: this cluster went from "roughly neutral"
-# (the original 7-day test) to -36,948 vs. target/SL alone - the risk bug
-# #10 flagged as worth revisiting if a future backtest showed it turning
-# net-harmful. Swept 15/20/25 candles: 20 was the clear best (+22,027.50
-# vs. the unfixed behavior on that dataset, non-monotonic - 25 was worse
-# than 20) - see NOTES.md bug #16 and BACKTEST_RESULTS.md's 14-day
-# validation section. Doesn't fix the seed's bias, just delays when the
-# (still-biased) first signal can fire, so fewer freshly-entered positions
-# are still open and exposed by the time it does - positions still exit
-# normally via target/stop-loss/dynamic-SL during the warmup window, they
-# just can't exit via Supertrend until it completes.
+# indicator's very first computable value has no prior trend/band to seed
+# from, so it defaults via a naive band-width comparison that reads
+# "bearish" on ~every underlying regardless of actual trend (see NOTES.md
+# bug #10). Backtested on a 14-day, 104-trade CE dataset AT THE ORIGINAL
+# 5-MIN INTERVAL (so 20 candles = 100 minutes, warmup complete ~10:55): this
+# cluster went from "roughly neutral" (the original 7-day test) to -36,948
+# vs. target/SL alone - the risk bug #10 flagged as worth revisiting if a
+# future backtest showed it turning net-harmful. Swept 15/20/25 candles: 20
+# was the clear best (+22,027.50 vs. the unfixed behavior on that dataset,
+# non-monotonic - 25 was worse than 20) - see NOTES.md bug #16 and
+# BACKTEST_RESULTS.md's 14-day validation section. Doesn't fix the seed's
+# bias, just delays when the (still-biased) first signal can fire, so fewer
+# freshly-entered positions are still open and exposed by the time it does -
+# positions still exit normally via target/stop-loss/dynamic-SL during the
+# warmup window, they just can't exit via Supertrend until it completes.
+#
+# IMPORTANT: this value is expressed in CANDLES, not minutes - when
+# SUPERTREND_INTERVAL_MINUTES was moved from 5 to 1 (user request 26 Aug
+# 2026), the SAME 20-candle count now completes warmup at ~09:35 instead of
+# ~10:55, a much shorter and NOT separately re-backtested window. Left
+# unchanged here since it wasn't part of what was requested, but flagged as
+# a real, non-obvious side effect worth knowing about - the bug #10/#16
+# fix's own effectiveness was validated at the old 100-minute window, not
+# this new ~20-minute one.
 SUPERTREND_MIN_WARMUP_CANDLES = int(os.getenv("SUPERTREND_MIN_WARMUP_CANDLES", "20"))
 
 # Default ATM leg for /chartink/webhook (the bullish scan) and the

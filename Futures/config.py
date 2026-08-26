@@ -65,7 +65,11 @@ DYNAMIC_SL_STEP_PCT_PE = float(os.getenv("FUTURES_DYNAMIC_SL_STEP_PCT_PE", "0.09
 DYNAMIC_SL_INCREASE_PCT = float(os.getenv("FUTURES_DYNAMIC_SL_INCREASE_PCT", "0.01"))
 
 ENABLE_SUPERTREND_EXIT = os.getenv("FUTURES_ENABLE_SUPERTREND_EXIT", "true").lower() == "true"
-SUPERTREND_ENTRY_GRACE_MINUTES = int(os.getenv("FUTURES_SUPERTREND_ENTRY_GRACE_MINUTES", "5"))
+# Moved from 5 to 1 minute by user request 26 Aug 2026, alongside
+# Options/config.py's SUPERTREND_INTERVAL_MINUTES also moving to 1 (that
+# value is shared/not duplicated here - see this file's own module
+# docstring - so it applies to this package's Supertrend reads too).
+SUPERTREND_ENTRY_GRACE_MINUTES = int(os.getenv("FUTURES_SUPERTREND_ENTRY_GRACE_MINUTES", "1"))
 
 # Default ATM leg for /chartink/webhook-futures - bullish/CE only for now,
 # matching Options' /chartink/webhook convention (no bearish endpoint was
