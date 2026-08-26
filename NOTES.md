@@ -916,6 +916,74 @@ out of git.
     PE entry end-to-end (mirror), exit via 1-min crossed-below, and exit
     via the ₹1,000 max-loss cap - 22/22 checks passed.
 
+30. **A restart-surviving stale broker order made a SELL-to-close get
+    RMS-rejected for "insufficient funds," even though the position was
+    just being closed, not shorted (BHARATFORG, 26 Aug 2026).** A SELL
+    order (`3252608268636`, qty 500) was still `PENDING` at the broker
+    when `dhanboy.service` restarted for an unrelated deploy. The restart
+    wiped `pending_exit_order_id` (in-memory only), so on the new process
+    `reconcile_broker_positions()` correctly re-recovered the position but
+    `_exit_position()` had no idea an exit order was already outstanding
+    - it placed a **second** fresh SELL for the same 500 qty, which Dhan
+    rejected with `DH-906 "insufficient funds, add ₹151,637.20"` (~6x the
+    position's own ₹25,100 premium value - naked-short-scale margin, not
+    premium-scale). Confirmed via Dhan's own portfolio API that no
+    oversell/double-sell actually occurred (the second order never
+    filled) - this was a spurious rejection, not a real capital shortfall.
+
+    **Root cause, confirmed against Dhan's own published support docs**
+    (see Sources below): Dhan's RMS locks margin against a pending order,
+    and doesn't necessarily net a second order against the same holding
+    up front - it can price the second SELL as if it might create a fresh
+    naked short and demand full margin for it. Dhan's own guidance for
+    exactly this situation: *"If you're trying to exit a position but
+    already have an open order (maybe it's pending)... either cancel that
+    order or... exit at market."* This is a different failure mode from
+    bug #3 (product-type mismatch) - the product type matched correctly
+    here (`MARGIN` on both the original and the retry); the issue was
+    purely "two live orders against one holding, order book not netted
+    upfront."
+
+    **Fix**: `DhanWrapper.get_pending_order_id(trading_symbol,
+    transaction_type)` (new, `dhan_client.py`) checks Dhan's live order
+    list for a non-terminal (`TRANSIT`/`PENDING`/`PART_TRADED`) order on
+    the EXACT contract + transaction type. `_exit_position()` (both
+    `Options/` and `Futures/`) now calls this **before every placement
+    attempt** (not gated by `exit_failure_count`, since this exact
+    incident happened on the very first post-restart attempt) - if found,
+    cancels it via the new `DhanWrapper.cancel_order()` first, then
+    proceeds with a fresh SELL as normal. Both the lookup and the cancel
+    are wrapped so a failure in either one (e.g. the stale order resolved
+    on its own between the check and the cancel) falls through to placing
+    a fresh order anyway rather than blocking the exit entirely.
+
+    Verified fully offline (every `dhan_wrapper` method mocked directly,
+    and the new order-list unit tests inject a fake `_client` rather than
+    patching the `client` property itself - patching a property with no
+    setter both fails AND, confirmed interactively before writing the
+    test, its own internal capture-the-original-value step triggers a
+    REAL Dhan login as a side effect) in
+    `/private/tmp/.../scratchpad/test_exit_reconciliation.py` (extended,
+    not a new file): `get_pending_order_id`'s exact-match filtering
+    (symbol/transaction_type/non-terminal-status), the stale order being
+    cancelled BEFORE the fresh SELL is placed (call-ordering asserted
+    explicitly), a normal exit being completely unaffected when no stale
+    order exists, and graceful fallback-to-placement when either the
+    lookup or the cancel itself errors - 42/42 checks passed, no
+    regression in the existing broker-quantity-reconciliation checks it
+    shares the file with.
+
+    Sources: [Dhan Support - order rejected despite sufficient
+    funds](https://dhan.co/support/orders-and-positions/order-rejections/i-have-sufficient-funds-in-my-account-yet-my-order-was-rejected-with-the-reason-fund-limit-insufficient-why-did-this-happen/)
+    ("check if you have any pending order - your margin is blocked for
+    your pending order"); [Dhan Support - basket order rejected despite
+    available
+    funds](https://dhan.co/support/orders-and-positions/order-rejections/why-was-my-basket-order-rejected-even-though-funds-available-was-higher-than-overall-margin/)
+    (pending-order margin locks not yet reflected in displayed
+    totals); general guidance to cancel a conflicting open/pending order
+    before placing a new exit, from [Dhan's order-rejection FAQ
+    hub](https://dhan.co/support/orders-and-positions/order-rejections/).
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

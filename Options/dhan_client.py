@@ -752,6 +752,44 @@ class DhanWrapper:
                 return p["quantity"]
         return 0
 
+    def get_pending_order_id(self, trading_symbol: str, transaction_type: str) -> Optional[str]:
+        """order_id of an existing non-terminal (TRANSIT/PENDING/PART_TRADED)
+        broker order for this EXACT trading_symbol + transaction_type, or
+        None if there isn't one. Used to avoid placing a duplicate exit
+        order on top of one already outstanding at the broker.
+
+        Confirmed live on 26 Aug 2026 (BHARATFORG): our own in-memory
+        pending_exit_order_id tracking is wiped by a restart, but a SELL
+        order placed just before that restart can still be sitting PENDING
+        at the broker. If a second SELL then gets placed against the same
+        holding before the first resolves, Dhan's RMS doesn't necessarily
+        net them together up front - it can price the second one as if it
+        might create a fresh naked short and demand full margin for it,
+        rejecting with "insufficient funds" even though the position is
+        just being closed. This matches Dhan's own documented guidance
+        ("check if you have any pending order - your margin is blocked for
+        your pending order... cancel that order") - see NOTES.md's
+        design-decision entry for the sources."""
+        resp = self.client.Dhan.get_order_list()
+        if resp.get("status") != "success":
+            raise RuntimeError(f"get_order_list failed: {resp.get('remarks')}")
+        for order in (resp.get("data") or []):
+            if (order.get("tradingSymbol") == trading_symbol
+                    and order.get("transactionType") == transaction_type
+                    and order.get("orderStatus") in ("TRANSIT", "PENDING", "PART_TRADED")):
+                return order.get("orderId")
+        return None
+
+    def cancel_order(self, order_id: str) -> None:
+        """Cancels a still-outstanding broker order. Raises if the cancel
+        itself fails (e.g. the order already resolved by the time this
+        runs) - the caller treats that as non-fatal and proceeds with a
+        fresh order placement regardless, same as any other best-effort
+        cleanup step in this file."""
+        resp = self.client.Dhan.cancel_order(order_id)
+        if resp.get("status") != "success":
+            raise RuntimeError(f"cancel_order({order_id}) failed: {resp.get('remarks')}")
+
     # ------------------------------------------------------------------ #
     # Orders
     # ------------------------------------------------------------------ #

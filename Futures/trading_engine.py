@@ -309,8 +309,30 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
 async def _exit_position(symbol: str, position: Position, exit_price: float, reason: str) -> None:
     """See Options/trading_engine.py's _exit_position - identical logic,
     including the broker-reconciliation check after 2+ consecutive exit
-    failures."""
+    failures and the stale-pending-order cancel-before-retry check."""
     loop = asyncio.get_running_loop()
+
+    try:
+        stale_order_id = await loop.run_in_executor(
+            None, dhan_wrapper.get_pending_order_id, position.option_trading_symbol, "SELL"
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s: could not check for an already-outstanding SELL order before placing a new one - "
+            "proceeding anyway", symbol,
+        )
+        stale_order_id = None
+    if stale_order_id:
+        logger.warning(
+            "%s: found an already-outstanding SELL order %s for %s (likely surviving a restart) - "
+            "cancelling it before placing a fresh exit order.",
+            symbol, stale_order_id, position.option_trading_symbol,
+        )
+        try:
+            await loop.run_in_executor(None, dhan_wrapper.cancel_order, stale_order_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not cancel stale SELL order %s - proceeding with a new order anyway",
+                              symbol, stale_order_id)
 
     if position.exit_failure_count >= 2:
         try:

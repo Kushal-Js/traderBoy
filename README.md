@@ -210,6 +210,17 @@ URLs — matching the `webhook_url` field in your sample payload.
      means), the position is closed locally with no further order-
      placement call, instead of retrying an already-doomed SELL
      indefinitely.
+   - `get_pending_order_id()` guards against a subtler restart-timing gap:
+     before EVERY exit placement attempt (not just after repeated
+     failures), checks whether the broker already has a non-terminal SELL
+     order outstanding for this exact contract — one placed just before a
+     restart can survive it, since only our own in-memory tracking is
+     wiped. A second SELL against a holding that already has one pending
+     can get rejected by Dhan's RMS for "insufficient funds" (priced as a
+     fresh naked short, not netted against the existing order up front) —
+     `_exit_position()` cancels the stale order first, then places a
+     fresh one. See NOTES.md's design-decision entry for the incident and
+     sources.
 
 7. **Real-time order/position tracking** — `dhanhq.OrderUpdate` (order
    status pushes) and `dhanhq.MarketFeed` (LTP ticks) run as background

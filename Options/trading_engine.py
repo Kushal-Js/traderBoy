@@ -465,8 +465,38 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
     call (and the small risk of an unintended fresh short if the broker's
     state ever diverged) in favor of one cheap position check. Only
     engages past the 2-failure threshold so a single transient rejection
-    still retries exactly as before."""
+    still retries exactly as before.
+
+    Before EVERY placement attempt (not gated by exit_failure_count, since
+    the scenario this guards against can happen on the very first
+    post-restart attempt), checks for an already-outstanding SELL order at
+    the broker for this exact contract and cancels it first if found - see
+    dhan_wrapper.get_pending_order_id's docstring for why a stale pending
+    order surviving a restart can otherwise get a fresh SELL rejected for
+    "insufficient funds" it doesn't actually need."""
     loop = asyncio.get_running_loop()
+
+    try:
+        stale_order_id = await loop.run_in_executor(
+            None, dhan_wrapper.get_pending_order_id, position.option_trading_symbol, "SELL"
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s: could not check for an already-outstanding SELL order before placing a new one - "
+            "proceeding anyway", symbol,
+        )
+        stale_order_id = None
+    if stale_order_id:
+        logger.warning(
+            "%s: found an already-outstanding SELL order %s for %s (likely surviving a restart) - "
+            "cancelling it before placing a fresh exit order.",
+            symbol, stale_order_id, position.option_trading_symbol,
+        )
+        try:
+            await loop.run_in_executor(None, dhan_wrapper.cancel_order, stale_order_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not cancel stale SELL order %s - proceeding with a new order anyway",
+                              symbol, stale_order_id)
 
     if position.exit_failure_count >= 2:
         try:
