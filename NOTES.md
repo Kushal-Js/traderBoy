@@ -1143,6 +1143,14 @@ out of git.
   option types, the cap firing before a distant percentage SL would, and
   a profitable position being unaffected - 18/18 checks passed.
 
+  **Lowered from ₹3,000 to ₹2,000 on 26 Aug 2026, by user request**,
+  alongside adding `PROFIT_PROTECTION_THRESHOLD_RS` (see that entry below)
+  - both the code default and `.env`/`FUTURES_.env` values updated
+  together so a bare deploy without an explicit override still lands on
+  ₹2,000. Test suite updated to assert the new default and re-verified
+  (still 18/18, values shifted from 2999/3050 to 1999/2050 around the new
+  cap).
+
 - **New-entry time cutoff added to both `Options/` and `Futures/` (25 Aug
   2026, user request): `ENABLE_TRADING_TIME_LIMIT` +
   `ALLOWED_TRADING_TIME`, deliberately separate from `SQUARE_OFF_TIME`.**

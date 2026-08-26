@@ -74,7 +74,7 @@ STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.03"))    # -3% hard stop los
 # condition - a hard risk ceiling on any single trade, applies identically
 # to CE and PE since both are long-premium positions (loss = (entry_price -
 # ltp) * quantity either way).
-MAX_LOSS_PER_TRADE_RS = float(os.getenv("MAX_LOSS_PER_TRADE_RS", "3000"))
+MAX_LOSS_PER_TRADE_RS = float(os.getenv("MAX_LOSS_PER_TRADE_RS", "2000"))
 
 # Absolute per-trade rupee profit-protection threshold, added 26 Aug 2026 by
 # user request - the mirror image of MAX_LOSS_PER_TRADE_RS above, but on the
