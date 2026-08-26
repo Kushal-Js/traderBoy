@@ -103,7 +103,7 @@ MAX_LOSS_PER_TRADE_RS = float(os.getenv("MAX_LOSS_PER_TRADE_RS", "1000"))
 # full target hit is a strictly better outcome and takes priority) but
 # before the percentage-based trailing/hard stop-loss. Applies identically
 # to CE and PE for the same reason MAX_LOSS_PER_TRADE_RS does.
-PROFIT_PROTECTION_THRESHOLD_RS = float(os.getenv("PROFIT_PROTECTION_THRESHOLD_RS", "1200"))
+PROFIT_PROTECTION_THRESHOLD_RS = float(os.getenv("PROFIT_PROTECTION_THRESHOLD_RS", "1500"))
 
 # Trailing stop-loss: raises the exit floor as price rises above entry,
 # instead of only exiting at the fixed hard stop loss. When disabled, a

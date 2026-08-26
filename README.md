@@ -138,7 +138,7 @@ URLs — matching the `webhook_url` field in your sample payload.
      of the percentage stop-loss (a low-premium/high-quantity leg can lose
      far more than this in rupees before its own percentage SL would fire)
    - `+TARGET_PCT` target
-   - `PROFIT_PROTECTION_THRESHOLD_RS` rupee profit-lock (default ₹1,200,
+   - `PROFIT_PROTECTION_THRESHOLD_RS` rupee profit-lock (default ₹1,500,
      checked right after target) — once a trade's peak unrealized profit
      (`(highest_price - entry_price) * quantity`) has exceeded this, exits
      the moment price is off that peak *at all*, however small the dip -

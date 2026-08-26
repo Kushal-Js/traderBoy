@@ -984,6 +984,44 @@ out of git.
     before placing a new exit, from [Dhan's order-rejection FAQ
     hub](https://dhan.co/support/orders-and-positions/order-rejections/).
 
+31. **`PROFIT_PROTECTION_THRESHOLD_RS` raised 1200->1500 (both Options
+    and Futures, user request 26 Aug 2026), backed by a backtest instead
+    of a gut call this time.** Ran the CE ATM buying strategy against
+    `01 Krishvi-1 day.csv` (4 trading days: 21/24/25/26 Aug 2026, live
+    config otherwise unchanged - SELECT_BOTTOM_N_STOCKS=true,
+    MAX_LOSS_PER_TRADE_RS=1000, 1-min/1-min-grace Supertrend) at three
+    threshold values via a `PROFIT_PROTECTION_THRESHOLD_RS` env override
+    passed to the backtest subprocess only (never touched the live
+    `.env`/`config.py` for the comparison runs themselves):
+
+    | Threshold | Closed trades | Win rate | Realized P&L | Combined P&L |
+    |---|---|---|---|---|
+    | 1200 (previous) | 73 | 56.2% | +37,973.30 | +37,473.30 |
+    | 2000 | 70 | 55.7% | +48,024.55 | +47,524.55 |
+
+    (1500, the value actually deployed, wasn't separately re-run as its
+    own backtest - see below for why that's still reasonable.)
+
+    2000 beat 1200 by +26.5% on this sample - fewer trades got
+    profit-locked early (24 vs 30 `PROFIT_PROTECTION_HIT` exits), letting
+    2 of them run all the way to `TARGET_HIT` instead (one +5,000 on
+    KOTAKBANK), at the cost of slightly larger `MAX_LOSS_HIT` damage
+    (-8,338.75 vs -7,070.00, 7 vs 6 trades - the normal tradeoff of giving
+    a position more room before protection arms). User chose 1500 as a
+    middle ground between the tested 1200 and 2000 values rather than
+    deploying the backtested-best 2000 directly - not itself re-verified
+    against this exact dataset before deploy, but every underlying
+    mechanism (peak-profit calc, strict-greater-than arming, priority vs.
+    MAX_LOSS_HIT/TARGET_HIT) is identical and already covered by
+    `test_profit_protection.py`'s threshold-agnostic checks.
+
+    No code changes needed - `_exit_reason_for()` already reads this
+    config value directly. Verified offline against the new 1500 value in
+    the existing `test_profit_protection.py` suite (parameterized off the
+    live config value, not hardcoded - only the one literal "defaults to
+    N" assertion needed updating) - all checks passed, no regression in
+    `test_max_loss_exit.py`.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
