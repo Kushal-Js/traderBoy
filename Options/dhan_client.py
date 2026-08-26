@@ -734,6 +734,24 @@ class DhanWrapper:
             for p in self.get_open_fno_positions()
         )
 
+    def get_broker_net_quantity(self, trading_symbol: str) -> int:
+        """Net quantity currently held at the broker for this EXACT contract
+        (matched on trading_symbol, not just underlying - a manual trade on
+        a different strike for the same underlying shouldn't be confused
+        with the specific leg we're trying to exit). 0 if flat or not found
+        in the open-positions list at all. Used to reconcile a position we
+        believe is still open against broker truth after repeated exit
+        failures (see trading_engine._exit_position) - confirmed live on 26
+        Aug 2026 that a user manually closing a position out-of-band (or a
+        stuck RMS rejection resolving itself) can leave the bot blindly
+        retrying a SELL for something that's already flat, burning API
+        calls on doomed order placements instead of one cheap position
+        check."""
+        for p in self.get_open_fno_positions():
+            if p["trading_symbol"] == trading_symbol:
+                return p["quantity"]
+        return 0
+
     # ------------------------------------------------------------------ #
     # Orders
     # ------------------------------------------------------------------ #

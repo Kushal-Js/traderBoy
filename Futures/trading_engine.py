@@ -304,8 +304,33 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
 # Step 3: monitoring / exits
 # --------------------------------------------------------------------------- #
 async def _exit_position(symbol: str, position: Position, exit_price: float, reason: str) -> None:
-    """See Options/trading_engine.py's _exit_position - identical logic."""
+    """See Options/trading_engine.py's _exit_position - identical logic,
+    including the broker-reconciliation check after 2+ consecutive exit
+    failures."""
     loop = asyncio.get_running_loop()
+
+    if position.exit_failure_count >= 2:
+        try:
+            broker_qty = await loop.run_in_executor(
+                None, dhan_wrapper.get_broker_net_quantity, position.option_trading_symbol
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: could not reconcile broker position before retrying exit (attempt %d) - "
+                "proceeding with the retry anyway", symbol, position.exit_failure_count,
+            )
+            broker_qty = None
+        if broker_qty == 0:
+            logger.warning(
+                "%s: broker shows this position already flat after %d consecutive exit failures - "
+                "reconciling locally as closed instead of retrying.",
+                symbol, position.exit_failure_count,
+            )
+            mark_price = exit_price or position.highest_price
+            await position_store.close_position(symbol, mark_price, "RECONCILED_ALREADY_FLAT")
+            await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.option_trading_symbol)
+            return
+
     tag = _gen_tag("Ext", symbol)
     try:
         order_resp = await loop.run_in_executor(

@@ -190,6 +190,13 @@ URLs — matching the `webhook_url` field in your sample payload.
    - `reconcile_broker_positions()` runs once at startup and imports any
      position already open at Dhan into local state, so a restart mid-day
      doesn't lose track of it and re-enter.
+   - `get_broker_net_quantity()` guards the exit side too: after 2+
+     consecutive failed attempts to close a position, `_exit_position()`
+     checks this exact contract's real quantity at the broker before
+     retrying — if it's already flat (closed manually, or by some other
+     means), the position is closed locally with no further order-
+     placement call, instead of retrying an already-doomed SELL
+     indefinitely.
 
 7. **Real-time order/position tracking** — `dhanhq.OrderUpdate` (order
    status pushes) and `dhanhq.MarketFeed` (LTP ticks) run as background

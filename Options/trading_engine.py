@@ -444,8 +444,42 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
     release the claim via record_exit_failure(), or the position would be
     stuck forever unable to exit - try_start_exit() would keep seeing a
     non-empty pending_exit_order_id and refuse every future attempt,
-    including from /square-off-now."""
+    including from /square-off-now.
+
+    After 2+ consecutive exit failures (record_exit_failure's own backoff
+    already spaces these out - see NOTES.md's design-decision entry),
+    reconciles with the broker BEFORE attempting another SELL: if this
+    exact contract is already flat there (closed manually, by another
+    process, or a stuck rejection that actually resolved), closes it
+    locally instead of retrying - avoiding a doomed order-placement API
+    call (and the small risk of an unintended fresh short if the broker's
+    state ever diverged) in favor of one cheap position check. Only
+    engages past the 2-failure threshold so a single transient rejection
+    still retries exactly as before."""
     loop = asyncio.get_running_loop()
+
+    if position.exit_failure_count >= 2:
+        try:
+            broker_qty = await loop.run_in_executor(
+                None, dhan_wrapper.get_broker_net_quantity, position.option_trading_symbol
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: could not reconcile broker position before retrying exit (attempt %d) - "
+                "proceeding with the retry anyway", symbol, position.exit_failure_count,
+            )
+            broker_qty = None  # unknown - fall through to a normal retry rather than guess
+        if broker_qty == 0:
+            logger.warning(
+                "%s: broker shows this position already flat after %d consecutive exit failures - "
+                "reconciling locally as closed instead of retrying.",
+                symbol, position.exit_failure_count,
+            )
+            mark_price = exit_price or position.highest_price
+            await position_store.close_position(symbol, mark_price, "RECONCILED_ALREADY_FLAT")
+            await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.option_trading_symbol)
+            return
+
     tag = _gen_tag("Ext", symbol)
     try:
         order_resp = await loop.run_in_executor(

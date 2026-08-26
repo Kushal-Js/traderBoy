@@ -1335,6 +1335,61 @@ out of git.
   checks passed. Also re-ran the `MAX_LOSS_PER_TRADE_RS` suite to confirm
   no regression - unchanged, all still passing.
 
+- **Broker-reconciliation safeguard added to `_exit_position()` in both
+  `Options/` and `Futures/` (26 Aug 2026, user request) - after 2+
+  consecutive exit failures, check broker truth before retrying a SELL,
+  instead of retrying blindly.** Motivated directly by the ADANIPOWER
+  incident earlier the same day (see below) and the LICHSGFIN manual-
+  close: once `position.exit_failure_count >= 2`, `_exit_position()` now
+  calls a new `DhanWrapper.get_broker_net_quantity(trading_symbol)` (exact
+  contract match, not just underlying - a manual trade on a different
+  strike for the same stock shouldn't be confused with the specific leg
+  being exited) before attempting another SELL. If the broker already
+  shows 0 quantity for that exact contract, the position is closed
+  locally with reason `RECONCILED_ALREADY_FLAT` (marked at the last
+  reasonable price available, `exit_price` or `highest_price`) and NO
+  further order-placement call is made - trading one cheap position-check
+  API call for what would otherwise be an indefinitely-repeating doomed
+  SELL attempt. If the broker still shows it open, the normal retry
+  proceeds exactly as before - this only changes behavior once something
+  is already stuck for 2+ tries, never on a single transient rejection.
+  If the reconciliation check itself errors (e.g. a network blip), falls
+  through to a normal retry rather than guessing either way.
+
+  This also closes a latent, if narrow, safety gap: without this check, a
+  position closed out-of-band (manually, or by some other process) would
+  have kept the bot retrying a SELL for it indefinitely, since nothing
+  ever told `_exit_position()` the position was already gone - each
+  retry would fail for whatever reason applied (e.g. the account no
+  longer holding the contract), backing off and retrying forever rather
+  than ever resolving. `close_position()` (the same function every normal
+  exit path already uses) correctly pops the position, clears the
+  `reserved_symbols` claim, and frees the symbol for a fresh entry -
+  nothing new needed there.
+
+  ADANIPOWER context (25 Aug->26 Aug session): a SELL to close an
+  existing NRML long got RMS-rejected 6+ times over ~6 minutes with
+  "insufficient funds, add ~Rs.117,000+" - unusual for a square-off of a
+  position already held, not a fresh short. Most likely cause: running
+  7-9 concurrent MARGIN/NRML positions simultaneously that day left free
+  margin thin enough that Dhan's real-time RMS check needed headroom even
+  to process a closing SELL, self-resolving once other positions closed
+  and freed capital. This safeguard doesn't fix that underlying margin
+  dynamic (a real capital-management tradeoff of NRML, not a bug), but it
+  does stop the bot from hammering the same doomed order repeatedly once
+  a position turns out to have already resolved by other means.
+
+  Verified fully offline (mocked `dhan_wrapper`, zero real network calls
+  reachable) in `/private/tmp/.../scratchpad/test_exit_reconciliation.py`:
+  both packages, exact-contract matching in `get_broker_net_quantity`,
+  the check being skipped entirely below the 2-failure threshold (no
+  behavior change for a single rejection), a normal retry proceeding when
+  the broker confirms still-open, closing locally with zero order
+  placement when the broker confirms flat, and graceful fallback to a
+  normal retry when the reconciliation call itself errors - 21/21 checks
+  passed. Re-ran the `MAX_LOSS_PER_TRADE_RS` and `PROFIT_PROTECTION_
+  THRESHOLD_RS` suites too - no regression.
+
 ## Capital requirements
 
 Since this strategy only ever *buys* options (never sells/writes), capital
