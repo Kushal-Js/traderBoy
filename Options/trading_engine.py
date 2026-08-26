@@ -603,12 +603,26 @@ def _exit_reason_for(position: Position, ltp: float, supertrend_against_position
     fires. Applies identically to CE and PE - both are long-premium
     positions (this strategy only ever buys options, never sells), so a
     loss is (entry_price - ltp) * quantity either way, no direction-
-    specific logic needed."""
+    specific logic needed.
+
+    After TARGET_HIT, checks config.PROFIT_PROTECTION_THRESHOLD_RS - the
+    mirror image on the upside. Once the position's PEAK unrealized profit
+    ((highest_price - entry_price) * quantity) has exceeded this threshold,
+    exits the moment price is off that peak at all (ltp < highest_price) -
+    deliberately no drawdown tolerance, per the simple version requested,
+    rather than waiting for a percentage-based trailing floor to be
+    breached. highest_price is already maintained by the caller
+    (update_highest_price) before this runs, so a tick that itself sets a
+    new high never triggers this - only a subsequent tick below an
+    already-recorded peak does."""
     loss_rs = (position.entry_price - ltp) * position.quantity
     if loss_rs >= config.MAX_LOSS_PER_TRADE_RS:
         return "MAX_LOSS_HIT"
     if ltp >= position.target_price:
         return "TARGET_HIT"
+    peak_profit_rs = (position.highest_price - position.entry_price) * position.quantity
+    if peak_profit_rs > config.PROFIT_PROTECTION_THRESHOLD_RS and ltp < position.highest_price:
+        return "PROFIT_PROTECTION_HIT"
     trailing_sl = position.current_trailing_sl
     if ltp <= trailing_sl:
         return "TRAILING_SL_HIT" if trailing_sl > position.hard_stop_loss else "STOP_LOSS_HIT"

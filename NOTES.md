@@ -1288,6 +1288,45 @@ out of git.
   4 failures as before (those check code defaults against the currently-
   loaded `.env`, not a regression).
 
+- **Absolute per-trade rupee profit-protection added to both `Options/`
+  and `Futures/` (26 Aug 2026, user request) - `PROFIT_PROTECTION_
+  THRESHOLD_RS` (default ₹2,000), the mirror image of
+  `MAX_LOSS_PER_TRADE_RS` but on the upside.** Once a trade's PEAK
+  unrealized profit (`(highest_price - entry_price) * quantity` -
+  `highest_price` is already maintained for the trailing-SL mechanism,
+  reused here rather than adding a new field) exceeds this threshold,
+  "protection" is armed: the very next tick where price is off that peak
+  *at all* (`ltp < highest_price`) exits immediately with reason
+  `PROFIT_PROTECTION_HIT`. Deliberately the simple version requested - no
+  drawdown tolerance once armed, not a percentage-based trailing floor.
+  Checked in `_exit_reason_for()` right after `TARGET_HIT` (reaching the
+  full target is a strictly better outcome and still takes priority) but
+  before the existing percentage-based trailing/hard stop-loss. Uses `>`
+  (strictly more than ₹2,000), not `>=`, matching the user's own wording.
+  Applies identically to CE and PE for the same reason
+  `MAX_LOSS_PER_TRADE_RS` does - both are long-premium positions, so
+  profit is `(ltp - entry_price) * quantity` either way.
+
+  Because `update_highest_price()` always runs before `_exit_reason_for()`
+  is called (both in the poll loop and the event-driven tick path), the
+  tick that itself sets a new peak can never trigger this - `ltp ==
+  highest_price` at that moment, not `<` - only a subsequent tick below an
+  already-recorded peak does. In practice this means once a trade clears
+  ₹2,000 of profit, it will almost always exit within a tick or two of its
+  actual high-water mark, since prices rarely rise monotonically forever -
+  a deliberately aggressive lock, not a lenient one.
+
+  Verified fully offline (pure function of a `Position` + an LTP, zero
+  network calls involved) in
+  `/private/tmp/.../scratchpad/test_profit_protection.py`: both packages,
+  both option types, no-exit-below-threshold, the exact-₹2,000 boundary
+  correctly NOT arming (strictly "more than"), no exit on the peak-setting
+  tick itself, firing on the smallest possible decline once armed,
+  `TARGET_HIT` still winning when price is at/above target, and
+  `MAX_LOSS_HIT` still winning in a crash-from-peak scenario - 30/30
+  checks passed. Also re-ran the `MAX_LOSS_PER_TRADE_RS` suite to confirm
+  no regression - unchanged, all still passing.
+
 ## Capital requirements
 
 Since this strategy only ever *buys* options (never sells/writes), capital

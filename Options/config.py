@@ -76,6 +76,20 @@ STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.03"))    # -3% hard stop los
 # ltp) * quantity either way).
 MAX_LOSS_PER_TRADE_RS = float(os.getenv("MAX_LOSS_PER_TRADE_RS", "3000"))
 
+# Absolute per-trade rupee profit-protection threshold, added 26 Aug 2026 by
+# user request - the mirror image of MAX_LOSS_PER_TRADE_RS above, but on the
+# upside. Once a trade's PEAK unrealized profit ((highest_price -
+# entry_price) * quantity - highest_price is already tracked for the
+# trailing-SL mechanism below, reused here rather than a new field) exceeds
+# this, "protection" is armed: deliberately the SIMPLE version requested -
+# no drawdown tolerance once armed, exit the moment price is off that peak
+# at all (ltp < highest_price), rather than waiting for a percentage-based
+# floor to be breached. Checked in _exit_reason_for() after TARGET_HIT (a
+# full target hit is a strictly better outcome and takes priority) but
+# before the percentage-based trailing/hard stop-loss. Applies identically
+# to CE and PE for the same reason MAX_LOSS_PER_TRADE_RS does.
+PROFIT_PROTECTION_THRESHOLD_RS = float(os.getenv("PROFIT_PROTECTION_THRESHOLD_RS", "2000"))
+
 # Trailing stop-loss: raises the exit floor as price rises above entry,
 # instead of only exiting at the fixed hard stop loss. When disabled, a
 # position only exits on TARGET_PCT or the fixed STOP_LOSS_PCT - see
