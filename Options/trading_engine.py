@@ -167,15 +167,23 @@ def rank_and_pick_top_stocks(
     stock_symbols: list[str], top_n: int = config.TOP_N_STOCKS, prefer_highest: bool = True
 ) -> list[tuple[str, float]]:
     """Returns [(symbol, pct_change), ...] sorted by %change, top_n only.
-    prefer_highest=True (the bullish /chartink/webhook) picks the biggest
-    gainers first; False (the bearish /chartink/webhook-sell) picks the
+    prefer_highest=True (the bullish /chartink/webhook) ranks the biggest
+    gainers first; False (the bearish /chartink/webhook-sell) ranks the
     biggest decliners first - same "strongest signal among the alerted
     list" idea, just pointed the other way for a PE/bearish scan.
     Stocks that error out on the quote lookup are skipped (and logged).
     Paced with a small delay between calls - Dhan's market-data REST API
     intermittently rate-limit-fails on rapid back-to-back calls (confirmed
     live); get_day_change_pct() already retries individually, but pacing
-    keeps that from being needed in the first place for a multi-stock alert."""
+    keeps that from being needed in the first place for a multi-stock alert.
+
+    config.SELECT_BOTTOM_N_STOCKS (default True, set 26 Aug 2026) then
+    decides which END of that ranking actually gets selected: True takes
+    the bottom top_n (the weakest-confirming names - for CE the weakest
+    gainers, for PE the weakest decliners - a contrarian/laggard bet);
+    False restores the original top-N/strongest-mover selection. Only
+    matters when more than top_n candidates were ranked - with top_n or
+    fewer, both ends are the same slice."""
     scored: list[tuple[str, float]] = []
     for i, symbol in enumerate(stock_symbols):
         if i > 0:
@@ -187,6 +195,8 @@ def rank_and_pick_top_stocks(
             logger.warning("Skipping %s - could not fetch day change: %s", symbol, exc)
 
     scored.sort(key=lambda t: t[1], reverse=prefer_highest)
+    if config.SELECT_BOTTOM_N_STOCKS:
+        return scored[-top_n:] if top_n > 0 else []
     return scored[:top_n]
 
 

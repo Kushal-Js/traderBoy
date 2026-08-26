@@ -1401,6 +1401,53 @@ out of git.
   passed. Re-ran the `MAX_LOSS_PER_TRADE_RS` and `PROFIT_PROTECTION_
   THRESHOLD_RS` suites too - no regression.
 
+- **Stock selection flipped from top-N to bottom-N by %change in both
+  `Options/` and `Futures/`, for both CE and PE (26 Aug 2026, user
+  request) - `SELECT_BOTTOM_N_STOCKS` (default `true`).** A deliberate
+  contrarian/laggard pivot, prompted directly by that same day's trade
+  evaluation showing 5 of 7 losing trades were fast, hard reversals right
+  after entry - a classic momentum-exhaustion pattern from chasing the
+  strongest-confirming names in an alert. This flips which end of the
+  ranking `rank_and_pick_top_stocks()` actually selects:
+  - **CE** ranks strongest gainers first (unchanged) - with the flag on,
+    selection takes the LAST `TOP_N_STOCKS` of that ranking instead of
+    the first, i.e. the *weakest* gainers in the alerted list (which can
+    even be flat or slightly negative names, if the list has more than
+    `TOP_N_STOCKS` candidates) rather than the names already up the most.
+  - **PE** ranks biggest decliners first (unchanged) - bottom-N takes the
+    *weakest* decliners (can even be flat or slightly positive names)
+    rather than the names already down the most.
+
+  The bet: names that haven't yet confirmed the alert's own direction as
+  strongly may have more room to move, rather than buying into a name
+  that's already made its run and is more prone to snapping back - the
+  opposite side of exactly the pattern that produced most of that day's
+  losses. This is a genuine, debatable strategy hypothesis, not an
+  obviously-correct fix - it trades one failure mode (buying exhausted
+  momentum) for a different, unproven one (the weakest names may be weak
+  because the move genuinely isn't there for them).
+
+  Implementation: `scored.sort(...)` is unchanged (still strongest-first
+  for CE, biggest-decliner-first for PE - the ranking itself, and its own
+  log/print output, is identical either way); only the final slice
+  changes, from `scored[:top_n]` to `scored[-top_n:]` when the flag is on.
+  Guarded against the `list[-0:]` Python gotcha (negative-zero slicing
+  returns the WHOLE list, not empty) with an explicit `top_n > 0` check,
+  though `TOP_N_STOCKS` is never actually 0 in practice. Only changes
+  anything when an alert ranks MORE candidates than `TOP_N_STOCKS` - with
+  3 or fewer ranked, top-N and bottom-N are the identical slice. Set
+  `SELECT_BOTTOM_N_STOCKS=false` (`FUTURES_SELECT_BOTTOM_N_STOCKS=false`
+  for Futures) to revert to the original strongest-mover selection
+  without a code change.
+
+  Verified fully offline (mocked `dhan_wrapper.get_day_change_pct`, zero
+  real network calls reachable) in
+  `/private/tmp/.../scratchpad/test_bottom_n_selection.py`: both packages,
+  both option types, bottom-N correctly selecting the weakest end of the
+  ranking with the flag on, top-N/legacy behavior restored with it off,
+  and bottom-N/top-N producing the identical result when candidates don't
+  exceed `TOP_N_STOCKS` - 11/11 checks passed.
+
 ## Capital requirements
 
 Since this strategy only ever *buys* options (never sells/writes), capital

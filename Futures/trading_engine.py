@@ -106,7 +106,8 @@ def rank_and_pick_top_stocks(
     stock_symbols: list[str], top_n: int = config.TOP_N_STOCKS, prefer_highest: bool = True
 ) -> list[tuple[str, float]]:
     """See Options/trading_engine.py's rank_and_pick_top_stocks - identical
-    logic, reusing the shared dhan_wrapper's get_day_change_pct."""
+    logic, reusing the shared dhan_wrapper's get_day_change_pct, including
+    the config.SELECT_BOTTOM_N_STOCKS bottom-N/top-N selection toggle."""
     scored: list[tuple[str, float]] = []
     for i, symbol in enumerate(stock_symbols):
         if i > 0:
@@ -118,6 +119,8 @@ def rank_and_pick_top_stocks(
             logger.warning("Skipping %s - could not fetch day change: %s", symbol, exc)
 
     scored.sort(key=lambda t: t[1], reverse=prefer_highest)
+    if config.SELECT_BOTTOM_N_STOCKS:
+        return scored[-top_n:] if top_n > 0 else []
     return scored[:top_n]
 
 

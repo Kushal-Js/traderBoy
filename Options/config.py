@@ -47,6 +47,21 @@ ENABLE_WS_FEED = os.getenv("ENABLE_WS_FEED", "true").lower() == "true"
 # Strategy parameters
 # ---------------------------------------------------------------------------
 TOP_N_STOCKS = int(os.getenv("TOP_N_STOCKS", "3"))
+
+# When true (default, set by user request 26 Aug 2026), rank_and_pick_top_
+# stocks() selects the BOTTOM TOP_N_STOCKS of the ranked list instead of the
+# top - for CE (ranked strongest %change first) this means the weakest
+# gainers among the alerted list (possibly even flat/negative names), and
+# for PE (ranked biggest decliners first) the weakest decliners (possibly
+# even flat/positive names) - a contrarian/laggard bet that the weakest
+# confirmers of the alert's own direction have more room to catch up,
+# rather than chasing the names that already moved the most (which showed
+# a pattern of sharp reversals right after entry earlier the same day -
+# see NOTES.md's design-decision entry). Set false to restore the original
+# top-N/strongest-mover selection. Only changes anything when an alert
+# ranks MORE than TOP_N_STOCKS candidates - with 3 or fewer, top-N and
+# bottom-N are the same slice.
+SELECT_BOTTOM_N_STOCKS = os.getenv("SELECT_BOTTOM_N_STOCKS", "true").lower() == "true"
 # Separate caps per option type - CE (from /chartink/webhook) and PE (from
 # /chartink/webhook-sell) each get their own budget rather than sharing one
 # pool, so a run of bearish alerts can't crowd out capacity for bullish

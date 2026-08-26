@@ -102,10 +102,18 @@ URLs — matching the `webhook_url` field in your sample payload.
    opening something new - it has no interaction with anything already
    live.
 
-2. **Top-N by %change** — on receipt, `rank_and_pick_top_stocks()` fetches
-   OHLC data for each stock and ranks by day's %change - highest first for
-   the bullish webhook, lowest/most negative first (biggest decliners) for
-   the bearish one - taking the top `TOP_N_STOCKS`.
+2. **Ranking + selection by %change** — on receipt, `rank_and_pick_top_stocks()`
+   fetches OHLC data for each stock and ranks by day's %change - highest
+   first for the bullish webhook, lowest/most negative first (biggest
+   decliners) for the bearish one. Which end of that ranking gets selected
+   depends on `SELECT_BOTTOM_N_STOCKS` (default `true`): when true, takes
+   the **bottom** `TOP_N_STOCKS` of the ranking instead of the top - for
+   CE this means the *weakest* gainers in the alert (a contrarian/laggard
+   bet, not the names already up the most); for PE, the *weakest*
+   decliners. Set `SELECT_BOTTOM_N_STOCKS=false` to restore the original
+   top-N/strongest-mover selection. Only matters when an alert ranks more
+   candidates than `TOP_N_STOCKS` - with fewer, both ends are the same
+   slice.
 
 3. **Entry** — for each ranked stock that doesn't already have an open or
    in-flight position (and there's capacity), `Tradehull.ATM_Strike_Selection()`
