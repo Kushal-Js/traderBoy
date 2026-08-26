@@ -50,11 +50,11 @@ STOP_LOSS_PCT = float(os.getenv("FUTURES_STOP_LOSS_PCT", "0.16"))
 
 # See Options/config.py's MAX_LOSS_PER_TRADE_RS - identical rationale, this
 # package's own independently-tunable cap.
-MAX_LOSS_PER_TRADE_RS = float(os.getenv("FUTURES_MAX_LOSS_PER_TRADE_RS", "1500"))
+MAX_LOSS_PER_TRADE_RS = float(os.getenv("FUTURES_MAX_LOSS_PER_TRADE_RS", "1000"))
 
 # See Options/config.py's PROFIT_PROTECTION_THRESHOLD_RS - identical
 # rationale, this package's own independently-tunable threshold.
-PROFIT_PROTECTION_THRESHOLD_RS = float(os.getenv("FUTURES_PROFIT_PROTECTION_THRESHOLD_RS", "1500"))
+PROFIT_PROTECTION_THRESHOLD_RS = float(os.getenv("FUTURES_PROFIT_PROTECTION_THRESHOLD_RS", "1200"))
 
 ENABLE_TRAILING_SL = os.getenv("FUTURES_ENABLE_TRAILING_SL", "false").lower() == "true"
 TRAILING_SL_PCT = float(os.getenv("FUTURES_TRAILING_SL_PCT", "0.015"))

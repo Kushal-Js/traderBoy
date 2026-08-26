@@ -1496,6 +1496,31 @@ out of git.
   never triggering regardless of timing, and no cached signal yet
   correctly not being treated as an exit signal - 23/23 checks passed.
 
+- **`MAX_LOSS_PER_TRADE_RS` lowered 1500->1000, `PROFIT_PROTECTION_
+  THRESHOLD_RS` lowered 1500->1200 (both Options and Futures), user
+  request 26 Aug 2026.** Third change to the loss cap this day (3000->
+  2000->1500->1000) and second to the profit-protection threshold (2000->
+  1500->1200) - the two are now intentionally asymmetric (1000 loss cap
+  vs 1200 profit-protection arm point) rather than mirrored 1:1 as they
+  were at every prior value. No code changes needed - both
+  `_exit_reason_for()` implementations already read these two config
+  values directly with no hardcoded numbers anywhere.
+
+  Net effect: MAX_LOSS_HIT now fires ~33% sooner in rupee terms than the
+  prior 1500 cap, tightening per-trade downside further. PROFIT_
+  PROTECTION_HIT now arms at a lower profit level (1200 instead of 1500)
+  but the gap between the two thresholds is narrower than before (200 Rs
+  vs the old 0 Rs when both were 1500) - a position now has a real (if
+  narrow) window where it's profitable but neither threshold has fired.
+
+  Verified fully offline in the existing `test_max_loss_exit.py` and
+  `test_profit_protection.py` suites (in scratchpad, both already written
+  to compute their boundary values off the live config value rather than
+  hardcoded literals precisely for this kind of repeated threshold churn) -
+  only each suite's one literal "defaults to N" assertion needed updating
+  to the new numbers; every boundary/priority-ordering check re-passed
+  unchanged. 18/18 and 30/30 checks passed respectively.
+
 ## Capital requirements
 
 Since this strategy only ever *buys* options (never sells/writes), capital
