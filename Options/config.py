@@ -183,13 +183,23 @@ SUPERTREND_ENTRY_GRACE_MINUTES = int(os.getenv("SUPERTREND_ENTRY_GRACE_MINUTES",
 #
 # IMPORTANT: this value is expressed in CANDLES, not minutes - when
 # SUPERTREND_INTERVAL_MINUTES was moved from 5 to 1 (user request 26 Aug
-# 2026), the SAME 20-candle count now completes warmup at ~09:35 instead of
-# ~10:55, a much shorter and NOT separately re-backtested window. Left
-# unchanged here since it wasn't part of what was requested, but flagged as
-# a real, non-obvious side effect worth knowing about - the bug #10/#16
-# fix's own effectiveness was validated at the old 100-minute window, not
-# this new ~20-minute one.
-SUPERTREND_MIN_WARMUP_CANDLES = int(os.getenv("SUPERTREND_MIN_WARMUP_CANDLES", "20"))
+# 2026), the SAME 20-candle count would have completed warmup at ~09:35
+# instead of ~10:55, a much shorter and NOT separately re-backtested window.
+#
+# Lowered to 0 (user request 26 Aug 2026, superseding the "20" tuning
+# above) - i.e. the gate is now OFF, only the bare SUPERTREND_PERIOD+1
+# candles are required, same as before bug #10/#16's fix existed. Backtest
+# evidence at the 1-min interval was MIXED across the two datasets tested:
+# a small 4-day/39-trade CE sample (01 Krishvi-1 day.csv) preferred keeping
+# the gate at 20 (+29,691 vs. +29,259 at 0); a larger 3-day/76-108-trade CE
+# sample (01 Kaashvi-1week.csv) strongly preferred 0 (+58,053 vs. +46,880
+# at 20 - fewer positions rode all the way down to MAX_LOSS_HIT because
+# Supertrend could cut them earlier). Deployed 0 anyway per explicit user
+# request despite the disagreement - see NOTES.md's design-decision entry
+# for the full numbers. Revisit if live results start looking like the
+# original bug #10 pattern (an early, naively-seeded "bearish" reading
+# firing near-simultaneously across many freshly-entered CE positions).
+SUPERTREND_MIN_WARMUP_CANDLES = int(os.getenv("SUPERTREND_MIN_WARMUP_CANDLES", "0"))
 
 # Default ATM leg for /chartink/webhook (the bullish scan) and the
 # fallback used when reconciling a broker position of unknown origin.

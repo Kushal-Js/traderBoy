@@ -160,6 +160,11 @@ URLs — matching the `webhook_url` field in your sample payload.
      period (also moved from 5 to 1) before honoring the signal, so it can
      fire as early as 2 minutes after entry. Faster and noisier than the
      old 5-min timeframe by design - expect more Supertrend exits overall.
+     `SUPERTREND_MIN_WARMUP_CANDLES` (default `0` - effectively off, as of
+     26 Aug 2026) gates when the Supertrend signal is trusted AT ALL each
+     session, independent of any single position's own grace period above -
+     see NOTES.md's design-decision entry for the mixed backtest evidence
+     behind this value.
    - `SQUARE_OFF_TIME` hard square-off of everything still open - only
      when `ENABLE_SQUARE_OFF=true` (default). When `false`, there is no
      forced end-of-day exit at all: a position rides past market close and

@@ -1022,6 +1022,46 @@ out of git.
     N" assertion needed updating) - all checks passed, no regression in
     `test_max_loss_exit.py`.
 
+32. **`SUPERTREND_MIN_WARMUP_CANDLES` lowered 20->0 (user request 26 Aug
+    2026) - effectively OFF, deployed despite genuinely mixed backtest
+    evidence.** This is bug #10/#16's own fix, reversed. Backtested both
+    values against two different CE ATM datasets before deploy:
+
+    | Dataset | Trades (20 / 0) | Realized P&L (20 / 0) |
+    |---|---|---|
+    | `01 Krishvi-1 day.csv` (4 days) | 39 / 39 | +29,691.30 / +29,259.45 |
+    | `01 Kaashvi-1week.csv` (3 days) | 108 / 76 | +46,879.75 / +58,053.40 |
+
+    The two datasets **disagree**: the smaller Krishvi sample says the
+    warmup gate is doing its job (0 is very slightly worse, -1.5%); the
+    larger Kaashvi sample says removing it is a clear win (+23.8%) -
+    mechanically, because Supertrend firing earlier (right after the bare
+    `SUPERTREND_PERIOD+1`=11 candles instead of waiting for 20) let it cut
+    several positions out before they rode all the way down to
+    `MAX_LOSS_HIT`, on the day-wise breakdown concentrated almost entirely
+    in one especially choppy session (25 Aug). User chose to deploy 0
+    anyway, aware of the disagreement - this is exactly the failure mode
+    bug #10 originally described (a naively-seeded early Supertrend
+    reading with no real trend/band history yet), so if live Supertrend
+    exits start clustering suspiciously early and often across many
+    freshly-entered CE positions again, this is the first place to look.
+
+    No code changes needed beyond the config default - `_compute_supertrend`,
+    `refresh_supertrend_signal()`, and `_supertrend_signal_for()` were
+    already fully driven by this value; the underlying
+    `SUPERTREND_PERIOD+1` (11-candle) ATR-seed minimum is untouched and
+    still enforced regardless of this setting. Verified fully offline
+    (mocked `dhan_wrapper._client` directly - the lazily-authenticating
+    `.client` property is never touched, confirmed the safe way after an
+    earlier session incident where merely referencing it via `patch.object`
+    triggered a real Dhan login) in
+    `/private/tmp/.../scratchpad/test_supertrend_warmup0.py`: the new
+    default is 0, 12 candles (just above the ATR-seed minimum) now cache a
+    signal where the old warmup=20 gate would have refused to, the bare
+    11-candle ATR-seed minimum is still enforced independent of this
+    setting, and a comfortably-large candle count caches either way -
+    6/6 checks passed, no regression in `test_supertrend_1min.py`.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
