@@ -116,13 +116,6 @@ class Position:
     # trading_engine._supertrend_signal_for), so entering doesn't get
     # immediately reversed by the same breakout candle that triggered it.
     supertrend_entry_candle_start: Optional[datetime] = None
-    # Rupee MAX_LOSS_HIT cap for THIS position specifically, overriding
-    # config.MAX_LOSS_PER_TRADE_RS when set - see PositionStore.
-    # get_max_loss_cap_for()'s docstring for the re-entry escalation this
-    # implements (user request 27 Aug 2026). None (the default) means "use
-    # the plain config default" - reconciled positions and anything built
-    # outside the live entry path (tests, backtests) leave this unset.
-    max_loss_override_rs: Optional[float] = None
 
     @property
     def current_trailing_sl(self) -> float:
@@ -179,12 +172,6 @@ class PositionStore:
         self.closed_positions_today: List[Position] = []
         self.orders_today: Dict[str, OrderRecord] = {}  # keyed by order_id
         self._trading_day: date = date.today()
-        # underlying_symbol -> consecutive MAX_LOSS_HIT exit count today, for
-        # get_max_loss_cap_for()'s re-entry escalation. Reset unconditionally
-        # every trading day (see maybe_reset_for_new_day) - unlike
-        # live_positions/reserved_symbols, this always resets regardless of
-        # ENABLE_SQUARE_OFF, per explicit user request.
-        self._consecutive_max_loss_by_underlying: Dict[str, int] = {}
 
     async def maybe_reset_for_new_day(self) -> None:
         """Resets per-day state at the first check after midnight. Whether
@@ -217,7 +204,6 @@ class PositionStore:
                     )
                 self.closed_positions_today.clear()
                 self.orders_today.clear()
-                self._consecutive_max_loss_by_underlying.clear()
                 self._trading_day = today
 
     async def reserve_symbol(self, underlying_symbol: str, option_type: str) -> bool:
@@ -416,45 +402,12 @@ class PositionStore:
             # reserved_symbols only blocks while something is genuinely
             # open/in-flight for it, not for the rest of the day.
             self.reserved_symbols.pop(underlying_symbol, None)
-            # Re-entry MAX_LOSS_HIT escalation counter (see
-            # get_max_loss_cap_for) - MAX_LOSS_HIT increments it, any other
-            # exit reason resets it back to 0 for this underlying.
-            if reason == "MAX_LOSS_HIT":
-                self._consecutive_max_loss_by_underlying[underlying_symbol] = (
-                    self._consecutive_max_loss_by_underlying.get(underlying_symbol, 0) + 1
-                )
-            else:
-                self._consecutive_max_loss_by_underlying.pop(underlying_symbol, None)
             logger.info(
                 "Position CLOSED: %s (%s) reason=%s exit=%.2f pnl_pct=%.2f%%",
                 pos.underlying_symbol, pos.option_trading_symbol, reason, exit_price,
                 (exit_price - pos.entry_price) / pos.entry_price * 100,
             )
             return pos
-
-    async def get_max_loss_cap_for(self, underlying_symbol: str) -> float:
-        """Rupee MAX_LOSS_HIT cap to use for a FRESH entry on this underlying
-        right now (user request 27 Aug 2026, see NOTES.md's design-decision
-        entry). Base config.MAX_LOSS_PER_TRADE_RS, escalated
-        config.MAX_LOSS_REENTRY_MULTIPLIER-fold per consecutive MAX_LOSS_HIT
-        exit already recorded for this underlying TODAY, capped at
-        config.MAX_LOSS_REENTRY_CEILING_MULTIPLIER x the base value.
-
-        Rationale: a stock that just got stopped out on MAX_LOSS_HIT and
-        immediately re-alerts is often genuinely choppy that day - giving
-        the re-entry the exact same tight cap that already proved too tight
-        once tends to just chop it again regardless of how the new leg is
-        actually performing. Any OTHER exit reason (TARGET_HIT,
-        PROFIT_PROTECTION_HIT, STOP_LOSS_HIT/TRAILING_SL_HIT,
-        SUPERTREND_EXIT, ...) resets this back to the base cap immediately -
-        this only escalates on consecutive LOSSES, not consecutive trades.
-        Resets to 0 for every underlying at the start of each new trading
-        day regardless of ENABLE_SQUARE_OFF (see maybe_reset_for_new_day)."""
-        async with self._lock:
-            count = self._consecutive_max_loss_by_underlying.get(underlying_symbol, 0)
-            base = config.MAX_LOSS_PER_TRADE_RS
-            escalated = base * (config.MAX_LOSS_REENTRY_MULTIPLIER ** count)
-            return min(escalated, base * config.MAX_LOSS_REENTRY_CEILING_MULTIPLIER)
 
     async def snapshot(self) -> dict:
         async with self._lock:

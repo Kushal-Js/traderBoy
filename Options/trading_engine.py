@@ -405,7 +405,6 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
         )
 
     entry_candle_start = await _capture_supertrend_entry_candle(loop, symbol)
-    max_loss_cap = await position_store.get_max_loss_cap_for(symbol)
 
     position = Position(
         underlying_symbol=symbol,
@@ -420,15 +419,8 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
         order_id=order_id,
         product_type=config.OPTIONS_PRODUCT,
         supertrend_entry_candle_start=entry_candle_start,
-        max_loss_override_rs=max_loss_cap,
     )
     await position_store.add_position(position)
-    if max_loss_cap != config.MAX_LOSS_PER_TRADE_RS:
-        logger.info(
-            "%s: re-entering after consecutive MAX_LOSS_HIT exit(s) today - MAX_LOSS_HIT cap "
-            "escalated to Rs.%.2f for this leg (base Rs.%.2f)",
-            symbol, max_loss_cap, config.MAX_LOSS_PER_TRADE_RS,
-        )
 
     logger.info(
         "BUY order %s FILLED for %s (%s): qty=%s entry_price=%s target=%.2f sl=%.2f",
@@ -678,17 +670,14 @@ def _exit_reason_for(position: Position, ltp: float, supertrend_against_position
     counts) - caller's responsibility to fetch/pass it, since that read can
     involve I/O and this function stays synchronous.
 
-    Checks the position's own MAX_LOSS_HIT cap first, ahead of every other
-    exit condition - an absolute per-trade rupee-loss cap independent of
+    Checks config.MAX_LOSS_PER_TRADE_RS first, ahead of every other exit
+    condition - an absolute per-trade rupee-loss cap independent of
     STOP_LOSS_PCT, since a large-quantity/low-premium position can still
     lose more than this cap in rupee terms before its percentage stop-loss
     fires. Applies identically to CE and PE - both are long-premium
     positions (this strategy only ever buys options, never sells), so a
     loss is (entry_price - ltp) * quantity either way, no direction-
-    specific logic needed. Normally this cap is config.MAX_LOSS_PER_TRADE_RS,
-    but position.max_loss_override_rs takes priority when set - see
-    PositionStore.get_max_loss_cap_for's docstring for the re-entry
-    escalation that sets it on fresh entries.
+    specific logic needed.
 
     After TARGET_HIT, checks config.PROFIT_PROTECTION_THRESHOLD_RS - the
     mirror image on the upside. Once the position's PEAK unrealized profit
@@ -701,8 +690,7 @@ def _exit_reason_for(position: Position, ltp: float, supertrend_against_position
     new high never triggers this - only a subsequent tick below an
     already-recorded peak does."""
     loss_rs = (position.entry_price - ltp) * position.quantity
-    max_loss_cap = position.max_loss_override_rs if position.max_loss_override_rs is not None else config.MAX_LOSS_PER_TRADE_RS
-    if loss_rs >= max_loss_cap:
+    if loss_rs >= config.MAX_LOSS_PER_TRADE_RS:
         return "MAX_LOSS_HIT"
     if ltp >= position.target_price:
         return "TARGET_HIT"
@@ -847,7 +835,6 @@ async def _sync_pending_orders() -> None:
                     None, dhan_wrapper.get_option_ltp, order.trading_symbol
                 )
             entry_candle_start = await _capture_supertrend_entry_candle(loop, order.underlying_symbol)
-            max_loss_cap = await position_store.get_max_loss_cap_for(order.underlying_symbol)
             position = Position(
                 underlying_symbol=order.underlying_symbol,
                 option_trading_symbol=order.trading_symbol,
@@ -861,7 +848,6 @@ async def _sync_pending_orders() -> None:
                 order_id=order.order_id,
                 product_type=config.OPTIONS_PRODUCT,
                 supertrend_entry_candle_start=entry_candle_start,
-                max_loss_override_rs=max_loss_cap,
             )
             await position_store.add_position(position)
             logger.info(

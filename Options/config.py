@@ -89,19 +89,17 @@ STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.03"))    # -3% hard stop los
 # condition - a hard risk ceiling on any single trade, applies identically
 # to CE and PE since both are long-premium positions (loss = (entry_price -
 # ltp) * quantity either way).
-MAX_LOSS_PER_TRADE_RS = float(os.getenv("MAX_LOSS_PER_TRADE_RS", "1000"))
-
-# Re-entry MAX_LOSS_PER_TRADE_RS escalation, added 27 Aug 2026 by user
-# request (prompted by ADANIPOWER re-entering and getting MAX_LOSS_HIT
-# repeatedly the same morning) - see PositionStore.get_max_loss_cap_for's
-# docstring for the exact mechanics and NOTES.md's design-decision entry
-# for the rationale. MULTIPLIER compounds per consecutive MAX_LOSS_HIT exit
-# on the same underlying THAT DAY (1000 -> 1750 -> 3062.5 -> ... at the
-# default 1.75), CEILING_MULTIPLIER bounds how far that can climb (capped
-# at 3x the base = Rs.3000 by default) so one repeatedly-choppy stock can't
-# escalate into an unbounded per-trade risk.
-MAX_LOSS_REENTRY_MULTIPLIER = float(os.getenv("MAX_LOSS_REENTRY_MULTIPLIER", "1.75"))
-MAX_LOSS_REENTRY_CEILING_MULTIPLIER = float(os.getenv("MAX_LOSS_REENTRY_CEILING_MULTIPLIER", "3.0"))
+#
+# FLAT value, same for every trade regardless of re-entry count - a 1.75x-
+# per-re-entry escalation (capped at 3x) was tried and deployed 27 Aug 2026
+# (prompted by ADANIPOWER/LICHSGFIN re-entering repeatedly the same
+# morning), then explicitly REVERTED the same day by user request in favor
+# of this simple fixed Rs.1500 - the escalation logic (Position.
+# max_loss_override_rs, PositionStore.get_max_loss_cap_for, the
+# consecutive-MAX_LOSS_HIT counter) no longer exists in the codebase at
+# all. See NOTES.md's design-decision entries for both the original
+# feature and the revert.
+MAX_LOSS_PER_TRADE_RS = float(os.getenv("MAX_LOSS_PER_TRADE_RS", "1500"))
 
 # Absolute per-trade rupee profit-protection threshold, added 26 Aug 2026 by
 # user request - the mirror image of MAX_LOSS_PER_TRADE_RS above, but on the

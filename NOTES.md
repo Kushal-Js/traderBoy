@@ -1062,52 +1062,59 @@ out of git.
     setting, and a comfortably-large candle count caches either way -
     6/6 checks passed, no regression in `test_supertrend_1min.py`.
 
-33. **`MAX_LOSS_HIT` re-entry escalation added (user request 27 Aug 2026,
-    prompted by ADANIPOWER cycling through 5 legs in one morning with 3
-    `MAX_LOSS_HIT` exits).** Previously every fresh entry on an underlying
-    used the exact same flat `MAX_LOSS_PER_TRADE_RS` cap regardless of that
-    stock's own history that day - a genuinely choppy stock that just got
-    stopped out would immediately re-enter (once its symbol freed up) and
-    frequently get chopped again on the identical tight cap, "irrespective
-    of how it's performing after re-entering" (the user's framing).
+33. **`MAX_LOSS_HIT` re-entry escalation - added, then explicitly reverted
+    the same day (27 Aug 2026).** Prompted by ADANIPOWER cycling through 5
+    legs in one morning (3 `MAX_LOSS_HIT` exits) and LICHSGFIN separately
+    doing the same (3 consecutive `MAX_LOSS_HIT` legs, -4,300 realized):
+    the concern was that a genuinely choppy stock re-entering right after
+    a `MAX_LOSS_HIT` exit was using the exact same flat cap and often
+    getting chopped again "irrespective of how it's performing after
+    re-entering" (the user's framing).
 
-    **New behavior**: `PositionStore.get_max_loss_cap_for(underlying_symbol)`
-    computes the cap for a FRESH entry as
-    `base * MAX_LOSS_REENTRY_MULTIPLIER ** consecutive_MAX_LOSS_HIT_count`,
-    capped at `base * MAX_LOSS_REENTRY_CEILING_MULTIPLIER` (defaults 1.75x
-    per step, ceiling 3x base - so 1000 -> 1750 -> 3000(capped), staying at
-    3000 for any further consecutive `MAX_LOSS_HIT` re-entries the same
-    day). `close_position()` increments the counter for an underlying only
-    when `reason == "MAX_LOSS_HIT"`, and resets it to 0 the instant that
-    underlying's next exit is anything else (`TARGET_HIT`,
-    `PROFIT_PROTECTION_HIT`, `STOP_LOSS_HIT`/`TRAILING_SL_HIT`,
-    `SUPERTREND_EXIT`, ...) - this only escalates on consecutive LOSSES,
-    not consecutive trades in general, per explicit user confirmation.
-    `maybe_reset_for_new_day()` clears the whole counter unconditionally
-    every trading day, regardless of `ENABLE_SQUARE_OFF` - a deliberate,
-    simpler choice than letting it persist across the NRML/carry-forward
-    day boundary, also per explicit user confirmation.
+    **What was built and deployed**: `PositionStore.get_max_loss_cap_for()`
+    escalated the cap 1.75x per consecutive `MAX_LOSS_HIT` exit on an
+    underlying that day (1000 -> 1750 -> 3000, capped at 3x base), reset to
+    base on any other exit reason, reset entirely every trading day. New
+    `Position.max_loss_override_rs` field carried the computed cap onto
+    each position at entry. Verified offline (32/32 checks) and deployed.
 
-    `Position.max_loss_override_rs` (new field, default `None`) carries the
-    computed cap onto the specific position at entry time; `_exit_reason_for()`
-    uses it in place of `config.MAX_LOSS_PER_TRADE_RS` when set, in both
-    `Options/` and `Futures/` (each package tracks its own escalation
-    independently, off its own `MAX_LOSS_PER_TRADE_RS`/
-    `MAX_LOSS_REENTRY_MULTIPLIER`/`MAX_LOSS_REENTRY_CEILING_MULTIPLIER`).
-    Reconciled positions (`reconcile_broker_positions()`) and anything built
-    outside the live entry path (tests, backtests) leave this field unset
-    and fall back to the plain config default unchanged - fully backward
-    compatible.
+    **What real trading data showed almost immediately**: LICHSGFIN's own
+    history that same morning revealed the escalation counter doesn't
+    survive a process restart (it's in-memory only, same as
+    `live_positions` itself) - a restart landing between two re-entries
+    silently reset the count back to 0, so a leg that should have gotten
+    the 2nd-tier ~3000 cap only got the base 1000 instead. With several
+    deploys/restarts happening that same session, this materially
+    undercut the feature's own purpose before it had converged on a real
+    interaction to react to (see the `_client` login-safety /
+    stale-order-cancel entries above for what those restarts were fixing).
 
-    Verified fully offline (pure logic, no `dhan_wrapper`/network involved
-    at all) in `/private/tmp/.../scratchpad/test_max_loss_reentry_escalation.py`:
-    the escalation sequence and its ceiling, any non-`MAX_LOSS_HIT` exit
-    resetting it, a different underlying being unaffected by another's
-    escalation, the daily reset firing regardless of `ENABLE_SQUARE_OFF`,
-    and `_exit_reason_for()` correctly honoring the per-position override
-    over the config default - 32/32 checks passed across both packages, no
-    regression in `test_max_loss_exit.py`/`test_profit_protection.py`/
-    `test_exit_reconciliation.py`.
+    **Reverted via `git revert` of the feature's own commit** (clean,
+    single-commit revert - nothing else had touched the same code since)
+    per explicit user request the same day, in favor of a simple flat
+    cap - `MAX_LOSS_PER_TRADE_RS` raised straight to Rs.1500 (both
+    Options and Futures) instead, applied identically no matter how many
+    times a stock has already re-entered. All of
+    `Position.max_loss_override_rs`, `PositionStore.
+    get_max_loss_cap_for()`/`_consecutive_max_loss_by_underlying`, and the
+    `MAX_LOSS_REENTRY_MULTIPLIER`/`MAX_LOSS_REENTRY_CEILING_MULTIPLIER`
+    config values (both packages, plus the matching `.env` entries) no
+    longer exist in the codebase - this isn't a toggle-off, the mechanism
+    itself is gone. `test_max_loss_reentry_escalation.py` (scratchpad) is
+    now obsolete accordingly - it would fail to import against current
+    code and should not be run as a regression check for anything else.
+
+    Verified the revert + new flat value offline: `test_max_loss_exit.py`'s
+    threshold-agnostic checks (which read `cfg.MAX_LOSS_PER_TRADE_RS` live
+    rather than a hardcoded literal, precisely for this kind of repeated
+    threshold churn) re-passed against the new Rs.1500 value with only its
+    one literal "defaults to N" assertion needing updating, and
+    `test_profit_protection.py`/`test_exit_reconciliation.py` showed no
+    regression. Caught along the way: the code-level default change alone
+    had NO effect until `.env`'s own explicit `MAX_LOSS_PER_TRADE_RS=1000`
+    override (which takes priority over the Python fallback via
+    `os.getenv`) was updated too - a live re-run of the test suite against
+    the real `.env` is what surfaced this before deploy.
 
 ## Design decisions
 
