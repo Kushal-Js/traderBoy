@@ -13,14 +13,18 @@ vars here, those only matter to Options/dhan_client.py's authenticate().
 
 Only lists tunables this package's own trading_engine.py/position_store.py
 actually read via their own `from . import config`. A few Supertrend
-internals (period, multiplier, warmup-candle count) are deliberately
-NOT here even though Options/config.py has them - those are consumed
-inside the *shared* dhan_client.py (bound to Options/config.py, since
-that's the package that owns the one Dhan connection), so redefining
-them here would be a config surface that looks tunable but silently
-isn't. ENABLE_SUPERTREND_EXIT and SUPERTREND_ENTRY_GRACE_MINUTES ARE
-read directly by this package's own trading_engine.py, so they genuinely
-are independent per strategy.
+internals (period, multiplier) are deliberately NOT here even though
+Options/config.py has them - those are consumed inside the *shared*
+dhan_client.py (bound to Options/config.py, since that's the package that
+owns the one Dhan connection), so redefining them here would be a config
+surface that looks tunable but silently isn't. ENABLE_SUPERTREND_EXIT IS
+read directly by this package's own trading_engine.py, so it's genuinely
+independent per strategy. SUPERTREND_ENTRY_GRACE_MINUTES (this package's
+own former copy) and SUPERTREND_MIN_WARMUP_CANDLES (Options' own copy,
+consumed inside the shared dhan_client.py) were BOTH removed entirely -
+user request 27 Aug 2026, immediate action on a reversal signal with no
+tuned delay - see this file's own SUPERTREND_ENTRY_GRACE_MINUTES removal
+note below and Options/config.py's identical one.
 """
 import os
 
@@ -65,12 +69,11 @@ DYNAMIC_SL_STEP_PCT_PE = float(os.getenv("FUTURES_DYNAMIC_SL_STEP_PCT_PE", "0.09
 DYNAMIC_SL_INCREASE_PCT = float(os.getenv("FUTURES_DYNAMIC_SL_INCREASE_PCT", "0.01"))
 
 ENABLE_SUPERTREND_EXIT = os.getenv("FUTURES_ENABLE_SUPERTREND_EXIT", "true").lower() == "true"
-# Moved from 5 to 1 minute by user request 26 Aug 2026, then back to 5 the
-# very next day (27 Aug 2026), alongside Options/config.py's
-# SUPERTREND_INTERVAL_MINUTES also moving 5->1->5 (that value is
-# shared/not duplicated here - see this file's own module docstring - so
-# it applies to this package's Supertrend reads too).
-SUPERTREND_ENTRY_GRACE_MINUTES = int(os.getenv("FUTURES_SUPERTREND_ENTRY_GRACE_MINUTES", "5"))
+# SUPERTREND_ENTRY_GRACE_MINUTES REMOVED entirely (user request 27 Aug
+# 2026) - see Options/config.py's identical removal note. The only
+# remaining delay is trading_engine._supertrend_signal_for() never acting
+# on the exact same candle a position was entered on - everything past
+# that candle triggers immediately, no extra grace window.
 
 # Default ATM leg for /chartink/webhook-futures - bullish/CE only for now,
 # matching Options' /chartink/webhook convention (no bearish endpoint was

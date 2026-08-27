@@ -1142,6 +1142,59 @@ out of git.
     values, both packages, both option types. No regression in
     `test_supertrend_warmup0.py`.
 
+35. **`SUPERTREND_ENTRY_GRACE_MINUTES` and `SUPERTREND_MIN_WARMUP_CANDLES`
+    REMOVED entirely (user request 27 Aug 2026, same day as entry #34's
+    interval revert) - not set to 0, the config values and the code paths
+    that read them no longer exist at all.** User's framing: "as soon as
+    supertrend signal is generated for reverse, immediate action has to be
+    taken" - no tuned delay of any kind should remain.
+
+    Before implementing, flagged one nuance explicitly to the user: there
+    are really THREE separate delays bundled under "waiting" -
+    (1) `SUPERTREND_MIN_WARMUP_CANDLES`, a global daily gate before any
+    signal is trusted; (2) `SUPERTREND_ENTRY_GRACE_MINUTES`, extra minutes
+    past the entry candle; and (3) the entry-candle skip ITSELF (never
+    acting on the exact same candle a position was entered on) - which is
+    not a tuning knob but a documented fix for a real live bug
+    (`_supertrend_signal_for`'s own docstring: "confirmed live... without
+    the entry-candle skip, this was cutting winning trades flat at
+    breakeven the instant they were entered"). Asked which of the three
+    to keep; **user confirmed keeping only #3** - drop the other two
+    entirely, but never act on the exact entry candle.
+
+    **What changed**: `dhan_client.refresh_supertrend_signal()` no longer
+    has the `SUPERTREND_MIN_WARMUP_CANDLES` gate - a signal is cached as
+    soon as the bare `SUPERTREND_PERIOD+1`=11-candle ATR-seed minimum is
+    available (a real mathematical requirement to compute Supertrend at
+    all, not a "waiting" policy, so this one stays). `_supertrend_signal_for()`
+    (both `Options/` and `Futures/`) now compares
+    `candle_start > entry_candle_start` directly with no grace offset -
+    the very next candle after entry can trigger an exit immediately.
+    `bt_common.py` (untracked backtest plumbing) hardcodes both to 0 to
+    match, rather than reading the now-nonexistent config attributes.
+
+    **Known, accepted tradeoff reopened by this**: the original bug #10 -
+    an early, naively-seeded Supertrend reading with no prior trend/band
+    history can read "bearish" on ~every underlying regardless of actual
+    trend - is no longer gated against at all. Explicitly flagged in
+    `Options/config.py`'s removal comment as the first thing to revisit if
+    live Supertrend exits start clustering suspiciously early and often.
+
+    Verified fully offline in a new
+    `/private/tmp/.../scratchpad/test_supertrend_immediate.py` (supersedes
+    `test_supertrend_1min.py`/`test_supertrend_warmup0.py`, both of which
+    now correctly fail loud with `AttributeError` against the removed
+    config attributes rather than silently passing something wrong -
+    confirmed interactively before writing the replacement): both removed
+    attributes genuinely don't exist via `hasattr()`, the entry-candle
+    skip is still enforced, the very next candle triggers immediately with
+    no grace window, favorable-direction signals never trigger, missing
+    data never forces an exit, and `refresh_supertrend_signal()` caches a
+    signal right at the bare 11-candle ATR-seed minimum with nothing
+    blocking it further - 22/22 checks passed, both packages, both option
+    types. No regression in `test_max_loss_exit.py`/
+    `test_profit_protection.py`/`test_exit_reconciliation.py`.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

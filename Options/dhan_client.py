@@ -631,19 +631,14 @@ class DhanWrapper:
             if len(closes) < period + 1:
                 return
 
-            # Fix for the 10:10 warmup-cluster bug (NOTES.md bug #10/#16):
-            # gate the signal behind a longer minimum than the bare period
-            # needs, independent of any position's own entry+grace gating
-            # below. Doesn't fix the seed's inherent bias, just delays when
-            # the (still-biased) first value can fire - see
-            # config.SUPERTREND_MIN_WARMUP_CANDLES.
-            if len(closes) < config.SUPERTREND_MIN_WARMUP_CANDLES:
-                logger.info(
-                    "Supertrend warmup not complete yet for %s (%d/%d candles) - not caching a signal",
-                    underlying_symbol, len(closes), config.SUPERTREND_MIN_WARMUP_CANDLES,
-                )
-                return
-
+            # The extra minimum-candles warmup gate this used to have (NOTES.md
+            # bug #10/#16's fix - SUPERTREND_MIN_WARMUP_CANDLES) was removed
+            # entirely by user request 27 Aug 2026: the first computable value
+            # (right at period+1 candles) has no prior trend/band history to
+            # seed from, so it can read "bearish" on ~every underlying
+            # regardless of actual trend - a known, accepted tradeoff now,
+            # not gated against. See NOTES.md's design-decision entry for the
+            # full history of what this gate used to be tuned to.
             supertrend = _compute_supertrend(highs, lows, closes, period=period,
                                               multiplier=config.SUPERTREND_MULTIPLIER)
             last_st = supertrend[-1]

@@ -39,7 +39,7 @@ import random
 import re
 import string
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -456,7 +456,7 @@ def _supertrend_signal_for(position: Position) -> bool:
     entry_candle_start = position.supertrend_entry_candle_start
     if candle_start is None or entry_candle_start is None:
         return True
-    return candle_start > entry_candle_start + timedelta(minutes=config.SUPERTREND_ENTRY_GRACE_MINUTES)
+    return candle_start > entry_candle_start
 
 
 def _exit_reason_for(position: Position, ltp: float, supertrend_against_position: bool = False) -> Optional[str]:

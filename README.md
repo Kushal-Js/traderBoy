@@ -159,17 +159,20 @@ URLs — matching the `webhook_url` field in your sample payload.
    - the underlying's 5-min Supertrend (`SUPERTREND_INTERVAL_MINUTES`,
      briefly moved to 1-min on 26 Aug 2026, reverted back to 5-min the very
      next day) turning against the position's direction - set
-     `ENABLE_SUPERTREND_EXIT=false` to disable. Skips the entry candle plus
-     a `SUPERTREND_ENTRY_GRACE_MINUTES`-minute grace period (also reverted
-     back to 5) before honoring the signal, so it can fire as early as
-     10 minutes after entry. `SUPERTREND_MIN_WARMUP_CANDLES` (default `0` -
-     effectively off) gates when the Supertrend signal is trusted AT ALL
-     each session, independent of any single position's own grace period
-     above - note this now means "trusted after ~55 minutes" at the
-     5-min interval (11 candles), not the ~11 minutes it meant while the
-     interval was at 1-min - see NOTES.md's design-decision entries for
-     both the mixed backtest evidence behind the warmup value and the
-     interval/grace revert.
+     `ENABLE_SUPERTREND_EXIT=false` to disable. **Immediate action** (user
+     request 27 Aug 2026): both the extra grace-minutes window
+     (`SUPERTREND_ENTRY_GRACE_MINUTES`) and the global daily warmup gate
+     (`SUPERTREND_MIN_WARMUP_CANDLES`) were removed entirely, not set to
+     0 - those config values and the code that read them no longer exist.
+     The only delay left is skipping the exact candle a position was
+     entered on (a documented fix for a real live bug, not a tuning knob -
+     see `_supertrend_signal_for`'s docstring) - the very next candle after
+     that can trigger an exit immediately. A signal is trusted as soon as
+     the bare `SUPERTREND_PERIOD+1`-candle ATR-seed minimum is available
+     (a mathematical requirement, not a policy). Known tradeoff reopened
+     by this: bug #10's naively-seeded early reading (can read "bearish"
+     on ~every underlying with no real trend history yet) is no longer
+     gated against - see NOTES.md's design-decision entry.
    - `SQUARE_OFF_TIME` hard square-off of everything still open - only
      when `ENABLE_SQUARE_OFF=true` (default). When `false`, there is no
      forced end-of-day exit at all: a position rides past market close and

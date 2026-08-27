@@ -23,7 +23,7 @@ import random
 import re
 import string
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -627,8 +627,10 @@ def _supertrend_signal_for(position: Position) -> bool:
     """Cache-only, synchronous - safe to call from both the poll loop and
     the WebSocket tick path. Returns whether the underlying's Supertrend
     has turned against the position's own direction AND the cached signal
-    has moved at least config.SUPERTREND_ENTRY_GRACE_MINUTES past the
-    candle the position was entered on.
+    is reading a candle PAST the one the position was entered on - i.e.
+    immediate action on the very next candle, no extra grace window (the
+    former SUPERTREND_ENTRY_GRACE_MINUTES tuning knob was removed entirely
+    by user request 27 Aug 2026 - see config.py's removal note).
 
     Direction depends on option_type: a CE (long call) profits when the
     underlying rises, so a *bearish* crossover is the reversal-against-it
@@ -638,15 +640,13 @@ def _supertrend_signal_for(position: Position) -> bool:
     would exit CE positions correctly but PE positions exactly backwards
     (treating the move that confirms the PE thesis as the exit trigger).
 
-    Backtested across 7 real trading days (99 CE trades): skipping only
-    the entry candle itself (0 grace) still let the very next candle exit
-    a position that was still riding the same breakout's aftershock - 9 of
-    11 non-warmup divergent trades exited exactly one candle after entry.
-    A 5-minute grace (one extra candle) flipped the week's net effect from
-    -5,964 to +2,951 vs. target/stop-loss alone, with a better win rate
-    using fewer, higher-quality exits. Confirmed live before the 0-grace
-    version existed: without the entry-candle skip at all, this was cutting
-    winning trades flat at breakeven the instant they were entered."""
+    The ONE delay deliberately kept, per explicit user confirmation when
+    the grace period was removed: never act on the EXACT SAME candle the
+    position was entered on. Confirmed live before this existed at all:
+    without the entry-candle skip, this was cutting winning trades flat at
+    breakeven the instant they were entered - the entry candle's own
+    Supertrend read can still reflect the pre-breakout state, not yet the
+    move that justified entering."""
     is_bearish = dhan_wrapper.get_cached_supertrend_bearish(position.underlying_symbol)
     if is_bearish is None:
         return False  # no signal yet - never force an exit on missing data
@@ -657,7 +657,7 @@ def _supertrend_signal_for(position: Position) -> bool:
     entry_candle_start = position.supertrend_entry_candle_start
     if candle_start is None or entry_candle_start is None:
         return True  # no entry-candle baseline captured - don't block on it
-    return candle_start > entry_candle_start + timedelta(minutes=config.SUPERTREND_ENTRY_GRACE_MINUTES)
+    return candle_start > entry_candle_start
 
 
 def _exit_reason_for(position: Position, ltp: float, supertrend_against_position: bool = False) -> Optional[str]:
