@@ -77,7 +77,13 @@ URLs — matching the `webhook_url` field in your sample payload.
    already open from one blocks the other from also entering it - but each
    has its own capacity cap (`MAX_LIVE_POSITIONS_CE` /
    `MAX_LIVE_POSITIONS_PE`), so a run of alerts on one side can't crowd
-   out capacity for the other.
+   out capacity for the other. As of 27 Aug 2026 (user request):
+   `MAX_LIVE_POSITIONS_CE=4`, `MAX_LIVE_POSITIONS_PE=0` — the bearish
+   webhook is fully off, every alert to it gets rejected before ranking
+   even runs (`"No PE capacity left - ignoring alert"`). This only gates
+   *new* entries; any PE position already open when this took effect
+   keeps being monitored/exited normally. See NOTES.md's design-decision
+   entry for the DELHIVERY capacity-cap investigation that prompted this.
 
 1b. **Entry cutoff** — `POST /chartink/webhook`, `/chartink/webhook-sell`,
    and `/chartink/webhook-futures` all refuse to open new positions once

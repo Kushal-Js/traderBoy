@@ -1195,6 +1195,48 @@ out of git.
     types. No regression in `test_max_loss_exit.py`/
     `test_profit_protection.py`/`test_exit_reconciliation.py`.
 
+36. **`MAX_LIVE_POSITIONS_CE` 2->4, `MAX_LIVE_POSITIONS_PE` 2->0 (PE fully
+    off), `TOP_N_STOCKS` 3->4 - Options package only, user request 27 Aug
+    2026.** Prompted directly by investigating why a DELHIVERY alert at
+    06:13 IST never even reached the ranking step: the webhook log showed
+    *"No CE capacity left (2 live/in-flight already) - ignoring alert"* -
+    a real capacity-cap block, confirmed by checking every DELHIVERY-
+    mentioning alert that day (5 of the other 8 were dedup skips on
+    DELHIVERY itself, evidenced by a *different* stock from the same alert
+    entering right after - proving capacity, not ranking, was the
+    DELHIVERY-specific blocker only once). Also confirmed `TOP_N_STOCKS`
+    itself was never the cause for DELHIVERY specifically (every alert
+    mentioning it listed <=3 stocks, so bottom-N/top-N select the same
+    slice), but raising it to 4 alongside the CE cap means a genuinely
+    4-stock alert can now fill all 4 slots instead of only the first 3.
+
+    PE going to 0 is a deliberate full shutoff of `/chartink/webhook-sell`
+    (bearish scan) - no code changes needed, both capacity gates already
+    handle a zero cap correctly: `PositionStore.reserve_symbol()`'s
+    `current >= _cap_for(option_type)` is `0 >= 0` on the very first PE
+    attempt, and `option_main.py`'s early webhook-level bail-out
+    (`remaining_capacity()`'s `max(0, cap - current)`) also returns 0
+    immediately, rejecting the alert before ranking even runs. Existing
+    open PE positions at deploy time are unaffected - this only gates NEW
+    entries, exit monitoring for anything already open keeps working
+    exactly as before. Scoped to `Options/` only - Futures wasn't part of
+    this request and its own `FUTURES_MAX_LIVE_POSITIONS_PE`/
+    `FUTURES_TOP_N_STOCKS` are untouched.
+
+    Verified fully offline (pure `PositionStore` logic, no `dhan_wrapper`
+    involved at all) in
+    `/private/tmp/.../scratchpad/test_capacity_ce4_pe0.py`: exactly 4
+    concurrent CE reservations succeed and a 5th is rejected, a PE
+    reservation is rejected on the very first attempt with zero prior PE
+    activity, the two caps stay fully independent of each other, and a
+    pre-existing open PE position is left untouched by the cap change
+    (still tracked normally, just blocking any *new* PE symbol) - 15/15
+    checks passed. Caught the same `.env`-override gotcha as the
+    `MAX_LOSS_PER_TRADE_RS` incident earlier - the code-level defaults
+    alone had no effect until `.env`'s own explicit
+    `TOP_N_STOCKS=3`/`MAX_LIVE_POSITIONS_CE=2`/`MAX_LIVE_POSITIONS_PE=2`
+    were updated too.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
