@@ -78,6 +78,10 @@ class Position:
     exit_failure_count: int = 0
     next_exit_retry_at: Optional[datetime] = None
     supertrend_entry_candle_start: Optional[datetime] = None
+    # See Options/position_store.py's Position.max_loss_override_rs -
+    # identical logic, this package's own independently-tracked re-entry
+    # escalation.
+    max_loss_override_rs: Optional[float] = None
 
     @property
     def current_trailing_sl(self) -> float:
@@ -112,6 +116,9 @@ class PositionStore:
         self.closed_positions_today: List[Position] = []
         self.orders_today: Dict[str, OrderRecord] = {}
         self._trading_day: date = date.today()
+        # See Options/position_store.py's identical field - this package's
+        # own independently-tracked re-entry MAX_LOSS_HIT escalation counter.
+        self._consecutive_max_loss_by_underlying: Dict[str, int] = {}
 
     async def maybe_reset_for_new_day(self) -> None:
         """See Options/position_store.py's identical function - same
@@ -134,6 +141,7 @@ class PositionStore:
                     )
                 self.closed_positions_today.clear()
                 self.orders_today.clear()
+                self._consecutive_max_loss_by_underlying.clear()
                 self._trading_day = today
 
     async def reserve_symbol(self, underlying_symbol: str, option_type: str) -> bool:
@@ -252,12 +260,30 @@ class PositionStore:
             pos.closed_at = datetime.now()
             self.closed_positions_today.append(pos)
             self.reserved_symbols.pop(underlying_symbol, None)
+            # See Options/position_store.py's identical logic - this
+            # package's own independently-tracked re-entry escalation.
+            if reason == "MAX_LOSS_HIT":
+                self._consecutive_max_loss_by_underlying[underlying_symbol] = (
+                    self._consecutive_max_loss_by_underlying.get(underlying_symbol, 0) + 1
+                )
+            else:
+                self._consecutive_max_loss_by_underlying.pop(underlying_symbol, None)
             logger.info(
                 "Position CLOSED: %s (%s) reason=%s exit=%.2f pnl_pct=%.2f%%",
                 pos.underlying_symbol, pos.option_trading_symbol, reason, exit_price,
                 (exit_price - pos.entry_price) / pos.entry_price * 100,
             )
             return pos
+
+    async def get_max_loss_cap_for(self, underlying_symbol: str) -> float:
+        """See Options/position_store.py's get_max_loss_cap_for - identical
+        logic, this package's own independently-tracked re-entry escalation
+        off its own config.MAX_LOSS_PER_TRADE_RS/MAX_LOSS_REENTRY_*."""
+        async with self._lock:
+            count = self._consecutive_max_loss_by_underlying.get(underlying_symbol, 0)
+            base = config.MAX_LOSS_PER_TRADE_RS
+            escalated = base * (config.MAX_LOSS_REENTRY_MULTIPLIER ** count)
+            return min(escalated, base * config.MAX_LOSS_REENTRY_CEILING_MULTIPLIER)
 
     async def snapshot(self) -> dict:
         async with self._lock:

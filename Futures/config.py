@@ -52,6 +52,11 @@ STOP_LOSS_PCT = float(os.getenv("FUTURES_STOP_LOSS_PCT", "0.16"))
 # package's own independently-tunable cap.
 MAX_LOSS_PER_TRADE_RS = float(os.getenv("FUTURES_MAX_LOSS_PER_TRADE_RS", "1000"))
 
+# See Options/config.py's MAX_LOSS_REENTRY_MULTIPLIER/CEILING_MULTIPLIER -
+# identical rationale, this package's own independently-tunable values.
+MAX_LOSS_REENTRY_MULTIPLIER = float(os.getenv("FUTURES_MAX_LOSS_REENTRY_MULTIPLIER", "1.75"))
+MAX_LOSS_REENTRY_CEILING_MULTIPLIER = float(os.getenv("FUTURES_MAX_LOSS_REENTRY_CEILING_MULTIPLIER", "3.0"))
+
 # See Options/config.py's PROFIT_PROTECTION_THRESHOLD_RS - identical
 # rationale, this package's own independently-tunable threshold.
 PROFIT_PROTECTION_THRESHOLD_RS = float(os.getenv("FUTURES_PROFIT_PROTECTION_THRESHOLD_RS", "1500"))

@@ -91,6 +91,18 @@ STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.03"))    # -3% hard stop los
 # ltp) * quantity either way).
 MAX_LOSS_PER_TRADE_RS = float(os.getenv("MAX_LOSS_PER_TRADE_RS", "1000"))
 
+# Re-entry MAX_LOSS_PER_TRADE_RS escalation, added 27 Aug 2026 by user
+# request (prompted by ADANIPOWER re-entering and getting MAX_LOSS_HIT
+# repeatedly the same morning) - see PositionStore.get_max_loss_cap_for's
+# docstring for the exact mechanics and NOTES.md's design-decision entry
+# for the rationale. MULTIPLIER compounds per consecutive MAX_LOSS_HIT exit
+# on the same underlying THAT DAY (1000 -> 1750 -> 3062.5 -> ... at the
+# default 1.75), CEILING_MULTIPLIER bounds how far that can climb (capped
+# at 3x the base = Rs.3000 by default) so one repeatedly-choppy stock can't
+# escalate into an unbounded per-trade risk.
+MAX_LOSS_REENTRY_MULTIPLIER = float(os.getenv("MAX_LOSS_REENTRY_MULTIPLIER", "1.75"))
+MAX_LOSS_REENTRY_CEILING_MULTIPLIER = float(os.getenv("MAX_LOSS_REENTRY_CEILING_MULTIPLIER", "3.0"))
+
 # Absolute per-trade rupee profit-protection threshold, added 26 Aug 2026 by
 # user request - the mirror image of MAX_LOSS_PER_TRADE_RS above, but on the
 # upside. Once a trade's PEAK unrealized profit ((highest_price -

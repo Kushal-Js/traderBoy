@@ -269,6 +269,7 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
         )
 
     entry_candle_start = await _capture_supertrend_entry_candle(loop, symbol)
+    max_loss_cap = await position_store.get_max_loss_cap_for(symbol)
 
     position = Position(
         underlying_symbol=symbol,
@@ -283,8 +284,15 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
         order_id=order_id,
         product_type=config.OPTIONS_PRODUCT,
         supertrend_entry_candle_start=entry_candle_start,
+        max_loss_override_rs=max_loss_cap,
     )
     await position_store.add_position(position)
+    if max_loss_cap != config.MAX_LOSS_PER_TRADE_RS:
+        logger.info(
+            "%s: re-entering after consecutive MAX_LOSS_HIT exit(s) today - MAX_LOSS_HIT cap "
+            "escalated to Rs.%.2f for this leg (base Rs.%.2f)",
+            symbol, max_loss_cap, config.MAX_LOSS_PER_TRADE_RS,
+        )
 
     logger.info(
         "BUY order %s FILLED for %s (%s): qty=%s entry_price=%s target=%.2f sl=%.2f",
@@ -461,11 +469,14 @@ def _supertrend_signal_for(position: Position) -> bool:
 
 def _exit_reason_for(position: Position, ltp: float, supertrend_against_position: bool = False) -> Optional[str]:
     """See Options/trading_engine.py's version - identical logic, including
-    the config.MAX_LOSS_PER_TRADE_RS absolute rupee-loss cap checked first
-    and the config.PROFIT_PROTECTION_THRESHOLD_RS rupee profit-lock checked
-    after TARGET_HIT."""
+    the config.MAX_LOSS_PER_TRADE_RS absolute rupee-loss cap (overridable
+    per-position via position.max_loss_override_rs - see PositionStore.
+    get_max_loss_cap_for's re-entry escalation) checked first, and the
+    config.PROFIT_PROTECTION_THRESHOLD_RS rupee profit-lock checked after
+    TARGET_HIT."""
     loss_rs = (position.entry_price - ltp) * position.quantity
-    if loss_rs >= config.MAX_LOSS_PER_TRADE_RS:
+    max_loss_cap = position.max_loss_override_rs if position.max_loss_override_rs is not None else config.MAX_LOSS_PER_TRADE_RS
+    if loss_rs >= max_loss_cap:
         return "MAX_LOSS_HIT"
     if ltp >= position.target_price:
         return "TARGET_HIT"
@@ -590,6 +601,7 @@ async def _sync_pending_orders() -> None:
                     None, dhan_wrapper.get_option_ltp, order.trading_symbol
                 )
             entry_candle_start = await _capture_supertrend_entry_candle(loop, order.underlying_symbol)
+            max_loss_cap = await position_store.get_max_loss_cap_for(order.underlying_symbol)
             position = Position(
                 underlying_symbol=order.underlying_symbol,
                 option_trading_symbol=order.trading_symbol,
@@ -603,6 +615,7 @@ async def _sync_pending_orders() -> None:
                 order_id=order.order_id,
                 product_type=config.OPTIONS_PRODUCT,
                 supertrend_entry_candle_start=entry_candle_start,
+                max_loss_override_rs=max_loss_cap,
             )
             await position_store.add_position(position)
             logger.info(

@@ -136,7 +136,15 @@ URLs — matching the `webhook_url` field in your sample payload.
      checked first, ahead of every other exit condition below) — exits
      immediately once `(entry_price - ltp) * quantity` reaches this, independent
      of the percentage stop-loss (a low-premium/high-quantity leg can lose
-     far more than this in rupees before its own percentage SL would fire)
+     far more than this in rupees before its own percentage SL would fire).
+     **Re-entry escalation**: a fresh entry on an underlying that just hit
+     `MAX_LOSS_HIT` gets a higher cap instead of the identical flat value —
+     `MAX_LOSS_REENTRY_MULTIPLIER`-fold (default 1.75x) per consecutive
+     `MAX_LOSS_HIT` on that underlying today, capped at
+     `MAX_LOSS_REENTRY_CEILING_MULTIPLIER`x the base (default 3x, i.e.
+     ₹3,000). Resets to the base cap the instant that underlying's next
+     exit is anything else, and resets entirely every trading day. See
+     NOTES.md's design-decision entry.
    - `+TARGET_PCT` target
    - `PROFIT_PROTECTION_THRESHOLD_RS` rupee profit-lock (default ₹1,500,
      checked right after target) — once a trade's peak unrealized profit

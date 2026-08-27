@@ -1062,6 +1062,53 @@ out of git.
     setting, and a comfortably-large candle count caches either way -
     6/6 checks passed, no regression in `test_supertrend_1min.py`.
 
+33. **`MAX_LOSS_HIT` re-entry escalation added (user request 27 Aug 2026,
+    prompted by ADANIPOWER cycling through 5 legs in one morning with 3
+    `MAX_LOSS_HIT` exits).** Previously every fresh entry on an underlying
+    used the exact same flat `MAX_LOSS_PER_TRADE_RS` cap regardless of that
+    stock's own history that day - a genuinely choppy stock that just got
+    stopped out would immediately re-enter (once its symbol freed up) and
+    frequently get chopped again on the identical tight cap, "irrespective
+    of how it's performing after re-entering" (the user's framing).
+
+    **New behavior**: `PositionStore.get_max_loss_cap_for(underlying_symbol)`
+    computes the cap for a FRESH entry as
+    `base * MAX_LOSS_REENTRY_MULTIPLIER ** consecutive_MAX_LOSS_HIT_count`,
+    capped at `base * MAX_LOSS_REENTRY_CEILING_MULTIPLIER` (defaults 1.75x
+    per step, ceiling 3x base - so 1000 -> 1750 -> 3000(capped), staying at
+    3000 for any further consecutive `MAX_LOSS_HIT` re-entries the same
+    day). `close_position()` increments the counter for an underlying only
+    when `reason == "MAX_LOSS_HIT"`, and resets it to 0 the instant that
+    underlying's next exit is anything else (`TARGET_HIT`,
+    `PROFIT_PROTECTION_HIT`, `STOP_LOSS_HIT`/`TRAILING_SL_HIT`,
+    `SUPERTREND_EXIT`, ...) - this only escalates on consecutive LOSSES,
+    not consecutive trades in general, per explicit user confirmation.
+    `maybe_reset_for_new_day()` clears the whole counter unconditionally
+    every trading day, regardless of `ENABLE_SQUARE_OFF` - a deliberate,
+    simpler choice than letting it persist across the NRML/carry-forward
+    day boundary, also per explicit user confirmation.
+
+    `Position.max_loss_override_rs` (new field, default `None`) carries the
+    computed cap onto the specific position at entry time; `_exit_reason_for()`
+    uses it in place of `config.MAX_LOSS_PER_TRADE_RS` when set, in both
+    `Options/` and `Futures/` (each package tracks its own escalation
+    independently, off its own `MAX_LOSS_PER_TRADE_RS`/
+    `MAX_LOSS_REENTRY_MULTIPLIER`/`MAX_LOSS_REENTRY_CEILING_MULTIPLIER`).
+    Reconciled positions (`reconcile_broker_positions()`) and anything built
+    outside the live entry path (tests, backtests) leave this field unset
+    and fall back to the plain config default unchanged - fully backward
+    compatible.
+
+    Verified fully offline (pure logic, no `dhan_wrapper`/network involved
+    at all) in `/private/tmp/.../scratchpad/test_max_loss_reentry_escalation.py`:
+    the escalation sequence and its ceiling, any non-`MAX_LOSS_HIT` exit
+    resetting it, a different underlying being unaffected by another's
+    escalation, the daily reset firing regardless of `ENABLE_SQUARE_OFF`,
+    and `_exit_reason_for()` correctly honoring the per-position override
+    over the config default - 32/32 checks passed across both packages, no
+    regression in `test_max_loss_exit.py`/`test_profit_protection.py`/
+    `test_exit_reconciliation.py`.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
