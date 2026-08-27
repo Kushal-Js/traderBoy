@@ -1237,6 +1237,46 @@ out of git.
     `TOP_N_STOCKS=3`/`MAX_LIVE_POSITIONS_CE=2`/`MAX_LIVE_POSITIONS_PE=2`
     were updated too.
 
+37. **`MAX_LOSS_PER_TRADE_RS` lowered 1500->1200 (Options + Futures, user
+    request 27 Aug 2026), backtest-driven.** Following the CE=4/TOP_N=4
+    capacity change (#36 above), re-ran the `02 Kaashvi.csv` CE ATM
+    backtest against the new live capacity config: 209 closed trades,
+    56.5% win rate, +104,135.20 realized (vs. the CE=2/TOP_N=3 baseline's
+    142 trades/61.3%/+88,766.40 - more capacity let more alerts through,
+    net more profit despite a lower win rate). MAX_LOSS_HIT itself grew
+    from 30 to 49 trades (-61,746.60 -> -100,392.10), proportional to the
+    47% more total trade volume, not a change in the odds of any single
+    trade going bad (21.1%->23.4% of trades hitting it).
+
+    User then asked what tightening the cap to Rs.1000 would do:
+    re-ran the same backtest with `MAX_LOSS_PER_TRADE_RS=1000` as a
+    process-env override only (nothing deployed) - 230 trades, 52.2% win,
+    +107,431.20. MAX_LOSS_HIT count jumped 49->72 (some trades that used
+    to ride out to SUPERTREND_EXIT/PROFIT_PROTECTION at 1500 now clip out
+    at the lower cap instead), but per-trade loss is 33% smaller, so total
+    MAX_LOSS_HIT P&L barely moved (-100,392.10 -> -103,109.95). Net effect
+    was only marginally better (+3,296.00 over 4 days) at the cost of a
+    meaningfully lower win rate and ~50% more stop-outs - not a strong
+    enough signal either way from a 4-day sample.
+
+    User picked Rs.1200 as the middle ground and asked to deploy it
+    directly (no separate 1200 backtest requested). Mirrored to
+    `FUTURES_MAX_LOSS_PER_TRADE_RS` as well, consistent with every prior
+    `MAX_LOSS_PER_TRADE_RS` change in this file (#31 and the escalation
+    revert both mirrored the same way) - the backtest itself was
+    Options-only, so the Futures value change is an extrapolation of that
+    established pairing, not separately backtested.
+
+    Verified offline against the real `.env` (not just the code default)
+    before deploying: `test_max_loss_exit.py`'s two hardcoded "defaults to
+    1500" assertions updated to 1200, all boundary-value checks are
+    already parameterized off the live `config.MAX_LOSS_PER_TRADE_RS`
+    rather than hardcoded, so they needed no changes - reran alongside
+    `test_capacity_ce4_pe0.py` and `test_supertrend_immediate.py` to
+    confirm no regression on the other two recent changes, all passed.
+    Confirmed both `/positions` and `/futures/positions` had empty
+    `live_positions` immediately before restarting.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

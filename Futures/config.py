@@ -53,8 +53,10 @@ TARGET_PCT = float(os.getenv("FUTURES_TARGET_PCT", "0.25"))
 STOP_LOSS_PCT = float(os.getenv("FUTURES_STOP_LOSS_PCT", "0.16"))
 
 # See Options/config.py's MAX_LOSS_PER_TRADE_RS - identical rationale, this
-# package's own independently-tunable cap.
-MAX_LOSS_PER_TRADE_RS = float(os.getenv("FUTURES_MAX_LOSS_PER_TRADE_RS", "1500"))
+# package's own independently-tunable cap. Lowered 1500->1200 alongside
+# Options' own value (user request 27 Aug 2026, backtest-driven - see
+# Options/config.py's comment for the full rationale).
+MAX_LOSS_PER_TRADE_RS = float(os.getenv("FUTURES_MAX_LOSS_PER_TRADE_RS", "1200"))
 
 # See Options/config.py's PROFIT_PROTECTION_THRESHOLD_RS - identical
 # rationale, this package's own independently-tunable threshold.

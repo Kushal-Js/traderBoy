@@ -111,12 +111,18 @@ STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.03"))    # -3% hard stop los
 # per-re-entry escalation (capped at 3x) was tried and deployed 27 Aug 2026
 # (prompted by ADANIPOWER/LICHSGFIN re-entering repeatedly the same
 # morning), then explicitly REVERTED the same day by user request in favor
-# of this simple fixed Rs.1500 - the escalation logic (Position.
+# of this simple fixed value - the escalation logic (Position.
 # max_loss_override_rs, PositionStore.get_max_loss_cap_for, the
 # consecutive-MAX_LOSS_HIT counter) no longer exists in the codebase at
 # all. See NOTES.md's design-decision entries for both the original
 # feature and the revert.
-MAX_LOSS_PER_TRADE_RS = float(os.getenv("MAX_LOSS_PER_TRADE_RS", "1500"))
+#
+# Lowered 1500->1200 (user request 27 Aug 2026) after a backtest against
+# 02 Kaashvi.csv comparing 1500 vs 1000: 1000 cut losers faster/cheaper but
+# with a materially lower win rate (56.5%->52.2%) and ~50% more MAX_LOSS_HIT
+# stop-outs (49->72) for only a small P&L edge (+3,296 over 4 days). 1200 is
+# the user's chosen middle ground. See NOTES.md's design-decision entry.
+MAX_LOSS_PER_TRADE_RS = float(os.getenv("MAX_LOSS_PER_TRADE_RS", "1200"))
 
 # Absolute per-trade rupee profit-protection threshold, added 26 Aug 2026 by
 # user request - the mirror image of MAX_LOSS_PER_TRADE_RS above, but on the

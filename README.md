@@ -138,7 +138,7 @@ URLs — matching the `webhook_url` field in your sample payload.
 
 4. **Exit monitoring** — a background loop polls every
    `MONITOR_INTERVAL_SECONDS` and exits a leg on:
-   - `MAX_LOSS_PER_TRADE_RS` absolute rupee-loss cap (default ₹1,500,
+   - `MAX_LOSS_PER_TRADE_RS` absolute rupee-loss cap (default ₹1,200,
      checked first, ahead of every other exit condition below) — exits
      immediately once `(entry_price - ltp) * quantity` reaches this, independent
      of the percentage stop-loss (a low-premium/high-quantity leg can lose
