@@ -153,7 +153,12 @@ DYNAMIC_SL_INCREASE_PCT = float(os.getenv("DYNAMIC_SL_INCREASE_PCT", "0.01"))  #
 ENABLE_SUPERTREND_EXIT = os.getenv("ENABLE_SUPERTREND_EXIT", "true").lower() == "true"
 SUPERTREND_PERIOD = int(os.getenv("SUPERTREND_PERIOD", "10"))
 SUPERTREND_MULTIPLIER = float(os.getenv("SUPERTREND_MULTIPLIER", "3.0"))
-SUPERTREND_INTERVAL_MINUTES = int(os.getenv("SUPERTREND_INTERVAL_MINUTES", "1"))
+# Moved to 1-min by user request 26 Aug 2026 (was 5), then moved BACK to
+# 5-min by user request 27 Aug 2026 - the same day both values were first
+# changed. No re-validation data was gathered at 1-min before reverting;
+# this restores the original, actually-backtested 5-min/5-min pairing
+# (see SUPERTREND_ENTRY_GRACE_MINUTES's docstring below).
+SUPERTREND_INTERVAL_MINUTES = int(os.getenv("SUPERTREND_INTERVAL_MINUTES", "5"))
 # How long a cached Supertrend signal is reused before re-fetching candles -
 # doesn't need to track candle closes exactly (the poll loop refreshes it
 # every tick anyway, this just caps REST call frequency).
@@ -170,7 +175,7 @@ SUPERTREND_REFRESH_SECONDS = int(os.getenv("SUPERTREND_REFRESH_SECONDS", "60"))
 # separately backtested at this faster interval, so treat it as a
 # reasonable starting point carried over from the 5-min tuning, not a
 # re-validated one.
-SUPERTREND_ENTRY_GRACE_MINUTES = int(os.getenv("SUPERTREND_ENTRY_GRACE_MINUTES", "1"))
+SUPERTREND_ENTRY_GRACE_MINUTES = int(os.getenv("SUPERTREND_ENTRY_GRACE_MINUTES", "5"))
 # Minimum SUPERTREND_INTERVAL_MINUTES-candles since market open before ANY
 # Supertrend signal is trusted, independent of SUPERTREND_PERIOD and
 # independent of any single position's own entry+grace gating above - see
@@ -209,6 +214,13 @@ SUPERTREND_ENTRY_GRACE_MINUTES = int(os.getenv("SUPERTREND_ENTRY_GRACE_MINUTES",
 # for the full numbers. Revisit if live results start looking like the
 # original bug #10 pattern (an early, naively-seeded "bearish" reading
 # firing near-simultaneously across many freshly-entered CE positions).
+#
+# SUPERTREND_INTERVAL_MINUTES moved back to 5 (from 1) the very next day -
+# left at 0 here regardless, but note the real-world meaning flips again:
+# at 1-min candles, warmup=0 meant "trusted after ~11 minutes"; back at
+# 5-min candles, the SAME 0 now means "trusted after ~55 minutes"
+# (SUPERTREND_PERIOD+1 = 11 candles x 5 min) - a real, non-obvious side
+# effect of reverting the interval without separately revisiting this.
 SUPERTREND_MIN_WARMUP_CANDLES = int(os.getenv("SUPERTREND_MIN_WARMUP_CANDLES", "0"))
 
 # Default ATM leg for /chartink/webhook (the bullish scan) and the

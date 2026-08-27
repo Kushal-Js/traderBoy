@@ -156,18 +156,20 @@ URLs — matching the `webhook_url` field in your sample payload.
      `DYNAMIC_SL_STEP_PCT_PE` - stacks with the continuous trailing stop
      above, set `ENABLE_DYNAMIC_SL=false` to disable. `TARGET_PCT` is
      never touched by either trailing mechanism.
-   - the underlying's 1-min Supertrend (`SUPERTREND_INTERVAL_MINUTES`,
-     moved from 5-min 26 Aug 2026) turning against the position's
-     direction - set `ENABLE_SUPERTREND_EXIT=false` to disable. Skips the
-     entry candle plus a `SUPERTREND_ENTRY_GRACE_MINUTES`-minute grace
-     period (also moved from 5 to 1) before honoring the signal, so it can
-     fire as early as 2 minutes after entry. Faster and noisier than the
-     old 5-min timeframe by design - expect more Supertrend exits overall.
-     `SUPERTREND_MIN_WARMUP_CANDLES` (default `0` - effectively off, as of
-     26 Aug 2026) gates when the Supertrend signal is trusted AT ALL each
-     session, independent of any single position's own grace period above -
-     see NOTES.md's design-decision entry for the mixed backtest evidence
-     behind this value.
+   - the underlying's 5-min Supertrend (`SUPERTREND_INTERVAL_MINUTES`,
+     briefly moved to 1-min on 26 Aug 2026, reverted back to 5-min the very
+     next day) turning against the position's direction - set
+     `ENABLE_SUPERTREND_EXIT=false` to disable. Skips the entry candle plus
+     a `SUPERTREND_ENTRY_GRACE_MINUTES`-minute grace period (also reverted
+     back to 5) before honoring the signal, so it can fire as early as
+     10 minutes after entry. `SUPERTREND_MIN_WARMUP_CANDLES` (default `0` -
+     effectively off) gates when the Supertrend signal is trusted AT ALL
+     each session, independent of any single position's own grace period
+     above - note this now means "trusted after ~55 minutes" at the
+     5-min interval (11 candles), not the ~11 minutes it meant while the
+     interval was at 1-min - see NOTES.md's design-decision entries for
+     both the mixed backtest evidence behind the warmup value and the
+     interval/grace revert.
    - `SQUARE_OFF_TIME` hard square-off of everything still open - only
      when `ENABLE_SQUARE_OFF=true` (default). When `false`, there is no
      forced end-of-day exit at all: a position rides past market close and

@@ -1116,6 +1116,32 @@ out of git.
     `os.getenv`) was updated too - a live re-run of the test suite against
     the real `.env` is what surfaced this before deploy.
 
+34. **`SUPERTREND_INTERVAL_MINUTES`/`SUPERTREND_ENTRY_GRACE_MINUTES`
+    reverted 1-min/1-min -> 5-min/5-min (user request 27 Aug 2026, the day
+    after they were first moved to 1-min/1-min).** Restores the original,
+    actually-backtested pairing (see bug #16/BACKTEST_RESULTS.md's 14-day
+    validation, run at 5-min/5-min) - no re-validation data was gathered
+    at 1-min/1-min before this reverted it. No code changes needed,
+    `refresh_supertrend_signal()`/`_supertrend_signal_for()` were already
+    fully driven by these two config values.
+
+    **Side effect this flips back**: `SUPERTREND_MIN_WARMUP_CANDLES` is
+    still `0` (a separate, later decision - see entry #32 above, not
+    touched by this revert) - at 1-min candles that meant "trusted after
+    ~11 minutes"; back at 5-min candles the exact same `0` now means
+    "trusted after ~55 minutes" (`SUPERTREND_PERIOD+1` = 11 candles x
+    5 min). Flagged in both `Options/config.py`'s docstring and `.env`'s
+    comment - not itself reverted, since the user's request here was
+    specifically about the interval/grace pairing, not the warmup gate.
+
+    Verified offline: `test_supertrend_1min.py` (kept its original
+    filename despite now testing the 5-min value - the test logic itself,
+    entry-candle skip/grace-boundary/favorable-direction/no-cached-signal,
+    is interval-agnostic and only needed its 3 literal "defaults to N"
+    assertions updated) - 23/23 checks passed against the new 5-min
+    values, both packages, both option types. No regression in
+    `test_supertrend_warmup0.py`.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
