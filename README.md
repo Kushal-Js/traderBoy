@@ -137,7 +137,13 @@ URLs — matching the `webhook_url` field in your sample payload.
      for the day — see NOTES.md bug #28.
 
 4. **Exit monitoring** — a background loop polls every
-   `MONITOR_INTERVAL_SECONDS` and exits a leg on:
+   `MONITOR_INTERVAL_SECONDS` (default 2s, lowered from 5s 27 Aug 2026) and
+   exits a leg on, plus an event-driven check fired instantly on every new
+   WebSocket tick (doesn't wait for the poll). The poll's own LTP lookup
+   prefers the WebSocket-cached price, but forces a REST refetch instead of
+   trusting an old tick forever once it's older than `LTP_STALE_AFTER_SECONDS`
+   (default 5s, added 27 Aug 2026 after a real overshoot on a thin,
+   sparsely-ticking option — see NOTES.md's design-decision entry):
    - `MAX_LOSS_PER_TRADE_RS` absolute rupee-loss cap (default ₹1,200,
      checked first, ahead of every other exit condition below) — exits
      immediately once `(entry_price - ltp) * quantity` reaches this, independent

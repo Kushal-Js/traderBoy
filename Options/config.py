@@ -185,7 +185,17 @@ SUPERTREND_INTERVAL_MINUTES = int(os.getenv("SUPERTREND_INTERVAL_MINUTES", "5"))
 # How long a cached Supertrend signal is reused before re-fetching candles -
 # doesn't need to track candle closes exactly (the poll loop refreshes it
 # every tick anyway, this just caps REST call frequency).
-SUPERTREND_REFRESH_SECONDS = int(os.getenv("SUPERTREND_REFRESH_SECONDS", "60"))
+#
+# Lowered 60->15 (user request 27 Aug 2026) for responsiveness - a 5-min
+# candle can close and the bot wouldn't notice for up to a full 60s
+# afterwards under the old value, in tension with the same day's "no
+# waiting, immediate action" Supertrend-exit request. 15s caps that worst-
+# case detection lag at 15s instead. Cheap to lower: this REST call is on
+# the UNDERLYING stock (not the option), independently rate-limited per
+# underlying by this same value, so even at MAX_LIVE_POSITIONS_CE=4 worst
+# case is 4 calls/15s (~0.27/s) - far under Dhan's undocumented rate limit
+# (see NOTES.md bug #5).
+SUPERTREND_REFRESH_SECONDS = int(os.getenv("SUPERTREND_REFRESH_SECONDS", "15"))
 
 # REMOVED (user request 27 Aug 2026): there used to be two extra "waiting"
 # knobs here - SUPERTREND_ENTRY_GRACE_MINUTES (extra minutes past the
@@ -277,7 +287,27 @@ ENABLE_TRADING_TIME_LIMIT = os.getenv("ENABLE_TRADING_TIME_LIMIT", "false").lowe
 ALLOWED_TRADING_TIME = os.getenv("ALLOWED_TRADING_TIME", "11:30")
 MARKET_CLOSE_TIME = "15:30"
 
-MONITOR_INTERVAL_SECONDS = int(os.getenv("MONITOR_INTERVAL_SECONDS", "5"))
+# Lowered 5->2 (user request 27 Aug 2026) for a tighter fallback-heartbeat
+# check on live positions. Doesn't scale REST call volume on its own -
+# refresh_supertrend_signal has its own independent SUPERTREND_REFRESH_SECONDS
+# cache floor, and _get_ltp() prefers the WebSocket-cached LTP (no I/O) for
+# any position ticking normally. See NOTES.md's design-decision entry for
+# why this alone doesn't fix stale-LTP overshoot - LTP_STALE_AFTER_SECONDS
+# below is what actually addresses that.
+MONITOR_INTERVAL_SECONDS = int(os.getenv("MONITOR_INTERVAL_SECONDS", "2"))
+
+# How old a WebSocket-cached option LTP is allowed to get before
+# get_cached_option_ltp() treats it as a miss and forces dhan_client._get_ltp
+# to REST-refetch instead of trusting a possibly-ancient tick indefinitely.
+# Added 27 Aug 2026 after a real overshoot: SAGILITY's MAX_LOSS_HIT exit on
+# 28 Aug 2026 realized -Rs.1,800 against a Rs.1,200 cap because the cached
+# tick was stale for ~2 minutes (SAGILITY is thin - real trades printing on
+# that option contract are sparse) and nothing forced a fresh check in the
+# meantime. See Options/dhan_client.py's get_cached_option_ltp/note_rest_ltp
+# docstrings for the full mechanism, including how a REST refetch re-primes
+# the cache so a persistently-quiet option isn't hammered with a REST call
+# on every single poll (rate-limit safety - NOTES.md bug #5).
+LTP_STALE_AFTER_SECONDS = float(os.getenv("LTP_STALE_AFTER_SECONDS", "5"))
 
 # ---------------------------------------------------------------------------
 # Misc

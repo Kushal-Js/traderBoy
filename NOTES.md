@@ -1277,6 +1277,72 @@ out of git.
     Confirmed both `/positions` and `/futures/positions` had empty
     `live_positions` immediately before restarting.
 
+38. **Responsiveness tuning + a real stale-LTP overshoot fix - triggered by
+    reviewing 28 Aug 2026's real trades (user request 27 Aug 2026).** While
+    reporting yesterday's trades, found SAGILITY's 10:09 IST MAX_LOSS_HIT
+    exit realized -Rs.1,800 against the (already-live) Rs.1,200 cap - a
+    Rs.600 overshoot. Root cause: `_get_ltp()` prefers the WebSocket feed's
+    cached LTP (`get_cached_option_ltp`) with **no staleness check at
+    all** - once any tick arrives it's trusted forever, and the REST
+    fallback only ever runs if literally no tick has arrived yet. SAGILITY
+    is a thin, low-premium (~Rs.2) option with a 12,000-share lot - real
+    trades printing on that specific contract are sparse, so its cached
+    price can go stale for minutes while `on_price_tick`'s event-driven
+    exit path (which fires instantly on a genuinely NEW tick) simply has
+    nothing new to react to. `MONITOR_INTERVAL_SECONDS` polling more often
+    doesn't help this specific failure mode either - the poll loop just
+    re-reads the same stale cached number.
+
+    Three changes, all Options + Futures where applicable:
+    - `MONITOR_INTERVAL_SECONDS` (`FUTURES_MONITOR_INTERVAL_SECONDS`)
+      5->2 - tightens the fallback-heartbeat ceiling. Confirmed via code
+      read that this alone does NOT fix stale-LTP overshoot (see above) -
+      it's a real but narrow improvement (missed/delayed `on_price_tick`
+      edge case only). No rate-limit cost: `refresh_supertrend_signal` has
+      its own independent `SUPERTREND_REFRESH_SECONDS` floor, unaffected by
+      poll cadence.
+    - `SUPERTREND_REFRESH_SECONDS` 60->15 - the REST call keeping the
+      cached Supertrend signal fresh was allowed to lag up to 60s behind a
+      newly-closed 5-min candle, in tension with the same day's "immediate
+      action, no waiting" Supertrend-exit request (#35 above). 15s caps
+      that worst-case detection lag; still cheap (REST call is per
+      underlying, independently rate-limited by this same value - 4
+      concurrent CE positions worst case is ~0.27 calls/sec, far under
+      Dhan's undocumented rate limit, bug #5).
+    - **NEW `LTP_STALE_AFTER_SECONDS=5`** - the actual fix for the
+      overshoot mechanism. `get_cached_option_ltp()`
+      (`Options/dhan_client.py`) now tracks a timestamp per cached tick
+      (`_ltp_cache_ts`, updated in `_on_market_tick`) and treats a cache
+      entry older than this as a miss, forcing `_get_ltp`'s REST fallback
+      to run. A new `note_rest_ltp()` method re-primes the cache with the
+      REST result + a fresh timestamp - without this, a persistently-quiet
+      option would get a brand-new REST call on *every single poll*
+      (every 2s) for as long as it stays silent, risking Dhan's
+      undocumented rate limit (bug #5) once more than one position goes
+      stale at once; re-priming naturally throttles that to roughly once
+      per `LTP_STALE_AFTER_SECONDS`. `LTP_STALE_AFTER_SECONDS=0` disables
+      the check entirely (old indefinite-trust behavior). Lives only in
+      `Options/config.py` (not mirrored to Futures) since it governs the
+      one shared `dhan_client` LTP cache both packages read from, not a
+      per-strategy setting. New `stats["ltp_cache_stale"]` counter on
+      `/feed-stats` for observability.
+
+    Verified fully offline in
+    `/private/tmp/.../scratchpad/test_responsiveness_tuning.py` (17/17
+    checks): config defaults for all three values; `get_cached_option_ltp`
+    trusts a tick just under the threshold and treats one just over it as
+    stale (None); `note_rest_ltp` re-primes correctly and fails soft on an
+    unknown symbol; `LTP_STALE_AFTER_SECONDS=0` disables the check;
+    `_get_ltp` calls the REST fallback exactly once and re-primes the
+    cache with its result. Careful to never reference
+    `dhan_wrapper.client` anywhere in the test (including inside
+    `_instrument_meta`, which the staleness/re-prime methods call) - that
+    property lazily triggers a REAL Dhan login as a side effect (a
+    recurring gotcha this session) - `_instrument_meta` itself was patched
+    directly instead, since it's a plain method, not a property. Reran
+    `test_max_loss_exit.py`, `test_capacity_ce4_pe0.py`, and
+    `test_supertrend_immediate.py` too - no regressions.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

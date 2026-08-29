@@ -598,12 +598,19 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
 
 async def _get_ltp(trading_symbol: str) -> Optional[float]:
     """Prefers the WebSocket feed's cached LTP (near-instant); falls back to
-    a REST call if no tick has arrived yet (e.g. subscription just made)."""
+    a REST call if no tick has arrived yet (e.g. subscription just made) OR
+    the cached tick is older than config.LTP_STALE_AFTER_SECONDS (see
+    get_cached_option_ltp's docstring - a thinly-traded option can otherwise
+    go minutes without a fresh price). The REST result is fed back into the
+    cache via note_rest_ltp so a persistently-quiet option isn't re-fetched
+    on every single poll - see that method's docstring."""
     loop = asyncio.get_running_loop()
     ltp = await loop.run_in_executor(None, dhan_wrapper.get_cached_option_ltp, trading_symbol)
     if ltp is not None:
         return ltp
-    return await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, trading_symbol)
+    ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, trading_symbol)
+    await loop.run_in_executor(None, dhan_wrapper.note_rest_ltp, trading_symbol, ltp)
+    return ltp
 
 
 def _exit_on_cooldown(position: Position) -> bool:

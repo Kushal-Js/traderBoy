@@ -174,6 +174,12 @@ class DhanWrapper:
         self._order_updates: dict[str, dict] = {}
         # security_id (str) -> last LTP pushed over the socket
         self._ltp_cache: dict[str, float] = {}
+        # security_id (str) -> when that LTP was last updated - either by a
+        # genuine WebSocket tick, or by a staleness-triggered REST refetch
+        # (see note_rest_ltp()) re-priming the clock. Used by
+        # get_cached_option_ltp() to force a fresh REST check instead of
+        # trusting an old tick indefinitely - see config.LTP_STALE_AFTER_SECONDS.
+        self._ltp_cache_ts: dict[str, datetime] = {}
         # security_id (str) -> trading_symbol, for every symbol we've ever
         # subscribed - lets the market-feed tick callback (which only knows
         # security_id) find the trading_symbol to fire on_price_tick with.
@@ -199,6 +205,7 @@ class DhanWrapper:
         self.stats = {
             "ltp_cache_hits": 0,
             "ltp_cache_misses": 0,
+            "ltp_cache_stale": 0,
             "order_status_cache_hits": 0,
             "order_status_rest_calls": 0,
             "price_ticks_received": 0,
@@ -393,6 +400,7 @@ class DhanWrapper:
 
         security_id = str(security_id)
         self._ltp_cache[security_id] = ltp_val
+        self._ltp_cache_ts[security_id] = datetime.now(IST)
         self.stats["price_ticks_received"] += 1
 
         if self._on_price_tick_subscribers:
@@ -430,16 +438,56 @@ class DhanWrapper:
     def get_cached_option_ltp(self, trading_symbol: str) -> Optional[float]:
         """Returns the last price pushed over the WebSocket feed for this
         option, or None if not subscribed yet / no tick has arrived yet /
-        the feed is disabled (ENABLE_WS_FEED=false)."""
+        the feed is disabled (ENABLE_WS_FEED=false) / the cached tick is
+        older than config.LTP_STALE_AFTER_SECONDS.
+
+        The staleness check exists because a thinly-traded option can go
+        minutes between real WebSocket ticks (no trade printing on it) while
+        its underlying/premium keeps moving - confirmed live 28 Aug 2026:
+        SAGILITY's MAX_LOSS_HIT overshot its Rs.1200 cap by Rs.600 because
+        the cached LTP was stale for ~2 minutes and nothing forced a fresh
+        REST check in the meantime. Treating a too-old cache entry as a miss
+        forces _get_ltp()'s REST fallback to run, which then re-primes the
+        cache via note_rest_ltp() - see its docstring for why that matters
+        for rate-limit safety. A tick that's merely a little old (comfortably
+        within LTP_STALE_AFTER_SECONDS) is still trusted as-is; this only
+        catches genuinely stale/silent instruments."""
         if not config.ENABLE_WS_FEED:
             return None
         meta = self._instrument_meta(trading_symbol)
-        ltp = self._ltp_cache.get(meta["security_id"])
+        security_id = meta["security_id"]
+        ltp = self._ltp_cache.get(security_id)
+        if ltp is not None and config.LTP_STALE_AFTER_SECONDS > 0:
+            last_update = self._ltp_cache_ts.get(security_id)
+            age = (datetime.now(IST) - last_update).total_seconds() if last_update else None
+            if age is not None and age > config.LTP_STALE_AFTER_SECONDS:
+                self.stats["ltp_cache_stale"] += 1
+                return None  # forces the caller's REST fallback
         if ltp is not None:
             self.stats["ltp_cache_hits"] += 1
         else:
             self.stats["ltp_cache_misses"] += 1
         return ltp
+
+    def note_rest_ltp(self, trading_symbol: str, ltp: float) -> None:
+        """Re-primes the WebSocket LTP cache with a REST-fetched price and a
+        fresh timestamp, after get_cached_option_ltp() judged the previous
+        tick too stale to trust (see its docstring). Without this, a
+        silent/thinly-traded option would force a brand new REST call on
+        *every* poll for as long as it stays quiet - once every
+        MONITOR_INTERVAL_SECONDS (2s by default) - which risks Dhan's
+        undocumented REST rate limit (see NOTES.md bug #5) once more than one
+        position is stale at once. Re-priming means the next
+        LTP_STALE_AFTER_SECONDS-sized window is served from this fresh
+        value instead, so REST calls for a persistently-quiet option are
+        naturally throttled to roughly once per LTP_STALE_AFTER_SECONDS,
+        not once per poll."""
+        try:
+            meta = self._instrument_meta(trading_symbol)
+        except ValueError:
+            return  # best-effort - a lookup failure here shouldn't break the exit check that called us
+        self._ltp_cache[meta["security_id"]] = ltp
+        self._ltp_cache_ts[meta["security_id"]] = datetime.now(IST)
 
     def _order_snapshot_from_cache(self, order_id: str) -> Optional[dict]:
         """Normalizes a socket order-update push to the same shape as
