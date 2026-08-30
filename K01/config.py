@@ -147,4 +147,8 @@ POLL_INTERVAL_SECONDS = int(os.getenv("K01_POLL_INTERVAL_SECONDS", "45"))  # int
 # --------------------------------------------------------------------- #
 UNIVERSE_SCAN_DELAY_SECONDS = float(os.getenv("K01_UNIVERSE_SCAN_DELAY_SECONDS", "0.3"))
 
-PAPER_LOG_PATH = os.getenv("K01_PAPER_LOG_PATH", "k01_paper_trades.log")
+# PAPER_LOG_PATH removed 31 Aug 2026 - paper trade logging now goes through
+# trade_history.py's shared dated history/ convention (see paper_engine.py's
+# PaperTradeStore, PAPER_LOG_NAME="k01_paper_trades") instead of one fixed,
+# ever-growing flat file. No longer env-overridable - the history/ location
+# itself is fixed, matching every other store's own convention.

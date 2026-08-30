@@ -43,7 +43,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from trade_history import read_all_trades
+from trade_history import HISTORY_DIR, read_all_trades
 from Options import option_main
 from IndexScalping import index_main
 from CopperOptions import copper_main
@@ -94,20 +94,27 @@ async def health():
 async def get_incidents(limit: int = 20):
     """Records from watchdog.py - a separate process/systemd unit that
     polls /health independently of this app (so it can see this app being
-    down) and logs any outage past its threshold to incidents.log,
-    including the actual dhanboy.service journal output for that window.
-    Exists because journald's own retention is limited and a restart that
-    lands in a transient failure (e.g. a Dhan auth blip) can otherwise
-    self-heal via systemd's Restart=always and leave no lasting trace.
+    down) and logs any outage past its threshold, including the actual
+    dhanboy.service journal output for that window. Exists because
+    journald's own retention is limited and a restart that lands in a
+    transient failure (e.g. a Dhan auth blip) can otherwise self-heal via
+    systemd's Restart=always and leave no lasting trace.
+
+    Reads every history/<date>_incidents.log file (dated-history
+    convention, 31 Aug 2026 - see trade_history.py/watchdog.py), not one
+    fixed path, so incidents from any prior day are still visible here.
     Returns the most recent `limit` incidents, newest first."""
-    path = "/root/apps/traderBoy/incidents.log"
-    try:
-        with open(path) as f:
-            content = f.read()
-    except FileNotFoundError:
+    incidents: list[str] = []
+    for path in sorted(HISTORY_DIR.glob("*_incidents.log")):
+        try:
+            with open(path) as f:
+                content = f.read()
+        except FileNotFoundError:
+            continue
+        blocks = [b.strip() for b in content.split("=== INCIDENT ") if b.strip()]
+        incidents.extend("=== INCIDENT " + b for b in blocks)
+    if not incidents:
         return {"incidents": [], "note": "no incidents recorded yet"}
-    blocks = [b.strip() for b in content.split("=== INCIDENT ") if b.strip()]
-    incidents = [("=== INCIDENT " + b) for b in blocks]
     return {"incidents": list(reversed(incidents))[:limit], "total_recorded": len(incidents)}
 
 

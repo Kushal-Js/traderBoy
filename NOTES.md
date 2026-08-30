@@ -1520,6 +1520,56 @@ out of git.
     `main.py` imports cleanly with the new route registered
     (`/trade-history` present in `app.routes`) before deploying.
 
+44. **All trade/incident logs moved into a dated `history/` folder - user
+    request 31 Aug 2026** ("create a folder named history... store all
+    trades and logs related files named with date prefix... keep on
+    adding to it"). Every store now writes `history/<YYYY-MM-DD>_<name>.log`
+    (a new file each day) instead of one ever-growing flat file at the
+    repo root; reading always globs and merges every dated file for that
+    name, so "history" still means the full multi-day record.
+
+    `trade_history.py` (previously just the real-trade log from #43) is
+    now the shared owner of this convention (`dated_path`/`append_jsonl`/
+    `read_all_jsonl`), used by:
+    - `trade_history.py` itself - real trades (`real_trades`)
+    - `K01/paper_engine.py` - `k01_paper_trades`
+    - `CopperOptions/paper_engine.py` - `copper_paper_trades`
+    - `IndexScalping/paper_engine.py` - `index_scalping_paper_trades`
+      (renamed from the old generic `paper_trades.log` - a plain
+      "paper_trades" name would be ambiguous once multiple strategies'
+      files sit side by side in the same folder)
+
+    `watchdog.py`'s incident log follows the identical
+    `history/<date>_incidents.log` naming but is implemented directly in
+    that file (not via `trade_history.py`'s JSONL helpers) since
+    `watchdog.py` is deliberately dependency-free/stdlib-only and incidents
+    are a multi-line text block per entry, not JSONL. Dated by the
+    incident's own START timestamp, not "now" - so a rare incident
+    spanning midnight still lands entirely in one file. `main.py`'s
+    `/incidents` endpoint updated to glob every dated file, not one fixed
+    path.
+
+    Each package's old `*_LOG_PATH`/`*_PAPER_LOG_PATH` env var
+    (`K01_PAPER_LOG_PATH`, `COPPER_PAPER_LOG_PATH`, `SCALP_PAPER_LOG_PATH`)
+    was removed, not just left unused - the `history/` location itself is
+    now fixed, matching every store's convention consistently rather than
+    leaving a half-dead, no-longer-effective config knob behind.
+
+    **Existing accumulated history was migrated, not discarded.** A
+    one-time script bucketed every existing flat file's entries by their
+    own recorded date (each JSONL line's own `"date"` field; each incident
+    block's own start timestamp) into the correct dated file under
+    `history/`, then renamed the original flat file to
+    `<name>.log.pre-history-migration` (kept, not deleted). Verified before
+    running for real: dry-ran against copies of the actual droplet files
+    (8 CopperOptions paper trades, 42 IndexScalping paper trades, 39
+    incident blocks) and diffed the migrated output against the originals
+    byte-for-byte (as line/block sets) - all three matched exactly, same
+    counts, same content. `real_trade_history.log`/`k01_paper_trades.log`
+    had nothing to migrate (confirmed empty/nonexistent on the droplet at
+    migration time - no real trade had closed yet, K01 has never run its
+    daily screen since it's been deployed OFF since #41).
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

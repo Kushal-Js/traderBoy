@@ -38,6 +38,7 @@ from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from Options.dhan_client import dhan_wrapper, _compute_supertrend
+from trade_history import append_jsonl, read_all_jsonl
 
 from . import config
 
@@ -71,34 +72,23 @@ class PaperPosition:
     highest_price: float
 
 
+PAPER_LOG_NAME = "k01_paper_trades"
+
+
 class PaperTradeStore:
-    """In-memory completed-trade history + append-only on-disk log
-    (config.PAPER_LOG_PATH, JSONL) - same pattern as IndexScalping's own
-    store, so a multi-day paper-trading run survives a process restart."""
+    """In-memory completed-trade history + append-only on-disk log, stored
+    dated under history/ (trade_history.py's append_jsonl/read_all_jsonl -
+    the shared dated-file convention used by every paper-trading store in
+    this codebase, added 31 Aug 2026 per user request) - so a multi-day
+    paper-trading run survives a process restart, and history/ accumulates
+    one file per day rather than one ever-growing flat file."""
 
     def __init__(self) -> None:
-        self.completed: List[dict] = []
-        self._load_from_disk()
-
-    def _load_from_disk(self) -> None:
-        try:
-            with open(config.PAPER_LOG_PATH) as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        self.completed.append(json.loads(line))
-        except FileNotFoundError:
-            pass
-        except Exception:  # noqa: BLE001
-            logger.exception("Could not load existing paper trade log - starting fresh in memory (file untouched).")
+        self.completed: List[dict] = read_all_jsonl(PAPER_LOG_NAME)
 
     def record(self, trade: dict) -> None:
         self.completed.append(trade)
-        try:
-            with open(config.PAPER_LOG_PATH, "a") as f:
-                f.write(json.dumps(trade, default=str) + "\n")
-        except Exception:  # noqa: BLE001
-            logger.exception("Could not persist paper trade to disk - kept in memory only for this run.")
+        append_jsonl(PAPER_LOG_NAME, trade)
 
     def snapshot(self, watchlist: Dict[str, WatchlistEntry], open_positions: Dict[str, PaperPosition],
                  screen_date: Optional[ddate], limit: int = 50) -> dict:

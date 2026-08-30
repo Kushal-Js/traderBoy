@@ -93,4 +93,8 @@ SQUARE_OFF_TIME = os.getenv("SCALP_SQUARE_OFF_TIME", "15:15")
 # logic without hammering Dhan's rate limits (bug #5 in NOTES.md).
 POLL_INTERVAL_SECONDS = int(os.getenv("SCALP_POLL_INTERVAL_SECONDS", "15"))
 
-PAPER_LOG_PATH = os.getenv("SCALP_PAPER_LOG_PATH", "paper_trades.log")
+# PAPER_LOG_PATH removed 31 Aug 2026 - see K01/config.py's identical note.
+# Paper trades now go through trade_history.py's shared dated history/
+# convention (PaperTradeStore's PAPER_LOG_NAME="index_scalping_paper_trades" -
+# renamed from the old generic "paper_trades.log" for clarity now that
+# history/ holds multiple strategies' files side by side).

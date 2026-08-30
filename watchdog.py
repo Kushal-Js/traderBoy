@@ -22,6 +22,7 @@ Deliberately dependency-free (stdlib only) - runs via the same `uv run`
 venv as the main app for convenience, but must stay cheap to import/run
 on a ~1GB droplet regardless of what's installed there.
 """
+import os
 import subprocess
 import time
 import urllib.request
@@ -37,8 +38,22 @@ INCIDENT_THRESHOLD_SECONDS = 30
 # While an outage is still ongoing past the threshold, re-log an updated
 # record at this cadence so a long/permanent outage isn't silent forever.
 ONGOING_UPDATE_SECONDS = 300
-INCIDENT_LOG_PATH = "/root/apps/traderBoy/incidents.log"
 HTTP_TIMEOUT_SECONDS = 3
+
+# Dated, history/-folder convention (user request, 31 Aug 2026) - matches
+# trade_history.py's own history/<date>_<name>.log scheme, but implemented
+# directly here (not by importing trade_history) since this script is
+# deliberately dependency-free/stdlib-only, and incidents are a multi-line
+# text block per entry, not JSONL - trade_history.py's append_jsonl isn't
+# the right shape for this format anyway. Dated by the incident's own
+# START time, not "now" - so a rare incident spanning midnight still lands
+# entirely in one file instead of being split mid-record.
+HISTORY_DIR = "/root/apps/traderBoy/history"
+
+
+def incident_log_path(down_since: datetime) -> str:
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+    return os.path.join(HISTORY_DIR, f"{down_since.date().isoformat()}_incidents.log")
 
 
 def check_health() -> bool:
@@ -78,7 +93,7 @@ def write_incident(down_since: datetime, now: datetime, resolved: bool) -> None:
         f"(duration so far: {duration:.0f}s) [{status}] ==="
     )
     body = journal_excerpt(down_since, now)
-    with open(INCIDENT_LOG_PATH, "a") as f:
+    with open(incident_log_path(down_since), "a") as f:
         f.write(header + "\n" + body + "\n\n")
 
 

@@ -32,3 +32,6 @@ Dependencies\\*
 
 # Logs
 *.log
+
+# Dated trade/incident history (trade_history.py) - runtime data, not source.
+/history/

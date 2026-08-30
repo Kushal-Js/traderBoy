@@ -35,6 +35,7 @@ from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from Options.dhan_client import dhan_wrapper, _compute_supertrend
+from trade_history import append_jsonl, read_all_jsonl
 
 from . import config
 
@@ -62,37 +63,23 @@ class IndexState:
     open_position: Optional[PaperPosition] = None
 
 
+PAPER_LOG_NAME = "index_scalping_paper_trades"
+
+
 class PaperTradeStore:
-    """In-memory completed-trade history + append-only on-disk log
-    (config.PAPER_LOG_PATH, JSONL - one completed trade per line) so a
-    multi-week paper-trading run survives a process restart, unlike the
-    live options bot's in-memory-only state (which relies on the broker
-    itself as the source of truth to reconcile from - there's no
+    """Dated history/ storage (trade_history.py) as of 31 Aug 2026 - see
+    K01/paper_engine.py's PaperTradeStore for the full rationale, identical
+    here. So a multi-week paper-trading run survives a process restart,
+    unlike the live options bot's in-memory-only state (which relies on the
+    broker itself as the source of truth to reconcile from - there's no
     equivalent "broker" to reconcile paper trades from)."""
 
     def __init__(self) -> None:
-        self.completed: List[dict] = []
-        self._load_from_disk()
-
-    def _load_from_disk(self) -> None:
-        try:
-            with open(config.PAPER_LOG_PATH) as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        self.completed.append(json.loads(line))
-        except FileNotFoundError:
-            pass
-        except Exception:  # noqa: BLE001
-            logger.exception("Could not load existing paper trade log - starting fresh in memory (file untouched).")
+        self.completed: List[dict] = read_all_jsonl(PAPER_LOG_NAME)
 
     def record(self, trade: dict) -> None:
         self.completed.append(trade)
-        try:
-            with open(config.PAPER_LOG_PATH, "a") as f:
-                f.write(json.dumps(trade, default=str) + "\n")
-        except Exception:  # noqa: BLE001
-            logger.exception("Could not persist paper trade to disk - kept in memory only for this run.")
+        append_jsonl(PAPER_LOG_NAME, trade)
 
     def snapshot(self, states: Dict[str, IndexState], limit: int = 50) -> dict:
         recent = list(reversed(self.completed))[:limit]

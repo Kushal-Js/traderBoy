@@ -57,4 +57,6 @@ QUANTITY_LOTS = int(os.getenv("COPPER_QUANTITY_LOTS", "1"))
 
 POLL_INTERVAL_SECONDS = int(os.getenv("COPPER_POLL_INTERVAL_SECONDS", "15"))
 
-PAPER_LOG_PATH = os.getenv("COPPER_PAPER_LOG_PATH", "copper_paper_trades.log")
+# PAPER_LOG_PATH removed 31 Aug 2026 - see K01/config.py's identical note.
+# Paper trades now go through trade_history.py's shared dated history/
+# convention (PaperTradeStore's PAPER_LOG_NAME="copper_paper_trades").
