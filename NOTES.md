@@ -1486,6 +1486,40 @@ out of git.
     `/futures/positions` both had empty `live_positions` immediately
     before this deploy's restart.
 
+43. **New `trade_history.py` + `GET /trade-history` - user request 31 Aug
+    2026, prompted by asking "do we have a mechanism to understand which
+    trades are placed by which package and their history."** Real gap,
+    confirmed by reading both stores directly rather than assumed:
+    `Options/position_store.py` and `Futures/position_store.py`'s own
+    `closed_positions_today`/`orders_today` are BOTH purely in-memory,
+    reset every trading day (`maybe_reset_for_new_day`) and wiped entirely
+    by any service restart - there was no way to look at trade history
+    from a prior day, or after a restart, at all, for either strategy.
+
+    Pure logging addition - `record_closed_trade(strategy, pos)` is called
+    from inside `close_position()` AFTER the position is already closed
+    (the real exit order has already been placed and confirmed by that
+    point), so it cannot affect whether/when/at-what-price any real order
+    is placed. Appends one JSON line per closed trade to
+    `real_trade_history.log` (gitignored via the existing `*.log` rule),
+    tagged `"strategy": "Options"` or `"strategy": "Futures"` so both
+    packages' history lives in one file, filterable. Wrapped in try/except
+    - a logging failure here must never break the caller's actual
+    position-closing flow, same defensive pattern as K01's own
+    `PaperTradeStore.record()`.
+
+    `GET /trade-history` (optional `?strategy=Options`/`?strategy=Futures`)
+    exposes it, mirroring the existing `/positions`/`/orders` pattern.
+
+    Verified offline (not just read): a scratch-file test constructs a real
+    `Options.position_store.Position` and a real
+    `Futures.position_store.Position`, closes both through the actual
+    `PositionStore.close_position()` method (not a reimplementation), and
+    asserts the resulting log has exactly 2 correctly-tagged entries with
+    correct P&L math and correct per-strategy filtering. Confirmed
+    `main.py` imports cleanly with the new route registered
+    (`/trade-history` present in `app.routes`) before deploying.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

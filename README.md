@@ -16,6 +16,7 @@ This is the Dhan counterpart to the Groww version of this bot (see the
 |---|---|
 | `main.py` | Shared entry point - the `FastAPI` app instance, strategy-agnostic endpoints (`/health`, `/incidents`), and composes each strategy's router + lifespan onto the app |
 | `watchdog.py` | Standalone health-check watchdog (own systemd unit) - see NOTES.md |
+| `trade_history.py` | Persistent, cross-restart, cross-strategy log of every REAL closed trade (Options + Futures), tagged by which package placed it - `Options/position_store.py`/`Futures/position_store.py`'s own in-memory `closed_positions_today` resets daily and doesn't survive a restart, this is the durable record. Read via `GET /trade-history` |
 | `Options/option_main.py` | Options strategy's FastAPI router + lifespan - webhook endpoints + status endpoints, mounted onto `main.py`'s app |
 | `Options/trading_engine.py` | Ranking, entry, exit-condition monitoring, square-off logic, AMO order sync |
 | `Options/dhan_client.py` | Thin wrapper over Tradehull (REST) + dhanhq's `OrderUpdate`/`MarketFeed` (WebSocket) |
@@ -274,6 +275,7 @@ URLs — matching the `webhook_url` field in your sample payload.
 | `GET /k01/status` | "K01" (daily F&O screener)'s watchlist, open paper positions, completed trades, P&L - paper trading only |
 | `GET /health` | Liveness check |
 | `POST /square-off-now` | Manual kill-switch: closes every live position immediately |
+| `GET /trade-history` | Persistent, cross-restart record of every REAL closed trade (Options + Futures), tagged by which package placed it - `?strategy=Options` or `?strategy=Futures` to filter. See `trade_history.py` |
 
 ## Known limitations / things to verify against a live account
 

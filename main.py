@@ -43,6 +43,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from trade_history import read_all_trades
 from Options import option_main
 from IndexScalping import index_main
 from CopperOptions import copper_main
@@ -108,3 +109,17 @@ async def get_incidents(limit: int = 20):
     blocks = [b.strip() for b in content.split("=== INCIDENT ") if b.strip()]
     incidents = [("=== INCIDENT " + b) for b in blocks]
     return {"incidents": list(reversed(incidents))[:limit], "total_recorded": len(incidents)}
+
+
+@app.get("/trade-history")
+async def trade_history(strategy: str | None = None):
+    """Persistent, cross-restart record of every REAL (non-paper) closed
+    trade, tagged by which package placed it - see trade_history.py.
+    Options/position_store.py and Futures/position_store.py's own
+    closed_positions_today reset daily and don't survive a restart; this
+    is the durable record for later analysis. strategy=None returns both;
+    pass strategy=Options or strategy=Futures to filter to one."""
+    if strategy is not None and strategy not in ("Options", "Futures"):
+        return {"error": "strategy must be 'Options' or 'Futures' (or omitted for both)"}
+    trades = read_all_trades(strategy)
+    return {"count": len(trades), "trades": trades}

@@ -31,6 +31,7 @@ from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
 from . import config
+from trade_history import record_closed_trade
 
 logger = logging.getLogger("position_store")
 
@@ -398,6 +399,7 @@ class PositionStore:
             pos.exit_price = exit_price
             pos.closed_at = datetime.now()
             self.closed_positions_today.append(pos)
+            record_closed_trade("Options", pos)
             # Frees the symbol up for a fresh entry on a later alert today -
             # reserved_symbols only blocks while something is genuinely
             # open/in-flight for it, not for the rest of the day.

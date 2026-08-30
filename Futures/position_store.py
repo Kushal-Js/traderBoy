@@ -26,6 +26,7 @@ from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
 from . import config
+from trade_history import record_closed_trade
 
 logger = logging.getLogger("futures_position_store")
 
@@ -251,6 +252,7 @@ class PositionStore:
             pos.exit_price = exit_price
             pos.closed_at = datetime.now()
             self.closed_positions_today.append(pos)
+            record_closed_trade("Futures", pos)
             self.reserved_symbols.pop(underlying_symbol, None)
             logger.info(
                 "Position CLOSED: %s (%s) reason=%s exit=%.2f pnl_pct=%.2f%%",
