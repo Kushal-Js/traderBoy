@@ -74,7 +74,8 @@ SELECT_BOTTOM_N_STOCKS = os.getenv("SELECT_BOTTOM_N_STOCKS", "true").lower() == 
 # ones or vice versa. A symbol already open/in-flight as either type still
 # blocks a new entry of the *other* type for that same symbol - see
 # PositionStore.reserve_symbol().
-# CE raised 2->4, PE lowered 2->0 (user request 27 Aug 2026) - PE (bearish
+# CE raised 2->4->3, PE lowered 2->0 (user request 27 Aug 2026, CE lowered
+# 4->3 30 Aug 2026 alongside the matching Futures change) - PE (bearish
 # scan, /chartink/webhook-sell) is now fully OFF: reserve_symbol()'s
 # capacity check (current >= _cap_for("PE")) is 0 >= 0 on the very first
 # attempt, so every PE alert is rejected immediately - option_main.py's
@@ -85,7 +86,7 @@ SELECT_BOTTOM_N_STOCKS = os.getenv("SELECT_BOTTOM_N_STOCKS", "true").lower() == 
 # moment this deploys) are UNAFFECTED - this only gates new entries, exits
 # keep working normally regardless of this cap. See NOTES.md's design-
 # decision entry.
-MAX_LIVE_POSITIONS_CE = int(os.getenv("MAX_LIVE_POSITIONS_CE", "4"))
+MAX_LIVE_POSITIONS_CE = int(os.getenv("MAX_LIVE_POSITIONS_CE", "3"))
 MAX_LIVE_POSITIONS_PE = int(os.getenv("MAX_LIVE_POSITIONS_PE", "0"))
 
 # /chartink/webhook-papertrade (paper_webhook.py) - a second, independent

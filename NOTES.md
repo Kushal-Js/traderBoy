@@ -1471,6 +1471,21 @@ out of git.
     before this deploy (4th restart of the day - all clean, no crashes
     across any of today's iterations).
 
+42. **`MAX_LIVE_POSITIONS_CE` 4->3 (Options), 2->3 (Futures) - user request
+    30 Aug 2026.** Aligns both strategies' CE capacity at the same value
+    (previously 4 and 2 respectively, with no prior stated reason for the
+    mismatch beyond each being tuned independently on different dates -
+    #36 above raised Options' alone). PE untouched on both sides:
+    `MAX_LIVE_POSITIONS_PE` stays `0` for Options (still fully off, see
+    #36) and `2` for Futures (unused today anyway since
+    `futures_main.py` only exposes a bullish/CE webhook).
+
+    Verified by reloading both `Options.config`/`Futures.config` against
+    the real `.env` after the edit and asserting
+    `MAX_LIVE_POSITIONS_CE == 3` on both. Confirmed `/positions` and
+    `/futures/positions` both had empty `live_positions` immediately
+    before this deploy's restart.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
