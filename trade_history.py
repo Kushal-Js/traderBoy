@@ -33,6 +33,7 @@ the original files were preserved (not deleted).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import date, datetime
@@ -137,3 +138,68 @@ def read_all_trades(strategy: Optional[str] = None) -> list[dict]:
     if strategy is not None:
         trades = [t for t in trades if t.get("strategy") == strategy]
     return trades
+
+
+# --------------------------------------------------------------------- #
+# Webhook alert log - every incoming Chartink alert, tagged by which
+# endpoint/strategy received it and what happened to it (processed vs
+# ignored + reason). User request (31 Aug 2026), prompted by "are we
+# logging the webhook alerts received?" - the answer was "only to
+# journald, which has limited retention and isn't queryable" - this closes
+# that the same way trade_history.py already closed the equivalent gap for
+# closed trades.
+#
+# HARD REQUIREMENT (explicit user instruction): this must never add
+# latency to, or be able to break, real order placement or position
+# monitoring. Two things make that true:
+#   1. The actual disk write runs in the default thread-pool executor
+#      (loop.run_in_executor), never on the event loop thread - so even a
+#      slow/stalled disk can't stall the event loop other requests run on.
+#   2. Callers MUST fire this via `asyncio.create_task(record_webhook_alert(...))`
+#      and NOT await it - see each call site (Options/option_main.py,
+#      Futures/futures_main.py, Options/paper_webhook.py). A fire-and-
+#      forget task means the webhook handler's own coroutine returns
+#      (and, for a "processed" alert, the real entry-order placement it
+#      already triggered) without ever waiting on this write to finish.
+#      append_jsonl itself also already can't raise (wrapped in try/
+#      except), so even a failed write can't surface as an unhandled task
+#      exception.
+# --------------------------------------------------------------------- #
+WEBHOOK_ALERTS_NAME = "webhook_alerts"
+
+
+async def record_webhook_alert(
+    strategy: str, scan_name: Optional[str], alert_name: Optional[str],
+    stocks: list, status: str, reason: Optional[str] = None,
+) -> None:
+    """strategy: "Options"/"Futures"/"Options-PaperTrade" (matches the
+    endpoint that received the alert, not necessarily "did this place a
+    real order" - PaperTrade never does). status: "processed"/"ignored"/
+    "no_action" (mirrors the same status values each handler already
+    returns to Chartink). reason: the same reason string already being
+    returned to the caller where applicable (e.g.
+    "past_allowed_trading_time", "max_live_positions_reached") - not a
+    new classification, just persisting what the handler already knows.
+
+    Call this via `asyncio.create_task(record_webhook_alert(...))` and do
+    NOT await the task - see this module's docstring above for why."""
+    try:
+        loop = asyncio.get_running_loop()
+        record = {
+            "strategy": strategy, "scan_name": scan_name, "alert_name": alert_name,
+            "stocks": stocks, "status": status, "reason": reason,
+            "logged_at": datetime.now().isoformat(),
+        }
+        await loop.run_in_executor(None, append_jsonl, WEBHOOK_ALERTS_NAME, record)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not record webhook alert for %s (scan=%s) - "
+                          "the alert itself was already handled independently, "
+                          "this is logging-only.", strategy, scan_name)
+
+
+def read_all_webhook_alerts(strategy: Optional[str] = None) -> list[dict]:
+    """Read-only, same filtering convention as read_all_trades."""
+    alerts = read_all_jsonl(WEBHOOK_ALERTS_NAME)
+    if strategy is not None:
+        alerts = [a for a in alerts if a.get("strategy") == strategy]
+    return alerts

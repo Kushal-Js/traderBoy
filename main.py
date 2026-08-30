@@ -43,7 +43,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from trade_history import HISTORY_DIR, read_all_trades
+from trade_history import HISTORY_DIR, read_all_trades, read_all_webhook_alerts
 from Options import option_main
 from IndexScalping import index_main
 from CopperOptions import copper_main
@@ -130,3 +130,18 @@ async def trade_history(strategy: str | None = None):
         return {"error": "strategy must be 'Options' or 'Futures' (or omitted for both)"}
     trades = read_all_trades(strategy)
     return {"count": len(trades), "trades": trades}
+
+
+@app.get("/webhook-alerts")
+async def webhook_alerts(strategy: str | None = None):
+    """Every incoming Chartink alert (processed AND ignored, with why),
+    tagged by which endpoint received it - see trade_history.py's
+    record_webhook_alert. Each handler already logged receipt via the
+    standard logger, but that only reaches journald (limited retention,
+    not queryable) - this is the durable, structured record. strategy=None
+    returns all; pass strategy=Options/Futures/Options-PaperTrade to
+    filter to one."""
+    if strategy is not None and strategy not in ("Options", "Futures", "Options-PaperTrade"):
+        return {"error": "strategy must be 'Options', 'Futures', or 'Options-PaperTrade' (or omitted for all)"}
+    alerts = read_all_webhook_alerts(strategy)
+    return {"count": len(alerts), "alerts": alerts}

@@ -40,6 +40,8 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter
 from pydantic import BaseModel, field_validator
 
+from trade_history import record_webhook_alert
+
 from . import config
 from .dhan_client import dhan_wrapper
 from .position_store import Position
@@ -195,11 +197,21 @@ paper_store = PaperStore()
 async def chartink_webhook_papertrade(payload: ChartinkWebhookPayload):
     """Bullish scan, paper-only - see module docstring. Same shape/response
     style as /chartink/webhook, but never places a real order."""
+    stocks = payload.stock_list()
+
+    def _log_alert(status: str, reason: Optional[str] = None) -> None:
+        """Fire-and-forget - see trade_history.py's own docstring. Lower
+        stakes here than the real webhooks (this endpoint never places a
+        real order), but same discipline for consistency."""
+        asyncio.create_task(record_webhook_alert(
+            "Options-PaperTrade", payload.scan_name, payload.alert_name, stocks, status, reason,
+        ))
+
     if is_past_square_off_time():
         logger.info("Ignoring paper-trade alert - past today's %s square-off time.", config.SQUARE_OFF_TIME)
+        _log_alert("ignored", "past_square_off_time")
         return {"status": "ignored", "reason": "past_square_off_time"}
 
-    stocks = payload.stock_list()
     logger.info("Paper-trade webhook received: scan=%s alert=%s stocks=%s",
                 payload.scan_name, payload.alert_name, stocks)
 
@@ -208,6 +220,7 @@ async def chartink_webhook_papertrade(payload: ChartinkWebhookPayload):
         None, rank_and_pick_top_stocks, stocks, config.PAPERTRADE_TOP_N_STOCKS, True
     )
     if not ranked:
+        _log_alert("no_action", "could_not_rank_any_stock")
         return {"status": "no_action", "reason": "could_not_rank_any_stock"}
 
     results = []
@@ -246,6 +259,7 @@ async def chartink_webhook_papertrade(payload: ChartinkWebhookPayload):
             logger.exception("Paper entry failed for %s", symbol)
             results.append({"symbol": symbol, "status": "error", "reason": str(exc)})
 
+    _log_alert("processed")
     return {"status": "processed", "ranked_by_day_change_pct": ranked, "entries": results}
 
 

@@ -56,6 +56,8 @@ from typing import Optional
 from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel, field_validator
 
+from trade_history import record_webhook_alert
+
 from . import config, paper_webhook
 from .dhan_client import dhan_wrapper
 from .position_store import position_store
@@ -179,6 +181,15 @@ async def _handle_chartink_webhook(
     """Shared by both webhooks below - only the ATM leg (CE/PE) and which
     end of the %change ranking counts as "strongest" differ."""
     await position_store.maybe_reset_for_new_day()
+    stocks = payload.stock_list()
+
+    def _log_alert(status: str, reason: Optional[str] = None) -> None:
+        """Fire-and-forget - see trade_history.py's own docstring for why
+        this MUST be create_task'd, never awaited, in the entry-order-
+        placement path."""
+        asyncio.create_task(record_webhook_alert(
+            "Options", payload.scan_name, payload.alert_name, stocks, status, reason,
+        ))
 
     if is_past_allowed_trading_time():
         # Only gates NEW entries, and only when config.ENABLE_TRADING_TIME_LIMIT
@@ -188,6 +199,7 @@ async def _handle_chartink_webhook(
             "Ignoring alert (%s) - past today's allowed trading cutoff (%s), not opening new positions.",
             option_type, config.ALLOWED_TRADING_TIME,
         )
+        _log_alert("ignored", "past_allowed_trading_time")
         return {
             "status": "ignored",
             "reason": "past_allowed_trading_time",
@@ -203,13 +215,13 @@ async def _handle_chartink_webhook(
             "Ignoring alert (%s) - past today's %s square-off time, not opening new positions.",
             option_type, config.SQUARE_OFF_TIME,
         )
+        _log_alert("ignored", "past_square_off_time")
         return {
             "status": "ignored",
             "reason": "past_square_off_time",
             "square_off_time": config.SQUARE_OFF_TIME,
         }
 
-    stocks = payload.stock_list()
     logger.info(
         "Webhook received (%s): scan=%s alert=%s stocks=%s",
         option_type, payload.scan_name, payload.alert_name, stocks,
@@ -219,6 +231,7 @@ async def _handle_chartink_webhook(
     remaining = await position_store.remaining_capacity(option_type)
     if remaining == 0:
         logger.info("No %s capacity left (%s live/in-flight already) - ignoring alert.", option_type, cap)
+        _log_alert("ignored", "max_live_positions_reached")
         return {
             "status": "ignored",
             "reason": "max_live_positions_reached",
@@ -232,9 +245,11 @@ async def _handle_chartink_webhook(
     )
 
     if not ranked:
+        _log_alert("no_action", "could_not_rank_any_stock")
         return {"status": "no_action", "reason": "could_not_rank_any_stock"}
 
     results = await enter_positions_for_stocks(ranked, option_type)
+    _log_alert("processed")
 
     return {
         "status": "processed",

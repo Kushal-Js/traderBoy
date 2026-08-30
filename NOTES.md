@@ -1570,6 +1570,42 @@ out of git.
     migration time - no real trade had closed yet, K01 has never run its
     daily screen since it's been deployed OFF since #41).
 
+45. **Webhook alert logging - `record_webhook_alert()`, `history/<date>_
+    webhook_alerts.log`, `GET /webhook-alerts` - user request 31 Aug
+    2026**, prompted by asking "are we logging the webhook alerts
+    received?" Real gap confirmed before building: every handler already
+    called `logger.info(...)` on receipt, but that only reaches journald
+    (limited retention, not queryable, no record at all of what happened
+    to an *ignored* alert once journald rotates it out). Added to all four
+    webhook endpoints (`/chartink/webhook`, `/chartink/webhook-sell` -
+    both share `_handle_chartink_webhook` - `/chartink/webhook-futures`,
+    `/chartink/webhook-papertrade`), tagged `strategy="Options"`/
+    `"Futures"`/`"Options-PaperTrade"` and `status`/`reason` mirroring
+    exactly what each handler already returns to Chartink (ignored +
+    which gate, no_action, or processed) - no new classification logic,
+    just persisting what was already being computed.
+
+    **Explicit hard requirement from the user: this must never add
+    latency to, or be able to break, real order placement or position
+    monitoring.** Two things make that true, both verified with a real
+    test before deploying, not just asserted:
+    - The actual disk write runs via `loop.run_in_executor` (thread pool,
+      never the event loop thread).
+    - Every call site fires via `asyncio.create_task(record_webhook_alert(...))`
+      and does NOT await it - the webhook handler's own coroutine (and,
+      for a processed alert, the real entry-order placement that already
+      completed before the log call) never waits on the write.
+
+    Verified with a scratch-history-dir test that monkeypatches the
+    underlying write to sleep 2 real seconds: the calling coroutine
+    returned in 0.0ms regardless, and the write still completed correctly
+    once the event loop got a turn. A second test made the write raise an
+    `OSError` unconditionally - confirmed the exception is logged
+    (visible in journald) but never propagates into the caller. A third
+    test round-tripped all 4 status/reason combinations through the real
+    filtering (`strategy=Options`/`Futures`/`Options-PaperTrade`) - 7/7
+    checks passed.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
