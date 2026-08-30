@@ -28,7 +28,13 @@ PAPER_TRADING_ONLY = True  # see FnoScreener/paper_engine.py - hard safety invar
 # Stage 0 - Minervini Trend Template (hard gate, daily timeframe)
 # See trading-skills/learnings/technical-patterns/minervini-trend-template.md
 # --------------------------------------------------------------------- #
-TREND_TEMPLATE_LOOKBACK_DAYS = int(os.getenv("FNO_TREND_LOOKBACK_DAYS", "300"))  # >252 trading days incl. weekends/holidays padding
+# Bumped 300->420 (30 Aug 2026) - confirmed live against RELIANCE that
+# 300 calendar days only yields ~204 trading days (weekends/holidays), 17
+# short of the 221 (200-day MA + 21-day rising-check lookback) the Trend
+# Template needs - a real bug caught on the very first deploy (0/210
+# stocks passed Stage 0, all failing with "insufficient daily history").
+# 420 calendar days -> ~285 trading days, comfortable margin.
+TREND_TEMPLATE_LOOKBACK_DAYS = int(os.getenv("FNO_TREND_LOOKBACK_DAYS", "420"))
 MA_SHORT = 50
 MA_MID = 150
 MA_LONG = 200
