@@ -26,6 +26,26 @@ import os
 
 PAPER_TRADING_ONLY = True  # see K01/paper_engine.py - hard safety invariant, not just a label
 
+# On/off switch, same pattern as CopperOptions.config.STRATEGY_ENABLED -
+# independent of PAPER_TRADING_ONLY above (that one's a hard invariant that
+# can never be flipped to allow real orders; this one just turns the whole
+# poll loop's actual work on/off). Defaults to DISABLED: turned off by user
+# request 30 Aug 2026, the same day this strategy was first deployed and
+# renamed to K01, specifically to keep it off for its first live-market
+# session (31 Aug 2026) until its rate-limit footprint on the SHARED Dhan
+# connection (see K01_POLL_INTERVAL_SECONDS/watchlist-cap changes below,
+# made at the same time) has been reasoned through against the real
+# Options/Futures strategies' own needs - K01 shares one Dhan connection
+# and one process with them, so its REST call volume is a genuine, if
+# indirect, risk to real-money exit-monitoring timeliness, not just a
+# theoretical one (see trading-skills/learnings/exit-mechanics.md's
+# stale-cache finding for the general mechanism). Flip to true (or set
+# K01_STRATEGY_ENABLED=true in .env) to re-enable once that's been
+# resolved to satisfaction - the poll loop, screen, and status endpoint all
+# keep running either way, this only gates the actual Stage 0-3 work in
+# each tick.
+STRATEGY_ENABLED = os.getenv("K01_STRATEGY_ENABLED", "false").lower() == "true"
+
 # --------------------------------------------------------------------- #
 # Stage 0 - Minervini Trend Template (hard gate, daily timeframe)
 # See trading-skills/learnings/technical-patterns/minervini-trend-template.md
@@ -94,7 +114,14 @@ QUANTITY_LOTS = int(os.getenv("K01_QUANTITY_LOTS", "1"))
 # position in, same spirit as the live bot's MAX_LIVE_POSITIONS_CE/PE).
 MAX_CONCURRENT_CE = int(os.getenv("K01_MAX_CONCURRENT_CE", "4"))
 MAX_CONCURRENT_PE = int(os.getenv("K01_MAX_CONCURRENT_PE", "4"))
-DAILY_SHORTLIST_SIZE = int(os.getenv("K01_DAILY_SHORTLIST_SIZE", "10"))  # per direction
+DAILY_SHORTLIST_SIZE = int(os.getenv("K01_DAILY_SHORTLIST_SIZE", "10"))  # per direction, per the design doc - not yet used directly (see WATCHLIST_CAP)
+
+# Lowered 20->8 (user request 30 Aug 2026, same rate-limit-footprint
+# reasoning as STRATEGY_ENABLED/POLL_INTERVAL_SECONDS above) - the actual
+# cap on how many Stage-0+1 survivors get intraday-polled at all. Was
+# previously computed as 2*DAILY_SHORTLIST_SIZE (=20); now a direct,
+# independent value so it isn't tied to that per-direction design figure.
+WATCHLIST_CAP = int(os.getenv("K01_WATCHLIST_CAP", "8"))
 
 # --------------------------------------------------------------------- #
 # Timing
@@ -102,7 +129,15 @@ DAILY_SHORTLIST_SIZE = int(os.getenv("K01_DAILY_SHORTLIST_SIZE", "10"))  # per d
 MARKET_OPEN = "09:15"
 DAILY_SCREEN_TIME = os.getenv("K01_DAILY_SCREEN_TIME", "10:15")  # Stage 0+1 run once, frozen for the day, at/after this time
 SQUARE_OFF_TIME = os.getenv("K01_SQUARE_OFF_TIME", "15:15")
-POLL_INTERVAL_SECONDS = int(os.getenv("K01_POLL_INTERVAL_SECONDS", "15"))  # intraday momentum re-check cadence for shortlisted stocks
+# Raised 15->45s (user request 30 Aug 2026) to reduce K01's REST call
+# volume against the SHARED Dhan connection/rate limit (NOTES.md bug #5 in
+# this repo) - K01 runs in the same process as the real Options/Futures
+# strategies and was adding real, if indirect, contention risk to their
+# own exit-monitoring REST calls. See STRATEGY_ENABLED's comment above for
+# the fuller reasoning; this and WATCHLIST_CAP together are the mitigation
+# for keeping K01 running at all rather than fully disabling it going
+# forward (STRATEGY_ENABLED itself is what's actually off for now).
+POLL_INTERVAL_SECONDS = int(os.getenv("K01_POLL_INTERVAL_SECONDS", "45"))  # intraday momentum re-check cadence for shortlisted stocks
 
 # --------------------------------------------------------------------- #
 # Rate-limit pacing (NOTES.md bug #5 in this repo - Dhan's undocumented

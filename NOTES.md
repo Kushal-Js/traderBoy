@@ -1432,6 +1432,45 @@ out of git.
     (`designs/k01.md`) still describes the strategy's
     logic/rationale in full; this repo's `K01/` is the implementation.
 
+41. **K01 turned OFF before its first live-market session, plus two
+    rate-limit mitigations, 30 Aug 2026 - user request, prompted by
+    asking "would this paper trading impact real time trading tomorrow?"**
+    Real answer worked through: K01 can never place a real order (asserted
+    at startup, no code path to `place_market_order`/`order_placement`
+    exists in `paper_engine.py`) and has its own fully independent position
+    store, so there's no *direct* interference with Options/Futures. But
+    K01 reuses the SAME authenticated Dhan connection and runs in the SAME
+    process as those real-money strategies - its REST call volume
+    (intraday polling for its watchlist, every `POLL_INTERVAL_SECONDS`)
+    competes for Dhan's undocumented rate limit (bug #5) alongside their
+    own exit-monitoring calls. Not a new risk category - the same
+    mechanism already documented in this file's stale-LTP entry (#38) -
+    but K01 adds real volume to it, so it's a genuine indirect risk to
+    real-money exit-check timeliness, not just theoretical.
+
+    Three changes:
+    - **New `K01_STRATEGY_ENABLED` flag, defaulting to `false`** (same
+      pattern as `CopperOptions.config.STRATEGY_ENABLED`) - the poll loop,
+      daily screen scheduling, and status endpoint all keep running
+      either way; the flag gates only the actual Stage 0-3 work each
+      tick (an early `continue` right after the loop's startup log line).
+      Deployed OFF for 31 Aug 2026's first live session. Flip to `true`
+      in `.env` + restart to re-enable once the rate-limit footprint has
+      been reasoned through further.
+    - `K01_POLL_INTERVAL_SECONDS` 15->45s - cuts K01's own REST call
+      frequency by two-thirds.
+    - New `K01_WATCHLIST_CAP=8` (was computed as `2*DAILY_SHORTLIST_SIZE`
+      = 20 - now a direct, independent value) - fewer stocks polled per
+      tick means fewer REST calls per tick regardless of interval.
+
+    Verified offline (31/31 checks now, up from 27 - added a test that
+    actually runs `poll_loop()` for a few ticks with `STRATEGY_ENABLED`
+    patched `False` and confirms `_run_daily_screen` is never invoked,
+    not just that the config value reads correctly) against the real
+    `.env`. Confirmed both `/positions` and `/futures/positions` empty
+    before this deploy (4th restart of the day - all clean, no crashes
+    across any of today's iterations).
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

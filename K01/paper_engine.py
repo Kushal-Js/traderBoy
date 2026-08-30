@@ -107,6 +107,7 @@ class PaperTradeStore:
         wins = sum(1 for t in self.completed if t["pnl"] > 0)
         return {
             "strategy": "K01",
+            "strategy_enabled": config.STRATEGY_ENABLED,
             "paper_trading_only": config.PAPER_TRADING_ONLY,
             "mvp_scope_note": "Stage 2 (OI-buildup) and VCP detection not implemented yet - "
                                "momentum-only entries (RSI band + Supertrend regime/crossover + ROC sign). "
@@ -422,7 +423,7 @@ async def _run_daily_screen(loop: asyncio.AbstractEventLoop) -> None:
             continue
 
     candidates.sort(key=lambda w: w.atr_pct, reverse=True)
-    capped = candidates[: 2 * config.DAILY_SHORTLIST_SIZE]
+    capped = candidates[: config.WATCHLIST_CAP]
     _watchlist = {w.symbol: w for w in capped}
     logger.info("K01 daily screen complete: %d/%d passed Stage 0+1, watchlist capped to %d",
                 len(candidates), len(universe), len(_watchlist))
@@ -525,9 +526,14 @@ async def poll_loop() -> None:
     global _screen_date, _screen_in_progress
     assert config.PAPER_TRADING_ONLY, "Refusing to start: PAPER_TRADING_ONLY must stay True for this engine."
     loop = asyncio.get_running_loop()
-    logger.info("K01 paper-trading poll loop started (PAPER ONLY - no real orders will be placed).")
+    logger.info("K01 paper-trading poll loop started (PAPER ONLY - no real orders will be placed). "
+                "strategy_enabled=%s", config.STRATEGY_ENABLED)
     while True:
         try:
+            if not config.STRATEGY_ENABLED:
+                await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
+                continue
+
             now = datetime.now(IST)
             today = now.date()
             market_open_dt = datetime.combine(today, dtime.fromisoformat(config.MARKET_OPEN), tzinfo=IST)
