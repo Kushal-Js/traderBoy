@@ -1347,7 +1347,7 @@ out of git.
     TRADING ONLY, MVP shipped 30 Aug 2026 for a live paper-trading test
     starting the next trading session.** Full design lives in the separate
     `trading-skills` repo (github.com/Kushal-Js/trading-skills,
-    `designs/fno-daily-screener.md`) - this is the implementation, not a
+    `designs/k01.md`) - this is the implementation, not a
     fresh design. Built after also researching and documenting Minervini's
     Trend Template and VCP pattern (`trading-skills/learnings/
     technical-patterns/`), per explicit user request to have those
@@ -1402,6 +1402,35 @@ out of git.
     made and caught while writing this test) and None on a flat/
     insufficient series; `_exit_reason_for` fires each reason at the right
     boundary. No real network call is reachable from the test file.
+
+    **Real bug caught on the very first deploy, fixed same day**:
+    `TREND_TEMPLATE_LOOKBACK_DAYS=300` (calendar days) only yielded ~204
+    trading days once weekends/holidays were excluded - 17 short of the
+    221 (200-day MA + 21-day rising-check) Stage 0 needs, so all 210/210
+    stocks failed with "insufficient daily history" rather than a genuine
+    trend-quality read. Bumped to 420 calendar days (~285 trading days),
+    confirmed live against RELIANCE/TCS/HDFCBANK. Also confirmed a
+    zero-delay back-to-back debugging call (no relation to the real
+    screener's own 0.3s pacing) can trigger Dhan's undocumented rate limit
+    (bug #5) within just 2-3 rapid requests - a useful data point on how
+    aggressive that limit actually is.
+
+40. **`FnoScreener/` renamed to `K01`, 30 Aug 2026, per user request ("name
+    this strategy for future references and document it").** Full
+    mechanical rename - package directory, `main.py`'s import, the
+    `K01_`-prefixed env vars (was `FNO_`), the paper-trade log filename
+    (`k01_paper_trades.log`, was `fno_screener_paper_trades.log`), the
+    logger name (`k01`, was `fno_screener`), the status endpoint
+    (`GET /k01/status`, was `/fno-screener/status`), and a new
+    `"strategy": "K01"` field in the snapshot JSON so the endpoint
+    self-identifies. Done as a clean rename (not just a label/alias)
+    since no trade history existed yet to migrate or lose - today's
+    Sunday dry-run screen completed but placed zero paper trades (no
+    intraday data on a non-trading day), so there was nothing to strand
+    under the old name. Reran `test_fno_screener.py` (27/27) against the
+    renamed package - no regressions. The `trading-skills` design doc
+    (`designs/k01.md`) still describes the strategy's
+    logic/rationale in full; this repo's `K01/` is the implementation.
 
 ## Design decisions
 

@@ -1,5 +1,6 @@
 """
-Paper-trading engine for the daily F&O screener strategy - PAPER ONLY.
+Paper-trading engine for "K01", the daily F&O stock screener strategy -
+PAPER ONLY.
 
 SAFETY INVARIANT: this module must NEVER call `dhan_wrapper.place_market_order`
 (the only real order-placement entry point in Options/dhan_client.py) or
@@ -13,7 +14,7 @@ explicitly-requested change - not something this file does or should be
 modified to do casually.
 
 MVP scope (30 Aug 2026, see config.py's module docstring and
-trading-skills/designs/fno-daily-screener.md for the full plan): Stage 0
+trading-skills/designs/k01.md for the full plan): Stage 0
 (Minervini Trend Template) + Stage 1 (liquidity/anti-thin-option floor) run
 ONCE per day, frozen, producing a WATCHLIST (not yet directional - these
 two stages measure "is this stock structurally worth watching," not
@@ -41,7 +42,7 @@ from Options.dhan_client import dhan_wrapper, _compute_supertrend
 from . import config
 
 IST = ZoneInfo("Asia/Kolkata")
-logger = logging.getLogger("fno_screener")
+logger = logging.getLogger("k01")
 
 
 # --------------------------------------------------------------------- #
@@ -105,10 +106,11 @@ class PaperTradeStore:
         gross_total = sum(t["pnl"] for t in self.completed)
         wins = sum(1 for t in self.completed if t["pnl"] > 0)
         return {
+            "strategy": "K01",
             "paper_trading_only": config.PAPER_TRADING_ONLY,
             "mvp_scope_note": "Stage 2 (OI-buildup) and VCP detection not implemented yet - "
                                "momentum-only entries (RSI band + Supertrend regime/crossover + ROC sign). "
-                               "See trading-skills/designs/fno-daily-screener.md for the phase-2 plan.",
+                               "See trading-skills/designs/k01.md for the phase-2 plan.",
             "screen_date": screen_date.isoformat() if screen_date else None,
             "watchlist_size": len(watchlist),
             "watchlist": {
@@ -373,13 +375,13 @@ _screen_in_progress = False
 
 async def _run_daily_screen(loop: asyncio.AbstractEventLoop) -> None:
     global _watchlist
-    logger.info("F&O daily screen starting (Stage 0 Trend Template + Stage 1 liquidity floor)...")
+    logger.info("K01 daily screen starting (Stage 0 Trend Template + Stage 1 liquidity floor)...")
     try:
         universe = await loop.run_in_executor(None, _fetch_fno_universe)
     except Exception:  # noqa: BLE001
         logger.exception("Could not fetch F&O universe - screen aborted for today")
         return
-    logger.info("F&O universe: %d underlyings", len(universe))
+    logger.info("K01 F&O universe: %d underlyings", len(universe))
 
     candidates: list[WatchlistEntry] = []
     for symbol in universe:
@@ -422,7 +424,7 @@ async def _run_daily_screen(loop: asyncio.AbstractEventLoop) -> None:
     candidates.sort(key=lambda w: w.atr_pct, reverse=True)
     capped = candidates[: 2 * config.DAILY_SHORTLIST_SIZE]
     _watchlist = {w.symbol: w for w in capped}
-    logger.info("F&O daily screen complete: %d/%d passed Stage 0+1, watchlist capped to %d",
+    logger.info("K01 daily screen complete: %d/%d passed Stage 0+1, watchlist capped to %d",
                 len(candidates), len(universe), len(_watchlist))
     for w in capped:
         logger.info("  watchlist: %s ATR%%=%.2f turnover=Rs.%.1fcr", w.symbol, w.atr_pct, w.avg_turnover_cr)
@@ -523,7 +525,7 @@ async def poll_loop() -> None:
     global _screen_date, _screen_in_progress
     assert config.PAPER_TRADING_ONLY, "Refusing to start: PAPER_TRADING_ONLY must stay True for this engine."
     loop = asyncio.get_running_loop()
-    logger.info("F&O screener paper-trading poll loop started (PAPER ONLY - no real orders will be placed).")
+    logger.info("K01 paper-trading poll loop started (PAPER ONLY - no real orders will be placed).")
     while True:
         try:
             now = datetime.now(IST)
@@ -560,7 +562,7 @@ async def poll_loop() -> None:
             if _screen_date == today:
                 await _check_watchlist_for_entries(loop, now, today)
         except Exception:  # noqa: BLE001
-            logger.exception("Unhandled error in F&O screener poll loop")
+            logger.exception("Unhandled error in K01 poll loop")
         await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
 
 

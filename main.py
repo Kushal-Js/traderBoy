@@ -20,13 +20,15 @@ in the same process. Three are mounted today:
     orders, own separate position pool/capacity - see
     Futures/trading_engine.py's module docstring for why it skips broker
     reconciliation at startup.
-  - FnoScreener/screener_main.py - daily F&O stock screener (Minervini
+  - K01/screener_main.py - "K01", the daily F&O stock screener (Minervini
     Trend Template + liquidity floor, run once/day, feeding intraday
     Supertrend/RSI/ROC momentum entries), PAPER TRADING ONLY (see
-    FnoScreener/paper_engine.py's safety invariant). MVP scope shipped
-    30 Aug 2026 for first live test - full design in the separate
-    trading-skills repo (designs/fno-daily-screener.md); OI-buildup
-    gating and VCP detection are explicit phase-2 items, not yet built.
+    K01/paper_engine.py's safety invariant). Named/documented 30 Aug 2026
+    (was FnoScreener/ until this rename - no trade history existed yet to
+    migrate). MVP scope shipped the same day for first live test - full
+    design in the separate trading-skills repo (designs/k01.md); OI-buildup
+    gating and VCP detection are
+    explicit phase-2 items, not yet built.
 A sixth strategy would be added the same way - its own package,
 exporting `router` + `lifespan`, mounted below - without touching any
 existing one.
@@ -45,7 +47,7 @@ from Options import option_main
 from IndexScalping import index_main
 from CopperOptions import copper_main
 from Futures import futures_main
-from FnoScreener import screener_main
+from K01 import screener_main
 
 logging.basicConfig(
     level=logging.INFO,
