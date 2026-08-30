@@ -20,7 +20,14 @@ in the same process. Three are mounted today:
     orders, own separate position pool/capacity - see
     Futures/trading_engine.py's module docstring for why it skips broker
     reconciliation at startup.
-A fifth strategy would be added the same way - its own package,
+  - FnoScreener/screener_main.py - daily F&O stock screener (Minervini
+    Trend Template + liquidity floor, run once/day, feeding intraday
+    Supertrend/RSI/ROC momentum entries), PAPER TRADING ONLY (see
+    FnoScreener/paper_engine.py's safety invariant). MVP scope shipped
+    30 Aug 2026 for first live test - full design in the separate
+    trading-skills repo (designs/fno-daily-screener.md); OI-buildup
+    gating and VCP detection are explicit phase-2 items, not yet built.
+A sixth strategy would be added the same way - its own package,
 exporting `router` + `lifespan`, mounted below - without touching any
 existing one.
 
@@ -38,6 +45,7 @@ from Options import option_main
 from IndexScalping import index_main
 from CopperOptions import copper_main
 from Futures import futures_main
+from FnoScreener import screener_main
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,7 +67,8 @@ async def lifespan(app: FastAPI):
         async with index_main.lifespan(app):
             async with copper_main.lifespan(app):
                 async with futures_main.lifespan(app):
-                    yield
+                    async with screener_main.lifespan(app):
+                        yield
 
 
 app = FastAPI(title="Chartink -> Dhan Algo Bot", lifespan=lifespan)
@@ -67,6 +76,7 @@ app.include_router(option_main.router)
 app.include_router(index_main.router)
 app.include_router(copper_main.router)
 app.include_router(futures_main.router)
+app.include_router(screener_main.router)
 
 
 # --------------------------------------------------------------------------- #

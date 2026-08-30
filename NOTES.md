@@ -1343,6 +1343,66 @@ out of git.
     `test_max_loss_exit.py`, `test_capacity_ce4_pe0.py`, and
     `test_supertrend_immediate.py` too - no regressions.
 
+39. **New `FnoScreener/` package - a daily F&O stock screener, PAPER
+    TRADING ONLY, MVP shipped 30 Aug 2026 for a live paper-trading test
+    starting the next trading session.** Full design lives in the separate
+    `trading-skills` repo (github.com/Kushal-Js/trading-skills,
+    `designs/fno-daily-screener.md`) - this is the implementation, not a
+    fresh design. Built after also researching and documenting Minervini's
+    Trend Template and VCP pattern (`trading-skills/learnings/
+    technical-patterns/`), per explicit user request to have those
+    "skills" in place before building the screener.
+
+    Pipeline (5 stages designed, 3 shipped in this MVP): Stage 0 (Minervini
+    Trend Template - price above 50/150/200-day MAs stacked bullishly,
+    200-MA rising >=1 month, within 30%/25% of 52-week low/high - hard
+    gate, daily timeframe) + Stage 1 (liquidity floor - ATR(14)/price
+    >=1.0%, 20-day avg turnover >=Rs.50cr, anti-SAGILITY band rejecting
+    ATM premium<Rs.5 AND lot_size>=5000 together - hard gate) run ONCE
+    per day at 10:15 IST across the full ~208-stock F&O universe
+    (`dhan_wrapper.instruments()`, filtered `SEM_INSTRUMENT_NAME==
+    "OPTSTK"`), producing a watchlist capped to the top 20 by ATR%. Stage 3
+    (intraday momentum - 5-min RSI(14) in a 40-75/25-60 band, 5-min close
+    vs. its own Supertrend(10,3) - deliberately the bot's OWN exit-side
+    parameters, not Krishvi's period-7, closing the mismatch found
+    analyzing that screener - 1-min Supertrend(10,3) edge-detected
+    crossover, and 5-min ROC(9) sign, all four must agree) is re-evaluated
+    every 15s poll per watchlist symbol to decide paper entries.
+
+    Deliberately NOT shipped in this MVP: Stage 2 (OI-buildup gating, needs
+    Dhan's Option Chain API - the bot has never called that endpoint
+    before, so it's not being made load-bearing on the very first live
+    test until built and verified separately) and Stage 0's VCP-detection
+    bonus scoring (real, non-trivial pattern-recognition code - swing-high/
+    low finding, sequential-contraction measurement - that deserves its
+    own build+test pass, not something to rush). Both are documented
+    phase-2 items in the trading-skills design doc.
+
+    Paper-only exits (target/stop-loss/MAX_LOSS_PER_TRADE_RS=1200 -
+    matching the live Options value for consistency - EOD square-off at
+    15:15) are a self-contained reimplementation in `FnoScreener/
+    paper_engine.py`, not a reuse of `Options.trading_engine._exit_
+    reason_for` - same "per-package independence" convention IndexScalping/
+    CopperOptions already established (that function's own dynamic-SL/
+    trailing-SL tuning history belongs to the Options strategy specifically,
+    not this new experimental one).
+
+    `GET /fno-screener/status` exposes today's watchlist (with each
+    stock's Trend Template detail + most recent Stage 3 signal read),
+    open paper positions, completed trades, and total P&L - mirrors
+    IndexScalping's own `/scalping/paper-trades` shape. Verified fully
+    offline (27/27 checks, `test_fno_screener.py`) before deploying:
+    Trend Template correctly passes a rising series and rejects flat/
+    declining/insufficient-history ones; liquidity floor correctly passes
+    healthy ATR%/turnover and rejects thin volume or zero daily range;
+    momentum_signal correctly returns CE/PE only when all four Stage-3
+    conditions align (verified with hand-constructed, hand-checked
+    synthetic price series - RSI computed from a monotonic straight-line
+    series pins at 100/0 and is NOT a valid test input, a real mistake
+    made and caught while writing this test) and None on a flat/
+    insufficient series; `_exit_reason_for` fires each reason at the right
+    boundary. No real network call is reachable from the test file.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

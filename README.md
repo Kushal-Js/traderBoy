@@ -33,6 +33,9 @@ This is the Dhan counterpart to the Groww version of this bot (see the
 | `Futures/position_store.py` | Futures' own independent in-memory state - separate capacity/dedup from Options' |
 | `Futures/config.py` | All tunables for the Futures strategy, `FUTURES_`-prefixed env vars |
 | `Futures/dhan_client.py` | Re-exports `Options.dhan_client.dhan_wrapper` - reuses the one authenticated Dhan connection rather than opening a second |
+| `FnoScreener/screener_main.py` | Daily F&O stock screener's FastAPI router + lifespan - **paper trading only**, no real orders placed. Design in the separate `trading-skills` repo (`designs/fno-daily-screener.md`) |
+| `FnoScreener/paper_engine.py` | Stage 0 (Minervini Trend Template) + Stage 1 (liquidity floor) run once/day across the full F&O universe to build a watchlist; Stage 3 (5-min RSI/Supertrend + 1-min Supertrend crossover + ROC, all four must agree) re-checked every poll to trigger paper entries. OI-buildup gating and VCP detection are documented phase-2 items, not yet built |
+| `FnoScreener/config.py` | All tunables - `FNO_`-prefixed env vars |
 | `.env` | Your local credentials/config (gitignored - never commit this) |
 
 A future strategy would live in its own top-level package the same way
@@ -268,6 +271,7 @@ URLs — matching the `webhook_url` field in your sample payload.
 | `GET /futures/positions` | Futures strategy's own live + closed positions |
 | `GET /futures/orders` | Futures strategy's own orders today |
 | `POST /futures/square-off-now` | Futures strategy's own manual kill-switch |
+| `GET /fno-screener/status` | Daily F&O screener's watchlist, open paper positions, completed trades, P&L - paper trading only |
 | `GET /health` | Liveness check |
 | `POST /square-off-now` | Manual kill-switch: closes every live position immediately |
 
