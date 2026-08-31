@@ -688,6 +688,22 @@ class DhanWrapper:
         return (ltp - prev_close) / prev_close * 100
 
     def get_option_ltp(self, trading_symbol: str) -> float:
+        """REST LTP fallback, used by _get_ltp() whenever the WebSocket
+        cache is stale/missing (see that function's own docstring) - on
+        the exit-monitoring critical path, called once per position per
+        monitor tick when the cache misses. Retried (see _retry) - found
+        + fixed 31 Aug 2026 (user request, a lag audit of a live trading
+        day found 46 unretried "Could not fetch LTP" failures spread
+        across nearly every held position that day, each one silently
+        skipping that position's exit-check for a single ~2s tick before
+        self-healing on the next one). This call had no retry wrapper at
+        all before this fix, unlike get_atm_option/get_day_change_pct/
+        get_open_fno_positions, which already had one for the identical
+        reason ("Dhan's market-data calls can transiently rate-limit-
+        fail" - see _retry's own docstring)."""
+        return _retry(self._get_option_ltp_once, trading_symbol)
+
+    def _get_option_ltp_once(self, trading_symbol: str) -> float:
         data = self.client.get_ltp_data(names=[trading_symbol])
         ltp = data.get(trading_symbol)
         if ltp is None:

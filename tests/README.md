@@ -24,6 +24,7 @@ peace of mind.
 | `test_risk_threshold_cutoff.py` | The before/after-11:30 split of `MAX_LOSS_PER_TRADE_RS`/`PROFIT_PROTECTION_THRESHOLD_RS` in both Options and Futures - correct value on each side of the cutoff, the exact boundary instant, and `_exit_reason_for` itself firing at the right threshold |
 | `test_luxury_package.py` | The Luxury package (a same-account Options duplicate) - concurrent CE entry, the PE webhook entering PUTs on its own capacity pool, duplicate-delivery races, real exit paths, three-way (Options/Futures/Luxury) reconciliation with zero cross-contamination, malformed payloads |
 | `test_cross_strategy_registry.py` | `cross_strategy_registry.py`'s claim/release semantics, and REAL concurrent races (via `asyncio.gather`, not simulated) between Options/Futures/Luxury for the same stock at two levels: `_process_one_entry` directly, and the FULL real webhook handler functions (ranking, capacity, choppy-stocks filter, order placement) - exactly one winner every time at both levels, unrelated symbols/stocks in the same alert batch never affected, a mixed multi-stock scenario confirming each package's own unique stock is unaffected by a shared stock racing alongside it |
+| `test_get_option_ltp_retry.py` | `get_option_ltp()`'s retry wrapper (added 31 Aug 2026 after a lag audit found 46 unretried transient LTP-fetch failures in one trading day) - recovers from a transient failure, still raises after exhausting retries, and uses a real ~1.5s backoff (not a tight loop) |
 
 ## How to run
 
@@ -33,6 +34,7 @@ uv run python tests/test_choppy_stocks.py
 uv run python tests/test_risk_threshold_cutoff.py
 uv run python tests/test_luxury_package.py
 uv run python tests/test_cross_strategy_registry.py
+uv run python tests/test_get_option_ltp_retry.py
 ```
 
 Each takes a few seconds. Prints one PASS line per scenario, or raises an

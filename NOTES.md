@@ -2323,6 +2323,53 @@ out of git.
     was purely adding test coverage, not fixing anything the new
     scenarios found.
 
+60. **`get_option_ltp()` retry wrapper added - user request 31 Aug 2026**,
+    found via a lag audit of a full live trading day ("run a check on
+    today's all trades and find any lag before or after order placement
+    or from webhook trigger"). That audit correlated `/trade-history`/
+    `/webhook-alerts` against precise journal timestamps and found:
+    webhook-receipt-to-order-placement lag (~3.8-7.7s) is expected - the
+    sum of required REST round-trips (ranking, broker-position check, ATM
+    lookup) before an order can be placed, not idle code time; order-
+    placement-to-fill was excellent (0.1-1.7s) for 10 of 11 real fills,
+    with one genuine outlier (GRASIM sat `PENDING` at the broker for 8m42s
+    before filling - confirmed via an unbroken ~2s poll cadence the whole
+    time that this was 100% broker/exchange-side, not the bot); and 17
+    `ignored: max_live_positions_reached` alerts were all correct capacity
+    gating, not a hidden problem.
+
+    The one real, fixable finding: `get_option_ltp()` (the REST LTP
+    fallback `_get_ltp()` uses whenever the WebSocket cache is stale/
+    missing - on the exit-monitoring critical path) had NO retry wrapper
+    at all, unlike its sibling REST calls `get_atm_option`/
+    `get_day_change_pct`/`get_open_fno_positions`, which all already had
+    one for the identical transient-failure mode (see entry #51 for
+    `get_open_fno_positions`'s own identical fix). That day alone produced
+    46 unretried "Could not fetch LTP" failures spread across nearly every
+    held position (MANAPPURAM, GRASIM, ADANIPORTS, HINDUNILVR, SRF, CAMS,
+    ATHERENERG) - each one silently skipped that position's exit-check for
+    a single `MONITOR_INTERVAL_SECONDS` (~2s) tick before self-healing on
+    the next one. Small individual impact, but a real, avoidable gap
+    matching a bug class this codebase has now fixed four times.
+
+    Fix: split into a public `get_option_ltp()` wrapping a new private
+    `_get_option_ltp_once()`, same public-wraps-private-via-`_retry()`
+    pattern as every other retried REST call in this file. No caller
+    changes needed - every call site (`Options/`, `Futures/`, `Luxury/`
+    trading_engine.py, all four paper strategies) already invokes this
+    through `run_in_executor`, so the retry's up-to-3s worst-case backoff
+    only extends that one executor-thread call, never blocks the event
+    loop.
+
+    New `tests/test_get_option_ltp_retry.py` (3 scenarios, all passing):
+    recovers from a transient empty-response failure (mirrors the exact
+    test pattern used for `get_open_fno_positions`'s own retry fix);
+    still raises after exhausting all 3 attempts against a persistent
+    failure; and confirms a real ~1.5s backoff between attempts (not a
+    tight loop), proving this goes through the shared `_retry()` helper.
+    Re-ran all 5 existing suites afterward (35/35 total, zero
+    regressions).
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
