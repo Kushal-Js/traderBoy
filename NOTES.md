@@ -2611,6 +2611,43 @@ out of git.
     seed file this task created. Re-ran all 9 existing suites afterward
     (56/56 still pass, 62/62 total across all 10 test files).
 
+64. **Entry rule extended with a gap-up gate - user request 31 Aug 2026**
+    ("Entry Todays Open price is greater than yesterday's close price
+    and when 5 min close cross above super trend with 1 min close
+    greater than or crossed above 1 min super trend. Exit when 5 min
+    close price cross below super trend.") - EXIT is unchanged; ENTRY
+    now requires ALL THREE: today's open > yesterday's close, AND the
+    5-min crossed-above, AND the 1-min above/crossed-above.
+
+    New `Options/dhan_client.py` method: `get_today_open_and_prev_close()`
+    (public-wraps-private-via-`_retry`, same pattern as every other
+    retried REST call in that file) - reuses the exact same OHLC quote
+    `get_day_change_pct()` already fetches (Dhan bundles today's
+    `ohlc.open` and the prior session's `ohlc.close` into one response),
+    just returns the two raw values instead of deriving a % from them, so
+    no new REST call shape was introduced.
+
+    New `Swing/trading_engine.py` `_is_gap_up()` - deliberately cached
+    DIFFERENTLY from the Supertrend checks: today's own open never
+    changes again once the session starts, so this fetches at most ONCE
+    PER SYMBOL PER TRADING DAY (a plain `dict[symbol] -> (date, bool)`
+    that self-invalidates once the date no longer matches), not re-
+    checked on `SWING_SUPERTREND_REFRESH_SECONDS`'s own cadence the way
+    the Supertrend state is. `_evaluate_watchlist_entry_signal()` checks
+    it FIRST and short-circuits before either Supertrend timeframe is
+    even fetched when it fails - both because it's the cheaper/more
+    cacheable check and because that's the natural reading of the rule
+    itself.
+
+    New `tests/test_swing_signal_logic.py` scenarios (now 7 total, up
+    from 6): the gap-up check's own correctness/caching/day-invalidation
+    behavior, and the entry truth table extended to 7 combinations
+    (including gap-up=False correctly blocking entry even with an
+    otherwise-perfect Supertrend signal - the whole point of an AND
+    gate). Re-ran all 9 existing suites afterward (62/62 still pass,
+    69/69 total across all 10 test files). Still deployed DISABLED
+    (`SWING_STRATEGY_ENABLED=false`).
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

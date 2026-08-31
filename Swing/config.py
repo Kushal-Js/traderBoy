@@ -9,14 +9,18 @@ trading-skills repo's `basket-order-feasibility.md` for the full
 investigation this design is based on).
 
 Entry/exit CONDITION logic (added 31 Aug 2026, user request, same day as
-this package's own creation): a dual-timeframe Supertrend signal on the
-underlying's own STOCK price (not the futures/option premium - same
+this package's own creation; ENTRY extended with a gap-up gate later the
+same day) - a daily gap check plus a dual-timeframe Supertrend signal on
+the underlying's own STOCK price (not the futures/option premium - same
 convention Options/Futures/Luxury's own SUPERTREND_EXIT already uses):
-  - ENTRY: the 5-min close crosses ABOVE the 5-min Supertrend, AND the
-    1-min close is above (or has itself just crossed above) the 1-min
-    Supertrend - both conditions read on their own most recently fully-
-    closed candle.
-  - EXIT: the 5-min close crosses BELOW the 5-min Supertrend.
+  - ENTRY: today's open is greater than yesterday's close (a gap-up,
+    checked once per symbol per day - see trading_engine.py's own
+    _is_gap_up), AND the 5-min close crosses ABOVE the 5-min Supertrend,
+    AND the 1-min close is above (or has itself just crossed above) the
+    1-min Supertrend - the two Supertrend conditions each read on their
+    own most recently fully-closed candle.
+  - EXIT: the 5-min close crosses BELOW the 5-min Supertrend (unchanged
+    since first defined).
 See trading_engine.py's own module docstring for the full implementation
 (a self-contained, dual-timeframe crossover detector - deliberately NOT
 built on top of Options/dhan_client.py's own single-timeframe Supertrend

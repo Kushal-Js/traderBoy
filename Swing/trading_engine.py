@@ -32,15 +32,22 @@ Core strategy logic for the Swing package - user request 31 Aug 2026.
     alone rather than guessed at - same never-guess philosophy
     attribute_open_broker_position itself follows.
   - Entry/exit signal (added 31 Aug 2026, user request, same day as this
-    package's own creation) - a dual-timeframe Supertrend crossover on
-    the underlying's own STOCK price:
-      ENTRY: the 5-min close crosses ABOVE the 5-min Supertrend, AND the
-      1-min close is above (or has itself just crossed above) the 1-min
-      Supertrend - both read on their own most recently fully-closed
-      candle (user's own wording: "5 min close cross above super trend
-      with 1 min close greater than or crossed above 1 min super trend").
+    package's own creation; ENTRY extended with a gap-up gate later the
+    same day) - a daily gap check plus a dual-timeframe Supertrend
+    crossover on the underlying's own STOCK price:
+      ENTRY: today's open is greater than yesterday's close (checked via
+      `_is_gap_up()`, at most once per symbol per trading day - see its
+      own docstring for why this is cached differently from the
+      Supertrend checks below), AND the 5-min close crosses ABOVE the
+      5-min Supertrend, AND the 1-min close is above (or has itself just
+      crossed above) the 1-min Supertrend - the two Supertrend conditions
+      each read on their own most recently fully-closed candle (user's
+      own wording: "Todays Open price is greater than yesterday's close
+      price and when 5 min close cross above super trend with 1 min
+      close greater than or crossed above 1 min super trend").
       EXIT: the 5-min close crosses BELOW the 5-min Supertrend ("5 min
-      close price cross below super trend").
+      close price cross below super trend" - unchanged since first
+      defined).
     `_fetch_supertrend_state()` is a SELF-CONTAINED dual-timeframe
     crossover detector, deliberately NOT built on top of
     Options/dhan_client.py's own single-timeframe Supertrend cache/
@@ -55,9 +62,13 @@ Core strategy logic for the Swing package - user request 31 Aug 2026.
     `intraday_minute_data` REST call shape, just parameterized by
     interval and keeping the last TWO closed candles (not just one) so
     an actual crossover (a state CHANGE between consecutive candles) can
-    be detected, not merely a current side.
+    be detected, not merely a current side. `_is_gap_up()` similarly
+    reuses `Options/dhan_client.py`'s new `get_today_open_and_prev_close()`
+    (the same OHLC quote `get_day_change_pct()` already fetches, just the
+    two raw values instead of a derived %) rather than a new REST call
+    shape.
     `_evaluate_watchlist_entry_signal()`/`_evaluate_basket_exit_signal()`
-    apply the two rules above; `monitor_loop()` calls them every tick
+    apply the rules above; `monitor_loop()` calls them every tick
     once `config.STRATEGY_ENABLED` is on, entering/exiting exactly as
     described - a successful auto-entry also removes the symbol from the
     watchlist (no reason to keep evaluating a stock for entry once it has
@@ -77,7 +88,7 @@ import random
 import re
 import string
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -504,14 +515,62 @@ async def _fetch_supertrend_state(symbol: str, interval_minutes: int) -> Optiona
     return state
 
 
+# (as_of_date, is_gap_up) per symbol - today's own open never changes
+# again once the session has started, so this is fetched at most ONCE PER
+# SYMBOL PER TRADING DAY rather than re-checked every monitor tick the
+# way the Supertrend signal is (that one can genuinely change candle to
+# candle; this one can't). Self-invalidates on a new day simply because
+# `cached[0] == today` stops matching - no separate day-reset call needed.
+_gap_up_cache: dict[str, tuple[date, bool]] = {}
+
+
+async def _is_gap_up(symbol: str) -> bool:
+    """True if today's open is greater than yesterday's close (user's own
+    wording, updated 31 Aug 2026: "Todays Open price is greater than
+    yesterday's close price"). Cached per symbol per trading day - see
+    this module's own cache comment above for why re-fetching every tick
+    would be pointless REST traffic, not just wasteful."""
+    today = _now_ist().date()
+    cached = _gap_up_cache.get(symbol)
+    if cached and cached[0] == today:
+        return cached[1]
+
+    loop = asyncio.get_running_loop()
+    try:
+        today_open, prev_close = await loop.run_in_executor(
+            None, dhan_wrapper.get_today_open_and_prev_close, symbol
+        )
+        is_gap_up = today_open > prev_close
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not fetch today's open/previous close for the gap-up check", symbol)
+        return False
+
+    _gap_up_cache[symbol] = (today, is_gap_up)
+    if is_gap_up:
+        logger.info("%s: gap-up confirmed for today - open %.2f > previous close %.2f",
+                    symbol, today_open, prev_close)
+    return is_gap_up
+
+
 async def _evaluate_watchlist_entry_signal(symbol: str) -> bool:
-    """ENTRY rule (user's own wording, 31 Aug 2026): "5 min close cross
-    above super trend with 1 min close greater than or crossed above
-    1 min super trend." The 1-min half is written as two explicit checks
-    (`is_above` OR `crossed_above`) even though `crossed_above` already
-    implies `is_above` - kept both so this reads as a direct, auditable
-    translation of the stated rule rather than a logically-equivalent but
-    less traceable shortcut."""
+    """ENTRY rule (user's own wording, updated 31 Aug 2026): "Todays Open
+    price is greater than yesterday's close price and when 5 min close
+    cross above super trend with 1 min close greater than or crossed
+    above 1 min super trend." The gap-up check runs FIRST and short-
+    circuits the (more REST-expensive, two-timeframe) Supertrend checks
+    entirely when it fails - it's also the cheaper, more cacheable check
+    (see _is_gap_up's own docstring: at most one REST call per symbol per
+    day, vs the Supertrend checks' own SWING_SUPERTREND_REFRESH_SECONDS-
+    throttled but still much more frequent refresh).
+
+    The 1-min half of the Supertrend condition is written as two explicit
+    checks (`is_above` OR `crossed_above`) even though `crossed_above`
+    already implies `is_above` - kept both so this reads as a direct,
+    auditable translation of the stated rule rather than a logically-
+    equivalent but less traceable shortcut."""
+    if not await _is_gap_up(symbol):
+        return False
+
     entry_tf = await _fetch_supertrend_state(symbol, config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES)
     if entry_tf is None or not entry_tf.crossed_above:
         return False
@@ -523,7 +582,7 @@ async def _evaluate_watchlist_entry_signal(symbol: str) -> bool:
 
     if confirmed:
         logger.info(
-            "%s: ENTRY signal - %d-min close %.2f crossed above Supertrend %.2f, "
+            "%s: ENTRY signal - gap-up confirmed, %d-min close %.2f crossed above Supertrend %.2f, "
             "%d-min close %.2f %s its Supertrend %.2f",
             symbol, config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES, entry_tf.close, entry_tf.supertrend,
             config.SUPERTREND_CONFIRM_TIMEFRAME_MINUTES, confirm_tf.close,

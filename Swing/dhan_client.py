@@ -22,6 +22,11 @@ than on Options/dhan_client.py's own single-timeframe Supertrend
 cache/refresh mechanism, to avoid any risk to that already-live
 exit-protection path for the three real-money strategies relying on it -
 see trading_engine.py's own module docstring for why.
+
+`dhan_wrapper` (already re-exported above) also gained
+get_today_open_and_prev_close() the same day, for the "today's open >
+yesterday's close" entry gate - no separate re-export line needed here
+since it's just a new method on the same already-imported singleton.
 """
 from Options.dhan_client import (  # noqa: F401
     AtmOption,

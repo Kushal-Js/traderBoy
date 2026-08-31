@@ -763,6 +763,30 @@ class DhanWrapper:
             ltp = float(ltp_data.get(symbol) or 0)
         return (ltp - prev_close) / prev_close * 100
 
+    def get_today_open_and_prev_close(self, symbol: str) -> tuple[float, float]:
+        """Today's opening price and the previous session's closing price
+        for a cash-segment equity/index symbol - added 31 Aug 2026 for
+        Swing's "today's open > yesterday's close" entry gate. Reuses the
+        exact same OHLC quote get_day_change_pct() already fetches
+        (Dhan's own response bundles both today's `ohlc.open` and the
+        prior close as `ohlc.close` in one call) rather than a second,
+        redundant REST call - just returns the two raw values instead of
+        deriving a % from them. Retried (see _retry) - same rationale as
+        every other Dhan market-data call here."""
+        return _retry(self._get_today_open_and_prev_close_once, symbol)
+
+    def _get_today_open_and_prev_close_once(self, symbol: str) -> tuple[float, float]:
+        data = self.client.get_ohlc_data(names=[symbol])
+        values = data.get(symbol)
+        if not values:
+            raise ValueError(f"No OHLC data returned for {symbol}")
+        ohlc = values.get("ohlc") or {}
+        today_open = float(ohlc.get("open") or 0)
+        prev_close = float(ohlc.get("close") or 0)
+        if not today_open or not prev_close:
+            raise ValueError(f"Missing open/prev_close in OHLC data for {symbol}: {values}")
+        return today_open, prev_close
+
     def get_option_ltp(self, trading_symbol: str) -> float:
         """REST LTP fallback, used by _get_ltp() whenever the WebSocket
         cache is stale/missing (see that function's own docstring) - on
