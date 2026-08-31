@@ -26,6 +26,7 @@ peace of mind.
 | `test_cross_strategy_registry.py` | `cross_strategy_registry.py`'s claim/release semantics, and REAL concurrent races (via `asyncio.gather`, not simulated) between Options/Futures/Luxury for the same stock at two levels: `_process_one_entry` directly, and the FULL real webhook handler functions (ranking, capacity, choppy-stocks filter, order placement) - exactly one winner every time at both levels, unrelated symbols/stocks in the same alert batch never affected, a mixed multi-stock scenario confirming each package's own unique stock is unaffected by a shared stock racing alongside it |
 | `test_get_option_ltp_retry.py` | `get_option_ltp()`'s retry wrapper (added 31 Aug 2026 after a lag audit found 46 unretried transient LTP-fetch failures in one trading day) - recovers from a transient failure, still raises after exhausting retries, and uses a real ~1.5s backoff (not a tight loop) |
 | `test_swing_package.py` | The Swing package (futures + ATM PE hedge "basket") - disabled-by-default flag placing zero orders, a full successful all-or-nothing entry, both rollback cases ("neither" when the futures leg fails; the futures leg unwound via a compensating SELL when the PE leg fails after filling), configurable basket capacity, the watchlist webhook, Swing vs Options racing for the same stock via `cross_strategy_registry`, and `get_futures_contract()`'s nearest-expiry/hyphenated-underlying resolution |
+| `test_swing_integration.py` | Full end-to-end Swing flows on top of the above: multi-stock webhook entry with a mixed capacity outcome, a complete enter-via-webhook-then-manual-square-off lifecycle verified against `trade_history`, a realistic 4-way reconciliation (Options/Futures/Luxury/Swing all with real broker positions at once), the "unpaired leg" safety behavior (a lone futures leg is never reconstructed into a partial basket), and the watchlist/enter webhooks operating independently |
 
 ## How to run
 
@@ -37,6 +38,7 @@ uv run python tests/test_luxury_package.py
 uv run python tests/test_cross_strategy_registry.py
 uv run python tests/test_get_option_ltp_retry.py
 uv run python tests/test_swing_package.py
+uv run python tests/test_swing_integration.py
 ```
 
 Each takes a few seconds. Prints one PASS line per scenario, or raises an

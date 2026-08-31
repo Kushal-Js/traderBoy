@@ -2473,6 +2473,28 @@ out of git.
     the full 8-strategy `main.py` composes with zero route collisions (31
     endpoints via `app.openapi()`).
 
+    **Extended same day, user request** ("add and run integration test
+    suite also") with `tests/test_swing_integration.py` (5 more scenarios,
+    all passing) - full end-to-end flows on top of the engine-level
+    coverage above: a multi-stock webhook entry with a genuinely MIXED
+    capacity outcome (2 entered, 1 skipped, through the real
+    `chartink_webhook_swing_enter`, not `enter_basket_for_stock` directly);
+    a complete lifecycle (webhook entry -> live basket confirmed via
+    `basket_store.snapshot()` -> manual square-off -> both legs verified
+    CLOSED in `trade_history`, tagged "Swing", reason
+    `MANUAL_SQUARE_OFF`); a realistic 4-way reconciliation - Options-owned,
+    Futures-owned, Luxury-owned, AND a genuine paired Swing basket
+    (FUTSTK+OPTSTK) all present as real broker positions simultaneously,
+    Swing correctly reconciling only its own; the "unpaired leg" safety
+    behavior actually exercised end-to-end (a lone Swing-attributed
+    futures position with no PE counterpart correctly reconciles to
+    NOTHING, not a partial basket - `test_swing_package.py` never covered
+    reconciliation at all); and the two webhooks (enter/watchlist)
+    confirmed to operate fully independently in the same flow. No
+    production code changes - this was pure additional test coverage.
+    Re-ran all 7 existing suites afterward (45/45 still pass, 50/50
+    total across all 8 test files).
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
