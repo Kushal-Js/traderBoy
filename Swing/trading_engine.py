@@ -1,8 +1,5 @@
 """
 Core strategy logic for the Swing package - user request 31 Aug 2026.
-Entry and exit CONDITION logic is deliberately not built yet (the user
-will define it later, see config.py's own module docstring) - what's
-built here is the MECHANICS a future signal will plug into:
 
   - enter_basket_for_stock(): the all-or-nothing basket placement - buys
     1 lot of the underlying's nearest-expiry FUTURES contract, then 1 lot
@@ -34,14 +31,37 @@ built here is the MECHANICS a future signal will plug into:
     to Swing, the other missing) is logged as a clear warning and left
     alone rather than guessed at - same never-guess philosophy
     attribute_open_broker_position itself follows.
-  - monitor_loop(): runs forever, ALWAYS (even when config.STRATEGY_ENABLED
-    is False - see config.py's own docstring for why the loop still runs
-    rather than not starting at all). Currently a no-op tick over the
-    watchlist and live baskets, since there's no entry/exit signal to
-    evaluate yet. _evaluate_watchlist_entry_signal() and
-    _evaluate_basket_exit_signal() are the two clearly-marked EXTENSION
-    POINTS for that future logic - wire it in there without needing to
-    touch anything else in this file.
+  - Entry/exit signal (added 31 Aug 2026, user request, same day as this
+    package's own creation) - a dual-timeframe Supertrend crossover on
+    the underlying's own STOCK price:
+      ENTRY: the 5-min close crosses ABOVE the 5-min Supertrend, AND the
+      1-min close is above (or has itself just crossed above) the 1-min
+      Supertrend - both read on their own most recently fully-closed
+      candle (user's own wording: "5 min close cross above super trend
+      with 1 min close greater than or crossed above 1 min super trend").
+      EXIT: the 5-min close crosses BELOW the 5-min Supertrend ("5 min
+      close price cross below super trend").
+    `_fetch_supertrend_state()` is a SELF-CONTAINED dual-timeframe
+    crossover detector, deliberately NOT built on top of
+    Options/dhan_client.py's own single-timeframe Supertrend cache/
+    refresh mechanism (`refresh_supertrend_signal`/
+    `get_cached_supertrend_bearish`) - that cache is keyed by underlying
+    only (one timeframe's state per symbol) and is already live,
+    real-money exit protection for Options/Futures/Luxury; extending it
+    to carry a second timeframe risked that shared, already-relied-upon
+    path for no good reason. This file's own cache
+    (`_supertrend_state_cache`) is entirely independent - reuses the same
+    PURE `_compute_supertrend` function and the same
+    `intraday_minute_data` REST call shape, just parameterized by
+    interval and keeping the last TWO closed candles (not just one) so
+    an actual crossover (a state CHANGE between consecutive candles) can
+    be detected, not merely a current side.
+    `_evaluate_watchlist_entry_signal()`/`_evaluate_basket_exit_signal()`
+    apply the two rules above; `monitor_loop()` calls them every tick
+    once `config.STRATEGY_ENABLED` is on, entering/exiting exactly as
+    described - a successful auto-entry also removes the symbol from the
+    watchlist (no reason to keep evaluating a stock for entry once it has
+    a live basket).
 
 Participates in cross_strategy_registry.py the same way Options/Futures/
 Luxury already do (claims the underlying for the full duration of a
@@ -56,7 +76,8 @@ import logging
 import random
 import re
 import string
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -64,7 +85,7 @@ from trade_history import attribute_open_broker_position
 import cross_strategy_registry
 
 from . import config
-from .dhan_client import OrderStatus, dhan_wrapper
+from .dhan_client import OrderStatus, _compute_supertrend, _retry, dhan_wrapper
 from .position_store import Basket, Leg, basket_store
 from .watchlist import watchlist_store
 
@@ -377,42 +398,185 @@ async def reconcile_broker_positions() -> list[Basket]:
 
 
 # --------------------------------------------------------------------------- #
-# Watchlist / exit signal - EXTENSION POINTS, deliberately no-ops today
+# Dual-timeframe Supertrend crossover signal (user request 31 Aug 2026)
 # --------------------------------------------------------------------------- #
+@dataclass
+class SupertrendState:
+    """The last TWO fully-closed candles' relationship to the Supertrend
+    line for one (symbol, timeframe) - enough to detect an actual
+    crossover (a state CHANGE), not just a current side. `is_above`/
+    `prev_is_above` are None only if there weren't enough candles yet to
+    compute a Supertrend value for that bar (see _fetch_supertrend_state)."""
+    candle_start: Optional[datetime]
+    close: float
+    supertrend: float
+    is_above: bool
+    prev_close: float
+    prev_supertrend: float
+    prev_is_above: bool
+
+    @property
+    def crossed_above(self) -> bool:
+        """True only on the candle where price flips from AT-OR-BELOW to
+        ABOVE the Supertrend line - a real transition, not merely "is
+        above right now" (which stays true for every candle of an
+        established uptrend, not just the crossing one)."""
+        return (not self.prev_is_above) and self.is_above
+
+    @property
+    def crossed_below(self) -> bool:
+        """Mirror of crossed_above, for the downside."""
+        return self.prev_is_above and not self.is_above
+
+
+# (fetched_at, SupertrendState) per (symbol, interval_minutes) - entirely
+# separate from Options/dhan_client.py's own single-timeframe
+# _supertrend_cache (see this module's own docstring for why). Throttled
+# by config.SUPERTREND_REFRESH_SECONDS, same rate-limit-avoidance
+# rationale as that other cache.
+_supertrend_state_cache: dict[tuple[str, int], tuple[datetime, Optional[SupertrendState]]] = {}
+
+
+def _fetch_supertrend_state_once(symbol: str, interval_minutes: int) -> Optional[SupertrendState]:
+    """Blocking (REST calls) - always call via run_in_executor. Fetches
+    today's `interval_minutes` candles for `symbol` and computes the
+    Supertrend line (via the shared, pure `_compute_supertrend`), keeping
+    the last TWO fully-closed bars so a genuine crossover can be told
+    apart from an established trend. Returns None if there isn't enough
+    data yet (illiquid symbol, very early in the session, etc.) - callers
+    treat that as "no signal", never as a false crossover."""
+    security_id = dhan_wrapper._equity_security_id(symbol)
+    today = _now_ist().strftime("%Y-%m-%d")
+    resp = _retry(
+        dhan_wrapper.client.Dhan.intraday_minute_data,
+        security_id=security_id, exchange_segment="NSE_EQ", instrument_type="EQUITY",
+        from_date=today, to_date=today, interval=interval_minutes,
+    )
+    data = resp.get("data") or {}
+    highs = data.get("high") or []
+    lows = data.get("low") or []
+    closes = data.get("close") or []
+    timestamps = data.get("timestamp") or []
+
+    period = config.SUPERTREND_PERIOD
+    # Drop a still-forming last candle - only a fully-closed candle's
+    # close should ever drive a "crossed" signal (same guard Options/
+    # dhan_client.py's own refresh_supertrend_signal uses).
+    if timestamps:
+        last_candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST)
+        if _now_ist() < last_candle_start + timedelta(minutes=interval_minutes):
+            highs, lows, closes, timestamps = highs[:-1], lows[:-1], closes[:-1], timestamps[:-1]
+
+    # Need period+1 candles for the FIRST computable Supertrend bar, one
+    # more on top of that so there's a PREVIOUS bar to compare against for
+    # an actual crossover (period+2 total).
+    if len(closes) < period + 2:
+        return None
+
+    supertrend = _compute_supertrend(highs, lows, closes, period=period, multiplier=config.SUPERTREND_MULTIPLIER)
+    if supertrend[-1] is None or supertrend[-2] is None:
+        return None
+
+    return SupertrendState(
+        candle_start=datetime.fromtimestamp(timestamps[-1], tz=IST) if timestamps else None,
+        close=closes[-1], supertrend=supertrend[-1], is_above=closes[-1] > supertrend[-1],
+        prev_close=closes[-2], prev_supertrend=supertrend[-2], prev_is_above=closes[-2] > supertrend[-2],
+    )
+
+
+async def _fetch_supertrend_state(symbol: str, interval_minutes: int) -> Optional[SupertrendState]:
+    """Cached, throttled wrapper around _fetch_supertrend_state_once - see
+    config.SUPERTREND_REFRESH_SECONDS. Swallows and logs any fetch
+    failure (transient Dhan REST hiccup, illiquid symbol, etc.) as "no
+    signal" rather than raising into the monitor loop - one symbol's data
+    problem must never stop every other symbol's own tick from running."""
+    key = (symbol, interval_minutes)
+    cached = _supertrend_state_cache.get(key)
+    if cached and (_now_ist() - cached[0]).total_seconds() < config.SUPERTREND_REFRESH_SECONDS:
+        return cached[1]
+    loop = asyncio.get_running_loop()
+    try:
+        state = await loop.run_in_executor(None, _fetch_supertrend_state_once, symbol, interval_minutes)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not fetch %d-min Supertrend state", symbol, interval_minutes)
+        state = None
+    _supertrend_state_cache[key] = (_now_ist(), state)
+    return state
+
+
 async def _evaluate_watchlist_entry_signal(symbol: str) -> bool:
-    """EXTENSION POINT - entry condition logic goes here once the user
-    defines it (see config.py's own module docstring). Always returns
-    False today - no signal exists yet, so nothing on the watchlist ever
-    auto-enters. The only way a basket opens right now is the explicit
-    POST /chartink/webhook-swing-enter."""
-    return False
+    """ENTRY rule (user's own wording, 31 Aug 2026): "5 min close cross
+    above super trend with 1 min close greater than or crossed above
+    1 min super trend." The 1-min half is written as two explicit checks
+    (`is_above` OR `crossed_above`) even though `crossed_above` already
+    implies `is_above` - kept both so this reads as a direct, auditable
+    translation of the stated rule rather than a logically-equivalent but
+    less traceable shortcut."""
+    entry_tf = await _fetch_supertrend_state(symbol, config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES)
+    if entry_tf is None or not entry_tf.crossed_above:
+        return False
+
+    confirm_tf = await _fetch_supertrend_state(symbol, config.SUPERTREND_CONFIRM_TIMEFRAME_MINUTES)
+    if confirm_tf is None:
+        return False
+    confirmed = confirm_tf.is_above or confirm_tf.crossed_above
+
+    if confirmed:
+        logger.info(
+            "%s: ENTRY signal - %d-min close %.2f crossed above Supertrend %.2f, "
+            "%d-min close %.2f %s its Supertrend %.2f",
+            symbol, config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES, entry_tf.close, entry_tf.supertrend,
+            config.SUPERTREND_CONFIRM_TIMEFRAME_MINUTES, confirm_tf.close,
+            "crossed above" if confirm_tf.crossed_above else "is above", confirm_tf.supertrend,
+        )
+    return confirmed
 
 
 async def _evaluate_basket_exit_signal(symbol: str, basket: Basket) -> Optional[str]:
-    """EXTENSION POINT - exit condition logic goes here once the user
-    defines it (see config.py's own module docstring). Always returns
-    None today - a basket only ever closes via the manual
-    POST /swing/square-off-now kill switch until this is filled in."""
-    return None
+    """EXIT rule (user's own wording, 31 Aug 2026): "5 min close price
+    cross below super trend." Mutually exclusive with the entry rule by
+    construction (a single candle can't be both a crossed-above and a
+    crossed-below at once), so this can never immediately re-fire on the
+    very candle that justified the basket's own entry - no extra
+    entry-candle guard needed the way Options/Futures/Luxury's own
+    SUPERTREND_EXIT feature requires for its own (differently-shaped)
+    check."""
+    state = await _fetch_supertrend_state(symbol, config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES)
+    if state is None or not state.crossed_below:
+        return None
+    logger.info(
+        "%s: EXIT signal - %d-min close %.2f crossed below Supertrend %.2f",
+        symbol, config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES, state.close, state.supertrend,
+    )
+    return "SUPERTREND_5MIN_EXIT"
 
 
 async def monitor_loop() -> None:
     """Runs forever, ALWAYS - see config.py's own docstring for why this
     keeps running even when config.STRATEGY_ENABLED is False (so no
     restart is needed later to pick up the flag flipping), doing nothing
-    at all in that case. Currently a no-op tick either way over the
-    watchlist and live baskets - _evaluate_watchlist_entry_signal/
-    _evaluate_basket_exit_signal above are the extension points for the
-    user's own future logic; nothing else in this file needs to change
-    once those are filled in."""
+    at all in that case. Each tick: evaluates the entry signal for every
+    watchlist symbol (removing it from the watchlist on a successful
+    auto-entry - no reason to keep evaluating a stock once it has a live
+    basket) and the exit signal for every live basket. Paced (a small
+    sleep between watchlist symbols) the same way rank_and_pick_top_
+    stocks() paces its own sequential Dhan calls elsewhere in this
+    codebase - an unattended loop checking many symbols has no natural
+    per-alert pacing boundary the way a webhook-triggered call does, so
+    this provides its own."""
     logger.info("Swing monitor loop started. strategy_enabled=%s", config.STRATEGY_ENABLED)
     while True:
         try:
             await basket_store.maybe_reset_for_new_day()
             if config.STRATEGY_ENABLED:
-                for symbol in await watchlist_store.symbols():
+                watchlist_symbols = await watchlist_store.symbols()
+                for i, symbol in enumerate(watchlist_symbols):
+                    if i > 0:
+                        await asyncio.sleep(0.35)
                     if await _evaluate_watchlist_entry_signal(symbol):
-                        await enter_basket_for_stock(symbol)
+                        result = await enter_basket_for_stock(symbol)
+                        if result.get("status") == "entered":
+                            await watchlist_store.remove_symbol(symbol)
                 for symbol, basket in list(basket_store.live_baskets.items()):
                     reason = await _evaluate_basket_exit_signal(symbol, basket)
                     if reason:

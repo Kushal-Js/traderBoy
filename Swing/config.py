@@ -8,20 +8,27 @@ nothing guarantee (Dhan has no native basket-order API - see the separate
 trading-skills repo's `basket-order-feasibility.md` for the full
 investigation this design is based on).
 
-Entry and exit CONDITION logic (when to actually trigger a basket, when
-to close one) is deliberately NOT built yet - the user will define this
-later. What's built now is the MECHANICS: the watchlist, the two
-webhooks, the all-or-nothing basket placement/rollback, capacity, and
-reconciliation - all the plumbing a future signal can plug into without
-anything else here needing to change. See trading_engine.py's own
-docstring for the two clearly-marked extension points
-(`_evaluate_watchlist_entry_signal`/`_evaluate_basket_exit_signal`).
+Entry/exit CONDITION logic (added 31 Aug 2026, user request, same day as
+this package's own creation): a dual-timeframe Supertrend signal on the
+underlying's own STOCK price (not the futures/option premium - same
+convention Options/Futures/Luxury's own SUPERTREND_EXIT already uses):
+  - ENTRY: the 5-min close crosses ABOVE the 5-min Supertrend, AND the
+    1-min close is above (or has itself just crossed above) the 1-min
+    Supertrend - both conditions read on their own most recently fully-
+    closed candle.
+  - EXIT: the 5-min close crosses BELOW the 5-min Supertrend.
+See trading_engine.py's own module docstring for the full implementation
+(a self-contained, dual-timeframe crossover detector - deliberately NOT
+built on top of Options/dhan_client.py's own single-timeframe Supertrend
+cache, to avoid any risk to that already-live exit-protection mechanism
+for the three real-money strategies already relying on it).
 
 DEPLOYED DISABLED by default (STRATEGY_ENABLED=false) - real money, and a
 genuinely new capability for this codebase (the first package to trade an
 actual futures contract rather than buying an ATM option as a stand-in
 for one - see Options/dhan_client.py's new get_futures_contract()). Turn
-on only once entry/exit logic is actually defined and tested.
+on only once this logic has been reviewed/tested to the user's
+satisfaction.
 
 Reuses the Options package's single authenticated Dhan connection (see
 this package's own dhan_client.py) - no DHAN_CLIENT_ID/DHAN_PIN/etc. auth
@@ -67,9 +74,28 @@ ORDER_TAG_PREFIX = os.getenv("SWING_ORDER_TAG_PREFIX", "Swg")
 # force-closed at end of day. A manual kill-switch still exists
 # (POST /swing/square-off-now) for closing everything on demand.
 
-# Deliberately NO TARGET_PCT/STOP_LOSS_PCT/etc. here either - exit
-# condition logic is explicitly deferred to the user, see this file's own
-# module docstring. Adding tunables for logic that doesn't exist yet
-# would be a config surface that looks real but silently isn't - see
-# Futures/config.py's own docstring for why this codebase avoids that
-# trap deliberately.
+# --------------------------------------------------------------------------- #
+# Supertrend entry/exit signal (user request 31 Aug 2026) - own
+# independently-tunable Supertrend parameters, deliberately NOT read from
+# Options/config.py's own SUPERTREND_PERIOD/SUPERTREND_MULTIPLIER even
+# though they default to the same values - Swing computes its own
+# dual-timeframe signal directly (see trading_engine.py), it doesn't go
+# through Options/dhan_client.py's single-timeframe cache at all, so
+# there's no shared computation to couple these to.
+SUPERTREND_PERIOD = int(os.getenv("SWING_SUPERTREND_PERIOD", "10"))
+SUPERTREND_MULTIPLIER = float(os.getenv("SWING_SUPERTREND_MULTIPLIER", "3.0"))
+
+# The two timeframes the entry rule reads - "5 min close cross above
+# supertrend WITH 1 min close greater than or crossed above 1 min
+# supertrend" (user's own wording). Exit only ever reads the entry
+# timeframe (5-min). Configurable rather than hardcoded 5/1 in the code,
+# consistent with every other tunable in this codebase, even though
+# changing them changes what the user's own stated rule actually means.
+SUPERTREND_ENTRY_TIMEFRAME_MINUTES = int(os.getenv("SWING_SUPERTREND_ENTRY_TIMEFRAME_MINUTES", "5"))
+SUPERTREND_CONFIRM_TIMEFRAME_MINUTES = int(os.getenv("SWING_SUPERTREND_CONFIRM_TIMEFRAME_MINUTES", "1"))
+
+# How often a (symbol, timeframe) Supertrend read is allowed to re-fetch
+# from Dhan - see Options/config.py's identical SUPERTREND_REFRESH_SECONDS
+# for the same rate-limit-avoidance rationale. Own independent value/cache
+# (trading_engine.py's own _supertrend_cache), not shared with Options'.
+SUPERTREND_REFRESH_SECONDS = int(os.getenv("SWING_SUPERTREND_REFRESH_SECONDS", "15"))

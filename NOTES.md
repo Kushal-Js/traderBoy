@@ -2495,6 +2495,87 @@ out of git.
     Re-ran all 7 existing suites afterward (45/45 still pass, 50/50
     total across all 8 test files).
 
+62. **Swing's entry/exit signal defined - user request 31 Aug 2026**
+    ("Entry when 5 min close cross above super trend with 1 min close
+    greater than or crossed above 1 min super trend. Exit when 5 min
+    close price cross below super trend."). Fills in the two extension
+    points entry #61 deliberately left as no-op stubs
+    (`_evaluate_watchlist_entry_signal`/`_evaluate_basket_exit_signal`),
+    same day as the package itself.
+
+    **Design choice: a self-contained dual-timeframe crossover detector,
+    NOT built on top of Options/dhan_client.py's own Supertrend cache.**
+    That cache (`refresh_supertrend_signal`/`get_cached_supertrend_
+    bearish`) is keyed by underlying only - one timeframe's CURRENT state
+    per symbol - and is already live, real-money exit protection for
+    Options/Futures/Luxury. Swing's own rule needs TWO timeframes (1-min
+    AND 5-min) simultaneously and an explicit CROSSOVER (a state change
+    between consecutive candles), not just a current side - extending the
+    shared cache's key shape and semantics to support this risked that
+    already-relied-upon path for the three real-money strategies using it
+    today, for no good reason. New, entirely separate machinery in
+    `Swing/trading_engine.py`: a `SupertrendState` dataclass carrying both
+    the current AND previous fully-closed candle's close/Supertrend/side,
+    with `crossed_above`/`crossed_below` properties computed from the
+    pair; `_fetch_supertrend_state_once`/`_fetch_supertrend_state`
+    (cached, throttled by new `SWING_SUPERTREND_REFRESH_SECONDS`,
+    mirroring the existing cache's own rate-limit-avoidance rationale) -
+    reuses the same PURE `_compute_supertrend` function and the same
+    `intraday_minute_data` REST call shape as the existing mechanism,
+    just parameterized by interval and keeping 2 bars instead of 1.
+
+    New independently-tunable config: `SWING_SUPERTREND_PERIOD`/
+    `_MULTIPLIER` (default 10/3.0, same defaults as Options' own but a
+    genuinely separate value - Swing doesn't share the computation, so
+    there's nothing to couple these to), `SWING_SUPERTREND_ENTRY_
+    TIMEFRAME_MINUTES`/`_CONFIRM_TIMEFRAME_MINUTES` (5/1, the two
+    timeframes the rule itself names).
+
+    **The entry rule's "greater than OR crossed above" is logically
+    redundant** (crossing above already implies being above) but
+    implemented as two explicit checks anyway, to keep the code a direct,
+    auditable translation of the user's own stated rule rather than a
+    logically-equivalent but less traceable shortcut - worth being able
+    to point at the exact line matching what was asked for.
+
+    **No entry-candle guard needed for the exit rule** (unlike Options/
+    Futures/Luxury's own SUPERTREND_EXIT, which needs one to avoid
+    re-reading the same breakout candle that triggered entry) - entry
+    requires a crossed-ABOVE and exit requires a crossed-BELOW, which are
+    mutually exclusive on any single candle by construction, so the exit
+    signal can never immediately re-fire on the very candle that
+    justified the basket's own entry.
+
+    `monitor_loop()` updated to actually call both signal functions every
+    tick once `config.STRATEGY_ENABLED` is on (paced 0.35s between
+    watchlist symbols, matching `rank_and_pick_top_stocks()`'s own
+    sequential-Dhan-call pacing elsewhere in this codebase), and to
+    remove a symbol from the watchlist after a successful auto-entry - no
+    reason to keep evaluating a stock for entry once it has a live
+    basket.
+
+    New `tests/test_swing_signal_logic.py` (6 scenarios, all passing):
+    `SupertrendState.crossed_above`/`crossed_below` correctness for every
+    relevant current/previous combination; a GENUINE crossover proven
+    through the real `_compute_supertrend` against a real synthetic
+    candle series (not just the dataclass logic in isolation) - caught
+    and fixed one of my own test-construction bugs here, where the first
+    version of the synthetic series jumped over 2 bars instead of 1, so
+    both the current and previous bar ended up already above the
+    Supertrend line (an established uptrend, not a fresh cross) - the
+    test's own assertions didn't check `crossed_above` at all and so
+    "passed" without actually proving what it was meant to, until an
+    assertion was added and the series fixed to jump on only the final
+    bar; the entry rule's full 5-min/1-min truth table (6 combinations);
+    the exit rule firing only on a genuine crossed-below; and full
+    monitor-loop-shaped auto-entry/auto-exit flows (a real signal
+    genuinely enters/exits a basket via the real
+    `enter_basket_for_stock`/`_exit_basket`, not a stub, including the
+    watchlist-removal-on-entry behavior). Re-ran all 8 existing suites
+    afterward (50/50 still pass, 56/56 total across all 9 test files).
+    Still deployed DISABLED (`SWING_STRATEGY_ENABLED=false`) - this entry
+    only defines the signal, it doesn't turn the strategy on.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
