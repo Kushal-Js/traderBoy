@@ -2304,6 +2304,25 @@ out of git.
     the per-symbol, not global, design). Re-ran all 4 existing test
     suites afterward (23/23 still pass, 29/29 total).
 
+    **Extended same day, user request** ("ADD INTEgration tests and re
+    run them to verify race condition logic also") with 2 more scenarios
+    that go a full layer higher than `_process_one_entry` alone: test 7
+    fires the REAL webhook handler functions Chartink itself calls -
+    `option_main._handle_chartink_webhook`, Futures' actual
+    `chartink_webhook_futures` endpoint, `luxury_main._handle_chartink_
+    webhook` - all three alerting on the same stock at once, exercising
+    ranking/capacity/choppy-stocks-filter/order-placement on top of the
+    registry, not just the narrower function in isolation; test 8 is a
+    realistic mixed-alert shape (each package's alert carries the one
+    shared, contested stock plus its own unique stock) confirming the
+    unique stocks enter completely normally in every package while only
+    one wins the shared one, even with all three alerts fully concurrent
+    in the same `asyncio.gather` batch. Both pass (8/8 in this file now,
+    31/31 across all 5 suites) with no changes needed to
+    `cross_strategy_registry.py` or any `trading_engine.py` itself - this
+    was purely adding test coverage, not fixing anything the new
+    scenarios found.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

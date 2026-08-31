@@ -29,6 +29,19 @@ Covers, against the REAL production functions (not reimplemented):
      Futures entering TCS at the exact same instant both succeed, proving
      this is a per-symbol lock, not a global one (the whole point of
      keeping this from adding real latency to unrelated entries).
+  7. FULL webhook-level integration - not just _process_one_entry, but
+     the actual REAL webhook handler functions (option_main's, Futures'
+     endpoint function, luxury_main's) that Chartink itself hits, for all
+     THREE packages simultaneously alerting on the same stock - proving
+     the registry holds up through the whole real pipeline (ranking,
+     capacity check, choppy-stocks filter, ATM lookup, order placement),
+     not just at the narrower _process_one_entry layer.
+  8. A realistic MIXED multi-stock scenario - each package's alert
+     contains the one shared, contested stock PLUS its own unique stock -
+     confirming the registry's per-symbol scope means the unique stocks
+     enter completely normally in every package while only one package
+     wins the shared one, even though all three alerts are being
+     processed fully concurrently.
 
 HOW TO RUN:
     uv run python tests/test_cross_strategy_registry.py
@@ -56,13 +69,38 @@ import cross_strategy_registry as csr
 import Options.dhan_client as odc
 import Options.position_store as ops
 import Options.trading_engine as ote
+import Options.option_main as om
 import Futures.position_store as fps
 import Futures.trading_engine as fte
+import Futures.futures_main as fm
 import Luxury.position_store as lps
 import Luxury.trading_engine as lte
+import Luxury.luxury_main as lm
 from Options.dhan_client import AtmOption, OrderResult, OrderStatus
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 FUTURE_EXPIRY = date.today() + timedelta(days=25)
+MARKET_HOURS_INSTANT = datetime.now(ZoneInfo("Asia/Kolkata")).replace(hour=10, minute=0, second=0, microsecond=0)
+
+
+def _freeze_all_market_hours():
+    """Pins ALL THREE packages' own _now_ist() to 10:00 AM IST today, so
+    the full webhook-handler tests (7/8 below) don't fail depending on
+    when they happen to be run - the real webhook handlers check
+    is_past_square_off_time/is_past_allowed_trading_time, which
+    _process_one_entry alone (tests 3-6) never touches. Returns a
+    restore() closure."""
+    reals = (ote._now_ist, fte._now_ist, lte._now_ist)
+    ote._now_ist = fte._now_ist = lte._now_ist = lambda: MARKET_HOURS_INSTANT
+
+    def restore():
+        ote._now_ist, fte._now_ist, lte._now_ist = reals
+    return restore
+
+
+def fake_ranked(stocks, top_n, prefer_highest):
+    return [(s, float(i)) for i, s in enumerate(stocks[:top_n if top_n > 0 else len(stocks)])]
 
 
 def fake_atm_option(symbol: str, option_type: str) -> AtmOption:
@@ -261,6 +299,139 @@ async def test_6_different_symbols_never_contend():
         restore()
 
 
+async def test_7_full_webhook_level_three_way_race():
+    """Goes one full layer up from tests 3/4: fires the REAL webhook
+    handler functions Chartink itself calls - option_main's
+    _handle_chartink_webhook, Futures' actual chartink_webhook_futures
+    endpoint, luxury_main's _handle_chartink_webhook - all three alerting
+    on the SAME stock at once. Exercises ranking, the capacity check, the
+    choppy-stocks filter (Options only), ATM lookup, and order placement
+    on top of the registry, not just _process_one_entry in isolation."""
+    options_store = ops.PositionStore()
+    om.position_store = options_store
+    ote.position_store = options_store
+    futures_store = fps.PositionStore()
+    fm.position_store = futures_store
+    fte.position_store = futures_store
+    luxury_store = lps.PositionStore()
+    lm.position_store = luxury_store
+    lte.position_store = luxury_store
+
+    real_om_rank, real_fm_rank, real_lm_rank = om.rank_and_pick_top_stocks, fm.rank_and_pick_top_stocks, lm.rank_and_pick_top_stocks
+    om.rank_and_pick_top_stocks = fm.rank_and_pick_top_stocks = lm.rank_and_pick_top_stocks = fake_ranked
+
+    restore_time = _freeze_all_market_hours()
+    restore_mocks = install_all_dhan_mocks(entry_delay_seconds=0.05)
+    try:
+        options_payload = om.ChartinkWebhookPayload(
+            stocks="RELIANCE", trigger_prices="1", triggered_at="9:20 am",
+            scan_name="race-test-7", scan_url="race-test-7", alert_name="Options side of the race",
+        )
+        futures_payload = fm.ChartinkWebhookPayload(
+            stocks="RELIANCE", trigger_prices="1", triggered_at="9:20 am",
+            scan_name="race-test-7", scan_url="race-test-7", alert_name="Futures side of the race",
+        )
+        luxury_payload = lm.ChartinkWebhookPayload(
+            stocks="RELIANCE", trigger_prices="1", triggered_at="9:20 am",
+            scan_name="race-test-7", scan_url="race-test-7", alert_name="Luxury side of the race",
+        )
+
+        options_result, futures_result, luxury_result = await asyncio.gather(
+            om._handle_chartink_webhook(options_payload, "CE", True),
+            fm.chartink_webhook_futures(futures_payload),
+            lm._handle_chartink_webhook(luxury_payload, "CE", True),
+        )
+
+        all_entries = (
+            options_result["entries"] + futures_result["entries"] + luxury_result["entries"]
+        )
+        entered = [e for e in all_entries if e["status"] == "entered"]
+        claimed = [e for e in all_entries if e.get("reason") == "claimed_by_another_strategy"]
+
+        assert len(entered) == 1, f"expected exactly 1 real entry across all 3 FULL webhook " \
+                                   f"handlers, got {len(entered)}: {all_entries}"
+        assert len(claimed) == 2, f"expected the other 2 rejected via the registry, got {len(claimed)}: {all_entries}"
+        total_live = len(options_store.live_positions) + len(futures_store.live_positions) + len(luxury_store.live_positions)
+        assert total_live == 1, f"RELIANCE must end up live in exactly ONE store, got {total_live}"
+        assert csr.snapshot() == {}
+        print("7. FULL webhook-level 3-way race (option_main/futures_main/luxury_main's real "
+              "handler functions, not just _process_one_entry) for the same stock: exactly 1 "
+              "real entry, 2 correctly rejected via the registry: PASSED")
+    finally:
+        restore_mocks()
+        restore_time()
+        om.rank_and_pick_top_stocks, fm.rank_and_pick_top_stocks, lm.rank_and_pick_top_stocks = \
+            real_om_rank, real_fm_rank, real_lm_rank
+
+
+async def test_8_mixed_alert_shared_stock_races_unique_stocks_unaffected():
+    """A realistic shape: each package's alert contains the ONE shared,
+    contested stock (RELIANCE) plus its OWN unique stock (never alerted
+    to the other two packages). All three alerts processed fully
+    concurrently. Confirms the registry's per-symbol scope means each
+    package's unique stock enters completely normally regardless of the
+    RELIANCE race happening at the exact same time in the exact same
+    asyncio.gather batch."""
+    options_store = ops.PositionStore()
+    om.position_store = options_store
+    ote.position_store = options_store
+    futures_store = fps.PositionStore()
+    fm.position_store = futures_store
+    fte.position_store = futures_store
+    luxury_store = lps.PositionStore()
+    lm.position_store = luxury_store
+    lte.position_store = luxury_store
+
+    real_om_rank, real_fm_rank, real_lm_rank = om.rank_and_pick_top_stocks, fm.rank_and_pick_top_stocks, lm.rank_and_pick_top_stocks
+    om.rank_and_pick_top_stocks = fm.rank_and_pick_top_stocks = lm.rank_and_pick_top_stocks = fake_ranked
+
+    restore_time = _freeze_all_market_hours()
+    restore_mocks = install_all_dhan_mocks(entry_delay_seconds=0.05)
+    try:
+        options_payload = om.ChartinkWebhookPayload(
+            stocks="RELIANCE,TCS", trigger_prices="1,1", triggered_at="9:20 am",
+            scan_name="race-test-8", scan_url="race-test-8", alert_name="Options mixed alert",
+        )
+        futures_payload = fm.ChartinkWebhookPayload(
+            stocks="RELIANCE,SBIN", trigger_prices="1,1", triggered_at="9:20 am",
+            scan_name="race-test-8", scan_url="race-test-8", alert_name="Futures mixed alert",
+        )
+        luxury_payload = lm.ChartinkWebhookPayload(
+            stocks="RELIANCE,HDFCBANK", trigger_prices="1,1", triggered_at="9:20 am",
+            scan_name="race-test-8", scan_url="race-test-8", alert_name="Luxury mixed alert",
+        )
+
+        options_result, futures_result, luxury_result = await asyncio.gather(
+            om._handle_chartink_webhook(options_payload, "CE", True),
+            fm.chartink_webhook_futures(futures_payload),
+            lm._handle_chartink_webhook(luxury_payload, "CE", True),
+        )
+
+        # Each package's OWN unique stock must enter completely normally -
+        # the RELIANCE race happening alongside it must not affect it.
+        options_entered = {e["symbol"] for e in options_result["entries"] if e["status"] == "entered"}
+        futures_entered = {e["symbol"] for e in futures_result["entries"] if e["status"] == "entered"}
+        luxury_entered = {e["symbol"] for e in luxury_result["entries"] if e["status"] == "entered"}
+        assert "TCS" in options_entered, f"Options' unique stock TCS must enter unaffected: {options_result}"
+        assert "SBIN" in futures_entered, f"Futures' unique stock SBIN must enter unaffected: {futures_result}"
+        assert "HDFCBANK" in luxury_entered, f"Luxury's unique stock HDFCBANK must enter unaffected: {luxury_result}"
+
+        reliance_winners = sum("RELIANCE" in s for s in (options_entered, futures_entered, luxury_entered))
+        assert reliance_winners == 1, f"RELIANCE must be won by exactly 1 of the 3 packages, got {reliance_winners}"
+        total_reliance_live = sum(
+            1 for store in (options_store, futures_store, luxury_store) if "RELIANCE" in store.live_positions
+        )
+        assert total_reliance_live == 1
+        print("8. Mixed multi-stock alert (shared RELIANCE + each package's own unique stock, all "
+              "fully concurrent): every unique stock enters normally, RELIANCE won by exactly 1 "
+              "of the 3 packages: PASSED")
+    finally:
+        restore_mocks()
+        restore_time()
+        om.rank_and_pick_top_stocks, fm.rank_and_pick_top_stocks, lm.rank_and_pick_top_stocks = \
+            real_om_rank, real_fm_rank, real_lm_rank
+
+
 async def main():
     print("=== cross_strategy_registry.py test suite ===\n")
     await test_1_basic_claim_release_semantics()
@@ -269,6 +440,8 @@ async def main():
     await test_4_three_way_race_still_exactly_one_winner()
     await test_5_claim_released_after_resolution_not_stuck()
     await test_6_different_symbols_never_contend()
+    await test_7_full_webhook_level_three_way_race()
+    await test_8_mixed_alert_shared_stock_races_unique_stocks_unaffected()
     print("\nALL CROSS-STRATEGY REGISTRY CHECKS PASSED")
 
 
