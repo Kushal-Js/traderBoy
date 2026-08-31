@@ -40,7 +40,7 @@ from typing import Optional
 from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel, field_validator
 
-from trade_history import record_webhook_alert
+from trade_history import fire_and_forget, record_webhook_alert
 
 from . import config
 from .dhan_client import dhan_wrapper
@@ -119,9 +119,11 @@ async def chartink_webhook_futures(payload: ChartinkWebhookPayload):
 
     def _log_alert(status: str, reason: Optional[str] = None) -> None:
         """Fire-and-forget - see trade_history.py's own docstring for why
-        this MUST be create_task'd, never awaited, in the entry-order-
-        placement path."""
-        asyncio.create_task(record_webhook_alert(
+        this MUST go through fire_and_forget (never awaited) in the
+        entry-order-placement path. fire_and_forget (not a bare
+        asyncio.create_task) also holds a strong reference so the task
+        can't be garbage-collected mid-execution."""
+        fire_and_forget(record_webhook_alert(
             "Futures", payload.scan_name, payload.alert_name, stocks, status, reason,
         ))
 

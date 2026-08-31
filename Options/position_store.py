@@ -31,7 +31,7 @@ from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
 from . import config
-from trade_history import record_closed_trade
+from trade_history import fire_and_forget, record_closed_trade
 
 logger = logging.getLogger("position_store")
 
@@ -405,9 +405,11 @@ class PositionStore:
             # other position operation (a concurrent exit, a fresh entry
             # reserving this same symbol a few lines below, a price-tick's
             # update_highest_price) wait on disk I/O before the lock can
-            # release. create_task schedules it without blocking this
-            # coroutine at all.
-            asyncio.create_task(record_closed_trade("Options", pos))
+            # release. fire_and_forget schedules it without blocking this
+            # coroutine at all, AND holds a strong reference until it
+            # finishes (a bare asyncio.create_task's Task can otherwise be
+            # garbage-collected mid-execution - see trade_history.py).
+            fire_and_forget(record_closed_trade("Options", pos))
             # Frees the symbol up for a fresh entry on a later alert today -
             # reserved_symbols only blocks while something is genuinely
             # open/in-flight for it, not for the rest of the day.

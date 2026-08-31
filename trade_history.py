@@ -44,6 +44,31 @@ logger = logging.getLogger("trade_history")
 
 HISTORY_DIR = Path(__file__).resolve().parent / "history"
 
+# Fire-and-forget task tracking - a real asyncio gotcha, found and fixed
+# 31 Aug 2026 during a concurrency audit: `asyncio.create_task(coro)`
+# without keeping a reference to the returned Task is documented (Python's
+# own asyncio docs) to risk the task being garbage-collected mid-execution
+# - "The event loop only keeps weak references to tasks." Every fire-and-
+# forget logging call in this codebase (record_closed_trade,
+# record_webhook_alert) goes through fire_and_forget() below instead of a
+# bare asyncio.create_task(...), so a strong reference is held in
+# _background_tasks until the task actually finishes.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def fire_and_forget(coro) -> asyncio.Task:
+    """Schedule `coro` as a background task that cannot be garbage-
+    collected before it completes, without the caller having to await it
+    or hold its own reference. Use this instead of a bare
+    asyncio.create_task(...) for any logging-only call that must never
+    delay or be able to affect its caller (see this module's own
+    record_closed_trade/record_webhook_alert for the pattern this
+    supports)."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 
 def dated_path(name: str, d: Optional[date] = None) -> Path:
     """history/<YYYY-MM-DD>_<name>.log - creates the history/ dir on first

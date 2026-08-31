@@ -1658,6 +1658,60 @@ out of git.
     ranked stocks in one alert ever becomes the bottleneck worth trading
     against added complexity/race-condition surface.
 
+47. **Concurrency + reconciliation audit - user request 31 Aug 2026**
+    ("is concurrency and reconciliation also handled properly"). Verified
+    directly against the current code, not from memory:
+    - Every `PositionStore` state mutation (Options AND Futures) goes
+      through the same `asyncio.Lock` - `reserve_symbol`, `try_start_exit`,
+      `close_position`, `reconcile_from_broker`, `update_highest_price`,
+      etc. all take it, no mutation path skips it.
+    - `try_start_exit`'s atomic claim correctly guards the exact race two
+      concurrent exit triggers (poll loop + event-driven WebSocket tick)
+      could otherwise hit - confirmed the claim-then-release contract is
+      still intact and used correctly at every close/failure path.
+    - Reconciliation runs exactly once, at startup, inside `lifespan()`
+      BEFORE `yield` - FastAPI doesn't route any request (including a
+      webhook) until lifespan startup completes, so no race between
+      reconciliation and a webhook-driven entry is possible by
+      construction, not by luck.
+    - Futures confirmed still does NOT reconcile at all (by design, see
+      the design-decision entry below) - no drift.
+    - `dhan_wrapper._on_market_tick`'s fan-out to multiple strategies'
+      subscribers (Options/Futures/CopperOptions/IndexScalping all
+      register their own `_on_price_tick` closure) is per-callback
+      try/except'd, so one strategy's failure can't block another from
+      receiving the same tick; the subscriber list itself is only ever
+      appended to during startup, before `start_feed()` makes any tick
+      possible - no race there either.
+
+    **Found a second real issue, this time in code from earlier the same
+    day (#45/#46's own fire-and-forget logging):** `asyncio.create_task(...)`
+    was called at 5 sites without keeping a reference to the returned
+    `Task` - a documented asyncio pitfall (the event loop only holds a
+    *weak* reference to a Task; with no other referrer, it can be
+    garbage-collected before it finishes, silently dropping whatever it
+    was doing). The two long-lived monitor-loop tasks were already correct
+    (held in `_monitor_task`/`_paper_monitor_task` module globals) - only
+    the newer fire-and-forget logging calls (`record_closed_trade` x2,
+    `record_webhook_alert` x3) had this gap.
+
+    Fixed with the standard pattern: `trade_history.fire_and_forget(coro)`
+    wraps `asyncio.create_task`, adds the Task to a module-level
+    `_background_tasks` set, and removes it via `add_done_callback` once
+    it finishes - a strong reference is held for exactly as long as the
+    task is actually running, no longer. All 5 call sites switched from
+    bare `asyncio.create_task` to this.
+
+    Verified with a real test, not just citing the docs: fired a task via
+    `fire_and_forget`, dropped every other reference to it, called
+    `gc.collect()` immediately (deliberately hostile timing), and
+    confirmed the task was still tracked and still completed correctly a
+    moment later - then confirmed `_background_tasks` correctly emptied
+    back out afterward (no permanent leak from the tracking set itself).
+    Re-ran both #45/#46's own earlier tests afterward to confirm the
+    switch to `fire_and_forget` didn't regress the lag-free/non-blocking
+    behavior they'd already verified.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

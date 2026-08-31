@@ -26,7 +26,7 @@ from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
 from . import config
-from trade_history import record_closed_trade
+from trade_history import fire_and_forget, record_closed_trade
 
 logger = logging.getLogger("futures_position_store")
 
@@ -254,8 +254,10 @@ class PositionStore:
             self.closed_positions_today.append(pos)
             # Fire-and-forget - see Options/position_store.py's identical
             # comment / trade_history.py's record_closed_trade docstring:
-            # must not be awaited while _lock is held.
-            asyncio.create_task(record_closed_trade("Futures", pos))
+            # must not be awaited while _lock is held. fire_and_forget (not
+            # a bare asyncio.create_task) also holds a strong reference so
+            # the task can't be garbage-collected mid-execution.
+            fire_and_forget(record_closed_trade("Futures", pos))
             self.reserved_symbols.pop(underlying_symbol, None)
             logger.info(
                 "Position CLOSED: %s (%s) reason=%s exit=%.2f pnl_pct=%.2f%%",
