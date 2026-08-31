@@ -179,6 +179,97 @@ def read_all_trades(strategy: Optional[str] = None) -> list[dict]:
 
 
 # --------------------------------------------------------------------- #
+# Opened-position log + broker-position attribution - user request
+# 31 Aug 2026 ("make trades under Futures also reconcile"). The blocker
+# this solves, confirmed via Dhan's own API docs before writing any code:
+# Dhan's /positions endpoint has NO per-strategy tag at all -
+# correlationId (the order tag Options/Futures already set on every entry
+# order, see trading_engine.py's _gen_tag) exists ONLY on order-level
+# responses, never on the aggregated position record itself. Since Options
+# and Futures now both place REAL orders for the identical instrument
+# type (ATM options), the broker's own data genuinely cannot distinguish
+# "this open position is Options' vs Futures'" - this is why Futures never
+# got reconciliation originally (see NOTES.md's design-decision entry) and
+# why Options' own existing reconciliation was ALSO already latently
+# vulnerable to importing a Futures-opened position (never observed live,
+# but real given both place the same kind of order).
+#
+# The fix: our own persistent, durable, per-strategy record of every
+# position OPENED (this section) - not Dhan's data - is what reconciliation
+# now checks. record_opened_position mirrors record_closed_trade exactly
+# (same fire-and-forget discipline, called from PositionStore.add_position
+# right after a position is actually opened - can't affect the entry
+# order itself). attribute_open_broker_position is the read side, called
+# once per candidate position during startup reconciliation (a brief
+# blocking read is fine there - it is NOT a hot path).
+# --------------------------------------------------------------------- #
+OPENED_POSITIONS_NAME = "position_opened"
+
+
+async def record_opened_position(strategy: str, pos) -> None:
+    """strategy: "Options" or "Futures". pos: a just-opened
+    Options.position_store.Position or Futures.position_store.Position.
+    Call via fire_and_forget from PositionStore.add_position - never
+    awaited, same reasoning as record_closed_trade."""
+    try:
+        record = {
+            "strategy": strategy,
+            "underlying_symbol": pos.underlying_symbol,
+            "option_trading_symbol": pos.option_trading_symbol,
+            "option_type": pos.option_type,
+            "quantity": pos.quantity,
+            "entry_price": pos.entry_price,
+            "opened_at": pos.opened_at.isoformat() if pos.opened_at else None,
+            "order_id": pos.order_id,
+            "logged_at": datetime.now().isoformat(),
+        }
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, append_jsonl, OPENED_POSITIONS_NAME, record)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not append opened-position record for %s %s - "
+                          "the position itself is unaffected, this is logging-only "
+                          "(but WILL make this position unattributable if the "
+                          "process restarts before it closes - see "
+                          "attribute_open_broker_position's docstring).",
+                          strategy, getattr(pos, "underlying_symbol", "?"))
+
+
+def attribute_open_broker_position(option_trading_symbol: str) -> Optional[str]:
+    """Read-only. Returns "Options"/"Futures" if - and ONLY if - exactly
+    one strategy's own history shows this exact option_trading_symbol
+    opened with no later matching close (i.e. still open per OUR records,
+    not the broker's). Returns None if there is no record at all (predates
+    this logging, or the position was opened manually outside the bot) OR
+    if it's ambiguous (should never legitimately happen, but this never
+    guesses if it does).
+
+    Callers MUST treat None as "cannot safely attribute this position -
+    log a clear warning and skip reconciling it" rather than defaulting
+    to either strategy. Silently guessing wrong here means two strategies
+    could both try to independently manage/exit the same real broker
+    position - exactly the failure mode this whole mechanism exists to
+    prevent."""
+    opened = [r for r in read_all_jsonl(OPENED_POSITIONS_NAME)
+              if r.get("option_trading_symbol") == option_trading_symbol]
+    closed = [r for r in read_all_jsonl(REAL_TRADES_NAME)
+              if r.get("option_trading_symbol") == option_trading_symbol]
+
+    candidates = {r.get("strategy") for r in opened if r.get("strategy")}
+    still_open_for = []
+    for strategy in candidates:
+        strategy_opens = [r for r in opened if r.get("strategy") == strategy]
+        strategy_closes = [r for r in closed if r.get("strategy") == strategy]
+        last_open_at = max((r.get("opened_at") or "" for r in strategy_opens), default="")
+        last_closed_at = max((r.get("closed_at") or "" for r in strategy_closes), default="")
+        if last_open_at and last_open_at > last_closed_at:
+            still_open_for.append(strategy)
+
+    if len(still_open_for) == 1:
+        return still_open_for[0]
+    return None
+
+
+# --------------------------------------------------------------------- #
 # Webhook alert log - every incoming Chartink alert, tagged by which
 # endpoint/strategy received it and what happened to it (processed vs
 # ignored + reason). User request (31 Aug 2026), prompted by "are we

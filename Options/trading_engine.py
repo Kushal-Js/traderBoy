@@ -27,6 +27,8 @@ from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from trade_history import attribute_open_broker_position
+
 from . import config
 from .dhan_client import OrderStatus, dhan_wrapper
 from .position_store import EXIT_CLAIMED, OrderRecord, Position, position_store
@@ -113,7 +115,20 @@ async def reconcile_broker_positions() -> list[Position]:
     by a previous run of this process) into the local store. Target/stop-
     loss are computed off the broker's reported average price using the
     current config, since we don't have the original fill we'd normally use -
-    these are marked Position.reconciled=True so that's visible downstream."""
+    these are marked Position.reconciled=True so that's visible downstream.
+
+    Filtered by attribute_open_broker_position (trade_history.py) before
+    import: Dhan's /positions data has NO per-strategy tag at all, and
+    since Futures also places real orders for the identical instrument
+    type (ATM options, see NOTES.md's design-decision entry), an open
+    broker position genuinely cannot be assumed to be this strategy's own
+    just because it's an open FNO position - it could be Futures'. A
+    position this can't confidently attribute to "Options" specifically
+    (no record, or ambiguous) is skipped with a clear warning rather than
+    imported - the real position/money at the broker is unaffected either
+    way, this only controls whether THIS PROCESS starts trying to manage
+    it. See Futures/trading_engine.py's own reconcile_broker_positions for
+    the mirror-image filter."""
     loop = asyncio.get_running_loop()
     broker_positions = await loop.run_in_executor(None, dhan_wrapper.get_open_fno_positions)
 
@@ -124,6 +139,17 @@ async def reconcile_broker_positions() -> list[Position]:
             logger.warning(
                 "Skipping reconciliation for %s - broker reported no average price.",
                 bp["trading_symbol"],
+            )
+            continue
+
+        owner = await loop.run_in_executor(None, attribute_open_broker_position, bp["trading_symbol"])
+        if owner != "Options":
+            logger.warning(
+                "Skipping reconciliation for %s - attributed to %s (not Options) by our own "
+                "opened-position history. Real broker position is unaffected; this process just "
+                "won't manage it. If this is wrong (e.g. a manually-placed position, or one that "
+                "predates this logging), it needs manual handling.",
+                bp["trading_symbol"], owner or "no strategy (no record found)",
             )
             continue
 

@@ -1712,6 +1712,66 @@ out of git.
     switch to `fire_and_forget` didn't regress the lag-free/non-blocking
     behavior they'd already verified.
 
+48. **Futures now reconciles broker positions at startup - user request
+    31 Aug 2026** ("make trades under Futures also reconcile"). The
+    blocker was real and confirmed before writing any code, not assumed:
+    checked Dhan's official API docs for the `/positions` endpoint schema
+    - `correlationId` (the order tag both strategies already set on every
+    entry order via `_gen_tag`) exists ONLY on order-level responses,
+    never on the aggregated position record. Since Options and Futures
+    both place real orders for the identical instrument type (ATM
+    options), Dhan's own data genuinely cannot distinguish which
+    strategy's position is which - confirmed, not guessed at.
+
+    **The fix: a new persistent, per-strategy "position opened" log**
+    (`trade_history.py`'s `record_opened_position`/
+    `attribute_open_broker_position`, `history/<date>_position_opened.log`)
+    - mirrors the existing closed-trade log exactly (same fire-and-forget
+    discipline via `fire_and_forget`, called from `PositionStore.
+    add_position` right after a position is actually opened, can't affect
+    the entry order itself). `attribute_open_broker_position(trading_symbol)`
+    scans our OWN history (not the broker's) for which single strategy
+    shows this exact symbol opened with no later matching close - i.e.
+    still open per our own records. Returns `None` (never guesses) if
+    there's no record at all (predates this logging, or opened manually
+    outside the bot) or if it's ambiguous.
+
+    Wired into `reconcile_broker_positions()` on **both** sides, not just
+    Futures: **Options' own reconciliation was already latently
+    vulnerable to this exact issue** (it unconditionally imported every
+    open FNO position, with no filter) - never observed live, but real
+    now that Futures also places real option orders. Both functions now
+    skip (with a clear warning, not a silent guess) any broker position
+    they can't confidently attribute to themselves specifically. Added
+    `Futures/trading_engine.py::reconcile_broker_positions()` (didn't
+    exist before) and `Futures/position_store.py::reconcile_from_broker()`
+    (didn't exist before) as near-verbatim copies of Options' own,
+    wired into `Futures/futures_main.py`'s lifespan the same way Options'
+    lifespan already does it.
+
+    **Real limitation, stated plainly, not hidden**: a position opened
+    before this logging existed, or placed manually outside the bot
+    entirely, has no record and will be safely skipped by both sides
+    (visible as a clear warning log, not silently mismanaged) rather than
+    guessed into either strategy - it needs manual handling. This is the
+    correct failure mode (never double-track), not a gap to "fix" by
+    guessing.
+
+    Verified with real tests, not just reasoning about it: constructed
+    real `Position` objects, opened/closed them through the actual
+    `add_position()`/`close_position()` methods (not reimplemented) for
+    both Options and Futures, and confirmed (1) an Options-opened position
+    attributes to "Options", (2) a Futures-opened one to "Futures" with no
+    cross-contamination, (3) closing a position makes it correctly
+    unattributable again (no longer "open"), (4) an unknown symbol
+    correctly returns `None`, and (5) a reconciliation-style filter over a
+    mixed list of broker positions keeps only the correctly-attributed,
+    still-open one for each strategy - 5/5 checks passed. Also re-ran
+    #46/#47's own lag/GC-safety tests to confirm the new `add_position`
+    call site didn't regress either (`add_position()` returns in 0.0ms
+    even under a simulated 2-second slow write, matching `close_position`'s
+    already-verified behavior).
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
@@ -1726,22 +1786,34 @@ out of git.
   rather than opening a second Dhan session (same reuse pattern
   IndexScalping/CopperOptions already use).
 
-  **Does NOT run `reconcile_broker_positions()` at startup**, unlike every
-  other real-order strategy. `get_open_fno_positions()` returns every open
-  FNO position in the account with no notion of which strategy placed it -
-  if Futures also reconciled the same way Options does, a restart could
-  re-import Options' own live positions into Futures' separate tracker
-  too, and both strategies could then try to independently manage/exit
-  the same real broker position. Trades restart-resilience (a real
-  Futures position open across a restart won't be automatically
-  recovered) for correctness (never double-tracking) - the right
-  tradeoff for a new package. Also accepted, not fixed: since Options and
-  Futures both rank/enter independently with identical instrument-
-  selection logic, they could each open their own separate position on
-  the same underlying if both alert on it around the same time - same
-  class of tradeoff already accepted for the paper-trade webhook, now
-  with real money on both sides. Worth revisiting if it's ever observed
-  live.
+  **Update, 31 Aug 2026: now DOES run `reconcile_broker_positions()` at
+  startup** (user request - see entry #48 below for the actual mechanism:
+  a persistent, per-strategy "position opened" log, since Dhan's own
+  `/positions` data still has no notion of which strategy placed a
+  position - that fact hasn't changed, only how it's worked around).
+  Originally skipped entirely for the reason below, still worth reading
+  for why a naive fix would have been dangerous:
+
+  `get_open_fno_positions()` returns every open FNO position in the
+  account with no notion of which strategy placed it - if Futures had
+  just reconciled the same way Options originally did (an unconditional
+  import of every open FNO position), a restart could re-import Options'
+  own live positions into Futures' separate tracker too, and both
+  strategies could then try to independently manage/exit the same real
+  broker position. Entry #48 solves this properly instead of leaving it
+  unsolved: neither strategy's reconciliation now imports a position
+  unless our OWN persistent history can confidently attribute it as
+  theirs.
+
+  Still accepted, not fixed: since Options and Futures both rank/enter
+  independently with identical instrument-selection logic, they could
+  each open their own separate position on the same underlying if both
+  alert on it around the same time - same class of tradeoff already
+  accepted for the paper-trade webhook, now with real money on both
+  sides. Worth revisiting if it's ever observed live. This is a
+  different failure mode than the reconciliation one above (two
+  *separately opened* positions, not one position double-managed) and
+  entry #48 does not address it.
 
   **Found and fixed while building this, before it could cause a live
   incident**: `dhan_wrapper.on_price_tick` was a single

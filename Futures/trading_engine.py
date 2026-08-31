@@ -6,16 +6,21 @@ piece; this is a near-verbatim copy, not reimplemented from scratch, so
 the two strategies can't silently drift apart in how they rank/enter/exit
 while both still do the same thing). Adapted only where it must differ:
 
-  - No reconcile_broker_positions() / step 0. Dhan's get_open_fno_positions()
-    returns every open FNO position in the account with no notion of which
-    strategy placed it - if this package also ran broker reconciliation
-    the same way Options does, a restart would re-import Options' own live
-    positions into this package's separate position_store too, and both
-    strategies could then try to independently manage (and exit) the same
-    real position. Skipping it trades restart-resilience (a real Futures
-    position open across a restart won't be automatically recovered here)
-    for correctness (never double-tracking) - the right tradeoff for a
-    new package, see NOTES.md's design-decision entry.
+  - reconcile_broker_positions() (added 31 Aug 2026, user request) now
+    DOES run here, unlike originally - but filtered through
+    trade_history.attribute_open_broker_position first, not a blind
+    import: Dhan's get_open_fno_positions() returns every open FNO
+    position in the account with no notion of which strategy placed it -
+    the same call Options' own reconciliation uses would otherwise
+    re-import Options' own live positions into this package's separate
+    position_store too, and both strategies could then try to
+    independently manage (and exit) the same real position. Our own
+    persistent opened/closed-position history (trade_history.py) is what
+    actually distinguishes ownership now, since Dhan's data never can -
+    see that module's own docstring and NOTES.md's updated design-
+    decision entry for the full mechanism and its real limitation (a
+    position that predates this logging, or was placed manually, is still
+    safely skipped rather than guessed at).
   - CE only - no prefer_highest=False/PE path is wired up in futures_main.py,
     since only one bullish webhook was requested for this package.
 
@@ -43,11 +48,71 @@ from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from trade_history import attribute_open_broker_position
+
 from . import config
 from .dhan_client import OrderStatus, dhan_wrapper
 from .position_store import EXIT_CLAIMED, OrderRecord, Position, position_store
 
 logger = logging.getLogger("futures_trading_engine")
+
+
+async def reconcile_broker_positions() -> list[Position]:
+    """Near-verbatim copy of Options/trading_engine.py's own function -
+    see this module's own docstring above for why this package now runs
+    it too (31 Aug 2026, previously skipped entirely) and see that
+    function's docstring for the full attribute_open_broker_position
+    filtering rationale, identical here except "Futures" is the strategy
+    this filters FOR (Options' own positions get skipped here, mirror-
+    image of that file's own filter)."""
+    loop = asyncio.get_running_loop()
+    broker_positions = await loop.run_in_executor(None, dhan_wrapper.get_open_fno_positions)
+
+    positions: list[Position] = []
+    for bp in broker_positions:
+        avg_price = bp["avg_price"]
+        if not avg_price:
+            logger.warning(
+                "Skipping reconciliation for %s - broker reported no average price.",
+                bp["trading_symbol"],
+            )
+            continue
+
+        owner = await loop.run_in_executor(None, attribute_open_broker_position, bp["trading_symbol"])
+        if owner != "Futures":
+            logger.warning(
+                "Skipping reconciliation for %s - attributed to %s (not Futures) by our own "
+                "opened-position history. Real broker position is unaffected; this process just "
+                "won't manage it. If this is wrong (e.g. a manually-placed position, or one that "
+                "predates this logging), it needs manual handling.",
+                bp["trading_symbol"], owner or "no strategy (no record found)",
+            )
+            continue
+
+        positions.append(Position(
+            underlying_symbol=bp["underlying_symbol"],
+            option_trading_symbol=bp["trading_symbol"],
+            option_type=bp["option_type"] or config.OPTION_TYPE,
+            quantity=bp["quantity"],
+            lot_size=bp["lot_size"],
+            entry_price=avg_price,
+            highest_price=avg_price,
+            target_price=avg_price * (1 + config.TARGET_PCT),
+            hard_stop_loss=avg_price * (1 - config.STOP_LOSS_PCT),
+            order_id="",
+            # Same reasoning as Options' own reconciliation - the broker's
+            # positions API reports a human-readable product label, not
+            # the code order_placement() needs; this package only ever
+            # trades config.OPTIONS_PRODUCT itself, so that's always
+            # correct here too. See NOTES.md bug #23.
+            product_type=config.OPTIONS_PRODUCT,
+            reconciled=True,
+        ))
+
+    for pos in positions:
+        await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, pos.option_trading_symbol)
+
+    return positions
 
 IST = ZoneInfo(config.MARKET_TZ)
 

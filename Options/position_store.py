@@ -31,7 +31,7 @@ from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
 from . import config
-from trade_history import fire_and_forget, record_closed_trade
+from trade_history import fire_and_forget, record_closed_trade, record_opened_position
 
 logger = logging.getLogger("position_store")
 
@@ -268,6 +268,13 @@ class PositionStore:
         async with self._lock:
             self.live_positions[pos.underlying_symbol] = pos
             self.reserved_symbols[pos.underlying_symbol] = pos.option_type
+            # Fire-and-forget, same discipline as close_position's own
+            # record_closed_trade call - this is what lets a FUTURE restart
+            # correctly attribute this exact broker position back to
+            # Options (not Futures) during reconciliation, since Dhan's own
+            # /positions data has no per-strategy tag at all. See
+            # trade_history.py's attribute_open_broker_position docstring.
+            fire_and_forget(record_opened_position("Options", pos))
             logger.info(
                 "Position OPENED: %s (%s) entry=%.2f target=%.2f sl=%.2f qty=%s",
                 pos.underlying_symbol, pos.option_trading_symbol,

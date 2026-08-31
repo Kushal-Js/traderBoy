@@ -26,7 +26,7 @@ from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
 from . import config
-from trade_history import fire_and_forget, record_closed_trade
+from trade_history import fire_and_forget, record_closed_trade, record_opened_position
 
 logger = logging.getLogger("futures_position_store")
 
@@ -163,11 +163,32 @@ class PositionStore:
         async with self._lock:
             self.live_positions[pos.underlying_symbol] = pos
             self.reserved_symbols[pos.underlying_symbol] = pos.option_type
+            # Fire-and-forget - see Options/position_store.py's identical
+            # comment: this is what lets a future restart correctly
+            # attribute this exact broker position back to Futures (not
+            # Options) during reconciliation.
+            fire_and_forget(record_opened_position("Futures", pos))
             logger.info(
                 "Position OPENED: %s (%s) entry=%.2f target=%.2f sl=%.2f qty=%s",
                 pos.underlying_symbol, pos.option_trading_symbol,
                 pos.entry_price, pos.target_price, pos.hard_stop_loss, pos.quantity,
             )
+
+    async def reconcile_from_broker(self, positions: List[Position]) -> None:
+        """Mirrors Options/position_store.py's identical method - imports
+        positions already open at Dhan (already filtered to this
+        strategy's own by trading_engine.py's reconcile_broker_positions,
+        added 31 Aug 2026) into live_positions/reserved_symbols."""
+        async with self._lock:
+            for pos in positions:
+                if pos.underlying_symbol in self.live_positions:
+                    continue
+                self.live_positions[pos.underlying_symbol] = pos
+                self.reserved_symbols[pos.underlying_symbol] = pos.option_type
+                logger.info(
+                    "Reconciled existing broker position: %s (%s) qty=%s avg_price=%.2f",
+                    pos.underlying_symbol, pos.option_trading_symbol, pos.quantity, pos.entry_price,
+                )
 
     async def update_highest_price(self, underlying_symbol: str, current_price: float) -> None:
         async with self._lock:

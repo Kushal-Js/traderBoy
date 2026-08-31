@@ -3,10 +3,10 @@ Futures strategy: Chartink -> Dhan ATM CE buying, exiting on
 target/stop-loss/dynamic-SL/Supertrend - PLACEHOLDER logic (buys ATM CE
 *options*, identical mechanics to Options/option_main.py) standing in
 until real futures-contract buying replaces it, by explicit request. See
-NOTES.md's design-decision entry for the full rationale, including why
-this package does NOT run broker-position reconciliation at startup
-(risk of double-tracking Options' own real positions - see
-trading_engine.py's module docstring).
+NOTES.md's design-decision entry for the full rationale, including how
+this package's broker-position reconciliation (added 31 Aug 2026) avoids
+double-tracking Options' own real positions - see trading_engine.py's
+module docstring for the actual mechanism.
 
 `lifespan` and `router` are composed into the shared app by the top-level
 main.py, the same way every other strategy package is - see main.py's own
@@ -52,6 +52,7 @@ from .trading_engine import (
     monitor_loop,
     on_price_tick,
     rank_and_pick_top_stocks,
+    reconcile_broker_positions,
 )
 
 logger = logging.getLogger("futures_main")
@@ -66,9 +67,14 @@ async def lifespan(app: FastAPI):
     """Futures strategy's own startup/shutdown. Does NOT authenticate or
     start the Dhan feed - it reuses Options' already-authenticated
     connection, so main.py must nest this lifespan inside Options' own
-    (after it), the same pattern IndexScalping/CopperOptions use. Does NOT
-    reconcile broker positions at startup either - see this package's
-    trading_engine.py module docstring for why."""
+    (after it), the same pattern IndexScalping/CopperOptions use.
+
+    DOES reconcile broker positions at startup now (31 Aug 2026, user
+    request) - filtered through attribute_open_broker_position so it can
+    never import a position that's actually Options' own, since Dhan's
+    own data can't tell the two apart. See trading_engine.py's module
+    docstring and reconcile_broker_positions' own docstring for the full
+    mechanism."""
     global _monitor_task
     loop = asyncio.get_running_loop()
 
@@ -76,6 +82,17 @@ async def lifespan(app: FastAPI):
         asyncio.run_coroutine_threadsafe(on_price_tick(trading_symbol, ltp), loop)
 
     dhan_wrapper.add_price_tick_subscriber(_on_price_tick)
+
+    try:
+        reconciled = await reconcile_broker_positions()
+        if reconciled:
+            await position_store.reconcile_from_broker(reconciled)
+            logger.info(
+                "Reconciled %d existing broker position(s) at startup: %s",
+                len(reconciled), [p.underlying_symbol for p in reconciled],
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not reconcile broker positions at startup - continuing without them.")
 
     _monitor_task = asyncio.create_task(monitor_loop())
     logger.info("Futures strategy startup complete: monitor loop running (reusing Options' Dhan connection).")
