@@ -2167,6 +2167,75 @@ out of git.
     reason_for` refactor didn't change behavior for anything other than
     the intended time-of-day split).
 
+58. **New `Luxury/` package - a same-account duplicate of Options, user
+    request 31 Aug 2026.** Initially requested as "groww" - asked the
+    user to clarify since Groww is a real, separate brokerage, and
+    building against it would mean a whole new broker API integration
+    (auth, order placement, instrument master - none of it built or
+    vetted). User clarified: not a new broker, just a same-Dhan-account
+    duplicate of Options' logic, renamed to "Luxury". REAL orders, own
+    separate position pool/capacity/config - live the moment a real
+    webhook hits it, same as Options/Futures.
+
+    Built as Futures/ (itself already "Options standing on its own")
+    extended with the second (PE) webhook/leg Futures doesn't have -
+    `POST /chartink/webhook-luxury` (bullish -> CE) and
+    `POST /chartink/webhook-luxury-sell` (bearish -> PE), sharing one
+    position pool the same way Options' own two endpoints do. 5 files,
+    each a near-verbatim copy of Options'/Futures' own (not reimplemented,
+    so the strategies can't silently drift apart in how they rank/enter/
+    exit): `config.py` (`LUXURY_`-prefixed env vars, capacity/risk-
+    threshold/etc. defaults matching Options' current values),
+    `dhan_client.py` (re-exports `Options.dhan_client.dhan_wrapper` -
+    reuses the one authenticated connection, same as Futures/
+    CopperOptions/IndexScalping, avoiding a second login and its real
+    risk of tripping Dhan's own auth rate limiter), `position_store.py`
+    (own independent in-memory state), `trading_engine.py` (ranking/
+    concurrent entry/exit/broker-reconciliation, filtered through
+    `attribute_open_broker_position` so it can never import a position
+    that's actually Options' or Futures' own - and vice versa, all three
+    now mutually exclusive), `luxury_main.py` (the two webhooks + status
+    endpoints, namespaced `/luxury/positions`/`/luxury/orders`/
+    `/luxury/square-off-now` matching Futures' own namespacing since
+    Options' bare `/positions`/`/orders` names are already taken).
+
+    Deliberately does NOT include: `choppy_stocks.py` filtering (scoped to
+    Options only per the user's own wording when THAT feature was
+    requested - same reason Futures doesn't have it either) or the
+    paper-trade evaluation webhook (`/chartink/webhook-papertrade`'s
+    equivalent - not part of this request). Both can be added later if
+    asked.
+
+    Wired into `main.py`: new lifespan nested after Options (needs its
+    already-authenticated connection, same requirement as Futures/
+    IndexScalping/CopperOptions), new router included, `/trade-history`
+    and `/webhook-alerts`' strategy-filter validation extended to accept
+    `Luxury` (the underlying `read_all_trades`/`read_all_webhook_alerts`/
+    `attribute_open_broker_position` functions were already strategy-
+    agnostic string matches - no changes needed there).
+
+    New `tests/test_luxury_package.py` (6 scenarios, all passing):
+    concurrent CE entry on Luxury's own capacity pool; the PE webhook
+    entering PUTs (not CALLs) on its own separate PE pool without
+    touching CE capacity; a duplicate-webhook-delivery race; real
+    target/stop-loss exits tagged `Luxury` in `trade_history`; a 3-way
+    (not just 2-way) reconciliation scenario with Options-owned,
+    Futures-owned, and Luxury-owned broker positions all correctly
+    attributed with zero cross-contamination; and a malformed-payload
+    rejection check. Caught and fixed one of my own test-construction
+    bugs while writing this: assumed a PE alert's ranking would put the
+    single biggest decliner first, but `SELECT_BOTTOM_N_STOCKS` (shared,
+    already-verified production logic, unchanged) deliberately selects
+    the WEAKEST decliner as a contrarian/laggard bet - not what this test
+    was meant to verify anyway (Luxury doesn't change ranking behavior at
+    all), so simplified the test to confirm the PE-specific, Luxury-
+    specific thing that actually matters: hitting the bearish endpoint
+    enters PUTs on Luxury's own PE pool, full stop. Re-ran `tests/
+    test_deep_integration.py`, `tests/test_choppy_stocks.py`, and `tests/
+    test_risk_threshold_cutoff.py` afterward (17/17 still pass). Also
+    verified the full 7-strategy `main.py` composes with zero route
+    collisions across all 25 registered endpoints (via `app.openapi()`).
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

@@ -29,7 +29,14 @@ in the same process. Three are mounted today:
     design in the separate trading-skills repo (designs/k01.md); OI-buildup
     gating and VCP detection are
     explicit phase-2 items, not yet built.
-A sixth strategy would be added the same way - its own package,
+  - Luxury/luxury_main.py - user request 31 Aug 2026: a same-account
+    duplicate of Options (same ranking/ATM-buying/exit logic, own CE+PE
+    webhooks, own separate position pool/capacity/config), REAL orders -
+    see Luxury/trading_engine.py's module docstring for what it does and
+    doesn't share with Options (reuses the one Dhan connection; does NOT
+    share choppy_stocks.py filtering or the paper-trade evaluation
+    webhook, both scoped to Options only).
+A seventh strategy would be added the same way - its own package,
 exporting `router` + `lifespan`, mounted below - without touching any
 existing one.
 
@@ -50,6 +57,7 @@ from IndexScalping import index_main
 from CopperOptions import copper_main
 from Futures import futures_main
 from K01 import screener_main
+from Luxury import luxury_main
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,7 +80,8 @@ async def lifespan(app: FastAPI):
             async with copper_main.lifespan(app):
                 async with futures_main.lifespan(app):
                     async with screener_main.lifespan(app):
-                        yield
+                        async with luxury_main.lifespan(app):
+                            yield
 
 
 app = FastAPI(title="Chartink -> Dhan Algo Bot", lifespan=lifespan)
@@ -81,6 +90,7 @@ app.include_router(index_main.router)
 app.include_router(copper_main.router)
 app.include_router(futures_main.router)
 app.include_router(screener_main.router)
+app.include_router(luxury_main.router)
 
 
 # --------------------------------------------------------------------------- #
@@ -123,12 +133,13 @@ async def get_incidents(limit: int = 20):
 async def trade_history(strategy: str | None = None):
     """Persistent, cross-restart record of every REAL (non-paper) closed
     trade, tagged by which package placed it - see trade_history.py.
-    Options/position_store.py and Futures/position_store.py's own
-    closed_positions_today reset daily and don't survive a restart; this
-    is the durable record for later analysis. strategy=None returns both;
-    pass strategy=Options or strategy=Futures to filter to one."""
-    if strategy is not None and strategy not in ("Options", "Futures"):
-        return {"error": "strategy must be 'Options' or 'Futures' (or omitted for both)"}
+    Options/position_store.py, Futures/position_store.py, and
+    Luxury/position_store.py's own closed_positions_today all reset daily
+    and don't survive a restart; this is the durable record for later
+    analysis. strategy=None returns all three; pass strategy=Options,
+    strategy=Futures, or strategy=Luxury to filter to one."""
+    if strategy is not None and strategy not in ("Options", "Futures", "Luxury"):
+        return {"error": "strategy must be 'Options', 'Futures', or 'Luxury' (or omitted for all)"}
     trades = read_all_trades(strategy)
     return {"count": len(trades), "trades": trades}
 
@@ -140,10 +151,10 @@ async def webhook_alerts(strategy: str | None = None):
     record_webhook_alert. Each handler already logged receipt via the
     standard logger, but that only reaches journald (limited retention,
     not queryable) - this is the durable, structured record. strategy=None
-    returns all; pass strategy=Options/Futures/Options-PaperTrade to
+    returns all; pass strategy=Options/Futures/Luxury/Options-PaperTrade to
     filter to one."""
-    if strategy is not None and strategy not in ("Options", "Futures", "Options-PaperTrade"):
-        return {"error": "strategy must be 'Options', 'Futures', or 'Options-PaperTrade' (or omitted for all)"}
+    if strategy is not None and strategy not in ("Options", "Futures", "Luxury", "Options-PaperTrade"):
+        return {"error": "strategy must be 'Options', 'Futures', 'Luxury', or 'Options-PaperTrade' (or omitted for all)"}
     alerts = read_all_webhook_alerts(strategy)
     return {"count": len(alerts), "alerts": alerts}
 

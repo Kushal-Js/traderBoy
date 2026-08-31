@@ -22,6 +22,7 @@ peace of mind.
 | `test_deep_integration.py` | Concurrent entry, duplicate-webhook races, retry-on-transient-failure, real exit paths, reconciliation attribution, malformed payloads |
 | `test_choppy_stocks.py` | `choppy_stocks.py`'s manually-maintained exclusion list (seed/never-overwrite behavior, read/write round-trip, fails-open + picks-up-manual-edits-live), and its wiring into the real webhook handler (choppy stocks excluded before ranking, non-choppy stocks unaffected, audit log stays unfiltered) |
 | `test_risk_threshold_cutoff.py` | The before/after-11:30 split of `MAX_LOSS_PER_TRADE_RS`/`PROFIT_PROTECTION_THRESHOLD_RS` in both Options and Futures - correct value on each side of the cutoff, the exact boundary instant, and `_exit_reason_for` itself firing at the right threshold |
+| `test_luxury_package.py` | The Luxury package (a same-account Options duplicate) - concurrent CE entry, the PE webhook entering PUTs on its own capacity pool, duplicate-delivery races, real exit paths, three-way (Options/Futures/Luxury) reconciliation with zero cross-contamination, malformed payloads |
 
 ## How to run
 
@@ -29,6 +30,7 @@ peace of mind.
 uv run python tests/test_deep_integration.py
 uv run python tests/test_choppy_stocks.py
 uv run python tests/test_risk_threshold_cutoff.py
+uv run python tests/test_luxury_package.py
 ```
 
 Each takes a few seconds. Prints one PASS line per scenario, or raises an

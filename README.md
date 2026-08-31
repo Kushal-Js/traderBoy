@@ -38,6 +38,11 @@ This is the Dhan counterpart to the Groww version of this bot (see the
 | `K01/screener_main.py` | "K01" - daily F&O stock screener's FastAPI router + lifespan - **paper trading only**, no real orders placed. Design in the separate `trading-skills` repo (`designs/k01.md`) |
 | `K01/paper_engine.py` | Stage 0 (Minervini Trend Template) + Stage 1 (liquidity floor) run once/day across the full F&O universe to build a watchlist; Stage 3 (5-min RSI/Supertrend + 1-min Supertrend crossover + ROC, all four must agree) re-checked every poll to trigger paper entries. OI-buildup gating and VCP detection are documented phase-2 items, not yet built |
 | `K01/config.py` | All tunables - `K01_`-prefixed env vars |
+| `Luxury/luxury_main.py` | "Luxury" strategy's FastAPI router + lifespan - a same-account duplicate of Options (user request 31 Aug 2026), real orders, own separate position pool. CE+PE webhooks like Options (not just CE like Futures); does NOT share choppy-stocks filtering or the paper-trade webhook |
+| `Luxury/trading_engine.py` | Near-verbatim copy of `Options/trading_engine.py`'s ranking/entry/exit logic against this package's own config/position_store, including concurrent entry placement and broker-position reconciliation (filtered so it can never import a position that's actually Options'/Futures' own) |
+| `Luxury/position_store.py` | Luxury's own independent in-memory state - separate capacity/dedup from Options'/Futures' - same async trade-history logging + reconciliation support |
+| `Luxury/config.py` | All tunables for the Luxury strategy, `LUXURY_`-prefixed env vars, defaulted to match Options' current values |
+| `Luxury/dhan_client.py` | Re-exports `Options.dhan_client.dhan_wrapper` - reuses the one authenticated Dhan connection rather than opening a second |
 | `choppy_stocks.py` | Manually-maintained "choppy stocks" exclusion list for the Options strategy - seeded once with `IDEA`/`YESBANK`/`SAGILITY`, persisted to `choppy/choppy_stocks.json` (gitignored runtime data, same convention as `history/`). No auto-computation or auto-refresh - edit the file directly on the server to change it; takes effect on the next webhook alert, no restart needed. Read via `GET /choppy-stocks`; enforced in `Options/option_main.py` (excluded before ranking) and `Options/trading_engine.py` (belt-and-suspenders check at entry) |
 | `.env` | Your local credentials/config (gitignored - never commit this) |
 | `tests/test_deep_integration.py` | Deep integration tests against the real webhook handler/entry/exit/reconciliation logic - only the Dhan network boundary is mocked, needs no live Dhan session. Run with `uv run python tests/test_deep_integration.py`. Not deployed, not wired into CI - a dev tool run manually for confidence before/after touching concurrency-sensitive code. See `tests/README.md` |
@@ -284,10 +289,15 @@ URLs — matching the `webhook_url` field in your sample payload.
 | `GET /futures/orders` | Futures strategy's own orders today |
 | `POST /futures/square-off-now` | Futures strategy's own manual kill-switch |
 | `GET /k01/status` | "K01" (daily F&O screener)'s watchlist, open paper positions, completed trades, P&L - paper trading only |
+| `POST /chartink/webhook-luxury` | Luxury strategy entry point (bullish scan -> buys ATM CE) - real orders, own separate position pool |
+| `POST /chartink/webhook-luxury-sell` | Luxury strategy entry point (bearish scan -> buys ATM PE) |
+| `GET /luxury/positions` | Luxury strategy's own live + closed positions |
+| `GET /luxury/orders` | Luxury strategy's own orders today |
+| `POST /luxury/square-off-now` | Luxury strategy's own manual kill-switch |
 | `GET /health` | Liveness check |
 | `POST /square-off-now` | Manual kill-switch: closes every live position immediately |
-| `GET /trade-history` | Persistent, cross-restart record of every REAL closed trade (Options + Futures), tagged by which package placed it - `?strategy=Options` or `?strategy=Futures` to filter. See `trade_history.py` |
-| `GET /webhook-alerts` | Persistent, cross-restart record of every incoming Chartink alert - processed AND ignored, with why - tagged by which endpoint received it. `?strategy=Options`/`Futures`/`Options-PaperTrade` to filter. Logged asynchronously (`trade_history.fire_and_forget`, never awaited) so it can never add latency to real order placement. See `trade_history.py`'s `record_webhook_alert` |
+| `GET /trade-history` | Persistent, cross-restart record of every REAL closed trade (Options + Futures + Luxury), tagged by which package placed it - `?strategy=Options`/`Futures`/`Luxury` to filter. See `trade_history.py` |
+| `GET /webhook-alerts` | Persistent, cross-restart record of every incoming Chartink alert - processed AND ignored, with why - tagged by which endpoint received it. `?strategy=Options`/`Futures`/`Luxury`/`Options-PaperTrade` to filter. Logged asynchronously (`trade_history.fire_and_forget`, never awaited) so it can never add latency to real order placement. See `trade_history.py`'s `record_webhook_alert` |
 | `GET /feed-stats` | Proves (or disproves) whether the WebSocket caches are actually being used instead of REST - `price_ticks_received`, `ltp_cache_hits`/`_misses`/`_stale`, `order_status_cache_hits`/`order_status_rest_calls`, plus `feed_connects`/`feed_disconnects`/`feed_errors` (added 31 Aug 2026 - visibility into the market-feed's own auto-reconnect, which was previously silent) |
 | `GET /choppy-stocks` | Stocks the Options strategy currently won't enter new positions in - a manually-maintained list, edited directly on the server (`choppy/choppy_stocks.json`), not auto-computed. See `choppy_stocks.py` |
 
