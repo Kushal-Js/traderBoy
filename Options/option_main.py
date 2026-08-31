@@ -79,7 +79,6 @@ router.include_router(paper_webhook.router)
 
 _monitor_task: Optional[asyncio.Task] = None
 _paper_monitor_task: Optional[asyncio.Task] = None
-_choppy_refresh_task: Optional[asyncio.Task] = None
 
 
 @asynccontextmanager
@@ -88,14 +87,14 @@ async def lifespan(app: FastAPI):
     starts its market-data feed, reconciles any broker positions left
     open from a previous run, and starts this strategy's monitor loop.
     Composed into the shared app's lifespan by main.py."""
-    global _monitor_task, _paper_monitor_task, _choppy_refresh_task
+    global _monitor_task, _paper_monitor_task
     loop = asyncio.get_running_loop()
 
-    # Best-effort load of whatever choppy-stocks list already exists on
-    # disk from a previous run, so entries are gated correctly from the
-    # first webhook alert after a restart, not just after the next
-    # scheduled Monday refresh - see choppy_stocks.py's own docstring.
-    choppy_stocks.load_choppy_cache_at_startup()
+    # One-time bootstrap - writes the default choppy-stocks list to disk
+    # ONLY if it doesn't already exist (first-ever deploy of this feature,
+    # or a fresh server). No further scheduling: this list is now
+    # maintained by hand - see choppy_stocks.py's own docstring.
+    choppy_stocks.ensure_choppy_list_exists()
 
     # Bridges the market-feed's WebSocket thread back onto the event loop -
     # on_price_tick is a plain sync function called directly from that
@@ -138,22 +137,12 @@ async def lifespan(app: FastAPI):
 
     _monitor_task = asyncio.create_task(monitor_loop())
     _paper_monitor_task = asyncio.create_task(paper_webhook.poll_loop())
-    # dhan_wrapper is already authenticated above (dhan_wrapper.authenticate
-    # ran first) - safe for this loop's own run_in_executor calls to read
-    # dhan_wrapper.instruments() straight away, both for its immediate
-    # bootstrap-if-missing check and every scheduled refresh after that.
-    _choppy_refresh_task = asyncio.create_task(choppy_stocks.choppy_list_refresh_loop(dhan_wrapper))
-    logger.info(
-        "Options strategy startup complete: authenticated + monitor loop + "
-        "paper-trade poll loop + choppy-stocks refresh loop running."
-    )
+    logger.info("Options strategy startup complete: authenticated + monitor loop + paper-trade poll loop running.")
     yield
     if _monitor_task:
         _monitor_task.cancel()
     if _paper_monitor_task:
         _paper_monitor_task.cancel()
-    if _choppy_refresh_task:
-        _choppy_refresh_task.cancel()
 
 
 # --------------------------------------------------------------------------- #
@@ -259,20 +248,17 @@ async def _handle_chartink_webhook(
             "max_live_positions": cap,
         }
 
-    # Excludes "choppy" stocks (lot size > choppy_stocks.LOT_SIZE_THRESHOLD,
-    # user request 31 Aug 2026) BEFORE ranking, not just at entry time, so
-    # a choppy stock's presence in the alert doesn't cost a genuinely
-    # tradeable stock its top-N ranking slot. See choppy_stocks.py.
-    # `stocks` itself stays untouched (unfiltered) - it's what
-    # record_webhook_alert logs below, an audit trail of what Chartink
-    # actually sent, independent of what the bot chose to act on.
+    # Excludes stocks on the manually-maintained choppy list (user request
+    # 31 Aug 2026 - see choppy_stocks.py) BEFORE ranking, not just at entry
+    # time, so a choppy stock's presence in the alert doesn't cost a
+    # genuinely tradeable stock its top-N ranking slot. `stocks` itself
+    # stays untouched (unfiltered) - it's what record_webhook_alert logs
+    # below, an audit trail of what Chartink actually sent, independent of
+    # what the bot chose to act on.
     choppy_hits = [s for s in stocks if choppy_stocks.is_choppy(s)]
     candidate_stocks = [s for s in stocks if s not in choppy_hits]
     if choppy_hits:
-        logger.info(
-            "Excluding choppy stock(s) from consideration (lot size > %d): %s",
-            choppy_stocks.LOT_SIZE_THRESHOLD, choppy_hits,
-        )
+        logger.info("Excluding choppy stock(s) from consideration: %s", choppy_hits)
     if not candidate_stocks:
         logger.info("All alerted stocks are choppy - ignoring alert.")
         _log_alert("ignored", "all_stocks_choppy")

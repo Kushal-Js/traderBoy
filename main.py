@@ -150,14 +150,13 @@ async def webhook_alerts(strategy: str | None = None):
 
 @app.get("/choppy-stocks")
 async def choppy_stocks_list():
-    """Stocks the Options strategy currently won't enter new positions in,
-    because their single F&O lot exceeds choppy_stocks.LOT_SIZE_THRESHOLD
-    units - user request 31 Aug 2026. Refreshed automatically every Monday
-    at 12:00 PM IST (see choppy_stocks.py's own docstring); this just
-    reads whatever's currently on disk. `generated_at`/`count` come from
-    the file itself - null/0 if no refresh has completed yet."""
+    """Stocks the Options strategy currently won't enter new positions in -
+    a manually-maintained list (user request 31 Aug 2026), edited directly
+    on the server at choppy/choppy_stocks.json, not auto-computed or
+    auto-refreshed. See choppy_stocks.py's own docstring for how to edit
+    it and when an edit takes effect."""
     data = choppy_stocks.read_choppy_list()
     if data is None:
-        return {"generated_at": None, "threshold": choppy_stocks.LOT_SIZE_THRESHOLD, "count": 0, "stocks": [],
-                "note": "No refresh has completed yet - nothing is being excluded in the meantime (fails open)."}
+        return {"stocks": [],
+                "note": "No choppy-stocks list on disk yet - nothing is being excluded in the meantime (fails open)."}
     return data

@@ -256,10 +256,9 @@ async def _process_one_entry(symbol: str, option_type: str) -> dict:
     # before ranking, so this should never actually trigger in the normal
     # webhook path - but any future caller of _process_one_entry that
     # skips that pre-filter (e.g. a different entry point) still can't
-    # place a real order in a choppy stock. Pure in-memory check, zero
-    # I/O cost. See choppy_stocks.py.
+    # place a real order in a choppy stock. See choppy_stocks.py.
     if choppy_stocks.is_choppy(symbol):
-        logger.info("%s: skipped - choppy stock (lot size > %d)", symbol, choppy_stocks.LOT_SIZE_THRESHOLD)
+        logger.info("%s: skipped - on the manually-maintained choppy-stocks list", symbol)
         return {"symbol": symbol, "status": "skipped", "reason": "choppy_stock"}
 
     # Atomically checks dedup + capacity and claims the symbol in one

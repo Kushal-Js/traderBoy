@@ -20,7 +20,7 @@ peace of mind.
 | File | Covers |
 |------|--------|
 | `test_deep_integration.py` | Concurrent entry, duplicate-webhook races, retry-on-transient-failure, real exit paths, reconciliation attribution, malformed payloads |
-| `test_choppy_stocks.py` | `choppy_stocks.py`'s lot-size computation/persistence/caching, weekly-refresh scheduling math, and its wiring into the real webhook handler (choppy stocks excluded before ranking, non-choppy stocks unaffected, audit log stays unfiltered) |
+| `test_choppy_stocks.py` | `choppy_stocks.py`'s manually-maintained exclusion list (seed/never-overwrite behavior, read/write round-trip, fails-open + picks-up-manual-edits-live), and its wiring into the real webhook handler (choppy stocks excluded before ranking, non-choppy stocks unaffected, audit log stays unfiltered) |
 
 ## How to run
 

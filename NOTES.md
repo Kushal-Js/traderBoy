@@ -2060,6 +2060,66 @@ out of git.
     still pass, confirming no interaction with the existing entry flow
     when the choppy cache is empty, its default state).
 
+56. **`choppy_stocks.py` simplified from an automatic weekly scan to a
+    manually-maintained fixed list - user request 31 Aug 2026, same day
+    as #55.** After reviewing #55's first scan output (14 stocks, lot
+    size > 6000 - IDEA, YESBANK, SUZLON, SAGILITY, IDFCFIRSTB, PNB,
+    GMRAIRPORT, NHPC, NMDC, CANBK, MAHABANK, NBCC, INOXWIND, MOTHERSON),
+    the user chose to keep only 3 (IDEA, YESBANK, SAGILITY) and maintain
+    the list by hand going forward rather than have it auto-computed or
+    auto-refreshed weekly.
+
+    Removed entirely, not left dormant: `compute_choppy_stocks` (the
+    lot-size scan itself), `LOT_SIZE_THRESHOLD`, `refresh_choppy_list`,
+    `choppy_list_refresh_loop` (the background asyncio task + its Monday-
+    noon scheduling math), and the in-memory symbol cache
+    (`_cached_choppy_symbols`/`load_choppy_cache_at_startup`) - all
+    dead weight once nothing computes or schedules a refresh anymore.
+    `choppy_stocks.py` no longer depends on `dhan_wrapper`/the instrument
+    master at all now - it's pure file I/O.
+
+    New design: `DEFAULT_CHOPPY_STOCKS = ["IDEA", "YESBANK", "SAGILITY"]`,
+    written once by `ensure_choppy_list_exists()` (called from Options'
+    lifespan) ONLY if `choppy/choppy_stocks.json` doesn't already exist -
+    never touches an existing file, so a hand-edit is never at risk of
+    being silently overwritten by the app itself. `is_choppy()` now reads
+    the file fresh on every call rather than an in-memory cache -
+    deliberately not cached, so a manual edit to the file (e.g. `ssh` in,
+    `nano choppy/choppy_stocks.json`) takes effect on the very next
+    webhook alert with no restart needed - a small tradeoff (repeated
+    tiny local file reads, OS-page-cached, negligible cost given this
+    only runs per-alert not per-tick) deliberately made for that
+    immediacy. Filtering call sites in `option_main.py`/`trading_engine.py`
+    (excluded before ranking, belt-and-suspenders re-check at entry) and
+    `GET /choppy-stocks` are unchanged in shape, just simpler underneath.
+
+    `tests/test_choppy_stocks.py` rewritten for the new design (5
+    scenarios, all passing): seed-if-missing + never-overwrite-existing,
+    write/read round-trip normalization (uppercase/dedup/sort), fail-open
+    with no file + live pickup of a manual edit with no reload step, and
+    the same two full-webhook-handler integration scenarios from #55
+    (choppy stock excluded before ranking; all-choppy alert ignored
+    cleanly) re-verified against the new manual-list mechanism. Caught and
+    fixed one of my own test-construction bugs while writing this: a
+    scratch-directory-naming helper used `id(object())` for uniqueness,
+    which CPython can and does reuse once the temporary object is
+    collected - two calls landed on the same scratch path and one test's
+    leftover data leaked into the next, failing a fail-open assertion
+    that should have passed. Fixed with a monotonic counter instead.
+    Re-ran `tests/test_deep_integration.py` afterward (6/6 still pass).
+
+    **Not yet deployed as of this writing** - two real Options PE
+    positions (MANAPPURAM, GRASIM, both opened today under #54's new
+    PE cap) were live when this was ready to ship, and restarting to
+    deploy would reset both positions' trailing-stop memory on broker
+    reconciliation (the same real risk #42/HAL-incident risk this file's
+    own safety-practice section describes). Asked the user via
+    AskUserQuestion rather than restarting anyway; user dismissed the
+    question without choosing an option, meaning: do not proceed, wait
+    for further instruction. Code is committed, pushed to `dhanBoy`, and
+    already pulled onto the droplet - the running process is still the
+    prior code until a restart is explicitly requested.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

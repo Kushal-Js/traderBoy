@@ -1,23 +1,28 @@
 """
 Tests for choppy_stocks.py and its wiring into the Options webhook
-handler - user request 31 Aug 2026 ("keep a list of stocks with lot size
-> 6000, avoid Options trades in them, refresh weekly").
+handler - user request 31 Aug 2026. Originally built as an automatic
+weekly lot-size scan, then simplified same-day to a manually-maintained,
+fixed list (IDEA, YESBANK, SAGILITY) with no auto-refresh - see NOTES.md
+entries #55/#56 and choppy_stocks.py's own module docstring for the full
+history. This file tests the CURRENT (manual) design.
 
 Covers, against the REAL production functions (not reimplemented):
-  1. compute_choppy_stocks correctly filters by lot size, one entry per
-     underlying even with many option rows for it.
-  2. write_choppy_list / read_choppy_list round-trip through real disk I/O
-     (a scratch temp dir, never the real choppy/ folder).
-  3. The in-memory cache (is_choppy/_load_into_cache/refresh_choppy_list)
-     stays consistent with what's on disk, and FAILS OPEN (excludes
-     nothing) when nothing has been written yet.
-  4. _next_monday_noon_ist's scheduling edge cases (exactly at the target
-     instant, just before it, a mid-week day).
-  5. The real webhook handler (_handle_chartink_webhook) actually excludes
+  1. ensure_choppy_list_exists() seeds DEFAULT_CHOPPY_STOCKS when no file
+     exists yet, and never overwrites an existing (possibly
+     hand-edited) one.
+  2. write_choppy_list / read_choppy_list round-trip (normalizes to
+     uppercase, dedups, sorts) through real disk I/O.
+  3. is_choppy() fails open (excludes nothing) when the file is missing,
+     and picks up a change to the file on the very next call - no
+     restart/reload step needed, since it deliberately reads fresh each
+     time (see its own docstring for why that's safe here).
+  4. The real webhook handler (_handle_chartink_webhook) actually excludes
      a choppy symbol before ranking, doesn't let it consume a top-N slot,
      and still enters the non-choppy symbols normally. Only the Dhan
      network boundary is mocked (same approach as
      test_deep_integration.py) - no live Dhan session needed.
+  5. An alert where every stock is choppy is ignored cleanly with an
+     explicit reason, not left to a misleading "could not rank" fallback.
 
 HOW TO RUN:
     uv run python tests/test_choppy_stocks.py
@@ -26,10 +31,8 @@ import asyncio
 import os
 import sys
 import tempfile
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
-
-import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -53,120 +56,81 @@ from Options.dhan_client import AtmOption, OrderResult, OrderStatus
 FUTURE_EXPIRY = date.today() + timedelta(days=25)
 
 
-class FakeDhanWrapper:
-    """A minimal stand-in exposing only what compute_choppy_stocks needs -
-    instruments() and the real _underlying_from_trading_symbol parsing
-    logic (reused verbatim from the real wrapper, not reimplemented, so
-    this test can't drift from what production actually does)."""
-
-    def __init__(self, df: pd.DataFrame):
-        self._df = df
-
-    def instruments(self):
-        return self._df
-
-    _underlying_from_trading_symbol = staticmethod(odc.DhanWrapper._underlying_from_trading_symbol)
+_scratch_choppy_counter = 0
 
 
-def _fake_instrument_df() -> pd.DataFrame:
-    """3 underlyings, several rows each (different strikes) - mirrors the
-    real scrip master's shape. RELIANCE (small lot) and TCS (small lot)
-    should NOT be flagged; BIGLOT (lot 7500, > threshold) should be, from
-    every one of its rows, deduplicated to a single entry."""
-    rows = []
-    for strike in (1300, 1350, 1400):
-        rows.append({"SEM_TRADING_SYMBOL": f"RELIANCE-Sep2026-{strike}-CE", "SEM_LOT_UNITS": 500,
-                     "SEM_EXM_EXCH_ID": "NSE", "SEM_INSTRUMENT_NAME": "OPTSTK"})
-    for strike in (4000, 4050):
-        rows.append({"SEM_TRADING_SYMBOL": f"TCS-Sep2026-{strike}-PE", "SEM_LOT_UNITS": 150,
-                     "SEM_EXM_EXCH_ID": "NSE", "SEM_INSTRUMENT_NAME": "OPTSTK"})
-    for strike in (900, 950, 1000):
-        rows.append({"SEM_TRADING_SYMBOL": f"BIGLOT-Sep2026-{strike}-CE", "SEM_LOT_UNITS": 7500,
-                     "SEM_EXM_EXCH_ID": "NSE", "SEM_INSTRUMENT_NAME": "OPTSTK"})
-    # A non-OPTSTK row (e.g. a future) with a huge "lot size" - must be
-    # ignored by the SEM_INSTRUMENT_NAME filter, not just the threshold.
-    rows.append({"SEM_TRADING_SYMBOL": "RELIANCE-Sep2026-FUT", "SEM_LOT_UNITS": 99999,
-                 "SEM_EXM_EXCH_ID": "NSE", "SEM_INSTRUMENT_NAME": "FUTSTK"})
-    # A BSE row sharing BIGLOT's own trading symbol shape - must be ignored
-    # by the SEM_EXM_EXCH_ID == "NSE" filter.
-    rows.append({"SEM_TRADING_SYMBOL": "BIGLOT-Sep2026-900-CE", "SEM_LOT_UNITS": 7500,
-                 "SEM_EXM_EXCH_ID": "BSE", "SEM_INSTRUMENT_NAME": "OPTSTK"})
-    return pd.DataFrame(rows)
-
-
-def test_1_compute_choppy_stocks_filters_correctly():
-    wrapper = FakeDhanWrapper(_fake_instrument_df())
-    result = choppy_stocks.compute_choppy_stocks(wrapper)
-    assert result == {"BIGLOT": 7500}, f"expected only BIGLOT flagged at 7500, got {result}"
-    print("1. compute_choppy_stocks: only the lot-size>6000 underlying (BIGLOT) is flagged, "
-          "deduped across its 3 rows, non-OPTSTK/non-NSE rows correctly ignored: PASSED")
-
-
-def test_2_write_and_read_round_trip():
+def _use_scratch_choppy_paths():
+    """Points choppy_stocks at a fresh scratch file for one test, returns
+    a restore() closure. Never touches the real choppy/ folder. Uses a
+    monotonic counter (not id(object()), which CPython can and does
+    reuse once the temporary object is collected) so two calls never
+    collide on the same scratch directory."""
+    global _scratch_choppy_counter
+    _scratch_choppy_counter += 1
     real_dir, real_file = choppy_stocks.CHOPPY_DIR, choppy_stocks.CHOPPY_FILE
-    choppy_stocks.CHOPPY_DIR = scratch_dir / "choppy"
+    choppy_stocks.CHOPPY_DIR = scratch_dir / f"choppy_{_scratch_choppy_counter}"
     choppy_stocks.CHOPPY_FILE = choppy_stocks.CHOPPY_DIR / "choppy_stocks.json"
+
+    def restore():
+        choppy_stocks.CHOPPY_DIR, choppy_stocks.CHOPPY_FILE = real_dir, real_file
+
+    return restore
+
+
+def test_1_ensure_choppy_list_exists_seeds_default_but_never_overwrites():
+    restore = _use_scratch_choppy_paths()
     try:
         assert choppy_stocks.read_choppy_list() is None, "expected no file yet"
-        written = choppy_stocks.write_choppy_list({"BIGLOT": 7500, "HUGELOT": 10000})
-        assert written["threshold"] == choppy_stocks.LOT_SIZE_THRESHOLD
-        assert written["count"] == 2
+        choppy_stocks.ensure_choppy_list_exists()
+        data = choppy_stocks.read_choppy_list()
+        assert data == {"stocks": sorted(choppy_stocks.DEFAULT_CHOPPY_STOCKS)}, data
+
+        # A human has since hand-edited the file - ensure_choppy_list_exists
+        # must NOT stomp on that.
+        choppy_stocks.write_choppy_list(["RELIANCE", "TCS"])
+        choppy_stocks.ensure_choppy_list_exists()
+        data_after = choppy_stocks.read_choppy_list()
+        assert data_after == {"stocks": ["RELIANCE", "TCS"]}, \
+            f"ensure_choppy_list_exists must never overwrite an existing file, got {data_after}"
+        print("1. ensure_choppy_list_exists seeds DEFAULT_CHOPPY_STOCKS when missing, "
+              "and never overwrites an existing (hand-edited) file: PASSED")
+    finally:
+        restore()
+
+
+def test_2_write_and_read_round_trip_normalizes():
+    restore = _use_scratch_choppy_paths()
+    try:
+        written = choppy_stocks.write_choppy_list(["idea", "YesBank", "yesbank", " sagility ", ""])
+        assert written == {"stocks": ["IDEA", "SAGILITY", "YESBANK"]}, written
         read_back = choppy_stocks.read_choppy_list()
         assert read_back == written, "read-back must exactly match what was written"
-        symbols = {s["symbol"] for s in read_back["stocks"]}
-        assert symbols == {"BIGLOT", "HUGELOT"}
-        # Sorted by lot size descending, per write_choppy_list's own contract.
-        assert read_back["stocks"][0]["symbol"] == "HUGELOT"
-        print("2. write_choppy_list/read_choppy_list round-trip through real disk I/O "
-              "(scratch dir), sorted descending by lot size: PASSED")
+        print("2. write_choppy_list/read_choppy_list round-trip: uppercased, deduped, "
+              "sorted, blanks dropped: PASSED")
     finally:
-        choppy_stocks.CHOPPY_DIR, choppy_stocks.CHOPPY_FILE = real_dir, real_file
+        restore()
 
 
-def test_3_cache_fails_open_then_tracks_refresh():
-    choppy_stocks._cached_choppy_symbols = set()  # simulate a fresh process, nothing loaded yet
-    assert not choppy_stocks.is_choppy("BIGLOT"), "must fail open (exclude nothing) before any load/refresh"
-
-    real_dir, real_file = choppy_stocks.CHOPPY_DIR, choppy_stocks.CHOPPY_FILE
-    choppy_stocks.CHOPPY_DIR = scratch_dir / "choppy2"
-    choppy_stocks.CHOPPY_FILE = choppy_stocks.CHOPPY_DIR / "choppy_stocks.json"
+def test_3_is_choppy_fails_open_and_picks_up_edits_live():
+    restore = _use_scratch_choppy_paths()
     try:
-        wrapper = FakeDhanWrapper(_fake_instrument_df())
-        choppy_stocks.refresh_choppy_list(wrapper)
-        assert choppy_stocks.is_choppy("BIGLOT"), "cache must reflect the just-completed refresh immediately"
+        assert not choppy_stocks.is_choppy("IDEA"), "must fail open (exclude nothing) when no file exists"
+
+        choppy_stocks.write_choppy_list(["IDEA", "YESBANK", "SAGILITY"])
+        assert choppy_stocks.is_choppy("IDEA")
+        assert choppy_stocks.is_choppy("idea"), "must be case-insensitive"
         assert not choppy_stocks.is_choppy("RELIANCE")
-        assert not choppy_stocks.is_choppy("TCS")
 
-        # A fresh process restarting later must recover the same state from disk.
-        choppy_stocks._cached_choppy_symbols = set()
-        choppy_stocks.load_choppy_cache_at_startup()
-        assert choppy_stocks.is_choppy("BIGLOT"), "load_choppy_cache_at_startup must recover the persisted list"
-        print("3. In-memory cache fails open with nothing loaded, reflects refresh_choppy_list "
-              "immediately, and survives a simulated restart via load_choppy_cache_at_startup: PASSED")
+        # Simulates a manual hand-edit while the process keeps running -
+        # must take effect on the very next call, no reload step needed.
+        choppy_stocks.write_choppy_list(["RELIANCE"])
+        assert choppy_stocks.is_choppy("RELIANCE"), "a manual edit must take effect immediately, no restart"
+        assert not choppy_stocks.is_choppy("IDEA"), "the old entry must no longer be excluded after the edit"
+
+        print("3. is_choppy fails open with no file, is case-insensitive, and picks up a "
+              "manual edit on the very next call with no restart/reload needed: PASSED")
     finally:
-        choppy_stocks.CHOPPY_DIR, choppy_stocks.CHOPPY_FILE = real_dir, real_file
-        choppy_stocks._cached_choppy_symbols = set()
-
-
-def test_4_next_monday_noon_edge_cases():
-    from zoneinfo import ZoneInfo
-    IST = ZoneInfo("Asia/Kolkata")
-
-    exactly_at_target = datetime(2026, 8, 31, 12, 0, 0, tzinfo=IST)  # Monday, exactly noon
-    assert choppy_stocks._next_monday_noon_ist(exactly_at_target) == datetime(2026, 9, 7, 12, 0, tzinfo=IST), \
-        "at the exact target instant, must roll to NEXT Monday (candidate <= now), not fire twice"
-
-    one_second_before = datetime(2026, 8, 31, 11, 59, 59, tzinfo=IST)
-    assert choppy_stocks._next_monday_noon_ist(one_second_before) == datetime(2026, 8, 31, 12, 0, tzinfo=IST)
-
-    mid_week = datetime(2026, 9, 2, 15, 0, tzinfo=IST)  # Wednesday
-    assert choppy_stocks._next_monday_noon_ist(mid_week) == datetime(2026, 9, 7, 12, 0, tzinfo=IST)
-
-    sunday_late = datetime(2026, 9, 6, 23, 59, tzinfo=IST)
-    assert choppy_stocks._next_monday_noon_ist(sunday_late) == datetime(2026, 9, 7, 12, 0, tzinfo=IST)
-
-    print("4. _next_monday_noon_ist: exact-instant rollover, just-before, mid-week, and "
-          "Sunday-night edge cases all resolve correctly: PASSED")
+        restore()
 
 
 def fake_atm_option(symbol: str, option_type: str) -> AtmOption:
@@ -202,7 +166,7 @@ def install_all_dhan_mocks():
     return restore
 
 
-async def test_5_webhook_handler_excludes_choppy_stock_before_ranking():
+async def test_4_webhook_handler_excludes_choppy_stock_before_ranking():
     store = ops.PositionStore()
     om.position_store = store
     ote.position_store = store
@@ -211,86 +175,80 @@ async def test_5_webhook_handler_excludes_choppy_stock_before_ranking():
     real_rank = om.rank_and_pick_top_stocks
 
     def fake_ranked(stocks, top_n, prefer_highest):
-        # Ranks by input order, capped to top_n - same shape as
-        # test_deep_integration.py's fake_ranked, isolating ranking's own
-        # network dependency without changing its selection contract.
         return [(s, float(i)) for i, s in enumerate(stocks[:top_n if top_n > 0 else len(stocks)])]
 
     om.rank_and_pick_top_stocks = fake_ranked
-
-    real_choppy_symbols = choppy_stocks._cached_choppy_symbols
-    choppy_stocks._cached_choppy_symbols = {"BIGLOT"}
-
-    restore = install_all_dhan_mocks()
+    restore_choppy_paths = _use_scratch_choppy_paths()
+    choppy_stocks.write_choppy_list(["IDEA"])
+    restore_mocks = install_all_dhan_mocks()
     try:
         payload = om.ChartinkWebhookPayload(
-            stocks="RELIANCE,BIGLOT,TCS", trigger_prices="1,1,1", triggered_at="9:20 am",
+            stocks="RELIANCE,IDEA,TCS", trigger_prices="1,1,1", triggered_at="9:20 am",
             scan_name="choppy-test", scan_url="choppy-test",
             alert_name="Choppy-stock exclusion test",
         )
         result = await om._handle_chartink_webhook(payload, "CE", True)
 
         assert result["status"] == "processed", result
-        assert result["choppy_stocks_excluded"] == ["BIGLOT"], result
+        assert result["choppy_stocks_excluded"] == ["IDEA"], result
         ranked_symbols = [s for s, _pct in result["ranked_by_day_change_pct"]]
-        assert "BIGLOT" not in ranked_symbols, "choppy stock must never reach ranking at all"
+        assert "IDEA" not in ranked_symbols, "choppy stock must never reach ranking at all"
         assert set(ranked_symbols) == {"RELIANCE", "TCS"}, ranked_symbols
 
         entered = [e["symbol"] for e in result["entries"] if e["status"] == "entered"]
         assert set(entered) == {"RELIANCE", "TCS"}, \
             f"both non-choppy stocks should still enter normally, got {entered}"
-        assert "BIGLOT" not in store.live_positions
+        assert "IDEA" not in store.live_positions
 
         # Alert log must still show the ORIGINAL, unfiltered stock list -
         # this is an audit trail of what Chartink sent, not what the bot acted on.
         await asyncio.sleep(0.3)
         alerts = trade_history.read_all_jsonl("webhook_alerts")
         last = alerts[-1]
-        assert set(last["stocks"]) == {"RELIANCE", "BIGLOT", "TCS"}, \
+        assert set(last["stocks"]) == {"RELIANCE", "IDEA", "TCS"}, \
             f"webhook_alerts log must record the full original alert, got {last['stocks']}"
 
-        print("5. Real webhook handler excludes the choppy stock (BIGLOT) before ranking - "
+        print("4. Real webhook handler excludes the choppy stock (IDEA) before ranking - "
               "it never occupies a top-N slot, both other stocks enter normally, and the "
               "audit log still records the original unfiltered alert: PASSED")
     finally:
-        restore()
+        restore_mocks()
+        restore_choppy_paths()
         om.rank_and_pick_top_stocks = real_rank
-        choppy_stocks._cached_choppy_symbols = real_choppy_symbols
 
 
-async def test_6_all_stocks_choppy_is_ignored_cleanly():
+async def test_5_all_stocks_choppy_is_ignored_cleanly():
     store = ops.PositionStore()
     om.position_store = store
     ote.position_store = store
     ote.config.MAX_LIVE_POSITIONS_CE = 10
 
-    real_choppy_symbols = choppy_stocks._cached_choppy_symbols
-    choppy_stocks._cached_choppy_symbols = {"BIGLOT", "HUGELOT"}
+    restore_choppy_paths = _use_scratch_choppy_paths()
+    choppy_stocks.write_choppy_list(["IDEA", "YESBANK"])
     try:
         payload = om.ChartinkWebhookPayload(
-            stocks="BIGLOT,HUGELOT", trigger_prices="1,1", triggered_at="9:20 am",
+            stocks="IDEA,YESBANK", trigger_prices="1,1", triggered_at="9:20 am",
             scan_name="choppy-test-2", scan_url="choppy-test-2",
             alert_name="All-choppy alert test",
         )
         result = await om._handle_chartink_webhook(payload, "CE", True)
         assert result["status"] == "ignored"
         assert result["reason"] == "all_stocks_choppy"
-        assert set(result["choppy_stocks_excluded"]) == {"BIGLOT", "HUGELOT"}
+        assert set(result["choppy_stocks_excluded"]) == {"IDEA", "YESBANK"}
         assert store.live_positions == {}
-        print("6. An alert where every stock is choppy is cleanly ignored (no ranking/entry "
+        print("5. An alert where every stock is choppy is cleanly ignored (no ranking/entry "
               "attempted at all), not left to fall through to a misleading 'could not rank' reason: PASSED")
     finally:
-        choppy_stocks._cached_choppy_symbols = real_choppy_symbols
+        restore_choppy_paths()
 
 
 async def main():
-    print("=== choppy_stocks.py test suite ===\n")
-    test_1_compute_choppy_stocks_filters_correctly()
-    test_2_write_and_read_round_trip()
-    test_3_cache_fails_open_then_tracks_refresh()
-    test_4_next_monday_noon_edge_cases()
-    await test_5_webhook_handler_excludes_choppy_stock_before_ranking()
-    await test_6_all_stocks_choppy_is_ignored_cleanly()
+    print("=== choppy_stocks.py test suite (manually-maintained list design) ===\n")
+    test_1_ensure_choppy_list_exists_seeds_default_but_never_overwrites()
+    test_2_write_and_read_round_trip_normalizes()
+    test_3_is_choppy_fails_open_and_picks_up_edits_live()
+    await test_4_webhook_handler_excludes_choppy_stock_before_ranking()
+    await test_5_all_stocks_choppy_is_ignored_cleanly()
     print("\nALL CHOPPY-STOCKS CHECKS PASSED")
 
 
