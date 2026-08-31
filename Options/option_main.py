@@ -57,6 +57,7 @@ from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel, field_validator
 
 from trade_history import fire_and_forget, record_webhook_alert
+import choppy_stocks
 
 from . import config, paper_webhook
 from .dhan_client import dhan_wrapper
@@ -78,6 +79,7 @@ router.include_router(paper_webhook.router)
 
 _monitor_task: Optional[asyncio.Task] = None
 _paper_monitor_task: Optional[asyncio.Task] = None
+_choppy_refresh_task: Optional[asyncio.Task] = None
 
 
 @asynccontextmanager
@@ -86,8 +88,14 @@ async def lifespan(app: FastAPI):
     starts its market-data feed, reconciles any broker positions left
     open from a previous run, and starts this strategy's monitor loop.
     Composed into the shared app's lifespan by main.py."""
-    global _monitor_task, _paper_monitor_task
+    global _monitor_task, _paper_monitor_task, _choppy_refresh_task
     loop = asyncio.get_running_loop()
+
+    # Best-effort load of whatever choppy-stocks list already exists on
+    # disk from a previous run, so entries are gated correctly from the
+    # first webhook alert after a restart, not just after the next
+    # scheduled Monday refresh - see choppy_stocks.py's own docstring.
+    choppy_stocks.load_choppy_cache_at_startup()
 
     # Bridges the market-feed's WebSocket thread back onto the event loop -
     # on_price_tick is a plain sync function called directly from that
@@ -130,12 +138,22 @@ async def lifespan(app: FastAPI):
 
     _monitor_task = asyncio.create_task(monitor_loop())
     _paper_monitor_task = asyncio.create_task(paper_webhook.poll_loop())
-    logger.info("Options strategy startup complete: authenticated + monitor loop + paper-trade poll loop running.")
+    # dhan_wrapper is already authenticated above (dhan_wrapper.authenticate
+    # ran first) - safe for this loop's own run_in_executor calls to read
+    # dhan_wrapper.instruments() straight away, both for its immediate
+    # bootstrap-if-missing check and every scheduled refresh after that.
+    _choppy_refresh_task = asyncio.create_task(choppy_stocks.choppy_list_refresh_loop(dhan_wrapper))
+    logger.info(
+        "Options strategy startup complete: authenticated + monitor loop + "
+        "paper-trade poll loop + choppy-stocks refresh loop running."
+    )
     yield
     if _monitor_task:
         _monitor_task.cancel()
     if _paper_monitor_task:
         _paper_monitor_task.cancel()
+    if _choppy_refresh_task:
+        _choppy_refresh_task.cancel()
 
 
 # --------------------------------------------------------------------------- #
@@ -241,9 +259,28 @@ async def _handle_chartink_webhook(
             "max_live_positions": cap,
         }
 
+    # Excludes "choppy" stocks (lot size > choppy_stocks.LOT_SIZE_THRESHOLD,
+    # user request 31 Aug 2026) BEFORE ranking, not just at entry time, so
+    # a choppy stock's presence in the alert doesn't cost a genuinely
+    # tradeable stock its top-N ranking slot. See choppy_stocks.py.
+    # `stocks` itself stays untouched (unfiltered) - it's what
+    # record_webhook_alert logs below, an audit trail of what Chartink
+    # actually sent, independent of what the bot chose to act on.
+    choppy_hits = [s for s in stocks if choppy_stocks.is_choppy(s)]
+    candidate_stocks = [s for s in stocks if s not in choppy_hits]
+    if choppy_hits:
+        logger.info(
+            "Excluding choppy stock(s) from consideration (lot size > %d): %s",
+            choppy_stocks.LOT_SIZE_THRESHOLD, choppy_hits,
+        )
+    if not candidate_stocks:
+        logger.info("All alerted stocks are choppy - ignoring alert.")
+        _log_alert("ignored", "all_stocks_choppy")
+        return {"status": "ignored", "reason": "all_stocks_choppy", "choppy_stocks_excluded": choppy_hits}
+
     loop = asyncio.get_running_loop()
     ranked = await loop.run_in_executor(
-        None, rank_and_pick_top_stocks, stocks, config.TOP_N_STOCKS, prefer_highest
+        None, rank_and_pick_top_stocks, candidate_stocks, config.TOP_N_STOCKS, prefer_highest
     )
 
     if not ranked:
@@ -257,6 +294,7 @@ async def _handle_chartink_webhook(
         "status": "processed",
         "ranked_by_day_change_pct": ranked,
         "entries": results,
+        "choppy_stocks_excluded": choppy_hits,
     }
 
 

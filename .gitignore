@@ -35,3 +35,6 @@ Dependencies\\*
 
 # Dated trade/incident history (trade_history.py) - runtime data, not source.
 /history/
+
+# Weekly choppy-stocks exclusion list (choppy_stocks.py) - runtime data, not source.
+/choppy/

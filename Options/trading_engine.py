@@ -28,6 +28,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from trade_history import attribute_open_broker_position
+import choppy_stocks
 
 from . import config
 from .dhan_client import OrderStatus, dhan_wrapper
@@ -249,6 +250,17 @@ async def _process_one_entry(symbol: str, option_type: str) -> dict:
     can't have one symbol's failure affect another's or crash the whole
     batch."""
     loop = asyncio.get_running_loop()
+
+    # Belt-and-suspenders (same reasoning as the already_open check below):
+    # option_main.py's webhook handler already filters choppy stocks out
+    # before ranking, so this should never actually trigger in the normal
+    # webhook path - but any future caller of _process_one_entry that
+    # skips that pre-filter (e.g. a different entry point) still can't
+    # place a real order in a choppy stock. Pure in-memory check, zero
+    # I/O cost. See choppy_stocks.py.
+    if choppy_stocks.is_choppy(symbol):
+        logger.info("%s: skipped - choppy stock (lot size > %d)", symbol, choppy_stocks.LOT_SIZE_THRESHOLD)
+        return {"symbol": symbol, "status": "skipped", "reason": "choppy_stock"}
 
     # Atomically checks dedup + capacity and claims the symbol in one
     # locked step, so two near-simultaneous calls for the same symbol

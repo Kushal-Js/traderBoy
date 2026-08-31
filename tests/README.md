@@ -15,13 +15,21 @@ behavior. Good times to run them: after touching `position_store.py`,
 `Futures/`; before a deploy you're nervous about; or just periodically for
 peace of mind.
 
+## Files
+
+| File | Covers |
+|------|--------|
+| `test_deep_integration.py` | Concurrent entry, duplicate-webhook races, retry-on-transient-failure, real exit paths, reconciliation attribution, malformed payloads |
+| `test_choppy_stocks.py` | `choppy_stocks.py`'s lot-size computation/persistence/caching, weekly-refresh scheduling math, and its wiring into the real webhook handler (choppy stocks excluded before ranking, non-choppy stocks unaffected, audit log stays unfiltered) |
+
 ## How to run
 
 ```bash
 uv run python tests/test_deep_integration.py
+uv run python tests/test_choppy_stocks.py
 ```
 
-Takes a few seconds. Prints one PASS line per scenario, or raises an
+Each takes a few seconds. Prints one PASS line per scenario, or raises an
 `AssertionError`/exception on the first failure (nothing is caught/hidden).
 
 ## Safety

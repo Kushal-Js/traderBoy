@@ -2003,6 +2003,63 @@ out of git.
     config value). Confirmed `/positions` and `/futures/positions` both
     had empty `live_positions` immediately before this deploy's restart.
 
+55. **New `choppy_stocks.py` - weekly "choppy stocks" exclusion list for
+    Options - user request 31 Aug 2026** ("stocks with lot size > 6000,
+    avoid Options trades in them, refresh every Monday 12 PM"). Every NSE
+    stock-option (OPTSTK) underlying whose current lot size exceeds 6000
+    units (`choppy_stocks.LOT_SIZE_THRESHOLD`) is excluded from new
+    Options entries - both real webhooks (`/chartink/webhook`,
+    `/chartink/webhook-sell`), scoped to Options only per the user's own
+    wording ("avoid taking trades in these stocks Options from bot") -
+    Futures/K01/CopperOptions/IndexScalping are untouched.
+
+    Computed from Tradehull's own cached scrip-master (same source/filter
+    K01's `_fetch_fno_universe` already uses for the full F&O universe -
+    one lot-size value per underlying, since NSE revises it for everyone
+    at once, not per-strike). Persisted to `choppy/choppy_stocks.json`
+    (gitignored runtime data, same convention as `history/`) via an
+    atomic write (temp file + `Path.replace`), refreshed automatically by
+    a new background loop (`choppy_list_refresh_loop`, started from
+    Options' lifespan the same way `monitor_loop`/`paper_webhook.poll_loop`
+    are) that bootstraps an initial list immediately if none exists on
+    disk yet, then refreshes every Monday at 12:00 PM IST after that.
+    Visible via new `GET /choppy-stocks`.
+
+    Two deliberately different read paths: `is_choppy()` (the hot path,
+    called once per candidate stock per alert) is a pure in-memory set
+    lookup - zero I/O - kept current by every refresh and reloaded from
+    disk at startup (`load_choppy_cache_at_startup`); `read_choppy_list()`
+    (the cold path, `GET /choppy-stocks` and the refresh loop's own
+    bootstrap check) reads the file fresh each time. FAILS OPEN throughout
+    - a missing/corrupt file means an empty exclusion set (nothing
+    blocked) with a warning logged, not a silent halt to all Options
+    entries, and a failed refresh just keeps the previous list rather than
+    crashing Options' own startup.
+
+    Filtered in `option_main.py`'s webhook handler BEFORE ranking (so a
+    choppy stock in an alert can't consume a top-N ranking slot a
+    tradeable stock could have used instead) and again, belt-and-suspenders,
+    inside `trading_engine.py`'s `_process_one_entry` right before
+    `reserve_symbol` (in case some future caller bypasses the pre-filter) -
+    same defensive-layering pattern this file already uses for the
+    broker-position dedup check. The webhook-alerts audit log
+    (`record_webhook_alert`) still records the ORIGINAL, unfiltered stock
+    list Chartink sent - only what the bot chose to act on is filtered,
+    not what's logged as received.
+
+    New `tests/test_choppy_stocks.py` (6 scenarios, all passing): lot-size
+    computation/dedup/exchange-filtering against a fake instrument
+    dataframe, write/read round-trip through real disk I/O, cache
+    fail-open + refresh + restart-recovery behavior, `_next_monday_noon_ist`
+    scheduling edge cases (exact instant, just-before, mid-week, Sunday
+    night), and two full-webhook-handler scenarios (a choppy stock
+    excluded before ranking while non-choppy stocks still enter normally;
+    an alert where every stock is choppy ignored cleanly with an explicit
+    `all_stocks_choppy` reason rather than a misleading `could_not_rank_
+    any_stock`). Re-ran `tests/test_deep_integration.py` afterward (6/6
+    still pass, confirming no interaction with the existing entry flow
+    when the choppy cache is empty, its default state).
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
