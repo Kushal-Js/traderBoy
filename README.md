@@ -1,9 +1,10 @@
 # Chartink → Dhan Algo Bot
 
 Receives Chartink scanner webhook alerts on two endpoints - a bullish scan
-(buys ATM CE) and a bearish scan (buys ATM PE) - on the top-3 %-change
-stocks in each alert, and manages exits (target / stop-loss / trailing
-stop-loss / Supertrend / EOD square-off) automatically - using Dhan's
+(buys ATM CE) and a bearish scan (buys ATM PE) - on the top-N %-change
+stocks in each alert (`TOP_N_STOCKS`, currently 4), and manages exits
+(target / stop-loss / trailing stop-loss / Supertrend / EOD square-off)
+automatically - using Dhan's
 [Dhan-Tradehull](https://pypi.org/project/Dhan-Tradehull/) package for REST
 calls and the underlying [`dhanhq`](https://pypi.org/project/dhanhq/) SDK's
 WebSocket classes for live order updates and market data.
@@ -18,9 +19,9 @@ This is the Dhan counterpart to the Groww version of this bot (see the
 | `watchdog.py` | Standalone health-check watchdog (own systemd unit) - see NOTES.md |
 | `trade_history.py` | Owns the shared `history/<YYYY-MM-DD>_<name>.log` dated-file convention (`dated_path`/`append_jsonl`/`read_all_jsonl`) used by every trade/paper-trade store in this repo, plus the real (non-paper) trade log itself (`real_trades`) - tagged by which package placed it. `Options/position_store.py`/`Futures/position_store.py`'s own in-memory `closed_positions_today` resets daily and doesn't survive a restart; `history/` is the durable record. Read via `GET /trade-history`. Also owns the `position_opened` log + `attribute_open_broker_position()` - the mechanism that lets Options' and Futures' broker-position reconciliation each correctly skip a position that isn't actually theirs, since Dhan's own `/positions` data has no per-strategy tag at all |
 | `Options/option_main.py` | Options strategy's FastAPI router + lifespan - webhook endpoints + status endpoints, mounted onto `main.py`'s app |
-| `Options/trading_engine.py` | Ranking, entry, exit-condition monitoring, square-off logic, AMO order sync |
-| `Options/dhan_client.py` | Thin wrapper over Tradehull (REST) + dhanhq's `OrderUpdate`/`MarketFeed` (WebSocket) |
-| `Options/position_store.py` | In-memory state: live positions, daily traded-symbols dedup, orders, capacity cap |
+| `Options/trading_engine.py` | Ranking, entry (ranked stocks enter concurrently via `asyncio.gather`, not sequentially), exit-condition monitoring, square-off logic, AMO order sync, broker-position reconciliation at startup (filtered by `trade_history.attribute_open_broker_position` so it can never import a position that's actually Futures') |
+| `Options/dhan_client.py` | Thin wrapper over Tradehull (REST) + dhanhq's `OrderUpdate`/`MarketFeed` (WebSocket). `MarketFeed` self-heals on disconnect on its own (verified against the library's own source); this file adds `on_connect`/`on_close`/`on_error` logging + `/feed-stats` counters for visibility into that, plus `ltp_rest_fallback_semaphore` to cap concurrent REST LTP fallbacks (shared with Futures) |
+| `Options/position_store.py` | In-memory state: live positions, daily traded-symbols dedup, orders, capacity cap. Every open/close fires an async, non-blocking `trade_history.py` log entry (never awaited inside the lock) |
 | `Options/config.py` | All tunables for the options strategy, sourced from environment variables |
 | `Options/paper_webhook.py` | Second, independent Chartink endpoint (`/chartink/webhook-papertrade`) for evaluating a new scan before trusting it with real money - **paper trading only**, reuses the real strategy's own ranking/ATM/exit logic so only the new scan's stock-picking is under test |
 | `IndexScalping/index_main.py` | Index scalping strategy's FastAPI router + lifespan - **paper trading only**, no real orders placed |
@@ -30,8 +31,8 @@ This is the Dhan counterpart to the Groww version of this bot (see the
 | `CopperOptions/paper_engine.py` | Gap + daily-RSI + dual-Supertrend signal, paper entry/exit logic, expiry-cycle rolling |
 | `CopperOptions/config.py` | All tunables, including `STRATEGY_ENABLED` (independent on/off switch) |
 | `Futures/futures_main.py` | Futures strategy's FastAPI router + lifespan - **PLACEHOLDER** (buys ATM CE options via Options'-identical mechanics until real futures-contract buying replaces it), real orders, own separate position pool |
-| `Futures/trading_engine.py` | Near-verbatim copy of `Options/trading_engine.py`'s ranking/entry/exit logic against this package's own config/position_store |
-| `Futures/position_store.py` | Futures' own independent in-memory state - separate capacity/dedup from Options' |
+| `Futures/trading_engine.py` | Near-verbatim copy of `Options/trading_engine.py`'s ranking/entry/exit logic against this package's own config/position_store, including concurrent entry placement and broker-position reconciliation (added 31 Aug 2026 - filtered so it can never import a position that's actually Options') |
+| `Futures/position_store.py` | Futures' own independent in-memory state - separate capacity/dedup from Options' - same async trade-history logging + reconciliation support as Options' own |
 | `Futures/config.py` | All tunables for the Futures strategy, `FUTURES_`-prefixed env vars |
 | `Futures/dhan_client.py` | Re-exports `Options.dhan_client.dhan_wrapper` - reuses the one authenticated Dhan connection rather than opening a second |
 | `K01/screener_main.py` | "K01" - daily F&O stock screener's FastAPI router + lifespan - **paper trading only**, no real orders placed. Design in the separate `trading-skills` repo (`designs/k01.md`) |
@@ -81,13 +82,15 @@ URLs — matching the `webhook_url` field in your sample payload.
    already open from one blocks the other from also entering it - but each
    has its own capacity cap (`MAX_LIVE_POSITIONS_CE` /
    `MAX_LIVE_POSITIONS_PE`), so a run of alerts on one side can't crowd
-   out capacity for the other. As of 27 Aug 2026 (user request):
-   `MAX_LIVE_POSITIONS_CE=4`, `MAX_LIVE_POSITIONS_PE=0` — the bearish
-   webhook is fully off, every alert to it gets rejected before ranking
-   even runs (`"No PE capacity left - ignoring alert"`). This only gates
-   *new* entries; any PE position already open when this took effect
-   keeps being monitored/exited normally. See NOTES.md's design-decision
-   entry for the DELHIVERY capacity-cap investigation that prompted this.
+   out capacity for the other. As of 30 Aug 2026 (user request):
+   `MAX_LIVE_POSITIONS_CE=3` (Futures' own cap aligned to the same value
+   the same day), `MAX_LIVE_POSITIONS_PE=0` — the bearish webhook is fully
+   off, every alert to it gets rejected before ranking even runs
+   (`"No PE capacity left - ignoring alert"`). This only gates *new*
+   entries; any PE position already open when this took effect keeps
+   being monitored/exited normally. See NOTES.md's design-decision entry
+   for the DELHIVERY capacity-cap investigation that originally prompted
+   this, and entry #42 for the later CE 4→3 alignment.
 
 1b. **Entry cutoff** — `POST /chartink/webhook`, `/chartink/webhook-sell`,
    and `/chartink/webhook-futures` all refuse to open new positions once
