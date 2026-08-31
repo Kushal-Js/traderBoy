@@ -1922,6 +1922,56 @@ out of git.
     pacing gaps are genuinely there. Re-ran all 6 of tonight's prior test
     suites (entries #46-50) afterward - no regression.
 
+52. **Deep integration test pass before market open - user request 31 Aug
+    2026** ("do deep paper testing to make sure everything works fine when
+    market opens"). Built a 6-scenario suite exercising the REAL webhook
+    handler (`Options.option_main._handle_chartink_webhook`) and REAL
+    entry/exit/reconciliation code end-to-end - not reimplemented,
+    not isolated unit mocks - with every Dhan network call mocked (ranking,
+    ATM lookup, broker-position lookup, order placement) so it validates
+    the LOGIC changes from tonight (#43-51) together, under realistic
+    multi-stock/concurrent conditions, safely and repeatably.
+
+    **A real operational constraint hit along the way, not a code bug**:
+    the first version of this suite used real (read-only) Dhan calls and
+    tripped Dhan's own authentication rate limiter after the many separate
+    local test-script logins already run tonight ("Too many attempts.
+    Please try again after sometime."). Confirmed the live droplet was
+    completely unaffected (`/health`, `/positions`, `/futures/positions`
+    all normal throughout - it uses its own already-cached session,
+    entirely independent of local test scripts each needing a fresh
+    login). Rewrote the suite to mock every Dhan network call, not just
+    order placement, removing any dependency on live auth for this kind
+    of logic-level validation going forward.
+
+    **6 scenarios, all passing, run together with all 26+ checks from
+    entries #43-51's own test suites afterward (32+ total, zero
+    regressions)**:
+    1. A real 5-stock alert through the real webhook handler, ranking
+       trimming to `TOP_N_STOCKS` candidates BEFORE capacity is checked
+       (exactly like production), capacity correctly capping entries.
+    2. Two concurrent identical webhook deliveries (a real Chartink
+       duplicate-delivery scenario) - each symbol entered exactly once,
+       `reserve_symbol`'s atomic lock holding under real concurrent calls.
+    3. A transient Dhan failure injected mid-burst during real concurrent
+       entry - the retry (entry #51's fix) recovers it inline, that
+       stock's entry is NOT abandoned.
+    4. Real target-hit and stop-loss-hit exits via the actual
+       `_exit_reason_for`/`close_position` - both close correctly, symbols
+       free for re-entry, `trade_history` logs both async and correctly.
+    5. A realistic mixed 3-position reconciliation (2 Options-owned, 1
+       Futures-owned, attributed via real `record_opened_position` calls)
+       - each side picks up only its own, confirmed via the exact expected
+       warning logs firing for the cross-strategy skips.
+    6. Malformed webhook payloads (empty `stocks`, missing required field)
+       rejected cleanly by pydantic validation, not silently passed
+       through toward order placement.
+
+    Live droplet confirmed healthy and untouched throughout (all of this
+    ran against local, scratch `PositionStore`/`history/` instances - the
+    real module-level singletons and the real deployed process were never
+    touched by any of tonight's testing).
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
