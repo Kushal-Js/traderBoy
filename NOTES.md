@@ -1772,6 +1772,42 @@ out of git.
     even under a simulated 2-second slow write, matching `close_position`'s
     already-verified behavior).
 
+49. **LTP-cache memory leak found and fixed - user request 31 Aug 2026**
+    ("is this setup fine with no memory issues"). Checked real droplet
+    numbers first, not just the code: `free -h` showed 961Mi total/489Mi
+    available/only 42Mi of the 1Gi swap in use, and no OOM-kill events in
+    `dmesg`/the kernel journal ever - healthy right now, the 21 Aug swap
+    addition was precautionary, not reactive to a crash.
+
+    Found a real bug while checking anyway: `dhan_client.py`'s `_ltp_cache`/
+    `_ltp_cache_ts` (the WebSocket price cache, keyed by option
+    security_id) are written on every tick and every REST fallback, but
+    were NEVER cleaned up - confirmed `unsubscribe_option_price()` (called
+    at every real exit point in both Options and Futures) only ever
+    popped `_security_id_to_symbol`, not these two. Unlike
+    `_supertrend_cache` (keyed by underlying_symbol, naturally capped at
+    the ~210-stock F&O universe), option contracts' security_ids change
+    with every strike/expiry, so this key space never caps on its own -
+    a real, if slow, unbounded leak (estimated ~1-2MB/year at realistic
+    trade volumes - not urgent given the headroom above, but a real bug,
+    not just theoretical).
+
+    Fixed by popping both dicts in `unsubscribe_option_price()` alongside
+    the existing `_security_id_to_symbol` pop. Checked every call site
+    first to confirm nothing reads a symbol's cached LTP after
+    unsubscribing it (unsubscribe only ever happens on a confirmed
+    successful exit or a rejected-entry cleanup - both are dead ends for
+    that exact contract, never read again) - so clearing the cache at that
+    exact moment can't break a legitimate read.
+
+    Verified with a real test (constructed a bare `DhanWrapper` instance,
+    monkeypatched only the instrument-lookup/market-feed dependencies
+    subscribe/unsubscribe touch - no network calls): populated both cache
+    dicts exactly as a real tick + REST fallback would, called the actual
+    `unsubscribe_option_price()`, and confirmed all three dicts (including
+    the two that leaked before the fix) were empty afterward - plus a
+    double-unsubscribe on an already-clean symbol doesn't raise.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

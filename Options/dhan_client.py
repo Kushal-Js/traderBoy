@@ -432,8 +432,23 @@ class DhanWrapper:
         if not config.ENABLE_WS_FEED:
             return
         meta = self._instrument_meta(trading_symbol)
-        self._security_id_to_symbol.pop(meta["security_id"], None)
-        self.market_feed.unsubscribe_symbols([(MarketFeed.NSE_FNO, meta["security_id"], MarketFeed.Ticker)])
+        security_id = meta["security_id"]
+        self._security_id_to_symbol.pop(security_id, None)
+        # Found + fixed 31 Aug 2026 (user request, "memory issues" audit):
+        # this always cleaned the subscription itself, but _ltp_cache/
+        # _ltp_cache_ts (populated by every tick/REST-fallback while this
+        # symbol was subscribed) were never cleared - a real, if slow,
+        # unbounded leak keyed by every distinct option contract ever
+        # traded across the process's entire lifetime (strikes/expiries
+        # change constantly, so this key space never naturally caps the
+        # way _supertrend_cache's underlying-symbol keys do). Small in
+        # absolute terms (confirmed: ~1-2MB/year at realistic trade
+        # volumes) but a real bug, not just theoretical - worth closing
+        # properly rather than leaving it to slowly accumulate forever on
+        # a memory-constrained droplet.
+        self._ltp_cache.pop(security_id, None)
+        self._ltp_cache_ts.pop(security_id, None)
+        self.market_feed.unsubscribe_symbols([(MarketFeed.NSE_FNO, security_id, MarketFeed.Ticker)])
 
     def get_cached_option_ltp(self, trading_symbol: str) -> Optional[float]:
         """Returns the last price pushed over the WebSocket feed for this
