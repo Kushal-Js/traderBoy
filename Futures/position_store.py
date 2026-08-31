@@ -252,7 +252,10 @@ class PositionStore:
             pos.exit_price = exit_price
             pos.closed_at = datetime.now()
             self.closed_positions_today.append(pos)
-            record_closed_trade("Futures", pos)
+            # Fire-and-forget - see Options/position_store.py's identical
+            # comment / trade_history.py's record_closed_trade docstring:
+            # must not be awaited while _lock is held.
+            asyncio.create_task(record_closed_trade("Futures", pos))
             self.reserved_symbols.pop(underlying_symbol, None)
             logger.info(
                 "Position CLOSED: %s (%s) reason=%s exit=%.2f pnl_pct=%.2f%%",

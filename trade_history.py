@@ -97,11 +97,23 @@ def read_all_jsonl(name: str) -> list[dict]:
 REAL_TRADES_NAME = "real_trades"
 
 
-def record_closed_trade(strategy: str, pos) -> None:
+async def record_closed_trade(strategy: str, pos) -> None:
     """strategy: "Options" or "Futures". pos: a closed
     Options.position_store.Position or Futures.position_store.Position -
     both have an identical field set for everything read here (confirmed
-    by reading both dataclasses directly)."""
+    by reading both dataclasses directly).
+
+    IMPORTANT (found + fixed 31 Aug 2026, user asked to audit for lag):
+    this used to be a plain sync function called directly inside
+    PositionStore.close_position()'s `async with self._lock:` block - a
+    blocking disk write on the event loop thread, while holding the lock
+    every other position operation (a concurrent exit, a fresh entry
+    reserving the same symbol, a price-tick's update_highest_price) has to
+    wait on. Now async for the same reason record_webhook_alert already
+    is - call it via `asyncio.create_task(record_closed_trade(...))` and
+    do NOT await it (see both position_store.py call sites). The actual
+    write still runs in run_in_executor's thread pool, never the event
+    loop, and still can't raise into the caller."""
     try:
         pnl = None
         if pos.exit_price is not None and pos.entry_price is not None:
@@ -123,7 +135,8 @@ def record_closed_trade(strategy: str, pos) -> None:
             "order_id": pos.order_id,
             "logged_at": datetime.now().isoformat(),
         }
-        append_jsonl(REAL_TRADES_NAME, record)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, append_jsonl, REAL_TRADES_NAME, record)
     except Exception:  # noqa: BLE001
         logger.exception("Could not build/append real trade record for %s %s - "
                           "trade itself is unaffected, this is logging-only.",

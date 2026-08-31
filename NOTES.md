@@ -1606,6 +1606,58 @@ out of git.
     filtering (`strategy=Options`/`Futures`/`Options-PaperTrade`) - 7/7
     checks passed.
 
+46. **Real lag regression found and fixed during a responsiveness audit -
+    user request 31 Aug 2026** ("make sure... no delay in entry and exit
+    trade placements... no lag basically"). Audited the full entry/exit/
+    monitoring path against NOTES.md's own previously-established
+    responsiveness targets (event-driven `on_price_tick`, `MONITOR_
+    INTERVAL_SECONDS=2`, `LTP_STALE_AFTER_SECONDS=5`, `SUPERTREND_
+    REFRESH_SECONDS=15`, `SUPERTREND_ENTRY_GRACE_MINUTES`/`_MIN_WARMUP_
+    CANDLES` confirmed still removed, `monitor_loop`'s position checks
+    confirmed still concurrent via `asyncio.gather` not sequential) -
+    all intact, no regression found in any of that.
+
+    **Found one real regression, introduced by entry #43's own trade_
+    history.py work (30 Aug 2026):** `record_closed_trade()` was a plain
+    sync function called directly inside `PositionStore.close_position()`'s
+    `async with self._lock:` block - a blocking disk write on the event
+    loop thread, WHILE HOLDING THE LOCK every other position operation
+    needs (a concurrent exit on a different symbol, a fresh entry trying
+    to reserve the very symbol this close just freed a few lines later in
+    the same block, a price-tick's `update_highest_price`). Unlike
+    `record_webhook_alert` (entry #45, built async/fire-and-forget from
+    the start), this one was never given the same treatment when it was
+    first written.
+
+    Fixed identically to #45's pattern: `record_closed_trade` is now
+    `async def`, its actual write goes through `run_in_executor` (thread
+    pool, never the event loop), and both call sites
+    (`Options/position_store.py`, `Futures/position_store.py`) fire it via
+    `asyncio.create_task(record_closed_trade(...))` WITHOUT awaiting -
+    `close_position()` (and the lock it holds) no longer waits on disk I/O
+    at all.
+
+    Verified with a real test, not just reasoning about it: monkeypatched
+    the write to sleep 2 real seconds, called the actual (not
+    reimplemented) `PositionStore.close_position()` for both Options and
+    Futures, and confirmed it returned in 0.0ms each time (vs. would have
+    blocked ~2000ms before the fix) - AND that the symbol was already
+    freed in `reserved_symbols` immediately (proving the lock genuinely
+    released without waiting), AND that both trades were still correctly
+    logged once the background writes actually completed a moment later.
+
+    **Observation, not changed:** `enter_positions_for_stocks` places
+    orders for ranked stocks in a sequential `for` loop (reserve + broker-
+    check + order-placement per stock, one after another), not
+    concurrently via `asyncio.gather`. With `TOP_N_STOCKS=4` this means up
+    to 4 sequential real-order round-trips per alert. Not clearly a
+    regression (no evidence this was ever concurrent) and not changed
+    without an explicit decision, since parallelizing real order placement
+    is a bigger behavioral change than a logging-path fix - flagged for
+    the user to decide on separately if entry latency across multiple
+    ranked stocks in one alert ever becomes the bottleneck worth trading
+    against added complexity/race-condition surface.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

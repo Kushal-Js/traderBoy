@@ -399,7 +399,15 @@ class PositionStore:
             pos.exit_price = exit_price
             pos.closed_at = datetime.now()
             self.closed_positions_today.append(pos)
-            record_closed_trade("Options", pos)
+            # Fire-and-forget - MUST NOT be awaited here (see
+            # trade_history.py's record_closed_trade docstring): this runs
+            # while _lock is held, and awaiting the write would make every
+            # other position operation (a concurrent exit, a fresh entry
+            # reserving this same symbol a few lines below, a price-tick's
+            # update_highest_price) wait on disk I/O before the lock can
+            # release. create_task schedules it without blocking this
+            # coroutine at all.
+            asyncio.create_task(record_closed_trade("Options", pos))
             # Frees the symbol up for a fresh entry on a later alert today -
             # reserved_symbols only blocks while something is genuinely
             # open/in-flight for it, not for the rest of the day.
