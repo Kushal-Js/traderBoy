@@ -2648,6 +2648,83 @@ out of git.
     69/69 total across all 10 test files). Still deployed DISABLED
     (`SWING_STRATEGY_ENABLED=false`).
 
+65. **Swing paper trading - user request 1 Sep 2026** ("Let's enable
+    paper trading for tomorrow for 'Swing' package and keep track of
+    trades, history and profit loss also like real trades in files and
+    we will evaluate them later tomorrow.").
+
+    New `Swing/paper_engine.py` - mirrors the established paper-trading
+    pattern already used by `CopperOptions/paper_engine.py`/
+    `IndexScalping/paper_engine.py`/`K01/paper_engine.py` (a dedicated
+    `PaperTradeStore`-style class over `trade_history.append_jsonl`/
+    `read_all_jsonl` with its own log name, never
+    `record_opened_position`/`record_closed_trade`, which write the REAL
+    trade files). Reuses trading_engine.py's entry/exit signal functions
+    completely UNCHANGED (`_evaluate_watchlist_entry_signal`/
+    `_evaluate_basket_exit_signal`) - the point is to see how the EXACT
+    signal that would eventually place real orders actually performs, not
+    a simplified stand-in for it. Simulates both legs' fills at current
+    LTP (`get_option_ltp` - confirmed generic across instrument types by
+    reading `Options/dhan_client.py` directly: a bare
+    `get_ltp_data(names=[trading_symbol])` call with no option-specific
+    validation, already reused for equity symbols by `get_day_change_pct`)
+    instead of placing real orders - never calls
+    `place_market_order`/`wait_for_order_result`, the two real
+    order-placement entry points.
+
+    Its own `PaperBasketStore` (in-memory `live_baskets` + `completed`
+    list backed by a NEW log name, `swing_paper_trades` - completely
+    separate file from `real_trades`/`position_opened`, so a paper trade
+    can never be mistaken for a real one when reading history back). No
+    capacity cap on paper baskets (`MAX_LIVE_BASKETS` exists to cap REAL
+    financial risk, which doesn't apply to a simulated trade). One
+    completed trade = one JSON record covering BOTH legs (futures +
+    option entry/exit price, per-leg pnl, and the combined total) - the
+    natural unit to eyeball for "did this trade work", not two half-rows.
+    A leg that can't be priced on ENTRY aborts the whole attempt with
+    nothing recorded (no unwind needed - nothing was ever persisted); a
+    leg that can't be priced on EXIT falls back to its own entry price
+    (logged loudly) so an already-open paper position always closes on
+    signal.
+
+    New `Swing/config.py` flag: `SWING_PAPER_TRADING_ENABLED`
+    (`config.PAPER_TRADING_ENABLED`) - completely INDEPENDENT of
+    `STRATEGY_ENABLED` (which stays `false` - no real money). Own poll
+    loop (`paper_poll_loop`), started from `swing_main.py`'s lifespan
+    alongside the real `monitor_loop`, always running (internally gated
+    by the flag, same "no restart needed to flip it" pattern as
+    `STRATEGY_ENABLED` itself). Reads the SAME shared watchlist
+    (`data/watchlist`/the watchlist webhook) the real loop reads, but
+    deliberately does NOT remove a symbol from it on a paper entry
+    (unlike the real loop's own auto-entry) - a symbol already holding an
+    open paper basket is simply skipped on the next entry check instead,
+    so paper trading can never interfere with what the real loop would
+    see once `STRATEGY_ENABLED` is eventually flipped on.
+
+    New endpoint: `GET /swing/paper-trades` (live + completed paper
+    baskets, per-leg/total pnl, win rate) - mirrors
+    `GET /copper/paper-trades`'s own shape.
+
+    New `tests/test_swing_paper_engine.py` (7 scenarios, all passing): a
+    full entry+exit cycle never calls `place_market_order`/
+    `wait_for_order_result` (proven by making both RAISE if called, not
+    merely asserting a call count); a successful entry prices both legs
+    and records the basket with nothing written to disk until a close; a
+    PE-leg pricing failure aborts cleanly with nothing recorded; exit
+    computes correct per-leg/total P&L (verified against hand-computed
+    numbers) and persists to the new on-disk log, round-tripped via
+    `read_all_jsonl`; the paper log is confirmed isolated from real trade
+    history in both directions; the poll loop's gated body evaluates
+    nothing at all while the flag is False; and a full poll-loop-shaped
+    auto-entry-then-exit through the real, unchanged signal functions,
+    including confirming a paper entry leaves the shared watchlist
+    untouched. Re-ran all 10 existing suites afterward (69/69 still pass,
+    76/76 total across all 11 test files).
+
+    Deployed with `SWING_PAPER_TRADING_ENABLED=true` for 1 Sep 2026's
+    session, `SWING_STRATEGY_ENABLED` confirmed still `false` (no real
+    orders) - see the deploy checklist run immediately after this entry.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

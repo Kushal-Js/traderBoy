@@ -103,3 +103,15 @@ SUPERTREND_CONFIRM_TIMEFRAME_MINUTES = int(os.getenv("SWING_SUPERTREND_CONFIRM_T
 # for the same rate-limit-avoidance rationale. Own independent value/cache
 # (trading_engine.py's own _supertrend_cache), not shared with Options'.
 SUPERTREND_REFRESH_SECONDS = int(os.getenv("SWING_SUPERTREND_REFRESH_SECONDS", "15"))
+
+# --------------------------------------------------------------------------- #
+# Paper trading (user request 1 Sep 2026 - "enable paper trading for
+# tomorrow... keep track of trades, history and profit loss also like
+# real trades in files"). Entirely INDEPENDENT of STRATEGY_ENABLED above -
+# that flag must stay False (no real money) while this one runs, so paper
+# trading can be evaluated using the exact same, already-defined entry/
+# exit signal before it's ever trusted with a real order. See
+# paper_engine.py's own module docstring for the full design (simulated
+# fills at current LTP, its own on-disk log entirely separate from real
+# trade history, no capacity cap since nothing here risks real capital).
+PAPER_TRADING_ENABLED = os.getenv("SWING_PAPER_TRADING_ENABLED", "false").lower() == "true"

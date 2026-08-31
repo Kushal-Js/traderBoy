@@ -42,6 +42,7 @@ from pydantic import BaseModel, field_validator
 from trade_history import fire_and_forget, record_webhook_alert
 
 from . import config
+from .paper_engine import paper_basket_store, paper_poll_loop
 from .position_store import basket_store
 from .trading_engine import enter_basket_for_stock, monitor_loop, reconcile_broker_positions
 from .watchlist import watchlist_store
@@ -51,6 +52,7 @@ logger = logging.getLogger("swing_main")
 router = APIRouter()
 
 _monitor_task: Optional[asyncio.Task] = None
+_paper_task: Optional[asyncio.Task] = None
 
 
 @asynccontextmanager
@@ -62,7 +64,7 @@ async def lifespan(app: FastAPI):
     restart needs to be picked back up whether or not NEW entries are
     currently allowed. The monitor loop always starts too - see
     config.py's own docstring for why."""
-    global _monitor_task
+    global _monitor_task, _paper_task
 
     # Best-effort load of whatever's already in data/watchlist (user
     # request 31 Aug 2026) - so a restart doesn't lose stocks that were
@@ -88,13 +90,19 @@ async def lifespan(app: FastAPI):
         logger.exception("Could not reconcile broker baskets at startup - continuing without them.")
 
     _monitor_task = asyncio.create_task(monitor_loop())
+    # Own independent loop, own independent flag (config.PAPER_TRADING_ENABLED)
+    # - see paper_engine.py's own module docstring for why this always
+    # starts alongside the real monitor loop regardless of either flag.
+    _paper_task = asyncio.create_task(paper_poll_loop())
     logger.info(
         "Swing strategy startup complete: monitor loop running (reusing Options' Dhan connection). "
-        "strategy_enabled=%s", config.STRATEGY_ENABLED,
+        "strategy_enabled=%s paper_trading_enabled=%s", config.STRATEGY_ENABLED, config.PAPER_TRADING_ENABLED,
     )
     yield
     if _monitor_task:
         _monitor_task.cancel()
+    if _paper_task:
+        _paper_task.cancel()
 
 
 # --------------------------------------------------------------------------- #
@@ -201,6 +209,15 @@ async def get_positions():
 @router.get("/swing/watchlist")
 async def get_watchlist():
     return await watchlist_store.snapshot()
+
+
+@router.get("/swing/paper-trades")
+async def get_paper_trades():
+    """Completed + live PAPER baskets, and aggregate pnl/win-rate - see
+    paper_engine.py's own docstring. Always reachable (no
+    strategy_enabled/paper_trading_enabled gate on the GET itself) so past
+    results stay visible even after paper trading is later turned off."""
+    return await paper_basket_store.snapshot()
 
 
 @router.post("/swing/square-off-now")

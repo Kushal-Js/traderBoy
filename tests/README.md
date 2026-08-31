@@ -29,6 +29,7 @@ peace of mind.
 | `test_swing_integration.py` | Full end-to-end Swing flows on top of the above: multi-stock webhook entry with a mixed capacity outcome, a complete enter-via-webhook-then-manual-square-off lifecycle verified against `trade_history`, a realistic 4-way reconciliation (Options/Futures/Luxury/Swing all with real broker positions at once), the "unpaired leg" safety behavior (a lone futures leg is never reconstructed into a partial basket), and the watchlist/enter webhooks operating independently |
 | `test_swing_signal_logic.py` | Swing's entry/exit signal (added 31 Aug 2026, entry extended same day with a gap-up gate) - crossover detection correctness, a genuine crossover proven through the real `_compute_supertrend` against synthetic candle data, the gap-up check's own caching/invalidation, the entry rule's full gap-up + 5-min/1-min truth table (including gap-up correctly blocking an otherwise-perfect Supertrend signal), the exit rule firing only on a genuine crossed-below, and full monitor-loop-shaped auto-entry/auto-exit flows (a real signal genuinely enters/exits a basket, not a stub) |
 | `test_swing_watchlist_file.py` | Swing's file-backed watchlist (`data/watchlist`, added 31 Aug 2026) - adds/uppercases symbols from a real file, ignores blank lines/comments, never duplicates, fails open on a missing file, picks up a hand-edit with no restart needed, and round-trips the real seed file this task created (AUROPHARMA/OFSS/TORNTPHARM/VEDL) |
+| `test_swing_paper_engine.py` | Swing's paper-trading engine (added 1 Sep 2026) - a full simulated entry+exit never calls `place_market_order`/`wait_for_order_result` (proven by making both raise if called), a successful entry prices both legs via `get_option_ltp` and records the basket, a PE-leg pricing failure aborts with nothing recorded (no partial paper position), exit computes correct per-leg/total P&L and persists to its own on-disk log (`swing_paper_trades`) fully isolated from real trade history, the poll loop is a no-op while `PAPER_TRADING_ENABLED` is False, and a full poll-loop-shaped auto-entry-then-exit via the real (unchanged) signal functions - including confirming a paper entry leaves the shared watchlist untouched, unlike a real auto-entry |
 
 ## How to run
 
@@ -43,6 +44,7 @@ uv run python tests/test_swing_package.py
 uv run python tests/test_swing_integration.py
 uv run python tests/test_swing_signal_logic.py
 uv run python tests/test_swing_watchlist_file.py
+uv run python tests/test_swing_paper_engine.py
 ```
 
 Each takes a few seconds. Prints one PASS line per scenario, or raises an
