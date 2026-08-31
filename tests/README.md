@@ -25,6 +25,7 @@ peace of mind.
 | `test_luxury_package.py` | The Luxury package (a same-account Options duplicate) - concurrent CE entry, the PE webhook entering PUTs on its own capacity pool, duplicate-delivery races, real exit paths, three-way (Options/Futures/Luxury) reconciliation with zero cross-contamination, malformed payloads |
 | `test_cross_strategy_registry.py` | `cross_strategy_registry.py`'s claim/release semantics, and REAL concurrent races (via `asyncio.gather`, not simulated) between Options/Futures/Luxury for the same stock at two levels: `_process_one_entry` directly, and the FULL real webhook handler functions (ranking, capacity, choppy-stocks filter, order placement) - exactly one winner every time at both levels, unrelated symbols/stocks in the same alert batch never affected, a mixed multi-stock scenario confirming each package's own unique stock is unaffected by a shared stock racing alongside it |
 | `test_get_option_ltp_retry.py` | `get_option_ltp()`'s retry wrapper (added 31 Aug 2026 after a lag audit found 46 unretried transient LTP-fetch failures in one trading day) - recovers from a transient failure, still raises after exhausting retries, and uses a real ~1.5s backoff (not a tight loop) |
+| `test_swing_package.py` | The Swing package (futures + ATM PE hedge "basket") - disabled-by-default flag placing zero orders, a full successful all-or-nothing entry, both rollback cases ("neither" when the futures leg fails; the futures leg unwound via a compensating SELL when the PE leg fails after filling), configurable basket capacity, the watchlist webhook, Swing vs Options racing for the same stock via `cross_strategy_registry`, and `get_futures_contract()`'s nearest-expiry/hyphenated-underlying resolution |
 
 ## How to run
 
@@ -35,6 +36,7 @@ uv run python tests/test_risk_threshold_cutoff.py
 uv run python tests/test_luxury_package.py
 uv run python tests/test_cross_strategy_registry.py
 uv run python tests/test_get_option_ltp_retry.py
+uv run python tests/test_swing_package.py
 ```
 
 Each takes a few seconds. Prints one PASS line per scenario, or raises an

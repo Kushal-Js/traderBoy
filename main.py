@@ -36,7 +36,18 @@ in the same process. Three are mounted today:
     doesn't share with Options (reuses the one Dhan connection; does NOT
     share choppy_stocks.py filtering or the paper-trade evaluation
     webhook, both scoped to Options only).
-A seventh strategy would be added the same way - its own package,
+  - Swing/swing_main.py - user request 31 Aug 2026: buys 1 lot of a
+    stock's FUTURES contract hedged with 1 lot of its ATM PE option, as
+    an all-or-nothing "basket" (Dhan has no native basket-order API - see
+    Swing/trading_engine.py's own module docstring for the compensating-
+    rollback design this uses instead). Entry/exit CONDITION logic is
+    deliberately deferred to the user - see Swing/config.py's own
+    docstring. REAL orders, own separate basket capacity/config,
+    DEPLOYED DISABLED (config.STRATEGY_ENABLED=false) until that logic is
+    defined. The first package in this codebase to trade an actual
+    futures contract (Options/dhan_client.py's new get_futures_contract())
+    rather than buying an ATM option as a placeholder for one.
+An eighth strategy would be added the same way - its own package,
 exporting `router` + `lifespan`, mounted below - without touching any
 existing one.
 
@@ -59,6 +70,7 @@ from CopperOptions import copper_main
 from Futures import futures_main
 from K01 import screener_main
 from Luxury import luxury_main
+from Swing import swing_main
 
 logging.basicConfig(
     level=logging.INFO,
@@ -82,7 +94,8 @@ async def lifespan(app: FastAPI):
                 async with futures_main.lifespan(app):
                     async with screener_main.lifespan(app):
                         async with luxury_main.lifespan(app):
-                            yield
+                            async with swing_main.lifespan(app):
+                                yield
 
 
 app = FastAPI(title="Chartink -> Dhan Algo Bot", lifespan=lifespan)
@@ -92,6 +105,7 @@ app.include_router(copper_main.router)
 app.include_router(futures_main.router)
 app.include_router(screener_main.router)
 app.include_router(luxury_main.router)
+app.include_router(swing_main.router)
 
 
 # --------------------------------------------------------------------------- #
@@ -134,13 +148,15 @@ async def get_incidents(limit: int = 20):
 async def trade_history(strategy: str | None = None):
     """Persistent, cross-restart record of every REAL (non-paper) closed
     trade, tagged by which package placed it - see trade_history.py.
-    Options/position_store.py, Futures/position_store.py, and
-    Luxury/position_store.py's own closed_positions_today all reset daily
-    and don't survive a restart; this is the durable record for later
-    analysis. strategy=None returns all three; pass strategy=Options,
-    strategy=Futures, or strategy=Luxury to filter to one."""
-    if strategy is not None and strategy not in ("Options", "Futures", "Luxury"):
-        return {"error": "strategy must be 'Options', 'Futures', or 'Luxury' (or omitted for all)"}
+    Options/position_store.py, Futures/position_store.py,
+    Luxury/position_store.py, and Swing/position_store.py's own daily
+    closed-trade logs all reset daily and don't survive a restart; this
+    is the durable record for later analysis. strategy=None returns all
+    four; pass strategy=Options, Futures, Luxury, or Swing to filter to
+    one (Swing's own records tag each basket's two legs separately -
+    option_type "FUT" for the futures leg, "PE" for the option leg)."""
+    if strategy is not None and strategy not in ("Options", "Futures", "Luxury", "Swing"):
+        return {"error": "strategy must be 'Options', 'Futures', 'Luxury', or 'Swing' (or omitted for all)"}
     trades = read_all_trades(strategy)
     return {"count": len(trades), "trades": trades}
 
@@ -152,10 +168,13 @@ async def webhook_alerts(strategy: str | None = None):
     record_webhook_alert. Each handler already logged receipt via the
     standard logger, but that only reaches journald (limited retention,
     not queryable) - this is the durable, structured record. strategy=None
-    returns all; pass strategy=Options/Futures/Luxury/Options-PaperTrade to
-    filter to one."""
-    if strategy is not None and strategy not in ("Options", "Futures", "Luxury", "Options-PaperTrade"):
-        return {"error": "strategy must be 'Options', 'Futures', 'Luxury', or 'Options-PaperTrade' (or omitted for all)"}
+    returns all; pass strategy=Options/Futures/Luxury/Swing/Swing-Watchlist/
+    Options-PaperTrade to filter to one."""
+    if strategy is not None and strategy not in (
+        "Options", "Futures", "Luxury", "Swing", "Swing-Watchlist", "Options-PaperTrade",
+    ):
+        return {"error": "strategy must be 'Options', 'Futures', 'Luxury', 'Swing', 'Swing-Watchlist', "
+                          "or 'Options-PaperTrade' (or omitted for all)"}
     alerts = read_all_webhook_alerts(strategy)
     return {"count": len(alerts), "alerts": alerts}
 

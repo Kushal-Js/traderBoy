@@ -2370,6 +2370,109 @@ out of git.
     Re-ran all 5 existing suites afterward (35/35 total, zero
     regressions).
 
+61. **New `Swing/` package - futures + ATM PE hedge "basket", user
+    request 31 Aug 2026, DEPLOYED DISABLED.** Buys 1 lot of a stock's
+    futures contract, hedged with 1 lot of its ATM PE option, as an
+    all-or-nothing basket ("do both of these or neither" - the user's own
+    framing). Entry and exit CONDITION logic is deliberately NOT built -
+    the user will define it later; what's built is the mechanics a future
+    signal plugs into. Grew directly out of the same day's basket-order
+    and MTF-eligibility research sessions (see the separate trading-skills
+    repo's `basket-order-feasibility.md` - this package is the practical
+    application of that investigation's "no native basket API, build
+    all-or-nothing at the application level" conclusion).
+
+    **Genuinely new capability**: this is the first package in this
+    codebase to trade a REAL futures contract, rather than buying an ATM
+    option as a placeholder for one (unlike Futures/, which is explicitly
+    a placeholder buying ATM CE options). Required new
+    `Options/dhan_client.py` additions: `FuturesContract` dataclass,
+    `get_futures_contract()`/`_get_futures_contract_once()` (mirrors
+    `get_atm_option`'s retry + expiry-day-roll-forward pattern, reads the
+    instrument master's FUTSTK rows directly since no Tradehull helper
+    exists for this the way `ATM_Strike_Selection` exists for options).
+    Also fixed a real, previously-dormant bug while building this:
+    `_underlying_from_trading_symbol` only ever handled the options
+    trailing-segment shape (3 segments: expiry, strike, CE/PE) - a
+    hyphenated-name stock's FUTURES symbol ("BAJAJ-AUTO-Sep2026-FUT", 2
+    trailing segments: expiry, "FUT") mangled to just "BAJAJ" the same way
+    its OPTIONS symbol used to before that bug was fixed - never triggered
+    before since nothing bought a real futures contract until now. Fixed
+    by branching on whether the trailing segment is "FUT".
+
+    **All-or-nothing via compensating rollback** (`enter_basket_for_stock`
+    in `Swing/trading_engine.py`) - Dhan has no basket-order API (confirmed
+    by enumerating its full endpoint surface, see the trading-skills repo)
+    so this is enforced at the application level, the standard "saga"
+    pattern for exactly this situation: futures leg fails -> PE leg never
+    attempted ("neither"); futures leg fills but PE leg then fails ->
+    futures leg is immediately SOLD to unwind it ("neither", via a
+    best-effort compensating SELL - a failed unwind is logged as an ERROR,
+    loudly, since it means a real un-hedged futures position may still be
+    open needing manual handling).
+
+    **Capacity**: `SWING_MAX_LIVE_BASKETS` (default 2, configurable, as
+    requested). **Product type**: `MARGIN` (NRML/carry-forward) for BOTH
+    legs, not MIS - deliberately, since "swing" positions are meant to be
+    held across multiple days, unlike every other package here. No
+    `SQUARE_OFF_TIME`/`ENABLE_SQUARE_OFF` config exists at all for this
+    reason - a manual `POST /swing/square-off-now` kill-switch still
+    exists for closing everything on demand.
+
+    **Two webhooks**: `POST /chartink/webhook-swing-enter` (a direct,
+    explicit trigger - "based on business logic defined" means the
+    decision of which stock and when lives outside the bot for now, not
+    an embedded ranking/scan the way Options/Futures/Luxury have) and
+    `POST /chartink/webhook-swing-watchlist` (adds stock(s) to
+    `Swing/watchlist.py`'s simple in-memory list, continuously polled by
+    `monitor_loop()`). Both return `status=ignored`/
+    `reason=strategy_disabled` while off, placing zero orders.
+
+    **Reconciliation** pairs a Swing-attributed FUTSTK + OPTSTK broker
+    position (via `attribute_open_broker_position`, same mechanism
+    Options/Futures/Luxury already use) back into a `Basket` at startup -
+    more important here than anywhere else, since Swing baskets are meant
+    to survive a restart by design. An unpaired leg (one side found, not
+    both) is logged as a clear warning ("UNHEDGED/incomplete") and left
+    alone rather than guessed at.
+
+    **Participates in `cross_strategy_registry.py`** the same way
+    Options/Futures/Luxury already do - Swing places real orders on the
+    same shared Dhan account, exposed to the identical cross-strategy race
+    that registry exists to close.
+
+    **The off switch**: `SWING_STRATEGY_ENABLED` (default false, deployed
+    false) - follows CopperOptions' own established pattern: the monitor
+    loop and both webhooks stay running/reachable (no restart needed
+    later to flip it) but do nothing at all while off. Two clearly-marked
+    extension points in `trading_engine.py`
+    (`_evaluate_watchlist_entry_signal`/`_evaluate_basket_exit_signal`,
+    both no-ops today) are where the user's own future entry/exit logic
+    plugs in without anything else in the file needing to change.
+
+    New `tests/test_swing_package.py` (8 scenarios, all passing): the
+    disabled-by-default flag placing zero orders; a full successful
+    all-or-nothing entry (both legs placed, basket recorded, both legs
+    tagged "Swing" in trade_history); both rollback cases (futures-fails-
+    so-PE-never-attempted, and PE-fails-so-futures-gets-unwound - the
+    unwind confirmed via an actual 3-order count, not just a status
+    field); basket capacity enforced AND confirmed genuinely configurable
+    (re-tested at a different cap value); the watchlist webhook; a REAL
+    Swing-vs-Options race for the same stock via `cross_strategy_registry`
+    (exactly one winner); and `get_futures_contract()`'s nearest-expiry +
+    hyphenated-underlying resolution against a fake instrument dataframe
+    (no live Dhan session needed). Caught and fixed one of my own test-
+    construction bugs while writing this: the shared Dhan-mock helper
+    omitted `refresh_supertrend_signal`/`get_cached_supertrend_candle_start`
+    (present in every OTHER deep-integration suite's mock set already),
+    which let the cross-strategy-race test's real `Options._process_one_
+    entry` call fall through to an actual (and here, unauthenticated -
+    confirmed live) Dhan login attempt. Fixed by completing the mock set;
+    re-ran and confirmed zero live network calls afterward. Re-ran all 6
+    existing suites afterward (37/37 still pass, 45/45 total). Verified
+    the full 8-strategy `main.py` composes with zero route collisions (31
+    endpoints via `app.openapi()`).
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

@@ -163,6 +163,15 @@ class AtmOption:
     expiry_date: Optional[date] = None
 
 
+@dataclass
+class FuturesContract:
+    """A stock's nearest-expiry FUTSTK contract - see get_futures_contract()."""
+    trading_symbol: str
+    security_id: str
+    lot_size: int
+    expiry_date: Optional[date] = None
+
+
 class DhanWrapper:
     """Lazily-authenticated singleton wrapper around Tradehull + dhanhq's
     WebSocket classes."""
@@ -281,14 +290,29 @@ class DhanWrapper:
 
     @staticmethod
     def _underlying_from_trading_symbol(sem_trading_symbol: str) -> str:
-        """Derives the underlying from Dhan's SEM_TRADING_SYMBOL format
-        ("{UNDERLYING}-{Mon}{YYYY}-{STRIKE}-{CE|PE}"). A naive split("-")[0]
+        """Derives the underlying from Dhan's SEM_TRADING_SYMBOL format -
+        options: "{UNDERLYING}-{Mon}{YYYY}-{STRIKE}-{CE|PE}" (3 trailing
+        segments); stock futures: "{UNDERLYING}-{Mon}{YYYY}-FUT" (2
+        trailing segments, added 31 Aug 2026 alongside genuine futures-
+        contract support for the Swing package). A naive split("-")[0]
         breaks for underlyings that themselves contain a hyphen - confirmed
-        live: BAJAJ-AUTO's contracts are "BAJAJ-AUTO-Aug2026-10000-CE",
-        which split("-")[0] mangles to just "BAJAJ" (not a real symbol, and
-        a REST lookup on it fails outright). Strip the last 3 segments
-        (expiry, strike, option type) instead of keeping only the first."""
+        live: BAJAJ-AUTO's OPTION contracts are "BAJAJ-AUTO-Aug2026-10000-CE"
+        (split("-")[0] mangles to just "BAJAJ"), and the exact same problem
+        exists for its FUTURES contract, "BAJAJ-AUTO-Sep2026-FUT" - this
+        function was only ever exercised against options until Swing's
+        get_futures_contract() started calling it too, so the futures
+        branch below was a real, if previously dormant (nothing in this
+        codebase bought a real futures contract before), latent bug in
+        get_open_fno_positions()/_instrument_meta_by_security_id() for any
+        hyphenated-name stock future. Branches on the trailing segment
+        ("FUT" vs an option type) since the caller doesn't know in advance
+        which shape it's looking at (this is called for every broker
+        position row, options and futures alike)."""
         parts = sem_trading_symbol.split("-")
+        if parts and parts[-1] == "FUT":
+            if len(parts) < 3:
+                return parts[0]
+            return "-".join(parts[:-2])
         if len(parts) < 4:
             return parts[0]
         return "-".join(parts[:-3])
@@ -659,6 +683,58 @@ class DhanWrapper:
             lot_size=meta["lot_size"],
             security_id=meta["security_id"],
             expiry_date=meta["expiry_date"],
+        )
+
+    def get_futures_contract(self, underlying_symbol: str) -> FuturesContract:
+        """Finds the nearest-expiry FUTSTK (stock futures) contract for
+        underlying_symbol - genuinely new capability, added 31 Aug 2026 for
+        the Swing package (the first strategy in this codebase to trade a
+        real futures contract rather than buying an ATM option as a
+        placeholder for one). No Tradehull helper exists for this the way
+        ATM_Strike_Selection exists for options, so this reads the
+        instrument master directly, mirroring K01's _fetch_fno_universe /
+        this file's own get_atm_option for the filtering/rolling pattern.
+
+        Retried (see _retry) - same rationale as get_atm_option: Dhan's
+        market-data-adjacent calls can transiently rate-limit-fail. Rolls
+        forward to the next listed expiry if the nearest one expires today
+        - same rationale as get_atm_option's identical guard (Dhan blocks
+        new positions in a contract on its own expiry day)."""
+        contract = _retry(self._get_futures_contract_once, underlying_symbol, 0)
+        if contract.expiry_date == datetime.now(IST).date():
+            logger.info(
+                "%s: nearest futures contract (%s) expires today - rolling to next month's expiry instead",
+                underlying_symbol, contract.trading_symbol,
+            )
+            rolled = _retry(self._get_futures_contract_once, underlying_symbol, 1)
+            if rolled.expiry_date != contract.expiry_date:
+                return rolled
+            logger.warning(
+                "%s: rolled-forward futures contract (%s) still expires today - no further expiry listed yet",
+                underlying_symbol, rolled.trading_symbol,
+            )
+        return contract
+
+    def _get_futures_contract_once(self, underlying_symbol: str, expiry_index: int = 0) -> FuturesContract:
+        df = self.instruments()
+        futs = df[(df["SEM_EXM_EXCH_ID"] == "NSE") & (df["SEM_INSTRUMENT_NAME"] == "FUTSTK")]
+        # Match by the underlying DERIVED from each row's own trading
+        # symbol, not a naive prefix match - a prefix match on "RELIANCE"
+        # would also wrongly match "RELIANCEPOWER"'s own futures contract.
+        matches = futs[futs["SEM_TRADING_SYMBOL"].apply(
+            lambda s: self._underlying_from_trading_symbol(str(s)) == underlying_symbol
+        )]
+        if matches.empty:
+            raise ValueError(f"No futures contract found for {underlying_symbol}")
+        matches = matches.sort_values("SEM_EXPIRY_DATE")
+        if expiry_index >= len(matches):
+            expiry_index = len(matches) - 1
+        row = matches.iloc[expiry_index]
+        return FuturesContract(
+            trading_symbol=str(row["SEM_CUSTOM_SYMBOL"]),
+            security_id=str(int(row["SEM_SMST_SECURITY_ID"])),
+            lot_size=int(float(row["SEM_LOT_UNITS"])),
+            expiry_date=pd.to_datetime(row["SEM_EXPIRY_DATE"], errors="coerce").date(),
         )
 
     # ------------------------------------------------------------------ #
