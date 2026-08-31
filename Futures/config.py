@@ -47,10 +47,11 @@ SELECT_BOTTOM_N_STOCKS = os.getenv("FUTURES_SELECT_BOTTOM_N_STOCKS", "true").low
 # option_type - unused today since futures_main.py only exposes a bullish
 # (CE) webhook, kept for parity if a bearish endpoint is added later.
 # CE raised 2->3 (user request 30 Aug 2026), matching Options'
-# MAX_LIVE_POSITIONS_CE change made the same day. PE left at its prior
-# default (2) - not part of that request, and unused today per the note
-# above anyway.
-MAX_LIVE_POSITIONS_CE = int(os.getenv("FUTURES_MAX_LIVE_POSITIONS_CE", "3"))
+# MAX_LIVE_POSITIONS_CE change made the same day. Lowered 3->2 (user
+# request 31 Aug 2026), matching Options' CE 3->2 change made the same day.
+# PE left at its prior default (2) - not part of that request, and unused
+# today per the note above anyway.
+MAX_LIVE_POSITIONS_CE = int(os.getenv("FUTURES_MAX_LIVE_POSITIONS_CE", "2"))
 MAX_LIVE_POSITIONS_PE = int(os.getenv("FUTURES_MAX_LIVE_POSITIONS_PE", "2"))
 
 TARGET_PCT = float(os.getenv("FUTURES_TARGET_PCT", "0.25"))

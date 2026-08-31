@@ -1984,6 +1984,25 @@ out of git.
     before/after touching it, run manually with
     `uv run python tests/test_deep_integration.py`.
 
+54. **`MAX_LIVE_POSITIONS_CE` 3->2 (Options + Futures), `MAX_LIVE_POSITIONS_PE`
+    0->2 (Options) - user request 31 Aug 2026.** Re-enables PE (bearish,
+    `/chartink/webhook-sell`) trading, off since #36 (27 Aug 2026), while
+    lowering CE on both strategies so combined CE+PE exposure stays in
+    line with the prior CE=3/PE=0 total rather than adding on top of it.
+    Futures' PE cap (`FUTURES_MAX_LIVE_POSITIONS_PE`) stays untouched at
+    its existing default of 2, still unused today since `futures_main.py`
+    only exposes a bullish/CE webhook.
+
+    No code changes needed - `reserve_symbol`/`remaining_capacity` already
+    handle any cap value correctly (this was proven going the other
+    direction too, down to 0, in #36). Verified by reloading
+    `Options.config`/`Futures.config` against the real `.env` after the
+    edit and asserting `CE == 2` and `PE == 2` on both. Re-ran the full
+    `tests/test_deep_integration.py` suite (all 6 scenarios pass - it sets
+    its own capacity override per test, so it's independent of this
+    config value). Confirmed `/positions` and `/futures/positions` both
+    had empty `live_positions` immediately before this deploy's restart.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

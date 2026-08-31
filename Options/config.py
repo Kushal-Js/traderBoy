@@ -76,18 +76,18 @@ SELECT_BOTTOM_N_STOCKS = os.getenv("SELECT_BOTTOM_N_STOCKS", "true").lower() == 
 # PositionStore.reserve_symbol().
 # CE raised 2->4->3, PE lowered 2->0 (user request 27 Aug 2026, CE lowered
 # 4->3 30 Aug 2026 alongside the matching Futures change) - PE (bearish
-# scan, /chartink/webhook-sell) is now fully OFF: reserve_symbol()'s
-# capacity check (current >= _cap_for("PE")) is 0 >= 0 on the very first
-# attempt, so every PE alert is rejected immediately - option_main.py's
-# early "no capacity left" bail-out (before ranking even runs) also
-# catches this via remaining_capacity()'s max(0, cap - current). No code
-# changes needed for either - both already handle a zero cap correctly,
-# this is a pure config change. Existing open PE positions (if any at the
-# moment this deploys) are UNAFFECTED - this only gates new entries, exits
-# keep working normally regardless of this cap. See NOTES.md's design-
-# decision entry.
-MAX_LIVE_POSITIONS_CE = int(os.getenv("MAX_LIVE_POSITIONS_CE", "3"))
-MAX_LIVE_POSITIONS_PE = int(os.getenv("MAX_LIVE_POSITIONS_PE", "0"))
+# scan, /chartink/webhook-sell) was fully OFF from 27 Aug until 31 Aug 2026:
+# reserve_symbol()'s capacity check (current >= _cap_for("PE")) was 0 >= 0
+# on the very first attempt, so every PE alert was rejected immediately -
+# option_main.py's early "no capacity left" bail-out (before ranking even
+# runs) also caught this via remaining_capacity()'s max(0, cap - current).
+# PE re-enabled at 2 (user request 31 Aug 2026), CE lowered 3->2 in the same
+# change to keep combined CE+PE exposure in line with the prior CE=3/PE=0
+# total. No code changes needed for either direction - both already handle
+# any cap value correctly, this is a pure config change. See NOTES.md's
+# design-decision entry.
+MAX_LIVE_POSITIONS_CE = int(os.getenv("MAX_LIVE_POSITIONS_CE", "2"))
+MAX_LIVE_POSITIONS_PE = int(os.getenv("MAX_LIVE_POSITIONS_PE", "2"))
 
 # /chartink/webhook-papertrade (paper_webhook.py) - a second, independent
 # position pool for evaluating a new Chartink scan before trusting it with
