@@ -64,6 +64,18 @@ async def lifespan(app: FastAPI):
     config.py's own docstring for why."""
     global _monitor_task
 
+    # Best-effort load of whatever's already in data/watchlist (user
+    # request 31 Aug 2026) - so a restart doesn't lose stocks that were
+    # only ever added by hand-editing the file, not through the webhook.
+    # Runs regardless of config.STRATEGY_ENABLED - populating the
+    # watchlist is inert on its own; only the entry SIGNAL evaluation
+    # (gated by the flag) can actually act on it. See watchlist.py's own
+    # docstring.
+    try:
+        await watchlist_store.sync_from_file()
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not sync watchlist from data/watchlist at startup - continuing without it.")
+
     try:
         reconciled = await reconcile_broker_positions()
         if reconciled:

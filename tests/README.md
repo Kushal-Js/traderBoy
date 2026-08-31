@@ -28,6 +28,7 @@ peace of mind.
 | `test_swing_package.py` | The Swing package (futures + ATM PE hedge "basket") - disabled-by-default flag placing zero orders, a full successful all-or-nothing entry, both rollback cases ("neither" when the futures leg fails; the futures leg unwound via a compensating SELL when the PE leg fails after filling), configurable basket capacity, the watchlist webhook, Swing vs Options racing for the same stock via `cross_strategy_registry`, and `get_futures_contract()`'s nearest-expiry/hyphenated-underlying resolution |
 | `test_swing_integration.py` | Full end-to-end Swing flows on top of the above: multi-stock webhook entry with a mixed capacity outcome, a complete enter-via-webhook-then-manual-square-off lifecycle verified against `trade_history`, a realistic 4-way reconciliation (Options/Futures/Luxury/Swing all with real broker positions at once), the "unpaired leg" safety behavior (a lone futures leg is never reconstructed into a partial basket), and the watchlist/enter webhooks operating independently |
 | `test_swing_signal_logic.py` | Swing's entry/exit Supertrend signal (added 31 Aug 2026) - crossover detection correctness, a genuine crossover proven through the real `_compute_supertrend` against synthetic candle data, the entry rule's full 5-min/1-min truth table, the exit rule firing only on a genuine crossed-below, and full monitor-loop-shaped auto-entry/auto-exit flows (a real signal genuinely enters/exits a basket, not a stub) |
+| `test_swing_watchlist_file.py` | Swing's file-backed watchlist (`data/watchlist`, added 31 Aug 2026) - adds/uppercases symbols from a real file, ignores blank lines/comments, never duplicates, fails open on a missing file, picks up a hand-edit with no restart needed, and round-trips the real seed file this task created (AUROPHARMA/OFSS/TORNTPHARM/VEDL) |
 
 ## How to run
 
@@ -41,6 +42,7 @@ uv run python tests/test_get_option_ltp_retry.py
 uv run python tests/test_swing_package.py
 uv run python tests/test_swing_integration.py
 uv run python tests/test_swing_signal_logic.py
+uv run python tests/test_swing_watchlist_file.py
 ```
 
 Each takes a few seconds. Prints one PASS line per scenario, or raises an

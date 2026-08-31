@@ -38,3 +38,6 @@ Dependencies\\*
 
 # Weekly choppy-stocks exclusion list (choppy_stocks.py) - runtime data, not source.
 /choppy/
+
+# Swing's hand-editable watchlist (Swing/watchlist.py) - runtime data, not source.
+/data/

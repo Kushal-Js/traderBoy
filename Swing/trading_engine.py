@@ -555,19 +555,24 @@ async def monitor_loop() -> None:
     """Runs forever, ALWAYS - see config.py's own docstring for why this
     keeps running even when config.STRATEGY_ENABLED is False (so no
     restart is needed later to pick up the flag flipping), doing nothing
-    at all in that case. Each tick: evaluates the entry signal for every
-    watchlist symbol (removing it from the watchlist on a successful
-    auto-entry - no reason to keep evaluating a stock once it has a live
-    basket) and the exit signal for every live basket. Paced (a small
-    sleep between watchlist symbols) the same way rank_and_pick_top_
-    stocks() paces its own sequential Dhan calls elsewhere in this
-    codebase - an unattended loop checking many symbols has no natural
-    per-alert pacing boundary the way a webhook-triggered call does, so
-    this provides its own."""
+    at all in that case. Each tick: re-syncs the watchlist from
+    data/watchlist (user request 31 Aug 2026 - a hand-edit to that file
+    takes effect within one tick, no restart needed, same hot-reload UX
+    choppy_stocks.py already established - runs regardless of
+    config.STRATEGY_ENABLED, since populating the watchlist is inert on
+    its own), then evaluates the entry signal for every watchlist symbol
+    (removing it from the watchlist on a successful auto-entry - no
+    reason to keep evaluating a stock once it has a live basket) and the
+    exit signal for every live basket. Paced (a small sleep between
+    watchlist symbols) the same way rank_and_pick_top_stocks() paces its
+    own sequential Dhan calls elsewhere in this codebase - an unattended
+    loop checking many symbols has no natural per-alert pacing boundary
+    the way a webhook-triggered call does, so this provides its own."""
     logger.info("Swing monitor loop started. strategy_enabled=%s", config.STRATEGY_ENABLED)
     while True:
         try:
             await basket_store.maybe_reset_for_new_day()
+            await watchlist_store.sync_from_file()
             if config.STRATEGY_ENABLED:
                 watchlist_symbols = await watchlist_store.symbols()
                 for i, symbol in enumerate(watchlist_symbols):

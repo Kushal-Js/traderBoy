@@ -2576,6 +2576,41 @@ out of git.
     Still deployed DISABLED (`SWING_STRATEGY_ENABLED=false`) - this entry
     only defines the signal, it doesn't turn the strategy on.
 
+63. **File-backed watchlist - user request 31 Aug 2026** ("Add a file
+    named 'watchlist' under folder data in server to keep all stocks to
+    monitor in it and add AUROPHARMA, OFSS, TORNTPHARM, VEDL in this
+    file"). `Swing/watchlist.py`'s `WatchlistStore` gained
+    `sync_from_file()` - reads a new plain-text `data/watchlist` (one
+    symbol per line, blank lines/`#`-comments ignored), adding any
+    symbol not already being watched. Deliberately ADD-ONLY - removing a
+    line from the file does NOT remove that symbol from the live
+    watchlist, keeping the semantics as simple as the webhook's own
+    add-only behavior and never silently dropping something that might
+    still matter.
+
+    Follows the exact hot-reload pattern `choppy_stocks.py` already
+    established the same day: `data/` is a new gitignored, server-only
+    runtime-data folder (same convention as `choppy/`/`history/`) - a
+    hand-edit to the file takes effect within one `monitor_loop` tick
+    (re-synced every tick, unconditionally - regardless of
+    `config.STRATEGY_ENABLED`, since populating the watchlist is inert on
+    its own; only the entry signal evaluation is gated), no restart
+    needed. Also synced once at `swing_main.py`'s own lifespan startup,
+    so a restart doesn't lose stocks that were only ever added by hand-
+    editing the file rather than through the webhook.
+
+    Seeded `data/watchlist` with the 4 requested stocks (AUROPHARMA,
+    OFSS, TORNTPHARM, VEDL) - both locally and on the droplet.
+
+    New `tests/test_swing_watchlist_file.py` (6 scenarios, all passing):
+    adds/uppercases symbols from a real file; ignores blank lines/
+    comments; never duplicates an already-watched symbol on a repeated
+    sync; fails open (empty result, no exception) on a missing file;
+    picks up a genuine hand-edit (a line appended mid-process) on the
+    very next sync with no restart/reload step; and round-trips the real
+    seed file this task created. Re-ran all 9 existing suites afterward
+    (56/56 still pass, 62/62 total across all 10 test files).
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
