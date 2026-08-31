@@ -39,6 +39,7 @@ This is the Dhan counterpart to the Groww version of this bot (see the
 | `K01/paper_engine.py` | Stage 0 (Minervini Trend Template) + Stage 1 (liquidity floor) run once/day across the full F&O universe to build a watchlist; Stage 3 (5-min RSI/Supertrend + 1-min Supertrend crossover + ROC, all four must agree) re-checked every poll to trigger paper entries. OI-buildup gating and VCP detection are documented phase-2 items, not yet built |
 | `K01/config.py` | All tunables - `K01_`-prefixed env vars |
 | `.env` | Your local credentials/config (gitignored - never commit this) |
+| `tests/test_deep_integration.py` | Deep integration tests against the real webhook handler/entry/exit/reconciliation logic - only the Dhan network boundary is mocked, needs no live Dhan session. Run with `uv run python tests/test_deep_integration.py`. Not deployed, not wired into CI - a dev tool run manually for confidence before/after touching concurrency-sensitive code. See `tests/README.md` |
 
 A future strategy would live in its own top-level package the same way
 `Options/`, `IndexScalping/`, and `CopperOptions/` do, exporting `router` +

@@ -1972,6 +1972,18 @@ out of git.
     real module-level singletons and the real deployed process were never
     touched by any of tonight's testing).
 
+53. **Deep integration suite persisted into the repo - user request 31 Aug
+    2026** ("keep it in our repo, no need to deploy this to droplet but we
+    can run it whenever needed and it would be documented also for future
+    references"). Moved from a scratchpad file into `tests/test_deep_integration.py`
+    (repo-relative paths, `tests/README.md` explaining what it covers and
+    how/why to run it, `README.md`'s file table updated). Confirmed all 6
+    scenarios still pass from the new location. Deliberately NOT deployed
+    to the droplet and NOT wired into any CI/deploy step - this is a
+    dev-only tool for validating concurrency/retry/reconciliation logic
+    before/after touching it, run manually with
+    `uv run python tests/test_deep_integration.py`.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

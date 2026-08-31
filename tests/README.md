@@ -1,0 +1,70 @@
+# tests/
+
+Deep integration tests for DhanBoy. These exercise the **real** production
+code paths - the actual webhook handler, `PositionStore` locking, entry/exit
+logic, retry wrapping, and reconciliation attribution - not reimplementations
+or shallow unit mocks. The only thing ever faked is the Dhan **network**
+boundary (ranking's price fetch, ATM option lookup, broker-position lookup,
+order placement/fill). Every bit of real logic runs for real.
+
+Not wired into any CI or deploy step, and not pytest-based - these are plain
+`asyncio.run(main())` scripts, run manually whenever you want confidence that
+a change hasn't broken concurrency, capacity, retry, or reconciliation
+behavior. Good times to run them: after touching `position_store.py`,
+`trading_engine.py`, or `trade_history.py` in either `Options/` or
+`Futures/`; before a deploy you're nervous about; or just periodically for
+peace of mind.
+
+## How to run
+
+```bash
+uv run python tests/test_deep_integration.py
+```
+
+Takes a few seconds. Prints one PASS line per scenario, or raises an
+`AssertionError`/exception on the first failure (nothing is caught/hidden).
+
+## Safety
+
+This suite can **never** place a real order, no matter how it's run -
+`place_market_order` and `wait_for_order_result` are mocked in every single
+scenario. It also never touches the real `trade_history.py` logs or the real
+module-level `position_store` singletons: it points `trade_history.HISTORY_DIR`
+at a scratch temp directory (cleaned up automatically at the end) and
+constructs its own standalone `PositionStore` instances per test.
+
+It also needs **no live Dhan session** - every Dhan network call is mocked,
+so it can be run offline, repeatedly, anytime, with zero risk of tripping
+Dhan's own authentication rate limiter (see "Why every Dhan call is mocked"
+below).
+
+## What each test covers
+
+| # | Test | What it guards against |
+|---|------|------------------------|
+| 1 | Real concurrent entry through the real webhook handler | Capacity isn't respected under real `asyncio.gather` concurrency; ranking's top-N trim happening at the wrong stage |
+| 2 | Duplicate webhook delivery race | Chartink (or a flaky network) delivering the same alert twice and the bot double-entering the same symbol |
+| 3 | Transient Dhan failure mid-burst recovers | A transient failure on `get_open_fno_positions` during a concurrent entry burst causing a stock's entry to be silently abandoned instead of retried |
+| 4 | Real exit path (target + stop-loss) | `_exit_reason_for`/`close_position` failing to close correctly, or not freeing the symbol for re-entry after close |
+| 5 | Reconciliation with a realistic mixed scenario | Options and Futures reconciliation cross-contaminating each other's broker positions |
+| 6 | Malformed webhook payloads rejected cleanly | A malformed Chartink payload (empty/missing fields) crashing the handler or silently passing through to order placement |
+
+## Why every Dhan call is mocked, not just order placement
+
+The first version of this suite used real (read-only) Dhan calls for ranking
+and ATM lookup, and tripped Dhan's own authentication rate limiter
+("Too many attempts. Please try again after sometime.") after the several
+separate local test-script logins already run that same night. This was
+confirmed to be a real operational constraint on Dhan's side, not a bug -
+the live droplet's own already-authenticated session was completely
+unaffected throughout. This version needs no live session at all, removing
+that risk entirely, so it's safe to run anytime.
+
+## Background
+
+Written 31 Aug 2026 following the user's request to "do deep paper testing
+to make sure everything works fine when market opens and real trades comes
+in," after a night of fixing concurrency, retry, memory-leak, and feed
+resilience issues found via code audit and dummy webhook testing. See
+[NOTES.md](../NOTES.md) entries #43-52 for the full history of what each
+scenario here is actually guarding against.
