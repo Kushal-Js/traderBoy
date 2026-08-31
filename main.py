@@ -52,6 +52,7 @@ from fastapi import FastAPI
 
 from trade_history import HISTORY_DIR, read_all_trades, read_all_webhook_alerts
 import choppy_stocks
+import cross_strategy_registry
 from Options import option_main
 from IndexScalping import index_main
 from CopperOptions import copper_main
@@ -171,3 +172,16 @@ async def choppy_stocks_list():
         return {"stocks": [],
                 "note": "No choppy-stocks list on disk yet - nothing is being excluded in the meantime (fails open)."}
     return data
+
+
+@app.get("/entry-claims")
+async def entry_claims():
+    """Underlyings currently mid-entry-attempt, and which of Options/
+    Futures/Luxury holds the claim - see cross_strategy_registry.py (user
+    request 31 Aug 2026). Normally empty or near-empty - a claim only
+    exists for the brief window between a webhook accepting an alert and
+    that stock's order placement/fill resolving, not for the life of an
+    open position. A non-empty entry that persists across repeated calls
+    would indicate a claim never got released (a bug in the try/finally
+    wrapping, not expected behavior) - see this module's own docstring."""
+    return {"claims": cross_strategy_registry.snapshot()}

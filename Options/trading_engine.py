@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 
 from trade_history import attribute_open_broker_position
 import choppy_stocks
+import cross_strategy_registry
 
 from . import config
 from .dhan_client import OrderStatus, dhan_wrapper
@@ -279,7 +280,17 @@ async def _process_one_entry(symbol: str, option_type: str) -> dict:
     path here was already caught locally and turned into a result dict
     rather than left to propagate - asyncio.gather over these coroutines
     can't have one symbol's failure affect another's or crash the whole
-    batch."""
+    batch.
+
+    Also claims `symbol` in cross_strategy_registry for the ENTIRE
+    duration of this function (user request 31 Aug 2026, see that
+    module's own docstring) - closes a real race window this file's own
+    reserve_symbol()/has_open_position_for_underlying() can't: Options,
+    Futures, and Luxury each have their own independent PositionStore and
+    share one broker account, so near-simultaneous alerts for the same
+    underlying across two of these packages could otherwise both pass
+    their own broker check before either order settles, and both place a
+    real order for the same stock."""
     loop = asyncio.get_running_loop()
 
     # Belt-and-suspenders (same reasoning as the already_open check below):
@@ -292,51 +303,60 @@ async def _process_one_entry(symbol: str, option_type: str) -> dict:
         logger.info("%s: skipped - on the manually-maintained choppy-stocks list", symbol)
         return {"symbol": symbol, "status": "skipped", "reason": "choppy_stock"}
 
-    # Atomically checks dedup + capacity and claims the symbol in one
-    # locked step, so two near-simultaneous calls for the same symbol
-    # (e.g. a duplicate Chartink webhook delivery) can't both pass a
-    # check-then-act race and both end up placing an order.
-    if not await position_store.reserve_symbol(symbol, option_type):
-        logger.info("%s: skipped - already open/in-flight, or no capacity", symbol)
-        return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
+    if not await cross_strategy_registry.try_claim(symbol, "Options"):
+        logger.info("%s: skipped - another strategy is currently entering it", symbol)
+        return {"symbol": symbol, "status": "skipped", "reason": "claimed_by_another_strategy"}
 
     try:
-        # Belt-and-suspenders: confirm the broker doesn't already show an
-        # open FNO position for this underlying (another process
-        # instance, a manual trade, or state from before this run) -
-        # our own reservation above only guards duplicates within this
-        # process's in-memory state.
-        already_open = await loop.run_in_executor(
-            None, dhan_wrapper.has_open_position_for_underlying, symbol
-        )
-        if already_open:
-            logger.warning("%s: skipped - broker already shows an open FNO position for it", symbol)
-            await position_store.release_symbol(symbol)
-            return {"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker"}
+        # Atomically checks dedup + capacity and claims the symbol in one
+        # locked step, so two near-simultaneous calls for the same symbol
+        # (e.g. a duplicate Chartink webhook delivery) can't both pass a
+        # check-then-act race and both end up placing an order.
+        if not await position_store.reserve_symbol(symbol, option_type):
+            logger.info("%s: skipped - already open/in-flight, or no capacity", symbol)
+            return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
 
-        entry_result = await _enter_single_position(symbol, option_type)
-        # "entered", "amo_placed", and "pending_confirmation" all
-        # correspond to a real order that's now live/queued for this
-        # stock - keep the reservation so a repeat alert today is
-        # treated as a duplicate, and so this stock's slot still counts
-        # against MAX_LIVE_POSITIONS_CE/_PE. Any other outcome
-        # (rejected, etc.) frees the symbol up to retry.
-        # "pending_confirmation" (bug #22's fix) was missing from this
-        # allow-list until now - _enter_single_position deliberately
-        # calls release_order_ownership (not release_symbol) to keep
-        # this same reservation alive when it defers a slow-filling
-        # order to _sync_pending_orders, but this caller was undoing
-        # that by releasing the symbol anyway, right after. Confirmed
-        # live on 24 Aug 2026: let a 3rd CE position (PETRONET) through
-        # past the 2-position cap once its deferred order filled for
-        # real - see NOTES.md bug #24.
-        if entry_result.get("status") not in ("entered", "amo_placed", "pending_confirmation"):
+        try:
+            # Belt-and-suspenders: confirm the broker doesn't already show
+            # an open FNO position for this underlying (another process
+            # instance, a manual trade, or state from before this run) -
+            # our own reservation above only guards duplicates within this
+            # process's in-memory state, and the cross_strategy_registry
+            # claim above only guards concurrent ENTRY ATTEMPTS in this
+            # same process, not a position that predates either.
+            already_open = await loop.run_in_executor(
+                None, dhan_wrapper.has_open_position_for_underlying, symbol
+            )
+            if already_open:
+                logger.warning("%s: skipped - broker already shows an open FNO position for it", symbol)
+                await position_store.release_symbol(symbol)
+                return {"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker"}
+
+            entry_result = await _enter_single_position(symbol, option_type)
+            # "entered", "amo_placed", and "pending_confirmation" all
+            # correspond to a real order that's now live/queued for this
+            # stock - keep the reservation so a repeat alert today is
+            # treated as a duplicate, and so this stock's slot still counts
+            # against MAX_LIVE_POSITIONS_CE/_PE. Any other outcome
+            # (rejected, etc.) frees the symbol up to retry.
+            # "pending_confirmation" (bug #22's fix) was missing from this
+            # allow-list until now - _enter_single_position deliberately
+            # calls release_order_ownership (not release_symbol) to keep
+            # this same reservation alive when it defers a slow-filling
+            # order to _sync_pending_orders, but this caller was undoing
+            # that by releasing the symbol anyway, right after. Confirmed
+            # live on 24 Aug 2026: let a 3rd CE position (PETRONET) through
+            # past the 2-position cap once its deferred order filled for
+            # real - see NOTES.md bug #24.
+            if entry_result.get("status") not in ("entered", "amo_placed", "pending_confirmation"):
+                await position_store.release_symbol(symbol)
+            return entry_result
+        except Exception as exc:  # noqa: BLE001
             await position_store.release_symbol(symbol)
-        return entry_result
-    except Exception as exc:  # noqa: BLE001
-        await position_store.release_symbol(symbol)
-        logger.exception("Failed to enter position for %s", symbol)
-        return {"symbol": symbol, "status": "error", "reason": str(exc)}
+            logger.exception("Failed to enter position for %s", symbol)
+            return {"symbol": symbol, "status": "error", "reason": str(exc)}
+    finally:
+        await cross_strategy_registry.release_claim(symbol, "Options")
 
 
 async def enter_positions_for_stocks(

@@ -2236,6 +2236,74 @@ out of git.
     verified the full 7-strategy `main.py` composes with zero route
     collisions across all 25 registered endpoints (via `app.openapi()`).
 
+59. **New `cross_strategy_registry.py` - closes a real cross-package race
+    window, user request 31 Aug 2026** (identified while explaining
+    Luxury's own design: "would there be any race conditions if all 3
+    webhooks... received triggers for same stock at same time?").
+    Options, Futures, and Luxury each have their own independent
+    `PositionStore` (separate lock, separate `reserved_symbols`) and share
+    ONE real Dhan account. The only thing that stopped two of them from
+    both entering the same underlying at once was each package's own
+    `has_open_position_for_underlying()` - a broker-side READ that only
+    reflects an order once it's actually placed AND settled. If alerts
+    for the same stock landed on two strategies close enough together
+    (inside that settlement window), both could see "nothing open yet"
+    and both place a real order for the same stock - each within its own
+    capacity cap, but doubling/tripling real exposure on that one stock.
+
+    New module: one shared, in-memory, per-symbol claim registry
+    (`try_claim`/`release_claim`, backed by a single `asyncio.Lock` + one
+    `dict[underlying_symbol, strategy_name]`) - checked and claimed BEFORE
+    any package's own `reserve_symbol`/broker-check/order-placement
+    sequence, and held via `try/finally` for that sequence's ENTIRE
+    duration, not just around the broker check. That's what actually
+    closes the gap: by the time a second strategy's own broker check
+    runs, the first strategy's order has already been placed and (in
+    practice) settled, because the two were never allowed to interleave
+    on that symbol at all. Deliberately per-symbol, not global - claiming
+    RELIANCE for Options never blocks Futures/Luxury from claiming TCS at
+    the same instant, and `try_claim` never blocks/waits, it returns
+    immediately either way. Pure in-memory dict ops under one lock - no
+    I/O - costing low single-digit microseconds against a code path
+    already dominated by real REST round-trips (the broker check, order
+    placement, and order-status polling each cost tens of ms to several
+    seconds), so this adds no measurable latency. Only the three real-
+    money strategies participate; K01/CopperOptions/IndexScalping never
+    place real orders so they're out of scope for this specific race.
+    Pure in-memory, same tradeoff as every `PositionStore` in this
+    codebase - resets on restart, which is fine since it only ever needs
+    to protect a single in-flight entry attempt (seconds), not persistent
+    state. Does NOT replace `has_open_position_for_underlying()` - that
+    remains the correct, restart-durable defense against a manual trade
+    or a stale reservation surviving a crashed process; this closes the
+    specific gap BETWEEN strategies racing for the same stock in this
+    same process.
+
+    Wired into all three packages' `_process_one_entry` (claim right
+    after the choppy-stocks check in Options', at the very top in
+    Futures'/Luxury's, released in a `finally` wrapping everything below
+    it - a losing strategy returns `{"status": "skipped", "reason":
+    "claimed_by_another_strategy"}` immediately, never reaching its own
+    broker check or order placement). New `GET /entry-claims` for
+    visibility (normally empty/near-empty; a persistently non-empty entry
+    would indicate a stuck claim, not expected behavior).
+
+    New `tests/test_cross_strategy_registry.py` (6 scenarios, all
+    passing): basic claim/release semantics including re-claiming your
+    own claim as a no-op and a release-by-non-holder being a no-op; a
+    REAL 3-way concurrent race (`asyncio.gather`, not simulated) for one
+    bare symbol with exactly 1 winner; Options vs Futures racing for the
+    same stock through their REAL `_process_one_entry` functions fired
+    concurrently - exactly 1 entered, the other correctly rejected via
+    the registry before ever reaching its own broker check; the same
+    3-way version across Options+Futures+Luxury; confirmation a resolved
+    claim releases properly so a later (non-concurrent) alert for the
+    same stock is judged on its own merits, not stuck behind a stale
+    claim; and confirmation two DIFFERENT symbols claimed at the same
+    instant by two different strategies never contend at all (proving
+    the per-symbol, not global, design). Re-ran all 4 existing test
+    suites afterward (23/23 still pass, 29/29 total).
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

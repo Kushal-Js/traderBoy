@@ -53,6 +53,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from trade_history import attribute_open_broker_position
+import cross_strategy_registry
 
 from . import config
 from .dhan_client import OrderStatus, dhan_wrapper
@@ -221,30 +222,44 @@ async def _process_one_entry(symbol: str, option_type: str) -> dict:
     entries run concurrently via asyncio.gather instead of sequentially.
     Safe as-is: reserve_symbol() is atomically locked, and every exception
     path here is caught locally into a result dict rather than left to
-    propagate."""
+    propagate.
+
+    Also claims `symbol` in cross_strategy_registry for the ENTIRE
+    duration of this function (user request 31 Aug 2026) - see
+    Options/trading_engine.py's identical function and
+    cross_strategy_registry.py's own docstring for why this closes a real
+    race window between Options/Futures/Luxury that reserve_symbol()/
+    has_open_position_for_underlying() alone can't."""
     loop = asyncio.get_running_loop()
 
-    if not await position_store.reserve_symbol(symbol, option_type):
-        logger.info("%s: skipped - already open/in-flight, or no capacity", symbol)
-        return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
+    if not await cross_strategy_registry.try_claim(symbol, "Luxury"):
+        logger.info("%s: skipped - another strategy is currently entering it", symbol)
+        return {"symbol": symbol, "status": "skipped", "reason": "claimed_by_another_strategy"}
 
     try:
-        already_open = await loop.run_in_executor(
-            None, dhan_wrapper.has_open_position_for_underlying, symbol
-        )
-        if already_open:
-            logger.warning("%s: skipped - broker already shows an open FNO position for it", symbol)
-            await position_store.release_symbol(symbol)
-            return {"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker"}
+        if not await position_store.reserve_symbol(symbol, option_type):
+            logger.info("%s: skipped - already open/in-flight, or no capacity", symbol)
+            return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
 
-        entry_result = await _enter_single_position(symbol, option_type)
-        if entry_result.get("status") not in ("entered", "amo_placed", "pending_confirmation"):
+        try:
+            already_open = await loop.run_in_executor(
+                None, dhan_wrapper.has_open_position_for_underlying, symbol
+            )
+            if already_open:
+                logger.warning("%s: skipped - broker already shows an open FNO position for it", symbol)
+                await position_store.release_symbol(symbol)
+                return {"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker"}
+
+            entry_result = await _enter_single_position(symbol, option_type)
+            if entry_result.get("status") not in ("entered", "amo_placed", "pending_confirmation"):
+                await position_store.release_symbol(symbol)
+            return entry_result
+        except Exception as exc:  # noqa: BLE001
             await position_store.release_symbol(symbol)
-        return entry_result
-    except Exception as exc:  # noqa: BLE001
-        await position_store.release_symbol(symbol)
-        logger.exception("Failed to enter position for %s", symbol)
-        return {"symbol": symbol, "status": "error", "reason": str(exc)}
+            logger.exception("Failed to enter position for %s", symbol)
+            return {"symbol": symbol, "status": "error", "reason": str(exc)}
+    finally:
+        await cross_strategy_registry.release_claim(symbol, "Luxury")
 
 
 async def enter_positions_for_stocks(
