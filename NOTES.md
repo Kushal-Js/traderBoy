@@ -1875,6 +1875,53 @@ out of git.
     this regressed the lag/GC-safety/reconciliation/leak fixes already
     verified today.
 
+51. **Two more real bugs found via a live "dummy webhook call" health
+    check - user request 31 Aug 2026.** Sent a real (but genuinely safe)
+    test payload to `/chartink/webhook-papertrade` (never `/chartink/
+    webhook`, `/chartink/webhook-sell`, or `/chartink/webhook-futures` -
+    those place real orders/AMOs even outside market hours, so a "dummy"
+    payload there is not actually dummy) with 3 real liquid stocks
+    (RELIANCE, TCS, SBIN). 2 of 3 failed with `"No LTP returned"`.
+
+    **Confirmed this was a real bug, not "market's closed, no data"**: all
+    three symbols resolved fine with real premiums moments later when
+    queried standalone with 1.5s pacing between them. Root cause: `Options/
+    paper_webhook.py`'s entry loop (`for symbol, pct_change in ranked:`)
+    had zero pacing between ranked stocks' REST calls - the SAME class of
+    bug already found and fixed 3 other places this session (K01's debug
+    loop, K01's anti-SAGILITY check, the DanDanaDan backtest loop), this
+    time in a real, currently-deployed code path. Fixed with the identical
+    convention: `await asyncio.sleep(0.35)` between stocks (skipped before
+    the first one).
+
+    **Checking this surfaced a second, more important finding**: entry
+    #50's parallelization of the REAL Options/Futures entry loop
+    (`enter_positions_for_stocks` via `asyncio.gather`) meant `has_open_
+    position_for_underlying()` - which calls `get_open_fno_positions()`,
+    which had NO retry wrapper at all - now fires concurrently for up to
+    4 stocks where it used to run one-at-a-time with natural sequential
+    spacing. Unlike `get_atm_option`/`get_day_change_pct` (both already
+    wrapped in `_retry` for exactly this "Dhan's market-data calls can
+    transiently rate-limit-fail" reason), a transient failure here meant
+    that stock's entire entry was abandoned outright, not retried. Fixed
+    by splitting `get_open_fno_positions()` into a thin `_retry`-wrapped
+    public method + a `_get_open_fno_positions_once()` private one doing
+    the actual call - the same pattern already used for
+    `_get_atm_option_once`/`_get_day_change_pct_once`. This benefits BOTH
+    the entry-time dedup check and startup reconciliation (both call
+    `get_open_fno_positions`), and is the correct fix rather than trying
+    to re-serialize what #50 deliberately parallelized.
+
+    Verified with real tests: (1) a flaky mock that fails once then
+    succeeds proves the retry actually recovers (not just retries and
+    still fails), correctly measuring the ~1.5s backoff elapsed; (2) a
+    mock that always fails proves exhausted retries still raise rather
+    than being silently swallowed; (3) the actual `chartink_webhook_
+    papertrade` handler (not reimplemented) with 3 fake-but-realistic
+    stocks measured at ≥0.65s elapsed, confirming the 2 expected 0.35s
+    pacing gaps are genuinely there. Re-ran all 6 of tonight's prior test
+    suites (entries #46-50) afterward - no regression.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

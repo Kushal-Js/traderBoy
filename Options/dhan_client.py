@@ -796,7 +796,22 @@ class DhanWrapper:
     def get_open_fno_positions(self) -> list[dict]:
         """Every NSE F&O position currently open at Dhan (net quantity != 0).
         avg_price is Dhan's own reported average buy price for the position
-        (buyAvg, falling back to costPrice), not something we computed."""
+        (buyAvg, falling back to costPrice), not something we computed.
+
+        Retried (see _retry) - found + fixed 31 Aug 2026 (user request, a
+        "dummy webhook call" health check surfaced the related paper_
+        webhook.py pacing bug and prompted checking this too). This is
+        called by has_open_position_for_underlying() on every entry
+        attempt - now potentially CONCURRENTLY for up to 4 ranked stocks
+        at once (entry #50's parallelized enter_positions_for_stocks) with
+        no retry wrapper at all before this fix, unlike get_atm_option/
+        get_day_change_pct which already had one for the identical reason
+        ("Dhan's market-data calls can transiently rate-limit-fail" - see
+        _retry's own docstring). A transient failure here previously meant
+        that stock's entry was abandoned outright rather than retried."""
+        return _retry(self._get_open_fno_positions_once)
+
+    def _get_open_fno_positions_once(self) -> list[dict]:
         resp = self.client.Dhan.get_positions()
         if resp.get("status") != "success":
             raise RuntimeError(f"get_positions failed: {resp.get('remarks')}")

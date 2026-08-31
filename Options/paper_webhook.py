@@ -226,7 +226,21 @@ async def chartink_webhook_papertrade(payload: ChartinkWebhookPayload):
         return {"status": "no_action", "reason": "could_not_rank_any_stock"}
 
     results = []
-    for symbol, pct_change in ranked:
+    for i, (symbol, pct_change) in enumerate(ranked):
+        # Found + fixed 31 Aug 2026 (user request - a "dummy webhook call"
+        # health check surfaced this live): this loop fires get_atm_option/
+        # get_option_ltp/_capture_supertrend_entry_candle back-to-back for
+        # each ranked stock with zero pacing between them - confirmed via a
+        # real test that this hits Dhan's undocumented rate limit (2 of 3
+        # stocks failed "No LTP returned" in one live call; the exact same
+        # 3 symbols all resolved fine seconds later with 1.5s pacing
+        # between them). Same class of bug already fixed 3 other places
+        # this session (K01's debug loop, K01's anti-SAGILITY check, the
+        # DanDanaDan backtest loop) - matches rank_and_pick_top_stocks'
+        # own time.sleep(0.35) convention, just the async equivalent since
+        # this runs inside an async handler.
+        if i > 0:
+            await asyncio.sleep(0.35)
         if await paper_store.is_reserved(symbol):
             results.append({"symbol": symbol, "status": "skipped", "reason": "already_open"})
             continue
