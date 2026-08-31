@@ -2120,6 +2120,53 @@ out of git.
     already pulled onto the droplet - the running process is still the
     prior code until a restart is explicitly requested.
 
+57. **`MAX_LOSS_PER_TRADE_RS`/`PROFIT_PROTECTION_THRESHOLD_RS` split into a
+    before/after-11:30 pair, for both Options and Futures - user request
+    31 Aug 2026** ("1500/1000 for profit protection, 1200/1000 for max
+    loss, before/after 11:30 AM"). Both were previously a single flat
+    value all day (1200 and 1500 respectively, both packages - see entry
+    #42's backtest-driven history for `MAX_LOSS_PER_TRADE_RS`). Now: the
+    morning value (1200 / 1500) stays exactly what it was before this
+    change, and a new, tighter afternoon value (1000 / 1000) takes over
+    from the cutoff on - a trade still open into the afternoon gets less
+    rope on the loss side and locks in profit sooner on the upside.
+
+    New config: `MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF`/`_AFTER_CUTOFF`,
+    `PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF`/`_AFTER_CUTOFF`, and
+    `RISK_THRESHOLD_CUTOFF_TIME` (default `"11:30"`, `FUTURES_`-prefixed
+    for Futures per that package's own convention) - deliberately a
+    SEPARATE setting from `ALLOWED_TRADING_TIME` even though both default
+    to the same "11:30" today: `ALLOWED_TRADING_TIME` only gates NEW
+    entries, while this gates the EXIT check on positions already open,
+    regardless of when they were entered - the two could diverge later
+    without this change accidentally coupling them.
+
+    New `current_max_loss_per_trade_rs()`/`current_profit_protection_
+    threshold_rs()` functions in both `Options/trading_engine.py` and
+    `Futures/trading_engine.py` (identical logic, each package's own
+    `_now_ist()`/`config`), backed by a shared `_is_before_risk_threshold_
+    cutoff()` check so both stay in lockstep on the exact same boundary
+    instant. `_exit_reason_for()` in both files now calls these instead of
+    reading the old flat `config.MAX_LOSS_PER_TRADE_RS`/`PROFIT_PROTECTION_
+    THRESHOLD_RS` constants directly (which no longer exist) - evaluated
+    fresh on every call, so a position open since before the cutoff is
+    still re-evaluated against the tighter afternoon values the instant
+    the clock crosses it, same as every other time-of-day gate in this
+    codebase (`is_past_square_off_time`, `is_past_allowed_trading_time`).
+    The exact boundary instant (11:30:00) already counts as "after",
+    consistent with those same gates' `>=` semantics.
+
+    New `tests/test_risk_threshold_cutoff.py` (3 scenarios, all passing):
+    the lookup functions return the correct value on each side of the
+    cutoff for both packages; the exact boundary instant resolves to
+    "after"; and `_exit_reason_for()` itself - not just the lookup
+    functions in isolation - fires `MAX_LOSS_HIT`/`PROFIT_PROTECTION_HIT`
+    at the correct threshold on each side, for both Options and Futures.
+    Re-ran `tests/test_deep_integration.py` and `tests/test_choppy_
+    stocks.py` afterward (14/14 still pass, confirming the `_exit_
+    reason_for` refactor didn't change behavior for anything other than
+    the intended time-of-day split).
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

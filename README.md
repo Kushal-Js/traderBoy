@@ -153,21 +153,27 @@ URLs — matching the `webhook_url` field in your sample payload.
    trusting an old tick forever once it's older than `LTP_STALE_AFTER_SECONDS`
    (default 5s, added 27 Aug 2026 after a real overshoot on a thin,
    sparsely-ticking option — see NOTES.md's design-decision entry):
-   - `MAX_LOSS_PER_TRADE_RS` absolute rupee-loss cap (default ₹1,200,
-     checked first, ahead of every other exit condition below) — exits
-     immediately once `(entry_price - ltp) * quantity` reaches this, independent
-     of the percentage stop-loss (a low-premium/high-quantity leg can lose
-     far more than this in rupees before its own percentage SL would fire).
+   - `MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF`/`_AFTER_CUTOFF` absolute rupee-loss
+     cap (default ₹1,200 before `RISK_THRESHOLD_CUTOFF_TIME`, ₹1,000 from
+     then on — default cutoff 11:30 AM, added 31 Aug 2026; was a single flat
+     ₹1,200 before that) — checked first, ahead of every other exit
+     condition below — exits immediately once `(entry_price - ltp) *
+     quantity` reaches the currently-applicable cap, independent of the
+     percentage stop-loss (a low-premium/high-quantity leg can lose far
+     more than this in rupees before its own percentage SL would fire).
      Flat for every trade regardless of re-entry count — a per-re-entry
      escalation was tried and explicitly reverted 27 Aug 2026 the same day
      it was deployed, see NOTES.md's design-decision entry.
    - `+TARGET_PCT` target
-   - `PROFIT_PROTECTION_THRESHOLD_RS` rupee profit-lock (default ₹1,500,
-     checked right after target) — once a trade's peak unrealized profit
-     (`(highest_price - entry_price) * quantity`) has exceeded this, exits
-     the moment price is off that peak *at all*, however small the dip -
-     deliberately no drawdown tolerance once armed. A full `TARGET_PCT`
-     hit still takes priority over this.
+   - `PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF`/`_AFTER_CUTOFF` rupee
+     profit-lock (default ₹1,500 before the same cutoff, ₹1,000 after —
+     added 31 Aug 2026; was a single flat ₹1,500 before that), checked
+     right after target — once a trade's peak unrealized profit
+     (`(highest_price - entry_price) * quantity`) has exceeded the
+     currently-applicable threshold, exits the moment price is off that
+     peak *at all*, however small the dip - deliberately no drawdown
+     tolerance once armed. A full `TARGET_PCT` hit still takes priority
+     over this.
    - `-STOP_LOSS_PCT` hard stop loss
    - `TRAILING_SL_PCT` continuous trailing stop (trails the peak price in
      the trade's favor) - set `ENABLE_TRAILING_SL=false` to disable

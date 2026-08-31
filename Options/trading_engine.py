@@ -96,6 +96,37 @@ def is_past_allowed_trading_time() -> bool:
     return _now_ist() >= _parse_hhmm_today(config.ALLOWED_TRADING_TIME)
 
 
+def _is_before_risk_threshold_cutoff() -> bool:
+    """True strictly before today's config.RISK_THRESHOLD_CUTOFF_TIME
+    (default 11:30). Backing check for current_max_loss_per_trade_rs()/
+    current_profit_protection_threshold_rs() below - factored out so both
+    stay in lockstep on the exact same boundary instant."""
+    return _now_ist() < _parse_hhmm_today(config.RISK_THRESHOLD_CUTOFF_TIME)
+
+
+def current_max_loss_per_trade_rs() -> float:
+    """MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF before config.
+    RISK_THRESHOLD_CUTOFF_TIME, MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF from
+    that instant on for the rest of the day (user request 31 Aug 2026) -
+    see config.py's own comment for the rationale. Evaluated fresh on
+    every _exit_reason_for() call (not cached), so a position that's been
+    open since before the cutoff is still re-evaluated against the
+    tighter afternoon cap once the clock crosses it, same as every other
+    time-of-day gate in this file."""
+    if _is_before_risk_threshold_cutoff():
+        return config.MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF
+    return config.MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF
+
+
+def current_profit_protection_threshold_rs() -> float:
+    """See current_max_loss_per_trade_rs() just above - identical before/
+    after-cutoff split, for PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF/
+    _AFTER_CUTOFF."""
+    if _is_before_risk_threshold_cutoff():
+        return config.PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF
+    return config.PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF
+
+
 def _gen_tag(prefix: str, symbol: str) -> str:
     """Dhan's correlationId rejects special characters (confirmed live:
     GVT&D's "&" caused a hard "Invalid correlationId" rejection on order
@@ -744,32 +775,34 @@ def _exit_reason_for(position: Position, ltp: float, supertrend_against_position
     counts) - caller's responsibility to fetch/pass it, since that read can
     involve I/O and this function stays synchronous.
 
-    Checks config.MAX_LOSS_PER_TRADE_RS first, ahead of every other exit
+    Checks current_max_loss_per_trade_rs() first, ahead of every other exit
     condition - an absolute per-trade rupee-loss cap independent of
     STOP_LOSS_PCT, since a large-quantity/low-premium position can still
     lose more than this cap in rupee terms before its percentage stop-loss
     fires. Applies identically to CE and PE - both are long-premium
     positions (this strategy only ever buys options, never sells), so a
     loss is (entry_price - ltp) * quantity either way, no direction-
-    specific logic needed.
+    specific logic needed. The cap itself tightens after
+    config.RISK_THRESHOLD_CUTOFF_TIME (user request 31 Aug 2026) - see
+    current_max_loss_per_trade_rs()'s own docstring.
 
-    After TARGET_HIT, checks config.PROFIT_PROTECTION_THRESHOLD_RS - the
-    mirror image on the upside. Once the position's PEAK unrealized profit
-    ((highest_price - entry_price) * quantity) has exceeded this threshold,
-    exits the moment price is off that peak at all (ltp < highest_price) -
-    deliberately no drawdown tolerance, per the simple version requested,
-    rather than waiting for a percentage-based trailing floor to be
-    breached. highest_price is already maintained by the caller
-    (update_highest_price) before this runs, so a tick that itself sets a
-    new high never triggers this - only a subsequent tick below an
-    already-recorded peak does."""
+    After TARGET_HIT, checks current_profit_protection_threshold_rs() - the
+    mirror image on the upside, same before/after-cutoff split. Once the
+    position's PEAK unrealized profit ((highest_price - entry_price) *
+    quantity) has exceeded this threshold, exits the moment price is off
+    that peak at all (ltp < highest_price) - deliberately no drawdown
+    tolerance, per the simple version requested, rather than waiting for a
+    percentage-based trailing floor to be breached. highest_price is
+    already maintained by the caller (update_highest_price) before this
+    runs, so a tick that itself sets a new high never triggers this - only
+    a subsequent tick below an already-recorded peak does."""
     loss_rs = (position.entry_price - ltp) * position.quantity
-    if loss_rs >= config.MAX_LOSS_PER_TRADE_RS:
+    if loss_rs >= current_max_loss_per_trade_rs():
         return "MAX_LOSS_HIT"
     if ltp >= position.target_price:
         return "TARGET_HIT"
     peak_profit_rs = (position.highest_price - position.entry_price) * position.quantity
-    if peak_profit_rs > config.PROFIT_PROTECTION_THRESHOLD_RS and ltp < position.highest_price:
+    if peak_profit_rs > current_profit_protection_threshold_rs() and ltp < position.highest_price:
         return "PROFIT_PROTECTION_HIT"
     trailing_sl = position.current_trailing_sl
     if ltp <= trailing_sl:

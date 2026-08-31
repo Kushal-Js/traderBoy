@@ -123,7 +123,17 @@ STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.03"))    # -3% hard stop los
 # with a materially lower win rate (56.5%->52.2%) and ~50% more MAX_LOSS_HIT
 # stop-outs (49->72) for only a small P&L edge (+3,296 over 4 days). 1200 is
 # the user's chosen middle ground. See NOTES.md's design-decision entry.
-MAX_LOSS_PER_TRADE_RS = float(os.getenv("MAX_LOSS_PER_TRADE_RS", "1200"))
+#
+# Split into a before/after-cutoff pair (user request 31 Aug 2026) - looser
+# (1200) for the first part of the session, tighter (1000) after
+# RISK_THRESHOLD_CUTOFF_TIME - the idea being a trade that's been open into
+# the afternoon gets less rope before the hard rupee-loss cap kicks in.
+# Independent of ALLOWED_TRADING_TIME (which only gates NEW entries) even
+# though both default to the same 11:30 - this governs the EXIT check on
+# positions already open, regardless of when they were entered. See
+# trading_engine.current_max_loss_per_trade_rs().
+MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF = float(os.getenv("MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF", "1200"))
+MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF = float(os.getenv("MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF", "1000"))
 
 # Absolute per-trade rupee profit-protection threshold, added 26 Aug 2026 by
 # user request - the mirror image of MAX_LOSS_PER_TRADE_RS above, but on the
@@ -137,7 +147,20 @@ MAX_LOSS_PER_TRADE_RS = float(os.getenv("MAX_LOSS_PER_TRADE_RS", "1200"))
 # full target hit is a strictly better outcome and takes priority) but
 # before the percentage-based trailing/hard stop-loss. Applies identically
 # to CE and PE for the same reason MAX_LOSS_PER_TRADE_RS does.
-PROFIT_PROTECTION_THRESHOLD_RS = float(os.getenv("PROFIT_PROTECTION_THRESHOLD_RS", "1500"))
+#
+# Split into a before/after-cutoff pair the same way and for the same
+# reason as MAX_LOSS_PER_TRADE_RS above (user request 31 Aug 2026) - locks
+# in profit sooner (1000 instead of 1500) once RISK_THRESHOLD_CUTOFF_TIME
+# has passed. See trading_engine.current_profit_protection_threshold_rs().
+PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF = float(os.getenv("PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF", "1500"))
+PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF = float(os.getenv("PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF", "1000"))
+
+# The time-of-day boundary the two before/after-cutoff pairs above switch
+# on - user request 31 Aug 2026 ("before 11:30 AM" / "after 11:30").
+# Deliberately its own separate setting from ALLOWED_TRADING_TIME even
+# though both default to "11:30" - see the comments above for why these
+# are independent concepts that could diverge later.
+RISK_THRESHOLD_CUTOFF_TIME = os.getenv("RISK_THRESHOLD_CUTOFF_TIME", "11:30")
 
 # Trailing stop-loss: raises the exit floor as price rises above entry,
 # instead of only exiting at the fixed hard stop loss. When disabled, a

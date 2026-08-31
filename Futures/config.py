@@ -57,15 +57,22 @@ MAX_LIVE_POSITIONS_PE = int(os.getenv("FUTURES_MAX_LIVE_POSITIONS_PE", "2"))
 TARGET_PCT = float(os.getenv("FUTURES_TARGET_PCT", "0.25"))
 STOP_LOSS_PCT = float(os.getenv("FUTURES_STOP_LOSS_PCT", "0.16"))
 
-# See Options/config.py's MAX_LOSS_PER_TRADE_RS - identical rationale, this
-# package's own independently-tunable cap. Lowered 1500->1200 alongside
-# Options' own value (user request 27 Aug 2026, backtest-driven - see
-# Options/config.py's comment for the full rationale).
-MAX_LOSS_PER_TRADE_RS = float(os.getenv("FUTURES_MAX_LOSS_PER_TRADE_RS", "1200"))
+# See Options/config.py's MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF/_AFTER_CUTOFF -
+# identical rationale, this package's own independently-tunable pair. Split
+# from a single flat value into before/after-cutoff the same way and same
+# day (user request 31 Aug 2026).
+MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF = float(os.getenv("FUTURES_MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF", "1200"))
+MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF = float(os.getenv("FUTURES_MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF", "1000"))
 
-# See Options/config.py's PROFIT_PROTECTION_THRESHOLD_RS - identical
-# rationale, this package's own independently-tunable threshold.
-PROFIT_PROTECTION_THRESHOLD_RS = float(os.getenv("FUTURES_PROFIT_PROTECTION_THRESHOLD_RS", "1500"))
+# See Options/config.py's PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF/
+# _AFTER_CUTOFF - identical rationale, this package's own independently-
+# tunable pair.
+PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF = float(os.getenv("FUTURES_PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF", "1500"))
+PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF = float(os.getenv("FUTURES_PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF", "1000"))
+
+# See Options/config.py's RISK_THRESHOLD_CUTOFF_TIME - this package's own
+# independently-tunable cutoff (defaults to the same "11:30").
+RISK_THRESHOLD_CUTOFF_TIME = os.getenv("FUTURES_RISK_THRESHOLD_CUTOFF_TIME", "11:30")
 
 ENABLE_TRAILING_SL = os.getenv("FUTURES_ENABLE_TRAILING_SL", "false").lower() == "true"
 TRAILING_SL_PCT = float(os.getenv("FUTURES_TRAILING_SL_PCT", "0.015"))
