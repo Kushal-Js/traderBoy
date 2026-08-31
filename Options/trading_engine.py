@@ -230,67 +230,90 @@ def rank_and_pick_top_stocks(
 # --------------------------------------------------------------------------- #
 # Step 2: enter positions
 # --------------------------------------------------------------------------- #
+async def _process_one_entry(symbol: str, option_type: str) -> dict:
+    """One ranked stock's full reserve -> broker-dedup-check -> enter
+    sequence - factored out of enter_positions_for_stocks (31 Aug 2026,
+    user request/resilience audit) so multiple ranked stocks' entries can
+    run CONCURRENTLY via asyncio.gather instead of one-after-another.
+    Previously up to TOP_N_STOCKS (4) real order-placement round-trips
+    queued sequentially per alert; now they fire together, so stock #4 in
+    a ranked list doesn't wait on stocks #1-3's own order-placement/fill-
+    confirmation latency first.
+
+    Safe to run concurrently as-is, nothing here changed structurally:
+    reserve_symbol() was already atomically locked (guards two DIFFERENT
+    symbols' concurrent calls same as it always guarded near-simultaneous
+    duplicate webhook deliveries for the SAME symbol), and every exception
+    path here was already caught locally and turned into a result dict
+    rather than left to propagate - asyncio.gather over these coroutines
+    can't have one symbol's failure affect another's or crash the whole
+    batch."""
+    loop = asyncio.get_running_loop()
+
+    # Atomically checks dedup + capacity and claims the symbol in one
+    # locked step, so two near-simultaneous calls for the same symbol
+    # (e.g. a duplicate Chartink webhook delivery) can't both pass a
+    # check-then-act race and both end up placing an order.
+    if not await position_store.reserve_symbol(symbol, option_type):
+        logger.info("%s: skipped - already open/in-flight, or no capacity", symbol)
+        return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
+
+    try:
+        # Belt-and-suspenders: confirm the broker doesn't already show an
+        # open FNO position for this underlying (another process
+        # instance, a manual trade, or state from before this run) -
+        # our own reservation above only guards duplicates within this
+        # process's in-memory state.
+        already_open = await loop.run_in_executor(
+            None, dhan_wrapper.has_open_position_for_underlying, symbol
+        )
+        if already_open:
+            logger.warning("%s: skipped - broker already shows an open FNO position for it", symbol)
+            await position_store.release_symbol(symbol)
+            return {"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker"}
+
+        entry_result = await _enter_single_position(symbol, option_type)
+        # "entered", "amo_placed", and "pending_confirmation" all
+        # correspond to a real order that's now live/queued for this
+        # stock - keep the reservation so a repeat alert today is
+        # treated as a duplicate, and so this stock's slot still counts
+        # against MAX_LIVE_POSITIONS_CE/_PE. Any other outcome
+        # (rejected, etc.) frees the symbol up to retry.
+        # "pending_confirmation" (bug #22's fix) was missing from this
+        # allow-list until now - _enter_single_position deliberately
+        # calls release_order_ownership (not release_symbol) to keep
+        # this same reservation alive when it defers a slow-filling
+        # order to _sync_pending_orders, but this caller was undoing
+        # that by releasing the symbol anyway, right after. Confirmed
+        # live on 24 Aug 2026: let a 3rd CE position (PETRONET) through
+        # past the 2-position cap once its deferred order filled for
+        # real - see NOTES.md bug #24.
+        if entry_result.get("status") not in ("entered", "amo_placed", "pending_confirmation"):
+            await position_store.release_symbol(symbol)
+        return entry_result
+    except Exception as exc:  # noqa: BLE001
+        await position_store.release_symbol(symbol)
+        logger.exception("Failed to enter position for %s", symbol)
+        return {"symbol": symbol, "status": "error", "reason": str(exc)}
+
+
 async def enter_positions_for_stocks(
     ranked_stocks: list[tuple[str, float]], option_type: str = config.OPTION_TYPE
 ) -> list[dict]:
     """Places ATM-option BUY orders for as many of the ranked stocks as
-    capacity and dedup rules allow. Returns a per-stock result log.
+    capacity and dedup rules allow. Returns a per-stock result log, in the
+    same order as ranked_stocks (asyncio.gather preserves input order).
     option_type is "CE" for the bullish webhook, "PE" for the bearish
     /chartink/webhook-sell one - same entry/exit machinery either way,
-    just a different ATM leg."""
-    results: list[dict] = []
-    loop = asyncio.get_running_loop()
+    just a different ATM leg.
 
-    for symbol, pct_change in ranked_stocks:
-        # Atomically checks dedup + capacity and claims the symbol in one
-        # locked step, so two near-simultaneous calls for the same symbol
-        # (e.g. a duplicate Chartink webhook delivery) can't both pass a
-        # check-then-act race and both end up placing an order.
-        if not await position_store.reserve_symbol(symbol, option_type):
-            logger.info("%s: skipped - already open/in-flight, or no capacity", symbol)
-            results.append({"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"})
-            continue
-
-        try:
-            # Belt-and-suspenders: confirm the broker doesn't already show an
-            # open FNO position for this underlying (another process
-            # instance, a manual trade, or state from before this run) -
-            # our own reservation above only guards duplicates within this
-            # process's in-memory state.
-            already_open = await loop.run_in_executor(
-                None, dhan_wrapper.has_open_position_for_underlying, symbol
-            )
-            if already_open:
-                logger.warning("%s: skipped - broker already shows an open FNO position for it", symbol)
-                results.append({"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker"})
-                await position_store.release_symbol(symbol)
-                continue
-
-            entry_result = await _enter_single_position(symbol, option_type)
-            # "entered", "amo_placed", and "pending_confirmation" all
-            # correspond to a real order that's now live/queued for this
-            # stock - keep the reservation so a repeat alert today is
-            # treated as a duplicate, and so this stock's slot still counts
-            # against MAX_LIVE_POSITIONS_CE/_PE. Any other outcome
-            # (rejected, etc.) frees the symbol up to retry.
-            # "pending_confirmation" (bug #22's fix) was missing from this
-            # allow-list until now - _enter_single_position deliberately
-            # calls release_order_ownership (not release_symbol) to keep
-            # this same reservation alive when it defers a slow-filling
-            # order to _sync_pending_orders, but this caller was undoing
-            # that by releasing the symbol anyway, right after. Confirmed
-            # live on 24 Aug 2026: let a 3rd CE position (PETRONET) through
-            # past the 2-position cap once its deferred order filled for
-            # real - see NOTES.md bug #24.
-            if entry_result.get("status") not in ("entered", "amo_placed", "pending_confirmation"):
-                await position_store.release_symbol(symbol)
-            results.append(entry_result)
-        except Exception as exc:  # noqa: BLE001
-            await position_store.release_symbol(symbol)
-            logger.exception("Failed to enter position for %s", symbol)
-            results.append({"symbol": symbol, "status": "error", "reason": str(exc)})
-
-    return results
+    Runs all ranked stocks' entries CONCURRENTLY (see _process_one_entry's
+    own docstring for why this is safe) - previously sequential, one
+    stock's entry waiting on the prior one's full order-placement/fill-
+    confirmation round-trip first."""
+    return await asyncio.gather(*[
+        _process_one_entry(symbol, option_type) for symbol, _pct_change in ranked_stocks
+    ])
 
 
 async def _enter_single_position(symbol: str, option_type: str = config.OPTION_TYPE) -> dict:
@@ -629,13 +652,20 @@ async def _get_ltp(trading_symbol: str) -> Optional[float]:
     get_cached_option_ltp's docstring - a thinly-traded option can otherwise
     go minutes without a fresh price). The REST result is fed back into the
     cache via note_rest_ltp so a persistently-quiet option isn't re-fetched
-    on every single poll - see that method's docstring."""
+    on every single poll - see that method's docstring.
+
+    The REST fallback itself is gated by dhan_wrapper.ltp_rest_fallback_
+    semaphore (shared with Futures - same underlying rate-limit budget) -
+    caps how many of these can be in flight at once if several positions
+    go stale in the same poll tick, without slowing down the (much more
+    common) cache-hit path at all."""
     loop = asyncio.get_running_loop()
     ltp = await loop.run_in_executor(None, dhan_wrapper.get_cached_option_ltp, trading_symbol)
     if ltp is not None:
         return ltp
-    ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, trading_symbol)
-    await loop.run_in_executor(None, dhan_wrapper.note_rest_ltp, trading_symbol, ltp)
+    async with dhan_wrapper.ltp_rest_fallback_semaphore:
+        ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, trading_symbol)
+        await loop.run_in_executor(None, dhan_wrapper.note_rest_ltp, trading_symbol, ltp)
     return ltp
 
 

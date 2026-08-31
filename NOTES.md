@@ -1808,6 +1808,73 @@ out of git.
     the two that leaked before the fix) were empty afterward - plus a
     double-unsubscribe on an already-clean symbol doesn't raise.
 
+50. **Three resilience/responsiveness fixes - user request 31 Aug 2026**
+    ("any other place to fine tune... more resilient and responsive to
+    price updates"), all three explicitly approved by the user before
+    building:
+
+    **(a) Feed reconnect visibility.** Traced into the actual installed
+    `dhanhq` library source (not assumed) - `MarketFeed` already self-
+    heals on disconnect: its own `_run_async` loop detects a closed socket
+    within ~1s and calls `connect()` again, which calls
+    `subscribe_instruments()` and replays the FULL current subscription
+    list (`self.instruments`, kept persistently updated by
+    `subscribe_symbols`/`unsubscribe_symbols`) - so open positions
+    automatically resume ticking with no code of ours needed. This is why
+    no custom retry wrapper was ever built for it, unlike `OrderUpdate`
+    (confirmed NOT to self-heal, per bug #21's era comments) which
+    deliberately got one. What WAS missing: our own `MarketFeed(...)`
+    construction only wired `on_ticks`, not `on_connect`/`on_close`/
+    `on_error` - a real disconnect/reconnect cycle produced zero log trace
+    and zero `/feed-stats` visibility, even though the mechanism itself
+    was fine. Added `_on_market_connect`/`_on_market_close`/
+    `_on_market_error` + three new `stats` counters
+    (`feed_connects`/`feed_disconnects`/`feed_errors`) - pure observability,
+    no behavior change to the feed itself.
+
+    **(b) Paced REST-fallback bursts.** `monitor_loop` checks all open
+    positions concurrently via `asyncio.gather` - if several positions go
+    stale in the same poll tick (most likely during the exact kind of feed
+    hiccup (a) now surfaces), each fired its own REST LTP call with zero
+    pacing between them, a burst against Dhan's known undocumented rate
+    limit (bug #5) right when the feed is already struggling. Added
+    `dhan_wrapper.ltp_rest_fallback_semaphore` (`asyncio.Semaphore(2)`),
+    shared between Options' and Futures' `_get_ltp` (same real rate-limit
+    budget) - only gates the REST-fallback branch, so the common case (a
+    cache hit, no REST needed at all) is completely unaffected.
+
+    **(c) Concurrent entry-order placement.** `enter_positions_for_stocks`
+    placed orders for ranked stocks in a sequential `for` loop (up to
+    `TOP_N_STOCKS`=4 real order-placement round-trips queued one after
+    another per alert) - flagged as an observation in entry #47, now
+    actually changed given explicit approval. Factored the per-stock
+    reserve/dedup/enter sequence into `_process_one_entry`, run via
+    `asyncio.gather` instead of a `for` loop, in both `Options/
+    trading_engine.py` and `Futures/trading_engine.py`. Safe because
+    nothing about the per-stock logic itself changed: `reserve_symbol()`
+    was already atomically locked (already had to guard concurrent
+    duplicate-webhook races for the SAME symbol; guarding different
+    symbols racing for the same capacity pool is the identical mechanism),
+    and every exception path was already caught locally into a result dict
+    rather than left to propagate, so `asyncio.gather` can't have one
+    stock's failure affect another's or crash the batch.
+
+    Verified with real tests, not just reasoning about it: (1) the
+    reconnect/disconnect/error callbacks correctly increment their
+    counters, (2) a real `asyncio.Semaphore(2)` genuinely caps 10
+    concurrent workers at exactly 2 in flight, (3) confirmed Options' and
+    Futures' `_get_ltp` reference the literal same semaphore object (one
+    shared budget, not two independent ones that would defeat the point),
+    and (4) - the highest-stakes one - real `PositionStore.reserve_symbol`/
+    `release_symbol` (not reimplemented) with capacity capped at 2, 5
+    ranked stocks all attempting entry CONCURRENTLY, confirmed exactly 2
+    entered and 3 were correctly skipped as capacity-full with zero race
+    letting more than capacity through, result order preserved matching
+    input order, and remaining capacity correctly at 0 afterward. Re-ran
+    all 5 of entries #46-49's own prior tests afterward to confirm none of
+    this regressed the lag/GC-safety/reconciliation/leak fixes already
+    verified today.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

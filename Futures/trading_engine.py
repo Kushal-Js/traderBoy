@@ -192,40 +192,47 @@ def rank_and_pick_top_stocks(
 # --------------------------------------------------------------------------- #
 # Step 2: enter positions
 # --------------------------------------------------------------------------- #
+async def _process_one_entry(symbol: str, option_type: str) -> dict:
+    """See Options/trading_engine.py's identical function - factored out
+    31 Aug 2026 (user request/resilience audit) so ranked stocks' entries
+    run concurrently via asyncio.gather instead of sequentially. Safe as-is
+    for the same reasons: reserve_symbol() was already atomically locked,
+    and every exception path here was already caught locally into a result
+    dict rather than left to propagate."""
+    loop = asyncio.get_running_loop()
+
+    if not await position_store.reserve_symbol(symbol, option_type):
+        logger.info("%s: skipped - already open/in-flight, or no capacity", symbol)
+        return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
+
+    try:
+        already_open = await loop.run_in_executor(
+            None, dhan_wrapper.has_open_position_for_underlying, symbol
+        )
+        if already_open:
+            logger.warning("%s: skipped - broker already shows an open FNO position for it", symbol)
+            await position_store.release_symbol(symbol)
+            return {"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker"}
+
+        entry_result = await _enter_single_position(symbol, option_type)
+        if entry_result.get("status") not in ("entered", "amo_placed", "pending_confirmation"):
+            await position_store.release_symbol(symbol)
+        return entry_result
+    except Exception as exc:  # noqa: BLE001
+        await position_store.release_symbol(symbol)
+        logger.exception("Failed to enter position for %s", symbol)
+        return {"symbol": symbol, "status": "error", "reason": str(exc)}
+
+
 async def enter_positions_for_stocks(
     ranked_stocks: list[tuple[str, float]], option_type: str = config.OPTION_TYPE
 ) -> list[dict]:
     """See Options/trading_engine.py's enter_positions_for_stocks - identical
-    logic, this package's own position_store."""
-    results: list[dict] = []
-    loop = asyncio.get_running_loop()
-
-    for symbol, pct_change in ranked_stocks:
-        if not await position_store.reserve_symbol(symbol, option_type):
-            logger.info("%s: skipped - already open/in-flight, or no capacity", symbol)
-            results.append({"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"})
-            continue
-
-        try:
-            already_open = await loop.run_in_executor(
-                None, dhan_wrapper.has_open_position_for_underlying, symbol
-            )
-            if already_open:
-                logger.warning("%s: skipped - broker already shows an open FNO position for it", symbol)
-                results.append({"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker"})
-                await position_store.release_symbol(symbol)
-                continue
-
-            entry_result = await _enter_single_position(symbol, option_type)
-            if entry_result.get("status") not in ("entered", "amo_placed", "pending_confirmation"):
-                await position_store.release_symbol(symbol)
-            results.append(entry_result)
-        except Exception as exc:  # noqa: BLE001
-            await position_store.release_symbol(symbol)
-            logger.exception("Failed to enter position for %s", symbol)
-            results.append({"symbol": symbol, "status": "error", "reason": str(exc)})
-
-    return results
+    logic (now concurrent via asyncio.gather, not sequential), this
+    package's own position_store."""
+    return await asyncio.gather(*[
+        _process_one_entry(symbol, option_type) for symbol, _pct_change in ranked_stocks
+    ])
 
 
 async def _enter_single_position(symbol: str, option_type: str = config.OPTION_TYPE) -> dict:
@@ -488,13 +495,17 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
 async def _get_ltp(trading_symbol: str) -> Optional[float]:
     """See Options/trading_engine.py's _get_ltp - identical staleness-driven
     REST fallback + cache re-priming, reusing the same shared dhan_wrapper
-    instance/cache (Futures has no LTP cache of its own)."""
+    instance/cache (Futures has no LTP cache of its own). The REST fallback
+    is gated by dhan_wrapper.ltp_rest_fallback_semaphore - the SAME
+    semaphore Options' own _get_ltp uses, since both strategies compete for
+    the same real Dhan rate-limit budget."""
     loop = asyncio.get_running_loop()
     ltp = await loop.run_in_executor(None, dhan_wrapper.get_cached_option_ltp, trading_symbol)
     if ltp is not None:
         return ltp
-    ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, trading_symbol)
-    await loop.run_in_executor(None, dhan_wrapper.note_rest_ltp, trading_symbol, ltp)
+    async with dhan_wrapper.ltp_rest_fallback_semaphore:
+        ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, trading_symbol)
+        await loop.run_in_executor(None, dhan_wrapper.note_rest_ltp, trading_symbol, ltp)
     return ltp
 
 

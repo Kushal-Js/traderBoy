@@ -16,6 +16,7 @@ the docs are thin in places.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -209,7 +210,37 @@ class DhanWrapper:
             "order_status_cache_hits": 0,
             "order_status_rest_calls": 0,
             "price_ticks_received": 0,
+            # Feed resilience visibility - added 31 Aug 2026 (user request).
+            # dhanhq's MarketFeed already self-heals on disconnect (its own
+            # _run_async loop reconnects and re-subscribes automatically -
+            # verified against the actual installed library source, not
+            # assumed) but we were never wiring on_connect/on_close/on_error,
+            # so a real disconnect/reconnect cycle produced zero log trace
+            # and zero visibility here. These counters don't change the
+            # feed's behavior at all - purely observability, so a real
+            # infra problem (frequent reconnects) is visible instead of
+            # silently self-healed and forgotten.
+            "feed_connects": 0,
+            "feed_disconnects": 0,
+            "feed_errors": 0,
         }
+        # Bounds how many REST LTP-fallback calls can be in flight at once
+        # across ALL strategies sharing this connection (Options + Futures,
+        # via the shared dhan_wrapper singleton - Futures/dhan_client.py
+        # just re-exports this instance) - added 31 Aug 2026 (user request,
+        # resilience audit). Without this, multiple positions going stale
+        # in the same poll tick (most likely during exactly the kind of
+        # feed hiccup feed_connects/feed_disconnects above now surface)
+        # would each fire their own REST call with zero pacing between
+        # them - a burst against Dhan's known undocumented rate limit
+        # (NOTES.md bug #5), worst-case exactly when the feed is already
+        # struggling. A semaphore, not a fixed sleep, so the common case
+        # (a cache hit, no REST needed at all) is completely unaffected -
+        # this only throttles the REST-fallback path itself. Constructed
+        # here (module-import time, before any event loop runs) - safe in
+        # Python 3.10+, where asyncio.Semaphore no longer binds to a loop
+        # at construction time.
+        self.ltp_rest_fallback_semaphore = asyncio.Semaphore(2)
 
     # ------------------------------------------------------------------ #
     # Auth
@@ -368,10 +399,36 @@ class DhanWrapper:
         if order_id:
             self._order_updates[str(order_id)] = data
 
+    def _on_market_connect(self, _feed) -> None:
+        # Fires on the INITIAL connect AND every auto-reconnect (dhanhq's
+        # own connect() calls this every time it (re)establishes the
+        # socket) - see MarketFeed.connect()'s own source. Counting this
+        # separately from "process started" is what makes a mid-session
+        # reconnect actually visible instead of silently self-healed.
+        self.stats["feed_connects"] += 1
+        logger.info("Dhan market-data WebSocket connected (connect #%d this run).",
+                    self.stats["feed_connects"])
+
+    def _on_market_close(self, _feed) -> None:
+        self.stats["feed_disconnects"] += 1
+        logger.warning("Dhan market-data WebSocket disconnected (disconnect #%d this run) - "
+                        "dhanhq's own MarketFeed auto-reconnects internally, expect a "
+                        "matching feed_connects increment shortly if the network recovers.",
+                        self.stats["feed_disconnects"])
+
+    def _on_market_error(self, _feed, exc) -> None:
+        self.stats["feed_errors"] += 1
+        logger.warning("Dhan market-data WebSocket error (#%d this run): %s",
+                        self.stats["feed_errors"], exc)
+
     @property
     def market_feed(self) -> MarketFeed:
         if self._market_feed is None:
-            feed = MarketFeed(self.client.dhan_context, [], version="v2", on_ticks=self._on_market_tick)
+            feed = MarketFeed(
+                self.client.dhan_context, [], version="v2", on_ticks=self._on_market_tick,
+                on_connect=self._on_market_connect, on_close=self._on_market_close,
+                on_error=self._on_market_error,
+            )
             feed.start()  # spawns its own background thread; non-blocking
             self._market_feed = feed
             logger.info("Dhan market-data WebSocket connecting in the background.")

@@ -276,7 +276,8 @@ URLs — matching the `webhook_url` field in your sample payload.
 | `GET /health` | Liveness check |
 | `POST /square-off-now` | Manual kill-switch: closes every live position immediately |
 | `GET /trade-history` | Persistent, cross-restart record of every REAL closed trade (Options + Futures), tagged by which package placed it - `?strategy=Options` or `?strategy=Futures` to filter. See `trade_history.py` |
-| `GET /webhook-alerts` | Persistent, cross-restart record of every incoming Chartink alert - processed AND ignored, with why - tagged by which endpoint received it. `?strategy=Options`/`Futures`/`Options-PaperTrade` to filter. Logged asynchronously (`asyncio.create_task`, never awaited) so it can never add latency to real order placement. See `trade_history.py`'s `record_webhook_alert` |
+| `GET /webhook-alerts` | Persistent, cross-restart record of every incoming Chartink alert - processed AND ignored, with why - tagged by which endpoint received it. `?strategy=Options`/`Futures`/`Options-PaperTrade` to filter. Logged asynchronously (`trade_history.fire_and_forget`, never awaited) so it can never add latency to real order placement. See `trade_history.py`'s `record_webhook_alert` |
+| `GET /feed-stats` | Proves (or disproves) whether the WebSocket caches are actually being used instead of REST - `price_ticks_received`, `ltp_cache_hits`/`_misses`/`_stale`, `order_status_cache_hits`/`order_status_rest_calls`, plus `feed_connects`/`feed_disconnects`/`feed_errors` (added 31 Aug 2026 - visibility into the market-feed's own auto-reconnect, which was previously silent) |
 
 ## Known limitations / things to verify against a live account
 
