@@ -3583,6 +3583,21 @@ out of git.
     feature flag disabling everything. Ran all 19 test suites
     afterward, all pass.
 
+    Deployed with explicit go-ahead (asked first, same as entry #77) -
+    at deploy time every package was flat (APLAPOLLO's PE hedge had
+    already exited on its own minutes earlier via PE_PROFIT_LOCK_HIT,
+    ₹60.55 -> ₹66.75 - basket_hedge's profit-lock condition working
+    correctly, unprompted, its first real trigger). Verified via
+    `/positions`/`/futures/positions`/`/luxury/positions` all empty
+    before restarting. After restart, real live confirmation the whole
+    feature works end-to-end (not just in tests): since the restart
+    happened well past 08:00 IST, the scan ran immediately at startup,
+    fetched the actual live 4-stock Chartink result
+    (BAJAJ-AUTO/HCLTECH/OIL/KOTAKBANK), and added the 3 genuinely new
+    ones to the watchlist (BAJAJ-AUTO was already present from the
+    static seed file) - watchlist count went 19 -> 22. No ERROR-level
+    log lines from the new process.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM
