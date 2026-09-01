@@ -137,16 +137,25 @@ async def test_5_hot_edit_picked_up_without_restart():
 
 
 async def test_6_real_seed_file_round_trips():
-    """The actual data/watchlist file this task created, with the real
-    requested content."""
+    """The actual data/watchlist file on the server - content has been
+    replaced since this file was first seeded (31 Aug 2026: AUROPHARMA/
+    OFSS/TORNTPHARM/VEDL; replaced 1 Sep 2026 with a 19-stock list, all 4
+    originals included) - reads whatever's actually there right now
+    rather than hardcoding either exact set, so this test doesn't go
+    stale the next time the watchlist is edited."""
     real_file = swl.WATCHLIST_FILE
     swl.WATCHLIST_FILE = REPO_ROOT / "data" / "watchlist"
     try:
         assert swl.WATCHLIST_FILE.exists(), f"expected {swl.WATCHLIST_FILE} to exist"
+        expected = {
+            line.strip().upper() for line in swl.WATCHLIST_FILE.read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        }
+        assert expected, "the real watchlist file must not be empty"
         store = swl.WatchlistStore()
         added = await store.sync_from_file()
-        assert set(added) == {"AUROPHARMA", "OFSS", "TORNTPHARM", "VEDL"}, added
-        print(f"6. The real data/watchlist file round-trips correctly: {sorted(added)}: PASSED")
+        assert set(added) == expected, (sorted(added), sorted(expected))
+        print(f"6. The real data/watchlist file round-trips correctly ({len(added)} symbols): PASSED")
     finally:
         swl.WATCHLIST_FILE = real_file
 

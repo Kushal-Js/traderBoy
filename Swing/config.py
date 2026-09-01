@@ -35,11 +35,6 @@ only thing needed to switch, no code changes required either direction.
 
 Entry/exit CONDITION logic (added 31 Aug 2026, user request; ENTRY's
 price gate RELAXED from a strict gap-up to a broader "at/above
-yesterday's close" check on 1 Sep 2026) is IDENTICAL in both modes - see
-below.
-
-Entry/exit CONDITION logic (added 31 Aug 2026, user request; ENTRY's
-price gate RELAXED from a strict gap-up to a broader "at/above
 yesterday's close" check on 1 Sep 2026) - a price-confirmation check plus
 a dual-timeframe Supertrend signal on the underlying's own STOCK price
 (not the futures/option premium - same convention Options/Futures/
@@ -67,12 +62,17 @@ built on top of Options/dhan_client.py's own single-timeframe Supertrend
 cache, to avoid any risk to that already-live exit-protection mechanism
 for the three real-money strategies already relying on it).
 
-DEPLOYED DISABLED by default (STRATEGY_ENABLED=false) - real money, and a
-genuinely new capability for this codebase (the first package to trade an
-actual futures contract rather than buying an ATM option as a stand-in
-for one - see Options/dhan_client.py's new get_futures_contract()). Turn
-on only once this logic has been reviewed/tested to the user's
-satisfaction.
+LIVE as of 1 Sep 2026 (STRATEGY_ENABLED=true, user confirmed explicitly
+after a stated-risk confirmation covering the untested-live sequential
+mode, then asked for MAX_LIVE_BASKETS lowered to 1 "we will change it
+later" as a deliberately cautious first real run) - real money, and a
+genuinely new capability for this codebase (the first package to trade
+an actual futures contract rather than buying an ATM option as a stand-in
+for one - see Options/dhan_client.py's new get_futures_contract()).
+Deployed DISABLED from this package's own creation (31 Aug 2026) until
+this date, paper-traded in the meantime (PAPER_TRADING_ENABLED, now
+turned back off below now that real trading is live - the two were
+always meant to be mutually exclusive, see that flag's own comment).
 
 Reuses the Options package's single authenticated Dhan connection (see
 this package's own dhan_client.py) - no DHAN_CLIENT_ID/DHAN_PIN/etc. auth
@@ -89,7 +89,9 @@ load_dotenv()
 # webhooks stay running/reachable (no restart needed to flip this later)
 # but do nothing at all while False - both webhooks return
 # status=ignored/reason=strategy_disabled, and monitor_loop's own ticks
-# are no-ops. Deployed False - see this file's own module docstring.
+# are no-ops. Flipped to DEPLOYED TRUE 1 Sep 2026 (user request, explicit
+# confirmation given) - see this file's own module docstring for the
+# full context of what went live and what was tightened first.
 STRATEGY_ENABLED = os.getenv("SWING_STRATEGY_ENABLED", "false").lower() == "true"
 
 # Which trading-mechanics implementation is active - see this file's own
@@ -108,6 +110,11 @@ STRATEGY_MODE = os.getenv("SWING_STRATEGY_MODE", "sequential").lower()
 # Swing/position_store.py's SequentialPositionStore for why sharing this
 # one cap is safe (only one mode's store is ever actually written to at
 # a time).
+#
+# Lowered 2->1 (user request 1 Sep 2026), deliberately, for the first
+# real live run of the new sequential mode ("make capacity smaller to 1,
+# we will change it later") - only one symbol can be under active real
+# management at a time until the user chooses to raise it again.
 MAX_LIVE_BASKETS = int(os.getenv("SWING_MAX_LIVE_BASKETS", "2"))
 
 # Sequential mode only (added 1 Sep 2026) - the PE hedge leg's own hard
@@ -170,17 +177,21 @@ SUPERTREND_CONFIRM_TIMEFRAME_MINUTES = int(os.getenv("SWING_SUPERTREND_CONFIRM_T
 SUPERTREND_REFRESH_SECONDS = int(os.getenv("SWING_SUPERTREND_REFRESH_SECONDS", "15"))
 
 # --------------------------------------------------------------------------- #
-# Paper trading (user request 1 Sep 2026 - "enable paper trading for
-# tomorrow... keep track of trades, history and profit loss also like
-# real trades in files"). Entirely INDEPENDENT of STRATEGY_ENABLED above -
-# that flag must stay False (no real money) while this one runs, so paper
-# trading can be evaluated using the exact same, already-defined entry/
-# exit signal before it's ever trusted with a real order. See
+# Paper trading (added 1 Sep 2026 - "enable paper trading for tomorrow...
+# keep track of trades, history and profit loss also like real trades in
+# files", turned back OFF the same day once real trading went live -
+# "Enable live real market trading for Swing package and disable paper
+# trading"). Entirely INDEPENDENT of STRATEGY_ENABLED above - the two are
+# meant to be mutually exclusive in practice (paper trading exists to
+# evaluate the signal BEFORE trusting it with a real order; once
+# STRATEGY_ENABLED is genuinely live, paper trading's own job is done)
+# though nothing in the code actually enforces that exclusivity - both
+# could be flipped on together if ever useful again. See
 # paper_engine.py's own module docstring for the full design (simulated
 # fills at current LTP, its own on-disk log entirely separate from real
 # trade history, no capacity cap since nothing here risks real capital).
-# Mirrors STRATEGY_MODE (added 1 Sep 2026, user confirmed via
-# AskUserQuestion) - paper trading always simulates whichever mode
-# (basket/sequential) is currently active, so paper results actually
-# reflect what real trading would do if turned on right now.
+# Mirrors STRATEGY_MODE (user confirmed via AskUserQuestion) - paper
+# trading always simulates whichever mode (basket/sequential) is
+# currently active, so paper results actually reflect what real trading
+# would do if turned on right now.
 PAPER_TRADING_ENABLED = os.getenv("SWING_PAPER_TRADING_ENABLED", "false").lower() == "true"

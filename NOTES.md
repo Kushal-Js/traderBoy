@@ -3176,6 +3176,52 @@ out of git.
     existing hot-reload mechanism, confirmed live via `GET /swing/
     watchlist` (count 4 -> 19) with NO restart needed.
 
+73. **Swing went LIVE with real money - user request 1 Sep 2026**
+    ("Enable live real market trading for Swing package and disable
+    paper trading preferably use a flag for this operation"). The
+    single highest-stakes action of this whole session: this activates
+    real order placement, for the first time ever, on the brand-new
+    "sequential" futures<->PE loop (entry #71) - previously exercised
+    only against mocks and paper simulation, never live.
+
+    Per the user's own earlier-established standing practice ("confirm
+    before starting/restarting a live bot or running order-placement
+    code"), laid out the exact before/after flag table and the real
+    consequence (any of the 19 watchlist stocks whose entry condition is
+    already true gets a real futures BUY at market the moment this
+    deploys) BEFORE touching anything, and waited for explicit
+    confirmation - the user confirmed, additionally asking to lower
+    capacity first: "make capacity smaller to 1, we will change it
+    later and then go ahead and flip it live now."
+
+    Pure `.env` flag flips, no code changes needed (every flag already
+    existed and is already read at startup) - already the SAME flags
+    used throughout the session's own already-thorough testing:
+      - `SWING_STRATEGY_ENABLED`: `false` -> **`true`**.
+      - `SWING_MAX_LIVE_BASKETS`: `2` -> **`1`** (deliberately cautious
+        for this first live run - "we will change it later").
+      - `SWING_PAPER_TRADING_ENABLED`: `true` -> **`false`** (paper
+        trading's own job - evaluating the signal before trusting it
+        with a real order - is done now that real trading is live).
+      - `SWING_STRATEGY_MODE` unchanged (`sequential`, already the
+        active mode since entry #71).
+
+    `Swing/config.py`'s own module docstring and the affected vars' own
+    comments updated to reflect the new deployed-live state (previously
+    said "DEPLOYED DISABLED... turn on only once reviewed/tested" -
+    that review/confirmation is what just happened). Also fixed
+    `tests/test_swing_watchlist_file.py`'s test #6, found stale while
+    re-running the full suite before this deploy - it hardcoded the
+    ORIGINAL 4-symbol watchlist content from entry #63, broken since
+    entry #72 replaced the file with 19 symbols; fixed to read the
+    file's own actual current content instead of hardcoding either set,
+    so it can't go stale again the next time the watchlist is edited.
+    Re-ran all 14 test suites afterward, all pass.
+
+    Deployed - Options/Futures/Luxury's `live_positions` (Swing itself
+    had none yet, being newly activated) confirmed empty before and
+    after restart, clean startup verified.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM
