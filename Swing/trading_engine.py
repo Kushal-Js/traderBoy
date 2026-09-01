@@ -153,7 +153,9 @@ import random
 import re
 import string
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
+from datetime import time as dt_time
+from datetime import timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -1317,6 +1319,154 @@ async def _fetch_supertrend_state(symbol: str, interval_minutes: int) -> Optiona
     return state
 
 
+# --------------------------------------------------------------------------- #
+# Daily watchlist prune (user request 1 Sep 2026): "removing any stock
+# when its daily close crossed below daily super trend / daily 12 EMA...
+# has to run daily when market starts at 9:15 AM." Entirely separate from
+# the intraday entry/exit signal above - reads DAILY candles (Dhan's own
+# historical_daily_data endpoint) rather than 5-min/1-min ones, and only
+# ever REMOVES a symbol from watchlist_store, never places an order or
+# touches a live position - see config.WATCHLIST_DAILY_PRUNE_ENABLED's
+# own docstring for why this runs independently of STRATEGY_ENABLED.
+# --------------------------------------------------------------------------- #
+def _compute_ema(closes: list[float], period: int) -> list[Optional[float]]:
+    """Standard EMA, seeded with a simple moving average of the first
+    `period` closes (the same warm-up convention _compute_supertrend's
+    own ATR seeding already follows in this codebase) rather than
+    seeding from the very first close - matches how most charting
+    platforms compute it. Returns one EMA value per bar; the first
+    period-1 entries are None since there aren't enough bars yet to seed
+    it. Pure function - no I/O - same shape as _compute_supertrend for
+    the same reason (cheap to unit-test independent of any live fetch)."""
+    n = len(closes)
+    if n < period:
+        return [None] * n
+    ema: list[Optional[float]] = [None] * n
+    ema[period - 1] = sum(closes[:period]) / period
+    multiplier = 2 / (period + 1)
+    for i in range(period, n):
+        ema[i] = (closes[i] - ema[i - 1]) * multiplier + ema[i - 1]
+    return ema
+
+
+def _fetch_daily_closes_once(symbol: str) -> Optional[dict]:
+    """Blocking (REST call) - always call via run_in_executor. Fetches
+    config.DAILY_TREND_LOOKBACK_DAYS calendar days of DAILY candles for
+    `symbol`, ending YESTERDAY - deliberately never today, even if called
+    well after 9:15 (a late restart's catch-up run): today's own daily
+    candle doesn't fully exist until the session closes, so using
+    yesterday's as the "last fully closed" candle is unconditionally
+    correct regardless of what time of day this actually runs, unlike
+    the intraday fetch's own "drop the still-forming last candle" guard
+    (which only needs to handle the same trading day). Returns None if
+    there isn't enough history yet for both indicators to have a
+    computable previous-vs-current pair (illiquid/newly-listed symbol)."""
+    security_id = dhan_wrapper._equity_security_id(symbol)
+    yesterday = _now_ist().date() - timedelta(days=1)
+    from_date = (yesterday - timedelta(days=config.DAILY_TREND_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+    to_date = yesterday.strftime("%Y-%m-%d")
+    resp = _retry(
+        dhan_wrapper.client.Dhan.historical_daily_data,
+        security_id=security_id, exchange_segment="NSE_EQ", instrument_type="EQUITY",
+        from_date=from_date, to_date=to_date,
+    )
+    data = resp.get("data") or {}
+    highs = data.get("high") or []
+    lows = data.get("low") or []
+    closes = data.get("close") or []
+
+    if len(closes) < config.SUPERTREND_PERIOD + 2 or len(closes) < config.DAILY_EMA_PERIOD + 1:
+        return None
+    return {"highs": highs, "lows": lows, "closes": closes}
+
+
+def _evaluate_daily_trend_break(symbol: str) -> Optional[str]:
+    """Blocking. Returns the reason string if `symbol`'s last fully-
+    closed DAILY candle genuinely CROSSED below either its daily
+    Supertrend or its daily EMA(config.DAILY_EMA_PERIOD) - i.e. the
+    previous daily close was on-or-above and the latest is below, a real
+    transition rather than merely "is below" (which would stay true
+    every single day after the original break and re-prune nothing new).
+    Checks both independently and returns on the first that fires -
+    either is sufficient per the user's own wording ("1. ... 2. ...",
+    not "both")."""
+    ohlc = _fetch_daily_closes_once(symbol)
+    if ohlc is None:
+        return None
+    highs, lows, closes = ohlc["highs"], ohlc["lows"], ohlc["closes"]
+
+    supertrend = _compute_supertrend(highs, lows, closes, period=config.SUPERTREND_PERIOD, multiplier=config.SUPERTREND_MULTIPLIER)
+    if supertrend[-1] is not None and supertrend[-2] is not None:
+        is_above = closes[-1] > supertrend[-1]
+        prev_is_above = closes[-2] > supertrend[-2]
+        if prev_is_above and not is_above:
+            return "DAILY_SUPERTREND_CROSSED_BELOW"
+
+    ema = _compute_ema(closes, config.DAILY_EMA_PERIOD)
+    if ema[-1] is not None and ema[-2] is not None:
+        is_above_ema = closes[-1] > ema[-1]
+        prev_is_above_ema = closes[-2] > ema[-2]
+        if prev_is_above_ema and not is_above_ema:
+            return "DAILY_EMA12_CROSSED_BELOW"
+
+    return None
+
+
+# The trading DAY this prune last actually ran for - None until the
+# first run. Gated by a DATE comparison (same tolerant "today != last
+# run day" convention every daily-reset store in this codebase already
+# uses, e.g. BasketStore.maybe_reset_for_new_day) rather than an exact
+# clock-time match against 09:15 - if the process wasn't running exactly
+# then (a restart later in the morning), this still runs ONCE for the
+# day the first tick after 09:15 notices it hasn't yet, rather than
+# silently skipping the whole day.
+_last_watchlist_prune_date: Optional[date] = None
+
+
+async def _daily_watchlist_prune_tick() -> None:
+    """Called every monitor_loop tick; only does real work once per
+    trading day, at/after 09:15 IST. Runs regardless of
+    config.STRATEGY_ENABLED (see config.WATCHLIST_DAILY_PRUNE_ENABLED's
+    own docstring) - this only prunes watchlist_store's own candidate
+    set, never a live position: a symbol currently held under sequential
+    or basket_hedge mode stays fully managed either way, since both
+    modes' own monitor ticks already union their currently-held symbols
+    into the tick's symbol list independent of watchlist membership (see
+    _sequential_monitor_tick/_basket_hedge_monitor_tick) - pruning it
+    from the watchlist here only means it won't be considered for a
+    FRESH entry again once its current position eventually exits, which
+    is exactly the intent."""
+    global _last_watchlist_prune_date
+    if not config.WATCHLIST_DAILY_PRUNE_ENABLED:
+        return
+    now = _now_ist()
+    if now.time() < dt_time(9, 15) or now.date() == _last_watchlist_prune_date:
+        return
+
+    symbols = await watchlist_store.symbols()
+    loop = asyncio.get_running_loop()
+    removed: list[tuple[str, str]] = []
+    for i, symbol in enumerate(symbols):
+        if i > 0:
+            await asyncio.sleep(0.35)
+        try:
+            reason = await loop.run_in_executor(None, _evaluate_daily_trend_break, symbol)
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not evaluate daily trend for watchlist prune - leaving it as-is", symbol)
+            continue
+        if reason:
+            await watchlist_store.remove_symbol(symbol)
+            removed.append((symbol, reason))
+            logger.info("%s: removed from watchlist - %s", symbol, reason)
+            await _record_swing_event("WATCHLIST_PRUNED", symbol, {"reason": reason})
+
+    _last_watchlist_prune_date = now.date()
+    logger.info(
+        "Daily watchlist prune complete: checked %d symbol(s), removed %d: %s",
+        len(symbols), len(removed), removed,
+    )
+
+
 # (as_of_date, prev_close, confirmed) per symbol - `prev_close` is
 # fetched (alongside today's open, in one OHLC call) at most ONCE PER
 # SYMBOL PER TRADING DAY, the same as the old gap-up cache this replaced.
@@ -1567,7 +1717,12 @@ async def monitor_loop() -> None:
     config.py's own STRATEGY_MODE docstring for why all three coexist
     rather than one replacing another. All three stores' own daily reset
     runs every tick regardless of which mode is currently active (cheap,
-    keeps a closed-today log from going stale across a mode switch)."""
+    keeps a closed-today log from going stale across a mode switch).
+
+    Also runs the daily watchlist prune (added 1 Sep 2026) every tick -
+    see _daily_watchlist_prune_tick's own docstring for why it's cheap to
+    call unconditionally (a no-op past the first successful run each
+    day) and why it runs regardless of STRATEGY_ENABLED."""
     logger.info(
         "Swing monitor loop started. strategy_enabled=%s strategy_mode=%s",
         config.STRATEGY_ENABLED, config.STRATEGY_MODE,
@@ -1578,6 +1733,7 @@ async def monitor_loop() -> None:
             await sequential_store.maybe_reset_for_new_day()
             await basket_hedge_store.maybe_reset_for_new_day()
             await watchlist_store.sync_from_file()
+            await _daily_watchlist_prune_tick()
             if config.STRATEGY_ENABLED:
                 if config.STRATEGY_MODE == "basket":
                     await _basket_monitor_tick()

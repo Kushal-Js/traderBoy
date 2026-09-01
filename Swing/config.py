@@ -215,6 +215,38 @@ SUPERTREND_CONFIRM_TIMEFRAME_MINUTES = int(os.getenv("SWING_SUPERTREND_CONFIRM_T
 SUPERTREND_REFRESH_SECONDS = int(os.getenv("SWING_SUPERTREND_REFRESH_SECONDS", "15"))
 
 # --------------------------------------------------------------------------- #
+# Daily watchlist prune (user request 1 Sep 2026): "removing any stock
+# when its daily close crossed below daily super trend / daily 12 EMA...
+# has to run daily when market starts at 9:15 AM." Runs once per trading
+# day, gated by a DATE comparison rather than an exact clock-time match
+# (see trading_engine._daily_watchlist_prune_tick's own docstring) -
+# unlike the entry/exit signal above (which reads intraday 5-min/1-min
+# candles), this reads DAILY candles via Dhan's own historical_daily_data
+# endpoint, using whichever daily candle is the LAST FULLY CLOSED one
+# (yesterday's at market open - today's daily candle can't exist yet).
+# Deliberately its own on/off flag, independent of STRATEGY_ENABLED -
+# this only ever mutates the watchlist (no order-placement risk), same
+# "watchlist hygiene is independent of the trading-enabled flag"
+# convention watchlist_store.sync_from_file() already follows.
+WATCHLIST_DAILY_PRUNE_ENABLED = os.getenv("SWING_WATCHLIST_DAILY_PRUNE_ENABLED", "true").lower() == "true"
+
+# Reuses the SAME Supertrend period/multiplier as the intraday signal
+# above (SUPERTREND_PERIOD/SUPERTREND_MULTIPLIER) - just fed daily
+# candles instead of intraday ones; the indicator's own settings aren't
+# meant to differ by timeframe, only the candles it's computed over do.
+# DAILY_EMA_PERIOD is the "12" in "DAILY 12 EMA" - the user's own number,
+# made configurable rather than hardcoded like every other tunable here.
+DAILY_EMA_PERIOD = int(os.getenv("SWING_DAILY_EMA_PERIOD", "12"))
+
+# Calendar days of daily-candle history to fetch per symbol for the
+# prune check - comfortably more than SUPERTREND_PERIOD/DAILY_EMA_PERIOD
+# need to seed (accounting for weekends/holidays eating into calendar
+# days - roughly 5 trading days per 7 calendar days), so both indicators
+# have settled past their own warm-up window rather than just barely
+# meeting the bare minimum candle count.
+DAILY_TREND_LOOKBACK_DAYS = int(os.getenv("SWING_DAILY_TREND_LOOKBACK_DAYS", "90"))
+
+# --------------------------------------------------------------------------- #
 # Paper trading (added 1 Sep 2026 - "enable paper trading for tomorrow...
 # keep track of trades, history and profit loss also like real trades in
 # files", turned back OFF the same day once real trading went live -

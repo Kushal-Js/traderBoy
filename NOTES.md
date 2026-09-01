@@ -3419,6 +3419,82 @@ out of git.
     lines from the new process; monitor loop actively evaluating
     watchlist entry signals within seconds of startup.
 
+    **Same-day live confirmation the new basket_hedge code actually
+    works**: within ~15 minutes of this deploy, APLAPOLLO's real exit
+    condition fired for the first time (5-min close 2231.50 crossed
+    below Supertrend 2247.47) - the bot correctly sold the futures leg
+    (exit ₹2237.30) and, ~4 seconds later, bought the new standalone PE
+    hedge (APLAPOLLO 29 SEP 2240 PUT @ ₹60.55), exactly matching the
+    BASKET->PE_HEDGE swap this entry describes. Caught live via a user
+    check ("why is the live trade not yet exited, conditions met
+    already?") that turned out to have already resolved itself moments
+    earlier - confirmed clean via `/swing/basket-hedge-positions` and
+    the logs, no bug, no intervention needed.
+
+77. **Daily watchlist prune - user request 1 Sep 2026** (verbatim):
+    "update this watchlist by removing any stock when it's 1. Daily
+    close crossed below daily super trend 2. Daily close crossed below
+    DAILY 12 EMA... This logic has to run daily when market starts at
+    9:15 AM." A stock is removed from Swing's watchlist the moment its
+    last FULLY CLOSED daily candle genuinely CROSSES below EITHER its
+    own daily Supertrend or its daily EMA(12) - checked once per trading
+    day, at/after 09:15 IST.
+
+    Entirely separate data path from the existing intraday entry/exit
+    signal (which reads 5-min/1-min candles) - this reads DAILY candles
+    via Dhan's own `historical_daily_data` endpoint (a sibling of the
+    `intraday_minute_data` call the intraday signal already uses, same
+    envelope shape). Always uses YESTERDAY's close as the "last fully
+    closed" candle, never today's - even a late catch-up run well after
+    market open can't use a daily candle that doesn't exist yet.
+    Deliberately a genuine CROSSOVER check (previous close on the other
+    side), not merely "is below" - the user's own wording ("crossed
+    below") for both conditions, and re-pruning an already-broken-down
+    stock every single day would be pointless since it's already off
+    the watchlist after the first prune anyway.
+
+    New `Swing/trading_engine._compute_ema` (a standard EMA, SMA-seeded
+    warm-up - the same convention `_compute_supertrend`'s own ATR
+    seeding already follows in this codebase) - the daily Supertrend
+    reuses the SAME `SUPERTREND_PERIOD`/`SUPERTREND_MULTIPLIER` as the
+    intraday signal (just fed daily candles instead), only the EMA
+    period is new/independently tunable (`DAILY_EMA_PERIOD`, the "12" in
+    "DAILY 12 EMA"). `_daily_watchlist_prune_tick` is called every
+    `monitor_loop` tick but only does real work once per trading day -
+    gated by a DATE comparison (`_last_watchlist_prune_date`) rather
+    than an exact clock-time match, so a process that wasn't running
+    exactly at 09:15 (a restart later in the morning) still catches up
+    and runs once for the day rather than silently skipping it. Runs
+    regardless of `STRATEGY_ENABLED` (own new flag,
+    `WATCHLIST_DAILY_PRUNE_ENABLED`, default true) - same "watchlist
+    hygiene is independent of the trading-enabled flag" convention
+    `watchlist_store.sync_from_file()` already established.
+
+    Deliberately only prunes `watchlist_store`'s own candidate set,
+    never a live position - a symbol currently held under sequential or
+    basket_hedge mode stays fully managed regardless, since both modes'
+    own monitor ticks already union their currently-held symbols into
+    each tick's symbol list independent of watchlist membership. Pruning
+    it here only means it won't be considered for a FRESH entry again
+    once its current position eventually exits - exactly the intent.
+
+    New `tests/test_swing_daily_watchlist_prune.py` (6 scenarios, against
+    the REAL production functions incl. `_compute_ema`/
+    `_compute_supertrend` fed real synthetic daily candle data): a
+    hand-verifiable EMA calculation; a genuine daily Supertrend
+    crossed-below firing and short-circuiting before EMA is even
+    checked; an isolated daily EMA(12) crossed-below firing on its own
+    (constructed via a wider daily high-low range to keep the Supertrend
+    band unreachable under the SAME multiplier, rather than a separate
+    config value, since both symbols run under one shared
+    `config.SUPERTREND_MULTIPLIER` in the same tick); a non-crossing
+    series and too-little-history both returning None; the once-per-day
+    gating (nothing before 09:15, runs once, stays a no-op the rest of
+    the day, resets on a new trading day); a mixed watchlist pruned
+    correctly with the right reason logged per removal; the feature flag
+    disabling everything; and one symbol's fetch failure never affecting
+    others in the same run. Ran all 18 test suites afterward, all pass.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM
