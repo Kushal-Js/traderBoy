@@ -20,6 +20,10 @@ Covers:
   6. The real seed content this request asked for (AUROPHARMA, OFSS,
      TORNTPHARM, VEDL) round-trips correctly through the real
      data/watchlist file this task created.
+  7. A line's optional `,YYYY-MM-DD` suffix (added 2 Sep 2026) correctly
+     backdates that symbol's own added_at/last_confirmed_at, a plain
+     symbol still gets "now", and an unparseable date falls back to
+     "now" for that one symbol rather than aborting the sync.
 
 HOW TO RUN:
     uv run python tests/test_swing_watchlist_file.py
@@ -28,6 +32,7 @@ import asyncio
 import os
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -140,15 +145,19 @@ async def test_6_real_seed_file_round_trips():
     """The actual data/watchlist file on the server - content has been
     replaced since this file was first seeded (31 Aug 2026: AUROPHARMA/
     OFSS/TORNTPHARM/VEDL; replaced 1 Sep 2026 with a 19-stock list, all 4
-    originals included) - reads whatever's actually there right now
-    rather than hardcoding either exact set, so this test doesn't go
-    stale the next time the watchlist is edited."""
+    originals included; each line gained a `,YYYY-MM-DD` curation date
+    2 Sep 2026, see test_7 below) - reads whatever's actually there right
+    now rather than hardcoding either exact set, so this test doesn't go
+    stale the next time the watchlist is edited. Only the symbol part of
+    each line (before any comma) is compared here - the optional date
+    suffix is test_7's own concern."""
     real_file = swl.WATCHLIST_FILE
     swl.WATCHLIST_FILE = REPO_ROOT / "data" / "watchlist"
     try:
         assert swl.WATCHLIST_FILE.exists(), f"expected {swl.WATCHLIST_FILE} to exist"
         expected = {
-            line.strip().upper() for line in swl.WATCHLIST_FILE.read_text().splitlines()
+            line.strip().partition(",")[0].strip().upper()
+            for line in swl.WATCHLIST_FILE.read_text().splitlines()
             if line.strip() and not line.strip().startswith("#")
         }
         assert expected, "the real watchlist file must not be empty"
@@ -160,6 +169,41 @@ async def test_6_real_seed_file_round_trips():
         swl.WATCHLIST_FILE = real_file
 
 
+async def test_7_optional_per_line_date_sets_added_at():
+    """Added 2 Sep 2026, user request: backdate the then-current
+    watchlist to 1 Sep 2026 "so they can later be pruned if required".
+    A line's optional `,YYYY-MM-DD` suffix becomes that symbol's own
+    added_at/last_confirmed_at instead of "now" - a plain symbol (no
+    date) still gets "now", unaffected; an unparseable date is logged
+    and swallowed, falling back to "now" for that ONE symbol rather than
+    aborting the whole sync."""
+    store = swl.WatchlistStore()
+    restore = _use_scratch_watchlist_file()
+    try:
+        swl.WATCHLIST_FILE.write_text(
+            "RELIANCE,2026-09-01\nTCS\nSBIN,not-a-real-date\n"
+        )
+        before = datetime.now()
+        added = await store.sync_from_file()
+        after = datetime.now()
+        assert set(added) == {"RELIANCE", "TCS", "SBIN"}
+
+        snap = {e["symbol"]: e for e in (await store.snapshot())["watchlist"]}
+        assert snap["RELIANCE"]["added_at"].startswith("2026-09-01T00:00:00")
+        assert snap["RELIANCE"]["last_confirmed_at"].startswith("2026-09-01T00:00:00")
+
+        for sym in ("TCS", "SBIN"):
+            added_at = datetime.fromisoformat(snap[sym]["added_at"])
+            assert before <= added_at <= after, \
+                f"{sym} has no valid date suffix - must fall back to 'now', got {added_at}"
+
+        print("7. A line's optional ',YYYY-MM-DD' suffix correctly becomes that symbol's own "
+              "added_at/last_confirmed_at, a plain symbol still gets 'now', and an unparseable "
+              "date falls back to 'now' rather than aborting the sync: PASSED")
+    finally:
+        restore()
+
+
 async def main():
     print("=== Swing file-backed watchlist test suite ===\n")
     await test_1_sync_adds_all_symbols_uppercased()
@@ -168,6 +212,7 @@ async def main():
     await test_4_missing_file_fails_open()
     await test_5_hot_edit_picked_up_without_restart()
     await test_6_real_seed_file_round_trips()
+    await test_7_optional_per_line_date_sets_added_at()
     print("\nALL SWING WATCHLIST FILE CHECKS PASSED")
 
 

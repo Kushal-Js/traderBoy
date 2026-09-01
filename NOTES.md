@@ -4042,6 +4042,55 @@ out of git.
     suite afterward, all pass. Read-only/local testing work - no deploy
     or restart needed or performed.
 
+84. **`data/watchlist` gained an optional per-line curation date - user
+    request 2 Sep 2026** (verbatim): "for current items in watchlist
+    give them addition date of 1st Sep 2026, so that they can later be
+    pruned if required."
+
+    The problem: `WatchlistStore` is purely in-memory (same tradeoff as
+    every store in this codebase) - `sync_from_file()` is what
+    repopulates it from `data/watchlist` after every restart, but it
+    always called `add_symbols()` with `datetime.now()`, so a symbol
+    already sitting in the file got RE-STAMPED with whatever time the
+    NEXT restart happened to occur at, not its own real curation date.
+    This silently defeated entry #79's own stale-age prune for every
+    file-backed symbol: since this bot restarts fairly often (deploys,
+    the daily 08:00 IST token-refresh restart), the effective 10-day
+    clock kept getting pushed back to "whenever it last restarted"
+    instead of "whenever the stock was actually added" - a symbol could
+    sit on the watchlist for months without ever going stale, purely as
+    a side effect of restart cadence, never actually being 10 real days
+    without reconfirmation.
+
+    Fix: a `data/watchlist` line may now optionally carry `,YYYY-MM-DD`
+    after the symbol (e.g. `AUROPHARMA,2026-09-01`) - `sync_from_file()`
+    parses it and passes it through a new `add_symbols(symbols,
+    added_at_override)` parameter, so a NEWLY-added-to-memory symbol
+    gets that real date as its own `added_at`/`last_confirmed_at`
+    instead of "now". A line with no date still works exactly as
+    before (backward compatible - the daily Chartink scan and the
+    webhook both still add plain, undated symbols that correctly get
+    "now"). An unparseable date is logged and swallowed, falling back
+    to "now" for just that one symbol rather than aborting the whole
+    sync - same fails-open philosophy as everything else in this file.
+
+    Applied it: every symbol currently on the live watchlist (the
+    19 already in `data/watchlist`, plus 3 more added live since
+    1 Sep 2026 via the webhook/Chartink scan and not yet persisted to
+    the file - HCLTECH, OIL, KOTAKBANK) got `,2026-09-01` added to
+    `data/watchlist`, so a future restart correctly re-stamps ALL of
+    them with 1 Sep 2026 (their real curation date) rather than
+    whatever day that restart happens to land on - the stale-age prune
+    can now genuinely fire on 11 Sep 2026 for anything not reconfirmed
+    by the Chartink scan before then, as originally intended.
+
+    New `tests/test_swing_watchlist_file.py` test 7: the `,YYYY-MM-DD`
+    suffix correctly becomes `added_at`/`last_confirmed_at`; a plain
+    symbol still gets "now"; an unparseable date falls back to "now" for
+    that symbol only. Test 6 (the real-seed-file round-trip) updated to
+    compare only the symbol part of each line, since the real file now
+    carries dates. Ran the full 24-file suite afterward, all pass.
+
     Deployed directly per the user's own explicit instruction ("Create
     and Test thoroughly and deploy it also") - every package flat at
     deploy time (checked all four - Options/Futures/Luxury/Swing -

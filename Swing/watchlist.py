@@ -15,6 +15,19 @@ remove_symbol()/a future removal webhook for that) - this keeps the
 file's semantics simple and matches the webhook's own add-only behavior;
 nothing here silently drops something that might still matter.
 
+A line may optionally carry `,YYYY-MM-DD` after the symbol (e.g.
+`AUROPHARMA,2026-09-01`) - the date this symbol was ACTUALLY curated,
+used as its `added_at`/`last_confirmed_at` instead of "now" (added 2 Sep
+2026, user request: backdate the then-current watchlist to 1 Sep 2026
+"so they can later be pruned if required"). This matters because the
+in-memory store itself resets on every restart (see below) - without a
+persisted date, every restart would silently re-stamp the file's
+symbols with THAT restart's own timestamp, perpetually postponing the
+stale-age prune's own 10-day clock and defeating the whole point of the
+feature. A line with no date (plain `SYMBOL`) still works exactly as
+before, stamped with "now" - this is a purely additive, backward-
+compatible format change.
+
 Each symbol carries two timestamps (added 1 Sep 2026, for the new
 stale-age prune - see trading_engine.py's own
 _stale_watchlist_age_prune_tick): `added_at` (when it FIRST joined the
@@ -60,7 +73,9 @@ class WatchlistStore:
         self._lock = asyncio.Lock()
         self._symbols: Dict[str, WatchlistEntry] = {}
 
-    async def add_symbols(self, symbols: List[str]) -> List[str]:
+    async def add_symbols(
+        self, symbols: List[str], added_at_override: Optional[Dict[str, datetime]] = None
+    ) -> List[str]:
         """Adds any symbols not already present. Returns only the ones
         actually newly added, for the webhook's own response - lets the
         caller see at a glance which of their requested symbols were
@@ -69,13 +84,19 @@ class WatchlistStore:
         this does NOT reset the stale-age prune's own clock (see
         confirm_chartink_symbols() below for the one thing that does);
         every existing caller (the webhook, the file sync) keeps this
-        exact same behavior unchanged."""
+        exact same behavior unchanged.
+
+        `added_at_override` (added 2 Sep 2026, used only by
+        sync_from_file() below) lets a caller stamp specific NEWLY-added
+        symbols with a real historical date instead of "now" - every
+        other/existing caller omits it and gets the original behavior."""
         async with self._lock:
             added = []
             now = datetime.now()
             for sym in symbols:
                 if sym not in self._symbols:
-                    self._symbols[sym] = WatchlistEntry(added_at=now)
+                    ts = (added_at_override or {}).get(sym, now)
+                    self._symbols[sym] = WatchlistEntry(added_at=ts)
                     added.append(sym)
             return added
 
@@ -150,7 +171,12 @@ class WatchlistStore:
         this time", never an error that could interrupt the monitor loop
         the caller runs this from. Cheap enough to call every tick (a
         small, OS-page-cached local file read - see choppy_stocks.py's
-        own docstring for the identical negligible-cost reasoning)."""
+        own docstring for the identical negligible-cost reasoning).
+
+        Each line may optionally carry `,YYYY-MM-DD` after the symbol -
+        see the module docstring. An unparseable date is logged and
+        ignored (falls back to "now" for that one symbol, rather than
+        aborting the whole sync)."""
         try:
             with open(WATCHLIST_FILE) as f:
                 lines = f.readlines()
@@ -160,13 +186,27 @@ class WatchlistStore:
             logger.exception("Could not read %s - skipping this sync", WATCHLIST_FILE)
             return []
 
-        symbols = [
-            line.strip().upper() for line in lines
-            if line.strip() and not line.strip().startswith("#")
-        ]
+        symbols: List[str] = []
+        added_at_override: Dict[str, datetime] = {}
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            sym_part, _, date_part = line.partition(",")
+            sym = sym_part.strip().upper()
+            date_part = date_part.strip()
+            if date_part:
+                try:
+                    added_at_override[sym] = datetime.strptime(date_part, "%Y-%m-%d")
+                except ValueError:
+                    logger.warning(
+                        "Could not parse date %r for %s in %s - using today's date instead",
+                        date_part, sym, WATCHLIST_FILE,
+                    )
+            symbols.append(sym)
         if not symbols:
             return []
-        added = await self.add_symbols(symbols)
+        added = await self.add_symbols(symbols, added_at_override=added_at_override)
         if added:
             logger.info("Synced %d new symbol(s) from %s: %s", len(added), WATCHLIST_FILE, added)
         return added
