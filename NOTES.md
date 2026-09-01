@@ -3982,6 +3982,66 @@ out of git.
     identical fix already needed across Swing's own test suite when
     entry #81 first landed. Ran all 23 test suites afterward, all pass.
 
+83. **Deep, full-pipeline integration tests for the 2-bucket fund
+    allocation system - user request 2 Sep 2026** (verbatim): "Perform
+    some integration tests to verify if bucket fund allocation is
+    working fine with trades in each package also. Add to documentation
+    also."
+
+    Entry #82's own `test_fund_allocation.py` already covered the pure
+    percentage math and (for Options) called `_enter_single_position`
+    directly - useful, but narrower than what "trades in each package"
+    really means: the REAL webhook -> ranking -> `cross_strategy_
+    registry` claim -> `PositionStore` capacity/reservation -> funds
+    check -> order-placement pipeline, for every package, not the
+    funds check in isolation. New `tests/test_fund_allocation_
+    integration.py` drives the actual production entry points instead
+    (`om._handle_chartink_webhook`, `chartink_webhook_futures`,
+    Luxury's own `_handle_chartink_webhook`, Swing's own
+    `_enter_basket_hedge_for_stock`) - only the Dhan network boundary is
+    mocked, everything else (locking, capacity, dedup, the check itself)
+    runs for real, matching every other deep-integration suite in this
+    repo. Four scenarios:
+      - The secondary bucket genuinely protects the primary bucket's own
+        share: an Options webhook entry sized to fit the WHOLE account
+        (₹60k margin against a ₹100k balance) but not its own 15% slice
+        (₹15k) is rejected through the real webhook handler - zero
+        orders placed, capacity AND the `cross_strategy_registry` claim
+        both released - while Swing's own real primary-bucket entry
+        against the EXACT SAME account balance succeeds via its own,
+        unaffected 85% share.
+      - Options/Futures/Luxury genuinely share ONE secondary bucket
+        through their own real pipelines, not 15% each: three
+        sequential real webhook entries (₹6k margin each) against a
+        realistically shrinking real balance (₹100k -> ₹60k -> ₹30k,
+        as each prior real fill's own actual margin block - typically
+        higher than the check's simple standalone-per-leg estimate -
+        lands) - the first two succeed, the third is correctly rejected
+        once the shared 15% share has shrunk below what it needs, even
+        though no SINGLE package's own ₹6k request ever exceeded ₹15k
+        by itself.
+      - The precise nuance from entry #82, demonstrated explicitly
+        rather than left implicit: the two buckets are PROPORTIONAL
+        SHARES of the account's own current real balance, not frozen,
+        mutually-exclusive silos. Once the real total genuinely drops
+        (₹100k -> ₹60k), BOTH buckets' own computed Rupee figures shrink
+        in exactly the same 85/15 proportion (₹85k/₹15k -> ₹51k/₹9k) -
+        this is the intended arithmetic (there's only one real pot of
+        money at the broker), not a bug, and not something either
+        bucket is "immune" to just because a DIFFERENT package's own
+        order was what actually spent the money.
+      - A funds-rejected webhook entry cleanly releases both its
+        `cross_strategy_registry` claim and its `PositionStore`
+        reservation - proven by the identical stock entering normally
+        on a SECOND webhook alert once the (simulated) balance improves,
+        confirming a funds-rejected stock is genuinely retriable, never
+        left in a stuck, half-claimed state.
+
+    Also updated `tests/README.md` (new file row + "How to run" line)
+    per the user's own "Add to documentation also." Ran the full 24-file
+    suite afterward, all pass. Read-only/local testing work - no deploy
+    or restart needed or performed.
+
     Deployed directly per the user's own explicit instruction ("Create
     and Test thoroughly and deploy it also") - every package flat at
     deploy time (checked all four - Options/Futures/Luxury/Swing -
