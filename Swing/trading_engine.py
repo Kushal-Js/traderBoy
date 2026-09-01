@@ -305,13 +305,14 @@ async def _has_sufficient_funds(symbol: str, legs: list[tuple[str, str, int, flo
     hedge AS A COMBO, only each leg standalone - so this sums every
     leg's own STANDALONE margin requirement and compares that sum
     against the account's current available balance (get_fund_limits'
-    own `availabelBalance`). A real, live-money-relevant simplification:
-    Dhan may in practice extend some margin benefit for a hedged
-    combination this check can't see, meaning this could read SLIGHTLY
-    more conservative than what the broker would actually require -
-    never the other way around, so it only ever errs toward skipping a
-    borderline-affordable trade, never toward proceeding with one that
-    can't actually be placed.
+    own `availabelBalance`) PLUS config.FUNDS_CHECK_BUFFER_RS (user
+    request 1 Sep 2026, default Rs15,000) - a provisional allowance for
+    the real margin benefit Dhan likely extends for an actual hedged
+    combo that this check can't see, so a genuinely affordable basket
+    isn't skipped just because this check's own standalone-sum estimate
+    reads more conservative than reality. Meant to be refined once a
+    real live basket shows the actual combo margin Dhan applies, rather
+    than guessed further now.
 
     Fails OPEN to "sufficient" (returns True) if the check itself fails
     (a margin-API or funds-API hiccup) - a funds-check OUTAGE must never
@@ -340,11 +341,20 @@ async def _has_sufficient_funds(symbol: str, legs: list[tuple[str, str, int, flo
         )
         return True
 
-    if total_required > available:
+    # config.FUNDS_CHECK_BUFFER_RS (user request 1 Sep 2026) - added to
+    # available balance, NOT subtracted from total_required, so the log
+    # line below always shows the real, unmodified available balance
+    # alongside the buffer actually applied. Compensates for this
+    # check's own known conservatism (summing each leg's standalone
+    # margin overstates what the broker will actually require for a
+    # real hedged combo) - a provisional estimate, to be refined once a
+    # real live basket shows the actual combo margin Dhan applies.
+    available_with_buffer = available + config.FUNDS_CHECK_BUFFER_RS
+    if total_required > available_with_buffer:
         logger.warning(
             "%s: skipping entry - required margin Rs%.2f (%d leg(s), summed standalone, no combo "
-            "margin benefit accounted for) exceeds available balance Rs%.2f",
-            symbol, total_required, len(legs), available,
+            "margin benefit accounted for) exceeds available balance Rs%.2f + Rs%.2f buffer = Rs%.2f",
+            symbol, total_required, len(legs), available, config.FUNDS_CHECK_BUFFER_RS, available_with_buffer,
         )
         return False
     return True

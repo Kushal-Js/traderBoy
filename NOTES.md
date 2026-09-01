@@ -3851,6 +3851,43 @@ out of git.
     package's own positions endpoint still empty afterward. `.env`
     updated with the new `SWING_FUNDS_CHECK_ENABLED=true`.
 
+    **Same-day follow-up, user request:** "Since Dhan might actually
+    extend some margin benefit while placing Basket order so let's add
+    15k as additional fund to available funds before calculating out
+    required margins so that a best bet isn't lost. And tomorrow anyways
+    we will get to know the real calculations on how the trades will be
+    placed and get to know real calculations for margin also." Directly
+    addresses `_has_sufficient_funds`'s own documented conservatism (it
+    sums each leg's standalone margin since Dhan's `/margincalculator`
+    has zero combo-awareness, which likely OVERSTATES the real
+    requirement for an actual hedged futures+PE hedge). New
+    `config.FUNDS_CHECK_BUFFER_RS` (default Rs15,000) is added to
+    `get_fund_limits`' own available balance BEFORE comparing against
+    required margin - added to available, not subtracted from required,
+    so the warning log line still shows the real, unbuffered available
+    figure alongside the buffer actually applied, for clean auditing.
+    Explicitly a PROVISIONAL number per the user's own plan - to be
+    refined once a real live basket shows Dhan's actual combo margin,
+    not guessed further now.
+
+    Updated `tests/test_swing_funds_check.py`'s own test 1: the
+    previous "insufficient" sub-case (required Rs6,000 > available
+    Rs5,000) would have flipped to "sufficient" once padded by the new
+    Rs15,000 buffer (6,000 <= 5,000+15,000), so its own margin figures
+    were bumped to genuinely exceed the buffered threshold, AND a NEW
+    sub-case was added asserting the buffer's own actual effect
+    (required Rs6,000 > raw available Rs5,000, but reads sufficient
+    once the buffer is added) - the exact scenario the user asked for.
+    Also bumped sequential mode's own single-leg insufficiency test
+    (entry #81's test 4) past the new higher buffered threshold. Ran
+    all 22 test suites afterward, all pass.
+
+    Deployed directly per the user's own explicit instruction ("make
+    this change and deploy it also") - every package flat at deploy
+    time, clean restart confirmed (no ERROR-level log lines, `/health`
+    OK, every position endpoint still empty). `.env` updated with the
+    new `SWING_FUNDS_CHECK_BUFFER_RS=15000`.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM

@@ -186,6 +186,22 @@ QUANTITY_LOTS = int(os.getenv("SWING_QUANTITY_LOTS", "1"))
 # one.
 FUNDS_CHECK_ENABLED = os.getenv("SWING_FUNDS_CHECK_ENABLED", "true").lower() == "true"
 
+# Buffer added to available balance before comparing against required
+# margin (added 1 Sep 2026, user request): "Since Dhan might actually
+# extend some margin benefit while placing Basket order so let's add
+# 15k as additional fund to available funds before calculating out
+# required margins so that a best bet isn't lost." Directly compensates
+# for _has_sufficient_funds's own known conservatism (Dhan's
+# /margincalculator has ZERO combo-awareness - it can't price a
+# futures+PE hedge together, only each leg standalone, so summing both
+# legs' own standalone figures likely OVERSTATES what the broker will
+# actually require for the real hedged combo). A rough, provisional
+# estimate of that gap - the user's own plan is to observe the REAL
+# combo margin the next time a live basket is actually placed and
+# refine this number from that real data, rather than guessing further
+# now.
+FUNDS_CHECK_BUFFER_RS = float(os.getenv("SWING_FUNDS_CHECK_BUFFER_RS", "15000"))
+
 # "MARGIN" is Tradehull's code for NRML/carry-forward (see Options/config.py's
 # identical OPTIONS_PRODUCT for the full rationale) - used for BOTH legs,
 # not MIS, since Swing baskets are explicitly meant to be held across

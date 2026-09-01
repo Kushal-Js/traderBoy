@@ -158,13 +158,30 @@ async def test_1_has_sufficient_funds_core_logic():
     finally:
         restore()
 
-    # (b) Insufficient - required > available.
+    # (b) Insufficient - required > available EVEN WITH the default
+    # Rs15,000 buffer (config.FUNDS_CHECK_BUFFER_RS) added on top.
+    restore, _, _ = install_all_dhan_mocks(margin_per_leg=15000.0, available_balance=5000.0)
+    try:
+        ok = await ste._has_sufficient_funds("TEST", [
+            ("SEC1", "MARGIN", 100, 500.0), ("SEC2", "MARGIN", 100, 20.0),
+        ])
+        assert ok is False, \
+            "15000+15000=30000 required > 5000 available + 15000 buffer = 20000 must be insufficient"
+    finally:
+        restore()
+
+    # (b2) The buffer's own effect (user request 1 Sep 2026): required
+    # exceeds the RAW available balance, but fits comfortably once the
+    # Rs15,000 buffer is added - must now read as SUFFICIENT specifically
+    # because of the buffer, not despite it.
     restore, _, _ = install_all_dhan_mocks(margin_per_leg=3000.0, available_balance=5000.0)
     try:
         ok = await ste._has_sufficient_funds("TEST", [
             ("SEC1", "MARGIN", 100, 500.0), ("SEC2", "MARGIN", 100, 20.0),
         ])
-        assert ok is False, "3000+3000=6000 required > 5000 available must be insufficient"
+        assert ok is True, \
+            "3000+3000=6000 required > 5000 raw available, but 6000 <= 5000+15000=20000 WITH the " \
+            "buffer - must read as sufficient because of the buffer"
     finally:
         restore()
 
@@ -185,9 +202,11 @@ async def test_1_has_sufficient_funds_core_logic():
         restore()
 
     print("1. _has_sufficient_funds correctly sums every leg's own standalone margin requirement and "
-          "compares against available balance (sufficient/insufficient both correct), and fails OPEN "
-          "to 'sufficient' on either the margin-API or funds-API itself failing - a funds-check "
-          "outage must never block real trading: PASSED")
+          "compares against available balance PLUS config.FUNDS_CHECK_BUFFER_RS (a case that exceeds "
+          "raw available but fits once the Rs15,000 buffer is added reads as sufficient BECAUSE of "
+          "the buffer; a case that exceeds even the buffered amount still reads as insufficient), and "
+          "fails OPEN to 'sufficient' on either the margin-API or funds-API itself failing - a "
+          "funds-check outage must never block real trading: PASSED")
 
 
 async def test_2_basket_mode_skips_before_any_order_when_insufficient():
@@ -251,7 +270,9 @@ async def test_4_sequential_mode_skips_before_any_order_when_insufficient():
     real_enabled = ste.config.STRATEGY_ENABLED
     ste.config.STRATEGY_ENABLED = True
 
-    restore, placed_orders, margin_calls = install_all_dhan_mocks(margin_per_leg=60000.0, available_balance=50000.0)
+    # Only ONE leg here (futures-only entry), so the required margin must
+    # clear the buffer on its own - 100000 > 50000 available + 15000 buffer.
+    restore, placed_orders, margin_calls = install_all_dhan_mocks(margin_per_leg=100000.0, available_balance=50000.0)
     try:
         result = await ste._enter_futures_for_stock("TCS")
         assert result["status"] == "skipped" and result["reason"] == "insufficient_funds", result
