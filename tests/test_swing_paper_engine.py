@@ -33,11 +33,20 @@ Covers, against the REAL production functions (not reimplemented):
      signal (gap-up + both Supertrend legs) genuinely creates a paper
      basket via _enter_paper_basket, and a real crossed-below exit signal
      genuinely closes it via _exit_paper_basket with the pnl recorded -
-     not reached if either were still stubs.
-  8. A symbol already holding an open paper basket is skipped on the next
-     entry-signal check (no duplicate paper position on the same stock),
-     and the SHARED watchlist itself is left untouched by a paper entry
-     (unlike the real loop's own auto-entry, which removes the symbol).
+     not reached if either were still stubs. Also confirms a symbol
+     already holding an open paper basket is skipped on the next
+     entry-signal check, and that the SHARED watchlist is left untouched
+     by a paper entry (unlike the real loop's own auto-entry).
+  8. Real margin/funds logging (added 1 Sep 2026, user request: "logging
+     real margin and funds required during paper trading so that we can
+     do analysis also") - each leg's real, Dhan-quoted margin_required
+     and the account's fund snapshot at entry flow correctly through to
+     the persisted closed-trade record (on-disk, not just in-memory), the
+     combined total is the naive SUM of both legs (never a guessed/
+     partial figure), and a margin/funds fetch failure at entry leaves
+     those figures None WITHOUT aborting the paper entry itself (unlike a
+     price-fetch failure, which does abort - price is essential to the
+     simulated P&L, margin/funds data is not).
 
 HOW TO RUN:
     uv run python tests/test_swing_paper_engine.py
@@ -88,18 +97,33 @@ def _raise_if_called(*args, **kwargs):
     )
 
 
-def install_all_dhan_mocks(ltp_by_symbol=None):
+def install_all_dhan_mocks(
+    ltp_by_symbol=None, margin_by_security_id=None, funds_snapshot=None,
+    fail_margin=False, fail_funds=False,
+):
     """Same shape as every other suite's helper - see
     test_swing_signal_logic.py's own copy. place_market_order/
     wait_for_order_result are wired to RAISE rather than just return a
     fake fill - proves the safety invariant by construction, not merely
     by omission (a stub that quietly no-ops could hide a real call
-    slipping through some other code path)."""
+    slipping through some other code path).
+
+    get_margin_required/get_fund_limits default to succeeding with a
+    generic fake figure (so tests that don't care about margin/funds
+    logging stay clean/fast, with no unmocked retry-with-backoff delay
+    and no noisy exception logging) - pass margin_by_security_id/
+    funds_snapshot for a test that needs specific values, or
+    fail_margin=True/fail_funds=True for a test that needs the "fetch
+    failed" path."""
     ltp_by_symbol = ltp_by_symbol or {}
+    margin_by_security_id = margin_by_security_id or {}
+    funds_snapshot = funds_snapshot if funds_snapshot is not None else {"availabelBalance": 100000.0}
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
         "get_futures_contract": odc.dhan_wrapper.get_futures_contract,
         "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "get_margin_required": odc.dhan_wrapper.get_margin_required,
+        "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "place_market_order": odc.dhan_wrapper.place_market_order,
         "wait_for_order_result": odc.dhan_wrapper.wait_for_order_result,
     }
@@ -111,7 +135,19 @@ def install_all_dhan_mocks(ltp_by_symbol=None):
             raise ValueError(f"no fake LTP configured for {trading_symbol}")
         return ltp_by_symbol[trading_symbol]
 
+    def fake_get_margin_required(security_id, exchange_segment, transaction_type, quantity, product_type, price):
+        if fail_margin:
+            raise ValueError("simulated margin_calculator failure")
+        return {"totalMargin": margin_by_security_id.get(security_id, 999.0)}
+
+    def fake_get_fund_limits():
+        if fail_funds:
+            raise ValueError("simulated get_fund_limits failure")
+        return funds_snapshot
+
     odc.dhan_wrapper.get_option_ltp = fake_get_option_ltp
+    odc.dhan_wrapper.get_margin_required = fake_get_margin_required
+    odc.dhan_wrapper.get_fund_limits = fake_get_fund_limits
     odc.dhan_wrapper.place_market_order = _raise_if_called
     odc.dhan_wrapper.wait_for_order_result = _raise_if_called
 
@@ -142,10 +178,17 @@ async def test_1_and_2_successful_paper_entry_never_places_real_orders():
         assert basket.option_leg.trading_symbol == "RELIANCE FAKE EXP PUT"
         assert basket.option_leg.entry_price == 40.0
         assert basket.option_leg.quantity == 500
+        # Margin/funds logging (added 1 Sep 2026) - default fake succeeds
+        # for both legs, so the naive sum must be reported (not None).
+        assert basket.futures_leg.margin_required == 999.0
+        assert basket.option_leg.margin_required == 999.0
+        assert basket.total_margin_required == 1998.0
+        assert basket.account_funds_snapshot == {"availabelBalance": 100000.0}
         assert store.completed == [], "entry alone must not write a completed trade - only a close does"
         print("1&2. Paper entry simulates both legs at LTP (futures leg priced via the same "
               "get_option_ltp used for options, confirming it's generic across instrument types), "
-              "records the basket, and - per the safety invariant - never calls "
+              "records the basket - including each leg's real margin_required and the account's "
+              "fund snapshot at entry - and, per the safety invariant, never calls "
               "place_market_order/wait_for_order_result even once: PASSED")
     finally:
         restore()
@@ -325,6 +368,76 @@ async def test_7_full_auto_paper_entry_then_exit_via_signal():
         spe.config.PAPER_TRADING_ENABLED = real_paper_enabled
 
 
+async def test_8_margin_and_funds_logging():
+    """User request 1 Sep 2026: "logging real margin and funds required
+    during paper trading so that we can do analysis also." Covers: exact
+    per-leg margin values + the naive combined sum flowing correctly from
+    entry through to the persisted closed-trade record; a margin-fetch
+    failure leaves that figure `None` WITHOUT aborting the paper entry
+    (unlike a price-fetch failure) and correctly leaves the combined sum
+    `None` too (never a partial/understated sum); and a funds-fetch
+    failure is likewise non-fatal."""
+    store = spe.PaperBasketStore()
+    spe.paper_basket_store = store
+    entry_ltp = {"WIPRO FAKE EXP FUT": 500.0, "WIPRO FAKE EXP PUT": 8.0}
+    margin_by_security_id = {"FUT-WIPRO": 62500.0, "OPT-WIPRO": 4000.0}
+    funds_snapshot = {"availabelBalance": 250000.0, "sodLimit": 300000.0, "utilizedAmount": 50000.0}
+    restore = install_all_dhan_mocks(entry_ltp, margin_by_security_id, funds_snapshot)
+    try:
+        await spe._enter_paper_basket("WIPRO")
+        basket = store.live_baskets["WIPRO"]
+        assert basket.futures_leg.margin_required == 62500.0
+        assert basket.option_leg.margin_required == 4000.0
+        assert basket.total_margin_required == 66500.0, "must be the naive SUM of both legs' own figures"
+        assert basket.account_funds_snapshot == funds_snapshot
+    finally:
+        restore()
+
+    exit_ltp = {"WIPRO FAKE EXP FUT": 510.0, "WIPRO FAKE EXP PUT": 6.0}
+    restore = install_all_dhan_mocks(exit_ltp)
+    try:
+        await spe._exit_paper_basket("WIPRO", "SUPERTREND_5MIN_EXIT")
+    finally:
+        restore()
+
+    wipro_trades = [t for t in store.completed if t["underlying_symbol"] == "WIPRO"]
+    assert len(wipro_trades) == 1
+    trade = wipro_trades[0]
+    assert trade["futures_margin_required"] == 62500.0
+    assert trade["option_margin_required"] == 4000.0
+    assert trade["total_margin_required"] == 66500.0
+    assert trade["account_funds_snapshot_at_entry"] == funds_snapshot
+    reloaded = trade_history.read_all_jsonl(spe.SWING_PAPER_LOG_NAME)
+    wipro_reloaded = [t for t in reloaded if t["underlying_symbol"] == "WIPRO"]
+    assert len(wipro_reloaded) == 1 and wipro_reloaded[0]["total_margin_required"] == 66500.0, \
+        "margin/funds fields must round-trip through the on-disk log too, not just the in-memory copy"
+    print("8a. Real per-leg margin (via get_margin_required) and the account's fund snapshot (via "
+          "get_fund_limits) are correctly captured at entry, summed into a naive worst-case total, "
+          "and persisted through to the completed trade record on-disk: PASSED")
+
+    # Now the failure paths - a margin/funds fetch failure must NOT abort
+    # the paper entry (unlike a price-fetch failure).
+    store2 = spe.PaperBasketStore()
+    spe.paper_basket_store = store2
+    entry_ltp_2 = {"AXISBANK FAKE EXP FUT": 1100.0, "AXISBANK FAKE EXP PUT": 15.0}
+    restore = install_all_dhan_mocks(entry_ltp_2, fail_margin=True, fail_funds=True)
+    try:
+        await spe._enter_paper_basket("AXISBANK")
+        assert "AXISBANK" in store2.live_baskets, \
+            "a margin/funds fetch failure must NOT abort the paper entry - only a price-fetch failure does"
+        basket = store2.live_baskets["AXISBANK"]
+        assert basket.futures_leg.margin_required is None
+        assert basket.option_leg.margin_required is None
+        assert basket.total_margin_required is None, \
+            "must be None (never a guessed 0 or a partial sum) when the fetch itself failed"
+        assert basket.account_funds_snapshot is None
+        print("8b. A margin/funds fetch failure at entry leaves those figures None (never a "
+              "guessed 0) WITHOUT aborting the paper entry itself - price is essential to the "
+              "simulated P&L, margin/funds data is not: PASSED")
+    finally:
+        restore()
+
+
 async def main():
     print("=== Swing paper-trading engine test suite ===\n")
     await test_1_and_2_successful_paper_entry_never_places_real_orders()
@@ -333,6 +446,7 @@ async def main():
     test_5_paper_log_is_isolated_from_real_trade_history()
     await test_6_poll_loop_noop_while_disabled()
     await test_7_full_auto_paper_entry_then_exit_via_signal()
+    await test_8_margin_and_funds_logging()
     print("\nALL SWING PAPER-TRADING ENGINE CHECKS PASSED")
 
 

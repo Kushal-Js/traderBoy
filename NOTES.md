@@ -2783,6 +2783,80 @@ out of git.
     and after restart, all four real-money strategies' `live_positions`
     confirmed empty both before and after.
 
+67. **Real margin/funds logging added to Swing's paper trading - user
+    request 1 Sep 2026** ("make sure we would also be logging real
+    margin and funds required during paper trading so that we can do
+    analysis also").
+
+    New `Options/dhan_client.py` methods: `get_margin_required()`
+    (public-wraps-private-via-`_retry`, same pattern as every other
+    retried REST call in that file) wraps Dhan's real, read-only
+    `/margincalculator` endpoint - and `get_fund_limits()` wraps
+    `/fundlimit`. Both call the RAW dhanhq object
+    (`self.client.Dhan.margin_calculator`/`get_fund_limits`), not
+    Tradehull's own higher-level wrappers - confirmed by reading
+    `Dhan_Tradehull.py` directly that Tradehull's own `margin_calculator()`
+    swallows literally ANY failure (bad symbol, transient error,
+    anything) down to a silent `return 0`, indistinguishable from a
+    genuine ₹0 margin. This codebase's own versions check
+    `response["status"]` explicitly and RAISE on failure instead, so a
+    fetch problem is always visible as "no data," never a misleadingly
+    precise zero.
+
+    Reused the exact call shape already confirmed working in the
+    separate trading-skills repo's own investigation from the previous
+    day (`basket-order-feasibility.md`'s Finding 2, and
+    `mtf-eligibility-detection.md`'s live-tested recipe) rather than
+    guessing at the signature - `margin_calculator(security_id,
+    exchange_segment, transaction_type, quantity, product_type, price,
+    trigger_price=0)`, `NSE_FNO` for the futures/option legs (matching
+    the exchange_segment string this codebase already uses elsewhere for
+    FNO instruments), and `config.FUTURES_PRODUCT`/`OPTIONS_PRODUCT`
+    ("MARGIN") passed straight through unchanged since that string is
+    already identical to dhanhq's own raw `MARGIN` product-type constant
+    (verified: `self.Dhan.MARGIN == 'MARGIN'`) - no translation layer
+    needed.
+
+    `Swing/paper_engine.py`'s `_enter_paper_basket()` now fetches, for
+    each leg, its own standalone `margin_required` (via
+    `get_margin_required`, at the same simulated LTP already used for
+    entry), plus ONE `account_funds_snapshot` (via `get_fund_limits`,
+    the account's full balance/utilization breakdown at that moment) -
+    all three new REST calls are best-effort: a failure logs a warning
+    and leaves that figure `None`, it never aborts the paper entry the
+    way a price-fetch failure does (price is essential to the simulated
+    P&L; margin/funds data is purely for later offline analysis).
+    `PaperBasket.total_margin_required` is the naive SUM of both legs'
+    own figures - the documented "practical rule" from
+    `basket-order-feasibility.md` (budget for the worst case, since
+    Dhan's margin_calculator has no concept of a combo/SPAN-hedge
+    discount) - and is deliberately only ever reported when BOTH legs'
+    figures came back real, never a partial/silently-understated sum.
+    All of this flows through to the persisted `swing_paper_trades`
+    record on close (`futures_margin_required`, `option_margin_required`,
+    `total_margin_required`, `account_funds_snapshot_at_entry`) and to
+    the live snapshot (`GET /swing/paper-trades`) while a basket is still
+    open, not just after it closes.
+
+    New `tests/test_margin_and_funds.py` (5 scenarios): both new
+    wrappers return the real `data` dict on success, RAISE (not a silent
+    0) on a failure status after exhausting retries, and retry/recover a
+    transient failure via the shared `_retry()` helper. Extended
+    `tests/test_swing_paper_engine.py` with a new test #8 (2
+    sub-scenarios): exact per-leg margin + funds values flow correctly
+    from entry through to the on-disk persisted record, and a
+    margin/funds fetch failure at entry leaves those figures `None`
+    without aborting the paper entry itself. `install_all_dhan_mocks()`
+    in that file extended to mock `get_margin_required`/`get_fund_limits`
+    (defaulting to a generic fake success so the 7 pre-existing scenarios
+    stay fast/clean, with configurable overrides for the new test) - re-
+    ran all 12 test suites afterward, all still pass.
+
+    Deployed - `SWING_STRATEGY_ENABLED` confirmed still `false`,
+    `SWING_PAPER_TRADING_ENABLED` confirmed still `true`, all real-money
+    strategies' `live_positions` confirmed empty before and after
+    restart.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

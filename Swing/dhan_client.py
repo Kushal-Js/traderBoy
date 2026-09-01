@@ -27,6 +27,11 @@ see trading_engine.py's own module docstring for why.
 get_today_open_and_prev_close() the same day, for the "today's open >
 yesterday's close" entry gate - no separate re-export line needed here
 since it's just a new method on the same already-imported singleton.
+
+Same goes for get_margin_required()/get_fund_limits(), added 1 Sep 2026
+for paper_engine.py's own margin/funds logging (user request - "logging
+real margin and funds required during paper trading so that we can do
+analysis also").
 """
 from Options.dhan_client import (  # noqa: F401
     AtmOption,

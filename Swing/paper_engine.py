@@ -10,14 +10,31 @@ or `dhan_wrapper.client.order_placement` - the only two real order-
 placement entry points reachable through dhan_wrapper. Every Dhan call
 here is READ-ONLY: `get_futures_contract`, `get_atm_option` (both just
 RESOLVE a contract - trading_symbol/security_id/lot_size - they don't
-place an order) and `get_option_ltp` (a plain REST LTP fetch, generic
+place an order), `get_option_ltp` (a plain REST LTP fetch, generic
 across instrument types despite its option-flavored name - confirmed by
 reading Options/dhan_client.py directly: it's a bare `get_ltp_data(names=
 [trading_symbol])` call keyed only by trading_symbol, with no option-
 specific validation, and Options/dhan_client.py's own get_day_change_pct
-already reuses it for plain equity symbols). A "SWING PAPER ENTRY"/"SWING
-PAPER EXIT" log line and an on-disk trade record are the only side
-effects of a paper trade.
+already reuses it for plain equity symbols), and (added 1 Sep 2026)
+`get_margin_required`/`get_fund_limits` - Dhan's own `/margincalculator`
+and `/fundlimit` endpoints, which only ever QUOTE a figure, never place
+or reserve anything. A "SWING PAPER ENTRY"/"SWING PAPER EXIT" log line
+and an on-disk trade record are the only side effects of a paper trade.
+
+Real margin/funds logging (user request 1 Sep 2026: "make sure we would
+also be logging real margin and funds required during paper trading so
+that we can do analysis also") - at entry, fetches each leg's real,
+Dhan-quoted standalone margin requirement plus the account's fund
+snapshot at that moment, purely for later offline analysis (e.g. "would
+this basket actually have been affordable, and by how much"). Never
+influences whether a paper trade is entered/exited or how its P&L is
+computed - a fetch failure here logs a warning and leaves that figure
+`None`, it never blocks or invalidates the trade itself. See
+get_margin_required's own docstring (Options/dhan_client.py) for why this
+is a worst-case, no-hedge-discount figure (Dhan's margin_calculator has
+no concept of "combo" margin), and PaperBasket's own field comments for
+why the combined total is only ever reported when BOTH legs' figures are
+real (never a partial, silently-understated sum).
 
 Deliberately reuses trading_engine.py's REAL, UNCHANGED entry/exit signal
 functions (_evaluate_watchlist_entry_signal/_evaluate_basket_exit_signal,
@@ -96,6 +113,13 @@ class PaperLeg:
     quantity: int
     lot_size: int
     entry_price: float
+    # Real margin Dhan's own /margincalculator would have blocked for
+    # THIS leg alone, at entry - added 1 Sep 2026 (user request: "logging
+    # real margin and funds required during paper trading so that we can
+    # do analysis also"). None if the fetch failed - never a guessed/
+    # defaulted 0 (see get_margin_required's own docstring for why a
+    # silent 0 would be actively misleading here).
+    margin_required: Optional[float] = None
     exit_price: Optional[float] = None
 
 
@@ -105,6 +129,20 @@ class PaperBasket:
     futures_leg: PaperLeg
     option_leg: PaperLeg
     opened_at: datetime = field(default_factory=_now_ist)
+    # Naive sum of both legs' own standalone margin_required - the
+    # "practical rule" from the trading-skills repo's own
+    # basket-order-feasibility.md: budget for the worst case (no combo/
+    # SPAN-hedge discount assumed), since Dhan's margin_calculator has no
+    # way to ask "what would the COMBINED margin be." None unless BOTH
+    # legs' own margin_required were fetched successfully - a partial sum
+    # would understate the real requirement without saying so.
+    total_margin_required: Optional[float] = None
+    # The account's full get_fund_limits() snapshot taken at entry time -
+    # so a later analysis can check "was this basket actually affordable
+    # right then," not just look at the requirement in isolation. Kept as
+    # the raw dict (Dhan's own field names/casing) rather than picking
+    # out one key - see get_fund_limits' own docstring.
+    account_funds_snapshot: Optional[dict] = None
 
 
 SWING_PAPER_LOG_NAME = "swing_paper_trades"
@@ -153,12 +191,19 @@ class PaperBasketStore:
                 "futures_entry_price": basket.futures_leg.entry_price,
                 "futures_exit_price": futures_exit_price,
                 "futures_pnl": futures_pnl,
+                "futures_margin_required": basket.futures_leg.margin_required,
                 "option_trading_symbol": basket.option_leg.trading_symbol,
                 "option_quantity": basket.option_leg.quantity,
                 "option_entry_price": basket.option_leg.entry_price,
                 "option_exit_price": option_exit_price,
                 "option_pnl": option_pnl,
+                "option_margin_required": basket.option_leg.margin_required,
                 "total_pnl": futures_pnl + option_pnl,
+                # See PaperBasket's own field comments - both None unless
+                # the underlying REST calls succeeded at entry time; never
+                # guessed/defaulted.
+                "total_margin_required": basket.total_margin_required,
+                "account_funds_snapshot_at_entry": basket.account_funds_snapshot,
             }
             self.completed.append(trade)
             append_jsonl(SWING_PAPER_LOG_NAME, trade)
@@ -190,6 +235,8 @@ class PaperBasketStore:
             "opened_at": b.opened_at.isoformat() if b.opened_at else None,
             "futures_leg": vars(b.futures_leg),
             "option_leg": vars(b.option_leg),
+            "total_margin_required": b.total_margin_required,
+            "account_funds_snapshot_at_entry": b.account_funds_snapshot,
         }
 
 
@@ -205,7 +252,17 @@ async def _enter_paper_basket(symbol: str) -> None:
     abandoned with nothing recorded - unlike the real all-or-nothing
     entry, there's no compensating rollback to do here, since nothing was
     ever actually "entered" (persisted) until BOTH legs have priced
-    successfully."""
+    successfully.
+
+    Margin (per leg, via get_margin_required) and the account's fund
+    snapshot (via get_fund_limits) are fetched separately, AFTER both
+    legs are already priced - added 1 Sep 2026 (user request: "logging
+    real margin and funds required during paper trading so that we can
+    do analysis also"). Deliberately best-effort: a failure here logs a
+    warning and leaves that figure `None` rather than aborting the whole
+    paper entry - unlike price, margin/funds data is for offline analysis
+    only, not something the simulated P&L depends on, so it must never
+    block or invalidate an otherwise-good paper trade."""
     loop = asyncio.get_running_loop()
     try:
         fut = await loop.run_in_executor(None, dhan_wrapper.get_futures_contract, symbol)
@@ -226,15 +283,61 @@ async def _enter_paper_basket(symbol: str) -> None:
 
     fut_qty = fut.lot_size * config.QUANTITY_LOTS
     option_qty = atm.lot_size * config.QUANTITY_LOTS
+
+    futures_margin: Optional[float] = None
+    try:
+        futures_margin_data = await loop.run_in_executor(
+            None, dhan_wrapper.get_margin_required,
+            fut.security_id, "NSE_FNO", "BUY", fut_qty, config.FUTURES_PRODUCT, fut_ltp,
+        )
+        futures_margin = futures_margin_data.get("totalMargin")
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s: could not fetch margin required for the futures leg - the paper trade still "
+            "proceeds, this figure will read as null for analysis", symbol,
+        )
+
+    option_margin: Optional[float] = None
+    try:
+        option_margin_data = await loop.run_in_executor(
+            None, dhan_wrapper.get_margin_required,
+            atm.security_id, "NSE_FNO", "BUY", option_qty, config.OPTIONS_PRODUCT, option_ltp,
+        )
+        option_margin = option_margin_data.get("totalMargin")
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s: could not fetch margin required for the PE leg - the paper trade still "
+            "proceeds, this figure will read as null for analysis", symbol,
+        )
+
+    account_funds_snapshot: Optional[dict] = None
+    try:
+        account_funds_snapshot = await loop.run_in_executor(None, dhan_wrapper.get_fund_limits)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s: could not fetch the account's fund limits at entry - the paper trade still "
+            "proceeds, this snapshot will read as null for analysis", symbol,
+        )
+
+    # A partial sum (only one leg's margin known) would UNDERSTATE the
+    # real requirement without saying so - only sum when both are real.
+    total_margin_required = (
+        futures_margin + option_margin if futures_margin is not None and option_margin is not None else None
+    )
+
     basket = PaperBasket(
         underlying_symbol=symbol,
-        futures_leg=PaperLeg("FUT", fut.trading_symbol, fut_qty, fut.lot_size, fut_ltp),
-        option_leg=PaperLeg("PE", atm.trading_symbol, option_qty, atm.lot_size, option_ltp),
+        futures_leg=PaperLeg("FUT", fut.trading_symbol, fut_qty, fut.lot_size, fut_ltp, margin_required=futures_margin),
+        option_leg=PaperLeg("PE", atm.trading_symbol, option_qty, atm.lot_size, option_ltp, margin_required=option_margin),
+        total_margin_required=total_margin_required,
+        account_funds_snapshot=account_funds_snapshot,
     )
     await paper_basket_store.add_basket(basket)
     logger.info(
-        "%s: SWING PAPER ENTRY (no real order placed) - futures %s@%.2f, PE %s@%.2f",
-        symbol, fut.trading_symbol, fut_ltp, atm.trading_symbol, option_ltp,
+        "%s: SWING PAPER ENTRY (no real order placed) - futures %s@%.2f (margin=%s), "
+        "PE %s@%.2f (margin=%s), total_margin_required=%s",
+        symbol, fut.trading_symbol, fut_ltp, futures_margin,
+        atm.trading_symbol, option_ltp, option_margin, total_margin_required,
     )
 
 

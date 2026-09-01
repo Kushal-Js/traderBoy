@@ -810,6 +810,72 @@ class DhanWrapper:
             raise ValueError(f"No LTP returned for {trading_symbol}")
         return float(ltp)
 
+    def get_margin_required(
+        self, security_id: str, exchange_segment: str, transaction_type: str,
+        quantity: int, product_type: str, price: float,
+    ) -> dict:
+        """Public, retried wrapper around Dhan's real, read-only
+        `/margincalculator` endpoint - added 1 Sep 2026 for Swing's paper
+        trading (user request: "make sure we would also be logging real
+        margin and funds required during paper trading so that we can do
+        analysis also"). Places NO order - answers "what would THIS ONE
+        order, by itself, cost in margin right now."
+
+        Uses the RAW dhanhq call (`self.client.Dhan.margin_calculator`),
+        not Tradehull's own `margin_calculator()` wrapper - that wrapper
+        collapses any failure (bad symbol, transient error, anything) down
+        to a silent `return 0`, which would be indistinguishable from a
+        genuine ₹0 margin figure. This raises instead, so a fetch failure
+        is always visible as "no data" rather than a misleadingly precise
+        zero.
+
+        See the separate trading-skills repo's own
+        `basket-order-feasibility.md`/`mtf-eligibility-detection.md` for
+        the full investigation this is built on - confirmed there that
+        this endpoint has ZERO combo-awareness (it can't tell you what a
+        futures+PE hedge would cost TOGETHER, only each leg standalone),
+        and that `status: "success"` alone doesn't guarantee a meaningful
+        result (the MTF-on-a-BE-series-stock gotcha) - callers here only
+        ever read `totalMargin`, which is unaffected by that specific
+        gotcha (it only affects the `leverage` field on MTF requests)."""
+        return _retry(
+            self._get_margin_required_once, security_id, exchange_segment,
+            transaction_type, quantity, product_type, price,
+        )
+
+    def _get_margin_required_once(
+        self, security_id: str, exchange_segment: str, transaction_type: str,
+        quantity: int, product_type: str, price: float,
+    ) -> dict:
+        response = self.client.Dhan.margin_calculator(
+            security_id=str(security_id), exchange_segment=exchange_segment,
+            transaction_type=transaction_type, quantity=int(quantity),
+            product_type=product_type, price=float(price),
+        )
+        if response.get("status") != "success":
+            raise ValueError(f"margin_calculator failed for security_id={security_id}: {response}")
+        return response.get("data") or {}
+
+    def get_fund_limits(self) -> dict:
+        """Public, retried wrapper around Dhan's real `/fundlimit`
+        endpoint - the account's current balance/margin-utilization
+        snapshot, added 1 Sep 2026 alongside get_margin_required() so a
+        paper trade's logged margin requirement can be checked against
+        what funds were actually available at that same moment, not just
+        the requirement viewed in isolation. Returns the full `data` dict
+        as-is (field names/casing exactly as Dhan sends them, including
+        its own `availabelBalance` typo) rather than picking out specific
+        keys - this is for offline analysis, not a decision this bot
+        makes anything on, so nothing is lost by keeping the whole
+        breakdown."""
+        return _retry(self._get_fund_limits_once)
+
+    def _get_fund_limits_once(self) -> dict:
+        response = self.client.Dhan.get_fund_limits()
+        if response.get("status") == "failure":
+            raise ValueError(f"get_fund_limits failed: {response}")
+        return response.get("data") or {}
+
     # ------------------------------------------------------------------ #
     # Supertrend exit signal (computed on the underlying stock, not the
     # option's own premium - see config.ENABLE_SUPERTREND_EXIT)
