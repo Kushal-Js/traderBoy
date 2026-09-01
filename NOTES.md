@@ -3656,6 +3656,21 @@ out of git.
     `last_confirmed_at` measurably bumped forward, not just be silently
     left alone. Ran all 20 test suites afterward, all pass.
 
+    Deployed directly per the user's own explicit instruction ("Test it
+    and deploy it also") - still ran the mechanical safety checks
+    unprompted: `/positions`/`/futures/positions`/`/luxury/positions`/
+    `/swing/basket-hedge-positions` all confirmed empty before
+    restarting. Real live confirmation immediately after restart (not
+    just in tests): the Chartink scan ran at startup and correctly
+    RECONFIRMED `BAJAJ-AUTO` (already present from the static watchlist
+    file) rather than silently ignoring it - `GET /swing/watchlist`
+    afterward showed its `added_at` (from the file sync) and
+    `last_confirmed_at` (from the scan, a few hundred ms later)
+    genuinely different, proving the reconfirm mechanism fired for
+    real. The stale-age prune also ran at startup (removed 0, correctly
+    - nothing has had time to go stale yet). No ERROR-level log lines
+    from the new process; every other package still flat.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM
