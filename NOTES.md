@@ -3671,6 +3671,81 @@ out of git.
     - nothing has had time to go stale yet). No ERROR-level log lines
     from the new process; every other package still flat.
 
+80. **Entry-candidate ranking - user request 1 Sep 2026** (verbatim,
+    answering "how are we gonna find which stock to apply our basket
+    order for if more than 1 stock becomes eligible for entry
+    conditions at the same time?"): "Use a combined strategy of the
+    Freshness of the crossover and higher Volume." Before this, when
+    more than one watchlist symbol's entry signal fired in the SAME
+    monitor tick, whichever symbol happened to sit earliest in
+    `watchlist_store`'s own iteration order won - pure accident of
+    insertion order, nothing judged which setup was actually better.
+    Applies to ALL THREE modes' own entry paths (basket/sequential/
+    basket_hedge), since all three share the exact same "capacity is
+    scarce, order of attempt determines the winner" shape.
+
+    Mechanism: each mode's own monitor tick now COLLECTS every symbol
+    whose entry signal fires this tick (instead of entering the first
+    one found immediately) into a list, ranks that list, THEN attempts
+    entries in ranked order - so once `MAX_LIVE_BASKETS` is exhausted,
+    the remaining (lower-ranked) candidates are simply skipped for this
+    tick and stay on the watchlist for a later one, exactly as a
+    capacity-blocked entry already worked before this change; only the
+    ORDER of attempts changed. New `_entry_candidate_rank_key(entry_tf)`
+    - a pure sort-key function returning `(candle_start, volume)` off
+    the SAME 5-min `SupertrendState`
+    `_evaluate_watchlist_entry_signal` already fetches internally for
+    its own crossed-above check, so ranking adds ZERO extra Dhan REST
+    calls (re-fetching immediately after is a guaranteed cache hit,
+    `SUPERTREND_REFRESH_SECONDS`-throttled). Sorting candidates
+    descending by this key ranks:
+      1. FRESHEST crossover first - `SupertrendState.crossed_above` is
+         itself only ever true for roughly one 5-min candle's own
+         eligibility window (see its own docstring), so two symbols can
+         both read True in the SAME tick while having crossed on
+         DIFFERENT candles within an overlapping window; the one that
+         crossed more recently is closer to the actual breakout moment.
+      2. Higher VOLUME on that SAME crossover candle as the tiebreak -
+         the much more common real case in practice, since most stocks'
+         5-min candles align to the same clock boundaries, so most
+         actual ties will share an identical `candle_start`. A
+         breakout on heavier volume reads as more convincing conviction
+         than a thin one - standard technical-analysis heuristic.
+
+    New `SupertrendState.volume` field (the crossover candle's OWN
+    traded volume, not a daily/average figure - added to
+    `_fetch_supertrend_state_once`'s own construction, extracted from
+    the same `intraday_minute_data` response already fetched, trimmed
+    in lockstep with the existing "drop still-forming last candle"
+    guard). Backward compatible (defaults to 0.0) - every existing
+    `SupertrendState(...)` construction across the test suite (all
+    keyword-arg-based) needed zero changes.
+
+    Sequential mode gets special treatment: ranking only applies to a
+    genuinely FRESH entry (`leg is None` - the only situation actually
+    competing for scarce capacity); the PE->FUTURES loop-continuation
+    swap doesn't compete for NEW capacity (that symbol's own slot was
+    already reserved when it first entered and stays reserved
+    throughout the loop), so it still fires immediately as detected,
+    never deferred behind a ranking step.
+
+    New `tests/test_swing_entry_ranking.py` (5 scenarios): the pure
+    rank-key function's own ordering (freshness dominates regardless of
+    volume; volume is only the tiebreak when `candle_start` ties; a
+    missing state/candle_start sorts last rather than crashing); a full
+    `_basket_hedge_monitor_tick`-shaped scenario with capacity=1 where
+    the FRESHER of two simultaneously-firing symbols wins even against
+    a vastly larger volume on the older one, and the loser stays on the
+    watchlist untouched; the same shape with an IDENTICAL `candle_start`
+    where the higher-volume symbol wins instead; and the same ranking
+    behavior confirmed for `_sequential_monitor_tick`'s own fresh-entry
+    path and for plain `_basket_monitor_tick`, for parity across all
+    three modes. Re-ran the FULL existing 20-suite test suite first to
+    confirm nothing broke before adding the new one (none of the
+    existing tests call the real tick functions with a mocked entry
+    signal but an unmocked Supertrend fetch, so none needed updating) -
+    21 test suites total afterward, all pass.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM

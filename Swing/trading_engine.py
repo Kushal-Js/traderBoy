@@ -156,7 +156,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from datetime import time as dt_time
 from datetime import timedelta
-from typing import Optional
+from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from trade_history import append_jsonl, attribute_open_broker_position
@@ -1221,7 +1221,12 @@ class SupertrendState:
     line for one (symbol, timeframe) - enough to detect an actual
     crossover (a state CHANGE), not just a current side. `is_above`/
     `prev_is_above` are None only if there weren't enough candles yet to
-    compute a Supertrend value for that bar (see _fetch_supertrend_state)."""
+    compute a Supertrend value for that bar (see _fetch_supertrend_state).
+
+    `volume` (added 1 Sep 2026, for entry-candidate ranking - see
+    _entry_candidate_rank_key below) is the CURRENT (most recent)
+    candle's own traded volume - the same candle `close`/`is_above`
+    describe, not a daily or average figure."""
     candle_start: Optional[datetime]
     close: float
     supertrend: float
@@ -1229,6 +1234,7 @@ class SupertrendState:
     prev_close: float
     prev_supertrend: float
     prev_is_above: bool
+    volume: float = 0.0
 
     @property
     def crossed_above(self) -> bool:
@@ -1271,6 +1277,7 @@ def _fetch_supertrend_state_once(symbol: str, interval_minutes: int) -> Optional
     highs = data.get("high") or []
     lows = data.get("low") or []
     closes = data.get("close") or []
+    volumes = data.get("volume") or []
     timestamps = data.get("timestamp") or []
 
     period = config.SUPERTREND_PERIOD
@@ -1280,7 +1287,7 @@ def _fetch_supertrend_state_once(symbol: str, interval_minutes: int) -> Optional
     if timestamps:
         last_candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST)
         if _now_ist() < last_candle_start + timedelta(minutes=interval_minutes):
-            highs, lows, closes, timestamps = highs[:-1], lows[:-1], closes[:-1], timestamps[:-1]
+            highs, lows, closes, volumes, timestamps = highs[:-1], lows[:-1], closes[:-1], volumes[:-1], timestamps[:-1]
 
     # Need period+1 candles for the FIRST computable Supertrend bar, one
     # more on top of that so there's a PREVIOUS bar to compare against for
@@ -1296,6 +1303,7 @@ def _fetch_supertrend_state_once(symbol: str, interval_minutes: int) -> Optional
         candle_start=datetime.fromtimestamp(timestamps[-1], tz=IST) if timestamps else None,
         close=closes[-1], supertrend=supertrend[-1], is_above=closes[-1] > supertrend[-1],
         prev_close=closes[-2], prev_supertrend=supertrend[-2], prev_is_above=closes[-2] > supertrend[-2],
+        volume=volumes[-1] if volumes else 0.0,
     )
 
 
@@ -1719,6 +1727,53 @@ async def _evaluate_watchlist_entry_signal(symbol: str) -> bool:
     return confirmed
 
 
+# --------------------------------------------------------------------------- #
+# Entry-candidate ranking (user request 1 Sep 2026): "Use a combined
+# strategy of the Freshness of the crossover and higher Volume" - for
+# when more than one watchlist symbol's entry signal fires in the SAME
+# monitor tick and MAX_LIVE_BASKETS can't take them all. Previously
+# whichever symbol happened to sit earliest in watchlist_store's own
+# iteration order won, by pure accident of insertion order - nothing
+# judged which setup was actually better. Applies uniformly to all
+# three modes' own entry paths (basket/sequential/basket_hedge) since
+# all three share this exact same "capacity is scarce, order of attempt
+# determines the winner" shape.
+# --------------------------------------------------------------------------- #
+def _entry_candidate_rank_key(entry_tf: Optional[SupertrendState]) -> Tuple[datetime, float]:
+    """Sort key for a symbol whose entry signal just fired this tick -
+    (candle_start, volume) of the SAME 5-min SupertrendState
+    _evaluate_watchlist_entry_signal already fetched internally (reading
+    it again here is free: _fetch_supertrend_state's own 15s-TTL cache
+    means this is a cache hit, no extra Dhan REST call).
+
+    Sorting candidates by this key in DESCENDING order ranks:
+      1. FRESHEST crossover first - a bigger `candle_start` means the
+         5-min crossed_above candle closed more recently. crossed_above
+         is itself only ever true for roughly one 5-min candle's worth
+         of ticks (see SupertrendState.crossed_above's own docstring),
+         so two symbols can both show True in the SAME tick while having
+         crossed on DIFFERENT candles within that overlapping window -
+         the one that crossed more recently is "fresher," closer to the
+         actual breakout moment rather than an aging signal about to
+         lapse.
+      2. Higher VOLUME on that SAME crossover candle as the tiebreak
+         (the much more common case in practice, since most stocks'
+         5-min candles align to the same clock boundaries, so most
+         simultaneous ties will share an identical candle_start) - a
+         breakout on heavier volume reads as more convincing conviction
+         behind the move than a thin one, a standard technical-analysis
+         heuristic.
+    `entry_tf` should never actually be None here (the caller only
+    computes this key after _evaluate_watchlist_entry_signal already
+    required a non-None entry-timeframe state to return True at all) -
+    handled defensively anyway with the lowest-possible key, so a
+    genuinely malformed candidate sorts last rather than crashing the
+    whole tick's entry-ranking step."""
+    if entry_tf is None or entry_tf.candle_start is None:
+        return (datetime.min.replace(tzinfo=IST), 0.0)
+    return (entry_tf.candle_start, entry_tf.volume)
+
+
 async def _evaluate_basket_exit_signal(symbol: str, basket: Basket) -> Optional[str]:
     """EXIT rule (user's own wording, 31 Aug 2026): "5 min close price
     cross below super trend." Mutually exclusive with the entry rule by
@@ -1739,23 +1794,38 @@ async def _evaluate_basket_exit_signal(symbol: str, basket: Basket) -> Optional[
 
 
 async def _basket_monitor_tick() -> None:
-    """The ORIGINAL "basket" mode tick body - unchanged behavior, just
-    factored out of monitor_loop 1 Sep 2026 when config.STRATEGY_MODE was
-    introduced (see monitor_loop's own docstring for the mode dispatch).
-    Evaluates the entry signal for every watchlist symbol (removing it
+    """The ORIGINAL "basket" mode tick body - factored out of
+    monitor_loop 1 Sep 2026 when config.STRATEGY_MODE was introduced
+    (see monitor_loop's own docstring for the mode dispatch). Evaluates
+    the entry signal for every watchlist symbol, paced (a small sleep
+    between watchlist symbols) the same way rank_and_pick_top_stocks()
+    paces its own sequential Dhan calls elsewhere in this codebase - but
+    (added 1 Sep 2026) does NOT enter immediately on the first signal
+    found: every symbol whose signal fires this tick is collected first,
+    then RANKED (see _entry_candidate_rank_key - freshest crossover,
+    higher volume as the tiebreak) before any entry is actually
+    attempted, so when more than one symbol qualifies in the same tick
+    and MAX_LIVE_BASKETS can't take them all, the best one goes first
+    rather than whichever happened to iterate first. Removes a symbol
     from the watchlist on a successful auto-entry - no reason to keep
-    evaluating a stock once it has a live basket) and the exit signal for
-    every live basket. Paced (a small sleep between watchlist symbols)
-    the same way rank_and_pick_top_stocks() paces its own sequential Dhan
-    calls elsewhere in this codebase."""
+    evaluating a stock once it has a live basket. Then evaluates the
+    exit signal for every live basket, unchanged."""
     watchlist_symbols = await watchlist_store.symbols()
+    entry_candidates: list[Tuple[datetime, float, str]] = []
     for i, symbol in enumerate(watchlist_symbols):
         if i > 0:
             await asyncio.sleep(0.35)
         if await _evaluate_watchlist_entry_signal(symbol):
-            result = await enter_basket_for_stock(symbol)
-            if result.get("status") == "entered":
-                await watchlist_store.remove_symbol(symbol)
+            entry_tf = await _fetch_supertrend_state(symbol, config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES)
+            candle_start, volume = _entry_candidate_rank_key(entry_tf)
+            entry_candidates.append((candle_start, volume, symbol))
+
+    entry_candidates.sort(reverse=True)
+    for _, _, symbol in entry_candidates:
+        result = await enter_basket_for_stock(symbol)
+        if result.get("status") == "entered":
+            await watchlist_store.remove_symbol(symbol)
+
     for symbol, basket in list(basket_store.live_baskets.items()):
         reason = await _evaluate_basket_exit_signal(symbol, basket)
         if reason:
@@ -1773,18 +1843,31 @@ async def _sequential_monitor_tick() -> None:
     every symbol CURRENTLY holding a leg even if it was hand-removed
     from data/watchlist mid-loop - a symbol's own held leg always keeps
     it under management until it naturally returns to NONE (the PE
-    loss-cap exit)."""
+    loss-cap exit).
+
+    Entry-candidate ranking (added 1 Sep 2026, see
+    _entry_candidate_rank_key) only applies to a genuinely FRESH entry
+    (a symbol currently at NONE, `leg is None` below) - that's the only
+    situation actually competing for scarce MAX_LIVE_BASKETS capacity.
+    The PE->FUTURES loop-continuation swap (the `leg.option_type == "PE"`
+    branch) does NOT compete for new capacity - that symbol's own slot
+    was already reserved back when it first entered and stays reserved
+    throughout the whole loop - so it fires immediately as soon as
+    detected, same as before, never deferred behind a ranking step."""
     watchlist_symbols = await watchlist_store.symbols()
     live_legs = dict(sequential_store.live_legs)
     all_symbols = list(dict.fromkeys(list(watchlist_symbols) + list(live_legs.keys())))
 
+    fresh_entry_candidates: list[Tuple[datetime, float, str]] = []
     for i, symbol in enumerate(all_symbols):
         if i > 0:
             await asyncio.sleep(0.35)
         leg = live_legs.get(symbol)
         if leg is None:
             if await _evaluate_watchlist_entry_signal(symbol):
-                await _enter_futures_for_stock(symbol)
+                entry_tf = await _fetch_supertrend_state(symbol, config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES)
+                candle_start, volume = _entry_candidate_rank_key(entry_tf)
+                fresh_entry_candidates.append((candle_start, volume, symbol))
         elif leg.option_type == "FUT":
             reason = await _evaluate_basket_exit_signal(symbol, None)
             if reason:
@@ -1797,6 +1880,10 @@ async def _sequential_monitor_tick() -> None:
                 if pe_reason:
                     await _exit_pe_to_watching(symbol, leg, pe_reason)
 
+    fresh_entry_candidates.sort(reverse=True)
+    for _, _, symbol in fresh_entry_candidates:
+        await _enter_futures_for_stock(symbol)
+
 
 async def _basket_hedge_monitor_tick() -> None:
     """The "basket_hedge" mode tick body (added 1 Sep 2026) - entry side
@@ -1806,20 +1893,29 @@ async def _basket_hedge_monitor_tick() -> None:
     so - same as sequential mode's own tick - every symbol CURRENTLY held
     (BASKET or PE_HEDGE state) is evaluated too, watchlist or not, until
     it naturally returns to plain watching via one of the PE hedge's own
-    3 exit conditions."""
+    3 exit conditions.
+
+    Entry-candidate ranking (added 1 Sep 2026, see
+    _entry_candidate_rank_key - freshest crossover, higher volume as the
+    tiebreak): a symbol whose entry signal fires this tick is collected
+    first rather than entered immediately, so that when more than one
+    fires in the SAME tick and MAX_LIVE_BASKETS can't take them all, the
+    best one is attempted first instead of whichever happened to iterate
+    first."""
     watchlist_symbols = await watchlist_store.symbols()
     live_positions = dict(basket_hedge_store.live_positions)
     all_symbols = list(dict.fromkeys(list(watchlist_symbols) + list(live_positions.keys())))
 
+    entry_candidates: list[Tuple[datetime, float, str]] = []
     for i, symbol in enumerate(all_symbols):
         if i > 0:
             await asyncio.sleep(0.35)
         position = live_positions.get(symbol)
         if position is None:
             if await _evaluate_watchlist_entry_signal(symbol):
-                result = await _enter_basket_hedge_for_stock(symbol)
-                if result.get("status") == "entered":
-                    await watchlist_store.remove_symbol(symbol)
+                entry_tf = await _fetch_supertrend_state(symbol, config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES)
+                candle_start, volume = _entry_candidate_rank_key(entry_tf)
+                entry_candidates.append((candle_start, volume, symbol))
         elif position.state == "BASKET":
             reason = await _evaluate_basket_exit_signal(symbol, None)
             if reason:
@@ -1829,6 +1925,12 @@ async def _basket_hedge_monitor_tick() -> None:
             reason = await _evaluate_pe_hedge_exit_signal(symbol, pe_leg)
             if reason:
                 await _exit_pe_hedge_to_watching(symbol, pe_leg, reason)
+
+    entry_candidates.sort(reverse=True)
+    for _, _, symbol in entry_candidates:
+        result = await _enter_basket_hedge_for_stock(symbol)
+        if result.get("status") == "entered":
+            await watchlist_store.remove_symbol(symbol)
 
 
 async def monitor_loop() -> None:
