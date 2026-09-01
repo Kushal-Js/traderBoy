@@ -36,7 +36,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, HTTPException
 from pydantic import BaseModel, field_validator
 
 from trade_history import fire_and_forget, record_webhook_alert
@@ -47,6 +47,7 @@ from .position_store import basket_hedge_store, basket_store, sequential_store
 from .trading_engine import (
     _enter_basket_hedge_for_stock,
     _enter_futures_for_stock,
+    _run_chartink_watchlist_scan,
     enter_basket_for_stock,
     monitor_loop,
     reconcile_basket_hedge_positions,
@@ -263,6 +264,32 @@ async def chartink_webhook_swing_watchlist(payload: SwingWebhookPayload):
         "status": "processed", "requested": stocks, "added": added,
         "already_on_watchlist": [s for s in stocks if s not in added],
     }
+
+
+@router.post("/swing/chartink-scan-now")
+async def trigger_chartink_watchlist_scan():
+    """Manual trigger for the daily Chartink scan pull (added 1 Sep
+    2026) - runs config.CHARTINK_WATCHLIST_SCAN_URL's own scan right now
+    and adds whatever it returns to the watchlist, rather than waiting
+    for the next scheduled run (config.CHARTINK_WATCHLIST_SCAN_TIME).
+    Bypasses the once-a-day gate deliberately - a manual request means
+    "run it now." Doesn't touch the gate either, so the regularly
+    scheduled run at config.CHARTINK_WATCHLIST_SCAN_TIME still fires on
+    its own later the same day regardless - harmless, since add_symbols
+    is idempotent (a symbol already on the watchlist is simply skipped).
+    Works regardless of config.STRATEGY_ENABLED (only ever mutates the
+    watchlist, never places an order) but NOT while
+    config.CHARTINK_WATCHLIST_SCAN_ENABLED is False - the feature flag
+    still wins over a manual request, same as every other flag in this
+    codebase."""
+    if not config.CHARTINK_WATCHLIST_SCAN_ENABLED:
+        return {"status": "ignored", "reason": "chartink_watchlist_scan_disabled"}
+    try:
+        result = await _run_chartink_watchlist_scan()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Manual Chartink watchlist scan trigger failed")
+        raise HTTPException(status_code=502, detail=f"Chartink scan fetch failed: {exc}") from exc
+    return {"status": "processed"} | result
 
 
 # --------------------------------------------------------------------------- #

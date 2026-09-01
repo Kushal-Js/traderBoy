@@ -161,7 +161,7 @@ from zoneinfo import ZoneInfo
 
 from trade_history import append_jsonl, attribute_open_broker_position
 
-from . import config
+from . import chartink_scan, config
 from .dhan_client import OrderStatus, _compute_supertrend, _retry, dhan_wrapper
 from .position_store import (
     Basket,
@@ -1467,6 +1467,73 @@ async def _daily_watchlist_prune_tick() -> None:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Daily Chartink scan pull for the watchlist (user request 1 Sep 2026) -
+# see config.py's own CHARTINK_WATCHLIST_SCAN_* docstring and
+# chartink_scan.py's own module docstring for the full mechanics. The
+# mirror image of the prune above: that one REMOVES on a daily trend
+# break, this one ADDS from a scan the user already runs on Chartink.
+# --------------------------------------------------------------------------- #
+async def _run_chartink_watchlist_scan() -> dict:
+    """The scan-and-add core, callable both from the daily tick below
+    AND from a manual trigger (POST /swing/chartink-scan-now) - a
+    manual run bypasses the once-a-day GATE (see
+    _daily_chartink_watchlist_scan_tick) but shares this exact same
+    fetch+add+log logic, so there's only one place that can ever
+    disagree with itself about what "running the scan" means. Raises on
+    a genuine fetch failure (network error, unexpected response shape) -
+    callers decide what to do with that (the tick logs and retries next
+    time; the manual endpoint surfaces it as an HTTP error)."""
+    loop = asyncio.get_running_loop()
+    symbols = await loop.run_in_executor(None, chartink_scan.fetch_scan_symbols_once)
+    added = await watchlist_store.add_symbols(symbols)
+    logger.info(
+        "Chartink watchlist scan complete: %d symbol(s) returned, %d newly added: %s",
+        len(symbols), len(added), added,
+    )
+    await _record_swing_event("CHARTINK_WATCHLIST_SCAN_COMPLETED", "ALL", {
+        "scan_url": config.CHARTINK_WATCHLIST_SCAN_URL,
+        "symbols_returned": symbols, "symbols_added": added,
+    })
+    return {"symbols_returned": symbols, "symbols_added": added}
+
+
+# Same tolerant "today != last run day" gating convention as
+# _last_watchlist_prune_date above - a late-starting process still
+# catches up and runs once for the day rather than skipping it. Only
+# set on SUCCESS (unlike the prune's per-symbol try/except, this is ONE
+# network call for the whole scan - a transient failure should retry on
+# a LATER tick the same day, not be silently marked "done" for the day).
+_last_chartink_scan_date: Optional[date] = None
+
+
+async def _daily_chartink_watchlist_scan_tick() -> None:
+    """Called every monitor_loop tick; only does real work once per
+    trading day, at/after config.CHARTINK_WATCHLIST_SCAN_TIME (pre-
+    market, well before the 09:15 prune above). Runs regardless of
+    config.STRATEGY_ENABLED (see config.CHARTINK_WATCHLIST_SCAN_ENABLED's
+    own docstring) - this only ever ADDS to watchlist_store, the same
+    "watchlist hygiene is independent of the trading-enabled flag"
+    convention every other watchlist-mutating feature here follows."""
+    global _last_chartink_scan_date
+    if not config.CHARTINK_WATCHLIST_SCAN_ENABLED:
+        return
+    now = _now_ist()
+    scan_time = datetime.strptime(config.CHARTINK_WATCHLIST_SCAN_TIME, "%H:%M").time()
+    if now.time() < scan_time or now.date() == _last_chartink_scan_date:
+        return
+
+    try:
+        await _run_chartink_watchlist_scan()
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Chartink watchlist scan failed - will retry on a later tick today rather than "
+            "marking today as done",
+        )
+        return
+    _last_chartink_scan_date = now.date()
+
+
 # (as_of_date, prev_close, confirmed) per symbol - `prev_close` is
 # fetched (alongside today's open, in one OHLC call) at most ONCE PER
 # SYMBOL PER TRADING DAY, the same as the old gap-up cache this replaced.
@@ -1719,10 +1786,11 @@ async def monitor_loop() -> None:
     runs every tick regardless of which mode is currently active (cheap,
     keeps a closed-today log from going stale across a mode switch).
 
-    Also runs the daily watchlist prune (added 1 Sep 2026) every tick -
-    see _daily_watchlist_prune_tick's own docstring for why it's cheap to
-    call unconditionally (a no-op past the first successful run each
-    day) and why it runs regardless of STRATEGY_ENABLED."""
+    Also runs the daily watchlist prune AND the daily Chartink scan pull
+    (both added 1 Sep 2026) every tick - see their own docstrings for
+    why each is cheap to call unconditionally (a no-op past their own
+    first successful run each day) and why both run regardless of
+    STRATEGY_ENABLED."""
     logger.info(
         "Swing monitor loop started. strategy_enabled=%s strategy_mode=%s",
         config.STRATEGY_ENABLED, config.STRATEGY_MODE,
@@ -1733,6 +1801,7 @@ async def monitor_loop() -> None:
             await sequential_store.maybe_reset_for_new_day()
             await basket_hedge_store.maybe_reset_for_new_day()
             await watchlist_store.sync_from_file()
+            await _daily_chartink_watchlist_scan_tick()
             await _daily_watchlist_prune_tick()
             if config.STRATEGY_ENABLED:
                 if config.STRATEGY_MODE == "basket":

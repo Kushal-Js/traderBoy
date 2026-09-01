@@ -3511,6 +3511,78 @@ out of git.
     manage it automatically. Needs manual review to confirm what it is
     and whether it needs manual closing.
 
+78. **Daily Chartink scan pull for the watchlist - user request 1 Sep
+    2026** ("I am thinking to automate updation of our watchlist file" ->
+    clarified via follow-up questions to: pull from "A specific Chartink
+    scan URL," "once daily, pre-market," scan =
+    `https://chartink.com/screener/longterm-15272`, the user's own
+    "LONGTERM" scan). The ADD-side mirror of entry #77's prune (that one
+    REMOVES on a daily trend break; this one ADDS from a scan the user
+    already runs) - pulls the scan's own current result list once daily
+    pre-market and adds it straight to the watchlist.
+
+    Unlike every OTHER Chartink integration in this codebase (Options/
+    Futures/Luxury/Swing's own two webhooks), which all wait for
+    Chartink to PUSH an alert TO us, this instead PULLS - it's the first
+    time this bot calls OUT to an external site rather than the other
+    way around. Confirmed the mechanics live via a real browser session
+    (Claude_Browser): opened the scan page, hooked
+    `XMLHttpRequest.prototype.send`/`setRequestHeader`, clicked the
+    page's own "Run Scan" button, and captured the EXACT request
+    Chartink's own frontend makes - a two-step flow: GET the scan page
+    for its `XSRF-TOKEN` cookie (Laravel's standard CSRF scheme), then
+    POST the scan's own `scan_clause` string to
+    `https://chartink.com/screener/process` with the cookie's value
+    (URL-decoded) echoed back as the `X-XSRF-TOKEN` header. No login or
+    API key needed - `window.CHARTINK.userId` was `0` throughout,
+    confirming this is the exact same unauthenticated request any
+    visitor's browser makes just by viewing the scan page. Independently
+    re-verified end-to-end with a bare `requests` script (no browser)
+    reproducing the identical 4-stock result set
+    (BAJAJ-AUTO/HCLTECH/OIL/KOTAKBANK) the live page showed at the time.
+
+    STALENESS CAVEAT, called out clearly rather than glossed over: the
+    captured `scan_clause` (stored as `config.CHARTINK_WATCHLIST_SCAN_
+    CLAUSE`) is a frozen SNAPSHOT of the scan's conditions as they
+    existed 1 Sep 2026. No public endpoint returns a scan's own live
+    definition without being logged in as its owner, so there's no way
+    to auto-detect a future edit - if the user changes the scan's own
+    conditions on Chartink's site, this needs a manual re-sync (repeat
+    the same browser-network-capture approach against the edited scan).
+
+    New `Swing/chartink_scan.py` (`fetch_scan_symbols_once` - the two-
+    step GET+POST, raises on any failure rather than ever returning a
+    guessed empty list) and `Swing/trading_engine.py`'s
+    `_run_chartink_watchlist_scan` (the shared core: fetch, add via the
+    REAL `watchlist_store.add_symbols`, log a durable
+    `CHARTINK_WATCHLIST_SCAN_COMPLETED` swing_event - callable both from
+    the daily tick and a new manual `POST /swing/chartink-scan-now`
+    trigger) / `_daily_chartink_watchlist_scan_tick` (same once-per-day
+    DATE-gating convention as entry #77's prune, new
+    `config.CHARTINK_WATCHLIST_SCAN_TIME` default 08:00 IST, pre-market
+    and distinctly earlier than the prune's own 09:15 gate) - with ONE
+    deliberate difference from the prune's own gating: since this is a
+    SINGLE network call for the whole scan (not a per-symbol loop), a
+    fetch FAILURE does NOT mark the day as done - the very next tick
+    (still the same day) retries, rather than silently waiting until
+    tomorrow the way one symbol's failure in the prune only skips that
+    one symbol. Runs regardless of `STRATEGY_ENABLED` (own flag,
+    `CHARTINK_WATCHLIST_SCAN_ENABLED`) - only ever mutates the
+    watchlist, never places an order.
+
+    New `tests/test_swing_chartink_scan.py` (4 scenarios, with ONLY
+    `requests.Session` mocked - everything else, including the real
+    `_run_chartink_watchlist_scan`/`watchlist_store`/swing_events
+    logging, runs for real): `fetch_scan_symbols_once` against a well-
+    formed mocked response (confirms the cookie is correctly URL-decoded
+    before being echoed back as the header) plus its own 3 failure
+    paths (no cookie, network error, malformed response) all correctly
+    RAISE; the scan-and-add core adding only genuinely NEW symbols and
+    logging the right event; the once-per-day gating including the
+    fetch-failure-doesn't-mark-done behavior specifically; and the
+    feature flag disabling everything. Ran all 19 test suites
+    afterward, all pass.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM

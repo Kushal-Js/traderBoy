@@ -247,6 +247,53 @@ DAILY_EMA_PERIOD = int(os.getenv("SWING_DAILY_EMA_PERIOD", "12"))
 DAILY_TREND_LOOKBACK_DAYS = int(os.getenv("SWING_DAILY_TREND_LOOKBACK_DAYS", "90"))
 
 # --------------------------------------------------------------------------- #
+# Daily Chartink scan pull for the watchlist (user request 1 Sep 2026):
+# "I am thinking to automate updation of our watchlist file" -> a
+# specific Chartink scan, polled once daily pre-market, its own result
+# list added straight to the watchlist. The mirror image of the daily
+# prune above (that one REMOVES on a daily trend break; this one ADDS
+# from a scan the user already runs on Chartink). See
+# Swing/chartink_scan.py's own module docstring for exactly how this
+# pulls Chartink's own public scan results server-side - no login or
+# API key involved, the same unauthenticated request any visitor's
+# browser makes when viewing the scan page and clicking "Run Scan"
+# (confirmed live via a real browser session, network-intercepted, then
+# independently re-verified with a bare `requests` script matching the
+# exact same result set).
+# --------------------------------------------------------------------------- #
+CHARTINK_WATCHLIST_SCAN_ENABLED = os.getenv("SWING_CHARTINK_WATCHLIST_SCAN_ENABLED", "true").lower() == "true"
+
+# The user's own "LONGTERM" scan on Chartink.
+CHARTINK_WATCHLIST_SCAN_URL = os.getenv(
+    "SWING_CHARTINK_WATCHLIST_SCAN_URL", "https://chartink.com/screener/longterm-15272",
+)
+
+# The exact query Chartink's OWN "Run Scan" button sends to reproduce
+# this scan's results - captured live via a real browser (network
+# interception) 1 Sep 2026, NOT re-derived from the URL alone (no
+# public endpoint returns a scan's own definition without being logged
+# in as its owner). STALE THE MOMENT the scan is edited on Chartink's
+# own site - see chartink_scan.py's own module docstring for how to
+# re-sync it (re-run the same browser-network-capture approach against
+# the edited scan).
+CHARTINK_WATCHLIST_SCAN_CLAUSE = (
+    "( {33489} (  daily close >  daily supertrend( 7 , 3 ) and  daily open >  1 day ago close and  "
+    "daily \"close - 1 candle ago close / 1 candle ago close * 100\" >  1 and  daily close >  daily "
+    "ema(  daily close , 20 ) and  daily close >  daily ema(  daily close , 200 ) and  daily close =  "
+    "daily max( 10 ,  daily close ) and(  daily close -  daily ema(  daily close , 20 ) ) >  (  1 day "
+    "ago close -  1 day ago ema(  daily close , 20 ) ) ) )"
+)
+
+# Pre-market, well before MARKET_OPEN_TIME (09:15) - the user's own
+# words: "once daily, pre-market." Chosen distinctly earlier than the
+# daily watchlist PRUNE's own 09:15 gate above so a fresh scan result is
+# already on the watchlist by the time market open's prune (and the
+# intraday entry signal) start evaluating it - not a hard requirement
+# (both read/write the same daily-candle-based data, unaffected by
+# intraday timing), just a sensible ordering.
+CHARTINK_WATCHLIST_SCAN_TIME = os.getenv("SWING_CHARTINK_WATCHLIST_SCAN_TIME", "08:00")
+
+# --------------------------------------------------------------------------- #
 # Paper trading (added 1 Sep 2026 - "enable paper trading for tomorrow...
 # keep track of trades, history and profit loss also like real trades in
 # files", turned back OFF the same day once real trading went live -
