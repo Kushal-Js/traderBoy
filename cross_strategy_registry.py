@@ -41,7 +41,17 @@ adds no measurable latency.
 
 Only the three REAL-money strategies (Options, Futures, Luxury)
 participate - K01/CopperOptions/IndexScalping never place real orders, so
-they're out of scope for this specific race.
+they're out of scope for this specific race. Swing (also real-money)
+briefly participated too, from its own creation on 31 Aug 2026, but was
+deliberately taken back OUT on 1 Sep 2026 (user decision: Swing is an
+"independent strategy" and should have its own separate live-basket
+tracking rather than share this registry - see Swing/trading_engine.py's
+own module docstring, and Swing/position_store.py's reserve_symbol/
+release_symbol for what replaced it). A real consequence of that
+decision: Swing and Options/Futures/Luxury can now independently enter
+the SAME underlying stock at the same instant - accepted, not a bug,
+since Swing trades a different instrument combination (futures + PE
+hedge) with its own capital pool.
 
 Pure in-memory, same tradeoff as every PositionStore in this codebase -
 resets on restart. That's fine here: this only ever needs to protect a

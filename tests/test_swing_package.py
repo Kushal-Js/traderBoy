@@ -27,9 +27,14 @@ Covers:
   5. Basket capacity (MAX_LIVE_BASKETS) is enforced and configurable.
   6. The watchlist webhook adds symbols and reports which were already
      present.
-  7. Cross-strategy registry participation: Swing racing Options for the
-     same stock - exactly one of the two wins, using the REAL
-     cross_strategy_registry and REAL entry functions from both packages.
+  7. Swing does NOT participate in cross_strategy_registry (user decision
+     1 Sep 2026, reversing its original 31 Aug 2026 design) - Swing and
+     Options racing for the SAME stock via their REAL entry functions can
+     now BOTH win (no mutual exclusion, and the shared registry stays
+     completely untouched by Swing's own attempt). Swing's OWN dedup
+     (basket_store.reserve_symbol) still fully protects against a
+     SWING-vs-SWING double entry on the same symbol, proven via a real
+     concurrent race using its REAL entry function.
   8. get_futures_contract() resolves the correct nearest-expiry contract
      (and correctly handles a hyphenated underlying like BAJAJ-AUTO -
      the same latent bug class _underlying_from_trading_symbol had for
@@ -329,10 +334,15 @@ async def test_6_watchlist_webhook_adds_symbols():
         sm.config.STRATEGY_ENABLED = real_enabled
 
 
-async def test_7_cross_strategy_registry_swing_vs_options():
+async def test_7_swing_no_longer_shares_cross_strategy_registry():
     """Swing and Options racing for the SAME stock via their REAL entry
-    functions, fired concurrently - exactly one must win, using the real
-    cross_strategy_registry both packages actually participate in."""
+    functions, fired concurrently - as of 1 Sep 2026 BOTH must win (Swing
+    was deliberately taken OUT of cross_strategy_registry, see
+    trading_engine.py's own module docstring), and the shared registry
+    must never even see Swing's own attempt. Separately: Swing's OWN
+    dedup (basket_store.reserve_symbol) must still fully prevent a
+    SWING-vs-SWING double entry on the same symbol - that's the
+    "independent, own separate list" protection that replaced it."""
     options_store = ops.PositionStore()
     ote.position_store = options_store
     swing_store = sps.BasketStore()
@@ -348,13 +358,30 @@ async def test_7_cross_strategy_registry_swing_vs_options():
             ote._process_one_entry("RELIANCE", "CE"),
             ste.enter_basket_for_stock("RELIANCE"),
         )
-        entered = [r for r in (options_result, swing_result) if r["status"] in ("entered",)]
-        claimed = [r for r in (options_result, swing_result) if r.get("reason") == "claimed_by_another_strategy"]
-        assert len(entered) == 1, f"expected exactly 1 winner, got options={options_result} swing={swing_result}"
-        assert len(claimed) == 1, f"expected the loser rejected via the registry, got options={options_result} swing={swing_result}"
-        assert csr.snapshot() == {}, "both claims must be released after their attempts resolve"
-        print("7. Cross-strategy registry: Swing vs Options racing for the SAME stock via their "
-              "REAL entry functions - exactly 1 winner, the other rejected pre-emptively: PASSED")
+        assert options_result["status"] == "entered", options_result
+        assert swing_result["status"] == "entered", \
+            f"Swing must no longer be blocked by Options claiming the same underlying, got {swing_result}"
+        assert csr.snapshot() == {}, \
+            "the shared registry must never see Swing's own claim at all now (Options' own claim " \
+            "still released normally, so it should read back empty either way)"
+        print("7a. Swing no longer shares cross_strategy_registry with Options - both can now "
+              "independently enter the SAME underlying stock at the same instant, and the shared "
+              "registry never even sees Swing's own attempt: PASSED")
+
+        # Reset for the Swing-vs-Swing race (a fresh symbol + a fresh store).
+        swing_store2 = sps.BasketStore()
+        ste.basket_store = swing_store2
+        swing_result_1, swing_result_2 = await asyncio.gather(
+            ste.enter_basket_for_stock("TCS"),
+            ste.enter_basket_for_stock("TCS"),
+        )
+        entered = [r for r in (swing_result_1, swing_result_2) if r["status"] == "entered"]
+        skipped = [r for r in (swing_result_1, swing_result_2) if r.get("reason") == "duplicate_or_capacity_full"]
+        assert len(entered) == 1, f"expected exactly 1 winner, got {swing_result_1} / {swing_result_2}"
+        assert len(skipped) == 1, f"expected the loser rejected by Swing's OWN dedup, got {swing_result_1} / {swing_result_2}"
+        print("7b. Swing's OWN dedup (basket_store.reserve_symbol) still fully prevents a "
+              "SWING-vs-SWING double entry on the same symbol - its own independent 'separate "
+              "list' protection: PASSED")
     finally:
         restore()
         ote.config.MAX_LIVE_POSITIONS_CE = real_ce_cap
@@ -404,7 +431,7 @@ async def main():
     await test_4_pe_leg_fails_futures_leg_gets_unwound()
     await test_5_basket_capacity_enforced_and_configurable()
     await test_6_watchlist_webhook_adds_symbols()
-    await test_7_cross_strategy_registry_swing_vs_options()
+    await test_7_swing_no_longer_shares_cross_strategy_registry()
     test_8_get_futures_contract_resolves_nearest_expiry_and_hyphenated_names()
     print("\nALL SWING PACKAGE CHECKS PASSED")
 

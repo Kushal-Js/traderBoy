@@ -74,11 +74,27 @@ Core strategy logic for the Swing package - user request 31 Aug 2026.
     watchlist (no reason to keep evaluating a stock for entry once it has
     a live basket).
 
-Participates in cross_strategy_registry.py the same way Options/Futures/
-Luxury already do (claims the underlying for the full duration of a
-basket entry attempt) - Swing places real orders on the same shared Dhan
-account, so it's exposed to the exact same cross-strategy race that
-registry exists to close.
+Deliberately does NOT participate in cross_strategy_registry.py (the
+shared per-symbol lock Options/Futures/Luxury use to stop two of THEM
+racing for the same underlying) - user decision 1 Sep 2026: Swing is an
+"independent strategy" and gets its own separate live-basket tracking
+instead of sharing that registry. (It briefly did participate, from this
+package's own creation on 31 Aug 2026 until this date - see git history/
+NOTES.md entry #66 if you're wondering why an older comment or test
+mentions it.)
+
+basket_store.py's own `reserve_symbol()`/`release_symbol()` (an atomic
+check-and-set under BasketStore's own asyncio.Lock, entirely separate
+from Options/Futures/Luxury's own PositionStore instances) already IS
+that separate claim mechanism - it fully protects against a SWING-vs-
+SWING double entry on the same symbol (e.g. the watchlist-driven
+monitor_loop and a manual webhook call racing each other), which is all
+this package's own entry path ever needed. What it deliberately no
+longer protects against: Swing and Options (or Futures/Luxury)
+independently entering the SAME underlying stock at the same instant -
+since 1 Sep 2026 that's an accepted possibility, not a bug, given Swing
+trades a completely different instrument combination (futures + PE
+hedge, not a bare CE/PE) with its own capital pool.
 """
 from __future__ import annotations
 
@@ -93,7 +109,6 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from trade_history import attribute_open_broker_position
-import cross_strategy_registry
 
 from . import config
 from .dhan_client import OrderStatus, _compute_supertrend, _retry, dhan_wrapper
@@ -179,118 +194,112 @@ async def enter_basket_for_stock(symbol: str) -> dict:
 
     loop = asyncio.get_running_loop()
 
-    # Cross-strategy claim held for this ENTIRE function - Options/
-    # Futures/Luxury all place real orders on this same Dhan account, so
-    # Swing is exposed to the exact same race cross_strategy_registry
-    # exists to close (see its own module docstring).
-    if not await cross_strategy_registry.try_claim(symbol, "Swing"):
-        logger.info("%s: skipped - another strategy is currently entering it", symbol)
-        return {"symbol": symbol, "status": "skipped", "reason": "claimed_by_another_strategy"}
+    # Swing's OWN dedup/claim (see this module's own docstring for why
+    # this deliberately does NOT also go through cross_strategy_registry -
+    # basket_store.reserve_symbol() is an atomic check-and-set under its
+    # own lock, entirely separate from Options/Futures/Luxury's own
+    # stores, and that's all this package's own entry path needs).
+    if not await basket_store.reserve_symbol(symbol):
+        logger.info("%s: skipped - already open/in-flight, or no basket capacity", symbol)
+        return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
 
     try:
-        if not await basket_store.reserve_symbol(symbol):
-            logger.info("%s: skipped - already open/in-flight, or no basket capacity", symbol)
-            return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
-
-        try:
-            # Belt-and-suspenders: confirm the broker doesn't already show
-            # an open FNO position for this underlying (a manual trade, a
-            # position from before this logging, or state this process
-            # hasn't reconciled yet) - our own reservation above only
-            # guards duplicates within this process's in-memory state.
-            already_open = await loop.run_in_executor(
-                None, dhan_wrapper.has_open_position_for_underlying, symbol
-            )
-            if already_open:
-                logger.warning("%s: skipped - broker already shows an open FNO position for it", symbol)
-                await basket_store.release_symbol(symbol)
-                return {"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker"}
-
-            # --- Leg 1: futures contract ---
-            try:
-                fut = await loop.run_in_executor(None, dhan_wrapper.get_futures_contract, symbol)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("%s: could not resolve futures contract - basket entry aborted", symbol)
-                await basket_store.release_symbol(symbol)
-                return {"symbol": symbol, "status": "error", "reason": f"futures_lookup_failed: {exc}"}
-
-            fut_qty = fut.lot_size * config.QUANTITY_LOTS
-            futures_result = await _place_leg(
-                fut.trading_symbol, fut_qty, "BUY", config.FUTURES_PRODUCT, config.ORDER_TAG_PREFIX, symbol,
-            )
-            if not futures_result["ok"]:
-                logger.warning(
-                    "%s: futures leg failed (%s) - basket entry aborted, PE leg never attempted (neither)",
-                    symbol, futures_result.get("remark") or futures_result.get("error"),
-                )
-                await basket_store.release_symbol(symbol)
-                return {
-                    "symbol": symbol, "status": "rejected", "reason": "futures_leg_failed",
-                    "detail": futures_result,
-                }
-
-            futures_fill_price = futures_result.get("fill_price") or 0.0
-
-            # --- Leg 2: ATM PE option (the hedge) ---
-            try:
-                atm = await loop.run_in_executor(None, dhan_wrapper.get_atm_option, symbol, "PE")
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("%s: could not resolve ATM PE option - unwinding the futures leg", symbol)
-                await _unwind_futures_leg(symbol, fut.trading_symbol, fut_qty)
-                await basket_store.release_symbol(symbol)
-                return {
-                    "symbol": symbol, "status": "error",
-                    "reason": f"pe_lookup_failed: {exc} - futures leg unwound",
-                }
-
-            option_qty = atm.lot_size * config.QUANTITY_LOTS
-            option_result = await _place_leg(
-                atm.trading_symbol, option_qty, "BUY", config.OPTIONS_PRODUCT, config.ORDER_TAG_PREFIX, symbol,
-            )
-            if not option_result["ok"]:
-                logger.warning(
-                    "%s: PE leg failed (%s) - unwinding the already-filled futures leg (neither)",
-                    symbol, option_result.get("remark") or option_result.get("error"),
-                )
-                await _unwind_futures_leg(symbol, fut.trading_symbol, fut_qty)
-                await basket_store.release_symbol(symbol)
-                return {
-                    "symbol": symbol, "status": "rejected", "reason": "pe_leg_failed_futures_unwound",
-                    "detail": option_result,
-                }
-
-            option_fill_price = option_result.get("fill_price") or 0.0
-
-            futures_leg = Leg(
-                underlying_symbol=symbol, option_trading_symbol=fut.trading_symbol, option_type="FUT",
-                quantity=fut_qty, lot_size=fut.lot_size, entry_price=futures_fill_price,
-                order_id=futures_result["order_id"], product_type=config.FUTURES_PRODUCT,
-                security_id=fut.security_id,
-            )
-            option_leg = Leg(
-                underlying_symbol=symbol, option_trading_symbol=atm.trading_symbol, option_type="PE",
-                quantity=option_qty, lot_size=atm.lot_size, entry_price=option_fill_price,
-                order_id=option_result["order_id"], product_type=config.OPTIONS_PRODUCT,
-                security_id=atm.security_id,
-            )
-            basket = Basket(underlying_symbol=symbol, futures_leg=futures_leg, option_leg=option_leg)
-            await basket_store.add_basket(basket)
-
-            logger.info(
-                "%s: basket ENTERED - futures %s@%.2f, PE %s@%.2f",
-                symbol, fut.trading_symbol, futures_fill_price, atm.trading_symbol, option_fill_price,
-            )
-            return {
-                "symbol": symbol, "status": "entered",
-                "futures_leg": {"trading_symbol": fut.trading_symbol, "entry_price": futures_fill_price, "quantity": fut_qty},
-                "option_leg": {"trading_symbol": atm.trading_symbol, "entry_price": option_fill_price, "quantity": option_qty},
-            }
-        except Exception as exc:  # noqa: BLE001
+        # Belt-and-suspenders: confirm the broker doesn't already show
+        # an open FNO position for this underlying (a manual trade, a
+        # position from before this logging, or state this process
+        # hasn't reconciled yet) - our own reservation above only
+        # guards duplicates within this process's in-memory state.
+        already_open = await loop.run_in_executor(
+            None, dhan_wrapper.has_open_position_for_underlying, symbol
+        )
+        if already_open:
+            logger.warning("%s: skipped - broker already shows an open FNO position for it", symbol)
             await basket_store.release_symbol(symbol)
-            logger.exception("%s: unexpected error entering basket", symbol)
-            return {"symbol": symbol, "status": "error", "reason": str(exc)}
-    finally:
-        await cross_strategy_registry.release_claim(symbol, "Swing")
+            return {"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker"}
+
+        # --- Leg 1: futures contract ---
+        try:
+            fut = await loop.run_in_executor(None, dhan_wrapper.get_futures_contract, symbol)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("%s: could not resolve futures contract - basket entry aborted", symbol)
+            await basket_store.release_symbol(symbol)
+            return {"symbol": symbol, "status": "error", "reason": f"futures_lookup_failed: {exc}"}
+
+        fut_qty = fut.lot_size * config.QUANTITY_LOTS
+        futures_result = await _place_leg(
+            fut.trading_symbol, fut_qty, "BUY", config.FUTURES_PRODUCT, config.ORDER_TAG_PREFIX, symbol,
+        )
+        if not futures_result["ok"]:
+            logger.warning(
+                "%s: futures leg failed (%s) - basket entry aborted, PE leg never attempted (neither)",
+                symbol, futures_result.get("remark") or futures_result.get("error"),
+            )
+            await basket_store.release_symbol(symbol)
+            return {
+                "symbol": symbol, "status": "rejected", "reason": "futures_leg_failed",
+                "detail": futures_result,
+            }
+
+        futures_fill_price = futures_result.get("fill_price") or 0.0
+
+        # --- Leg 2: ATM PE option (the hedge) ---
+        try:
+            atm = await loop.run_in_executor(None, dhan_wrapper.get_atm_option, symbol, "PE")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("%s: could not resolve ATM PE option - unwinding the futures leg", symbol)
+            await _unwind_futures_leg(symbol, fut.trading_symbol, fut_qty)
+            await basket_store.release_symbol(symbol)
+            return {
+                "symbol": symbol, "status": "error",
+                "reason": f"pe_lookup_failed: {exc} - futures leg unwound",
+            }
+
+        option_qty = atm.lot_size * config.QUANTITY_LOTS
+        option_result = await _place_leg(
+            atm.trading_symbol, option_qty, "BUY", config.OPTIONS_PRODUCT, config.ORDER_TAG_PREFIX, symbol,
+        )
+        if not option_result["ok"]:
+            logger.warning(
+                "%s: PE leg failed (%s) - unwinding the already-filled futures leg (neither)",
+                symbol, option_result.get("remark") or option_result.get("error"),
+            )
+            await _unwind_futures_leg(symbol, fut.trading_symbol, fut_qty)
+            await basket_store.release_symbol(symbol)
+            return {
+                "symbol": symbol, "status": "rejected", "reason": "pe_leg_failed_futures_unwound",
+                "detail": option_result,
+            }
+
+        option_fill_price = option_result.get("fill_price") or 0.0
+
+        futures_leg = Leg(
+            underlying_symbol=symbol, option_trading_symbol=fut.trading_symbol, option_type="FUT",
+            quantity=fut_qty, lot_size=fut.lot_size, entry_price=futures_fill_price,
+            order_id=futures_result["order_id"], product_type=config.FUTURES_PRODUCT,
+            security_id=fut.security_id,
+        )
+        option_leg = Leg(
+            underlying_symbol=symbol, option_trading_symbol=atm.trading_symbol, option_type="PE",
+            quantity=option_qty, lot_size=atm.lot_size, entry_price=option_fill_price,
+            order_id=option_result["order_id"], product_type=config.OPTIONS_PRODUCT,
+            security_id=atm.security_id,
+        )
+        basket = Basket(underlying_symbol=symbol, futures_leg=futures_leg, option_leg=option_leg)
+        await basket_store.add_basket(basket)
+
+        logger.info(
+            "%s: basket ENTERED - futures %s@%.2f, PE %s@%.2f",
+            symbol, fut.trading_symbol, futures_fill_price, atm.trading_symbol, option_fill_price,
+        )
+        return {
+            "symbol": symbol, "status": "entered",
+            "futures_leg": {"trading_symbol": fut.trading_symbol, "entry_price": futures_fill_price, "quantity": fut_qty},
+            "option_leg": {"trading_symbol": atm.trading_symbol, "entry_price": option_fill_price, "quantity": option_qty},
+        }
+    except Exception as exc:  # noqa: BLE001
+        await basket_store.release_symbol(symbol)
+        logger.exception("%s: unexpected error entering basket", symbol)
+        return {"symbol": symbol, "status": "error", "reason": str(exc)}
 
 
 # --------------------------------------------------------------------------- #

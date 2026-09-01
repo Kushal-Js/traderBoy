@@ -2725,6 +2725,64 @@ out of git.
     session, `SWING_STRATEGY_ENABLED` confirmed still `false` (no real
     orders) - see the deploy checklist run immediately after this entry.
 
+66. **Swing taken OUT of `cross_strategy_registry.py` - user decision
+    1 Sep 2026.** While explaining that Swing's real entry already
+    participates in the shared registry (claiming the underlying for its
+    entire entry attempt, same as Options/Futures/Luxury - added as part
+    of entry #61's own Swing build), the user said Swing "is [an]
+    independent strategy and should have it's own separate list of live
+    trades" instead of sharing that lock - confirmed via
+    `AskUserQuestion` (own separate claim, not the shared one).
+
+    `Swing/trading_engine.py`'s `enter_basket_for_stock()` no longer
+    calls `cross_strategy_registry.try_claim`/`release_claim` at all -
+    the `import cross_strategy_registry` line is gone from the file.
+    Nothing new had to be BUILT for the replacement: `position_store.py`'s
+    `BasketStore.reserve_symbol()`/`release_symbol()` already IS an
+    atomic, independent, per-symbol claim (its own `asyncio.Lock`, its
+    own `reserved_symbols` set, no shared state with Options/Futures/
+    Luxury's own `PositionStore` instances) - it was already doing all
+    the SWING-vs-SWING dedup work; the shared registry was only ever
+    adding CROSS-package protection on top, and that's specifically what
+    the user asked to remove.
+
+    Real consequence, stated explicitly in both files' updated
+    docstrings: Swing and Options/Futures/Luxury can now independently
+    enter the SAME underlying stock at the same instant (e.g. Swing
+    buying RELIANCE futures+PE while Options buys a RELIANCE CE) - no
+    longer mutually exclusive. Accepted, not a bug - Swing trades a
+    different instrument combination with its own capital pool, and this
+    was a deliberate user tradeoff, not an oversight. Swing-vs-Swing
+    double entry on the same symbol (e.g. the watchlist-driven
+    `monitor_loop` racing a manual webhook call) is still fully
+    prevented, by the mechanism described above.
+
+    `cross_strategy_registry.py`'s own module docstring updated with a
+    historical footnote (Swing briefly participated 31 Aug-1 Sep 2026)
+    so a future reader isn't confused by git history/old test names
+    still mentioning it. Note: paper trading was NEVER in the shared
+    registry in the first place (see entry #65 - `paper_engine.py` never
+    imported `cross_strategy_registry`) - this change only affects REAL
+    Swing trading, which stays deployed DISABLED
+    (`SWING_STRATEGY_ENABLED=false`) regardless.
+
+    `tests/test_swing_package.py`'s test #7 rewritten (previously
+    asserted "exactly one wins" for a Swing-vs-Options race - now the
+    opposite is the correct, intended behavior): confirms Swing and
+    Options BOTH win a real concurrent race for the same underlying via
+    their REAL entry functions, that `cross_strategy_registry.snapshot()`
+    reads back empty (Swing's own attempt never touches it), AND
+    (separately) that a genuine SWING-vs-SWING concurrent race for the
+    SAME symbol still produces exactly one winner via Swing's own
+    `reserve_symbol`. Re-ran all 11 existing suites afterward - all still
+    pass (64 individual scenario PASSED lines total across all 11 test
+    files; no new test files, test #7 in test_swing_package.py now prints
+    two sub-checks, 7a/7b, instead of one).
+
+    Deployed - `SWING_STRATEGY_ENABLED` confirmed still `false` before
+    and after restart, all four real-money strategies' `live_positions`
+    confirmed empty both before and after.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
