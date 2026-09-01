@@ -209,7 +209,7 @@ async def test_2_full_two_loop_cycle_then_loss_cap_exit():
     # BUY FUT(112), SELL FUT(105), BUY PE(18), (loss-cap exit priced via LTP, not a fill)
     restore, placed_orders = install_all_dhan_mocks(
         fill_prices=[100.0, 110.0, 20.0, 15.0, 112.0, 105.0, 18.0],
-        ltp_by_symbol={pe_symbol: 10.0},  # for the final PE loss-cap SELL fill/LTP check
+        ltp_by_symbol={pe_symbol: 10.0, fut_symbol: 100.0},  # PE: final loss-cap SELL/LTP check; FUT: the funds-check price
     )
     try:
         # --- Loop iteration 1: NONE -> FUTURES ---
@@ -294,7 +294,9 @@ async def test_3_capacity_blocks_reentry_mid_loop_but_not_other_symbols():
     ste.config.STRATEGY_ENABLED = True
     real_cap = ste.config.MAX_LIVE_BASKETS
     ste.config.MAX_LIVE_BASKETS = 10
-    restore, placed_orders = install_all_dhan_mocks(fill_prices=[100.0])
+    restore, placed_orders = install_all_dhan_mocks(
+        fill_prices=[100.0], ltp_by_symbol={"TCS FAKE EXP FUT": 100.0, "SBIN FAKE EXP FUT": 100.0},
+    )
     try:
         symbol = "TCS"
         result_1 = await ste._enter_futures_for_stock(symbol)
@@ -357,7 +359,9 @@ async def test_5_manual_square_off_is_mode_aware():
     ste.config.STRATEGY_MODE = "sequential"
     real_enabled = ste.config.STRATEGY_ENABLED
     ste.config.STRATEGY_ENABLED = True
-    restore, placed_orders = install_all_dhan_mocks(fill_prices=[100.0, 95.0])
+    restore, placed_orders = install_all_dhan_mocks(
+        fill_prices=[100.0, 95.0], ltp_by_symbol={"WIPRO FAKE EXP FUT": 100.0},
+    )
     try:
         result = await ste._enter_futures_for_stock("WIPRO")
         assert result["status"] == "entered", result

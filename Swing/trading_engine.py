@@ -282,6 +282,74 @@ async def _unwind_futures_leg(symbol: str, trading_symbol: str, quantity: int) -
     return result
 
 
+async def _has_sufficient_funds(symbol: str, legs: list[tuple[str, str, int, float]]) -> bool:
+    """Proactive funds check (user request 1 Sep 2026, following "what
+    happens when the fund shortfall for any basket order... does bot
+    calculate available funds and place trade for next stock basket
+    order which can fit well in available funds?") - called after
+    resolving a symbol's own contract(s) but BEFORE placing any real BUY
+    order for it, so a candidate that clearly can't be afforded is
+    skipped in favor of the next-ranked one within the SAME tick (see
+    the monitor ticks' own ranked-entry loops), rather than discovering
+    the shortfall only via a real broker-side RMS rejection - which
+    still remains the LAST line of defense either way (see
+    enter_basket_for_stock's own "neither"/unwind rollback), this check
+    just avoids reaching that point in the common case.
+
+    `legs`: (security_id, product_type, quantity, price) for each leg
+    about to be BOUGHT - 2 for basket/basket_hedge mode's own
+    futures+PE entry, 1 for sequential mode's own futures-only entry.
+
+    Dhan's own /margincalculator endpoint has ZERO combo-awareness (see
+    get_margin_required's own docstring) - it can't price a futures+PE
+    hedge AS A COMBO, only each leg standalone - so this sums every
+    leg's own STANDALONE margin requirement and compares that sum
+    against the account's current available balance (get_fund_limits'
+    own `availabelBalance`). A real, live-money-relevant simplification:
+    Dhan may in practice extend some margin benefit for a hedged
+    combination this check can't see, meaning this could read SLIGHTLY
+    more conservative than what the broker would actually require -
+    never the other way around, so it only ever errs toward skipping a
+    borderline-affordable trade, never toward proceeding with one that
+    can't actually be placed.
+
+    Fails OPEN to "sufficient" (returns True) if the check itself fails
+    (a margin-API or funds-API hiccup) - a funds-check OUTAGE must never
+    itself block real trading; the broker's own RMS rejection remains
+    the final safety net either way if this optimistic assumption turns
+    out wrong. Also reads as "sufficient" unconditionally when
+    config.FUNDS_CHECK_ENABLED is False - the flag controls only this
+    PROACTIVE check, never the broker's own reactive RMS rejection."""
+    if not config.FUNDS_CHECK_ENABLED:
+        return True
+    loop = asyncio.get_running_loop()
+    try:
+        total_required = 0.0
+        for security_id, product_type, quantity, price in legs:
+            margin_data = await loop.run_in_executor(
+                None, dhan_wrapper.get_margin_required,
+                security_id, "NSE_FNO", "BUY", quantity, product_type, price,
+            )
+            total_required += margin_data.get("totalMargin") or 0.0
+        funds = await loop.run_in_executor(None, dhan_wrapper.get_fund_limits)
+        available = funds.get("availabelBalance") or 0.0
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s: could not check available funds before entry - proceeding optimistically "
+            "(the broker's own RMS rejection remains the final safety net)", symbol,
+        )
+        return True
+
+    if total_required > available:
+        logger.warning(
+            "%s: skipping entry - required margin Rs%.2f (%d leg(s), summed standalone, no combo "
+            "margin benefit accounted for) exceeds available balance Rs%.2f",
+            symbol, total_required, len(legs), available,
+        )
+        return False
+    return True
+
+
 # --------------------------------------------------------------------------- #
 # Basket entry - the all-or-nothing guarantee
 # --------------------------------------------------------------------------- #
@@ -317,7 +385,11 @@ async def enter_basket_for_stock(symbol: str) -> dict:
             await basket_store.release_symbol(symbol)
             return {"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker"}
 
-        # --- Leg 1: futures contract ---
+        # --- Resolve BOTH legs first (added 1 Sep 2026, moved ATM
+        # resolution ahead of any order placement) - lets the funds
+        # check below (and a lookup failure on EITHER leg) abort before
+        # any real order is placed at all, rather than only after the
+        # futures leg has already filled and needs unwinding. ---
         try:
             fut = await loop.run_in_executor(None, dhan_wrapper.get_futures_contract, symbol)
         except Exception as exc:  # noqa: BLE001
@@ -325,7 +397,38 @@ async def enter_basket_for_stock(symbol: str) -> dict:
             await basket_store.release_symbol(symbol)
             return {"symbol": symbol, "status": "error", "reason": f"futures_lookup_failed: {exc}"}
 
+        try:
+            atm = await loop.run_in_executor(None, dhan_wrapper.get_atm_option, symbol, "PE")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("%s: could not resolve ATM PE option - basket entry aborted (neither leg placed)", symbol)
+            await basket_store.release_symbol(symbol)
+            return {"symbol": symbol, "status": "error", "reason": f"pe_lookup_failed: {exc}"}
+
         fut_qty = fut.lot_size * config.QUANTITY_LOTS
+        option_qty = atm.lot_size * config.QUANTITY_LOTS
+
+        # --- Proactive funds check (user request 1 Sep 2026) - see
+        # _has_sufficient_funds's own docstring. Fails open on its own
+        # errors, so this can only ever ADD a skip, never block on a
+        # funds-check outage. ---
+        try:
+            fut_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, fut.trading_symbol)
+            option_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, atm.trading_symbol)
+            sufficient = await _has_sufficient_funds(symbol, [
+                (fut.security_id, config.FUTURES_PRODUCT, fut_qty, fut_ltp),
+                (atm.security_id, config.OPTIONS_PRODUCT, option_qty, option_ltp),
+            ])
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not price legs for the funds check - proceeding optimistically", symbol)
+            sufficient = True
+        if not sufficient:
+            await basket_store.release_symbol(symbol)
+            await _record_swing_event("BASKET_INSUFFICIENT_FUNDS", symbol, {
+                "futures_trading_symbol": fut.trading_symbol, "option_trading_symbol": atm.trading_symbol,
+            })
+            return {"symbol": symbol, "status": "skipped", "reason": "insufficient_funds"}
+
+        # --- Leg 1: futures contract ---
         futures_result = await _place_leg(
             fut.trading_symbol, fut_qty, "BUY", config.FUTURES_PRODUCT, config.ORDER_TAG_PREFIX, symbol,
         )
@@ -342,19 +445,7 @@ async def enter_basket_for_stock(symbol: str) -> dict:
 
         futures_fill_price = futures_result.get("fill_price") or 0.0
 
-        # --- Leg 2: ATM PE option (the hedge) ---
-        try:
-            atm = await loop.run_in_executor(None, dhan_wrapper.get_atm_option, symbol, "PE")
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("%s: could not resolve ATM PE option - unwinding the futures leg", symbol)
-            await _unwind_futures_leg(symbol, fut.trading_symbol, fut_qty)
-            await basket_store.release_symbol(symbol)
-            return {
-                "symbol": symbol, "status": "error",
-                "reason": f"pe_lookup_failed: {exc} - futures leg unwound",
-            }
-
-        option_qty = atm.lot_size * config.QUANTITY_LOTS
+        # --- Leg 2: ATM PE option (the hedge) - already resolved above ---
         option_result = await _place_leg(
             atm.trading_symbol, option_qty, "BUY", config.OPTIONS_PRODUCT, config.ORDER_TAG_PREFIX, symbol,
         )
@@ -555,6 +646,25 @@ async def _enter_futures_for_stock(symbol: str) -> dict:
             return {"symbol": symbol, "status": "error", "reason": f"futures_lookup_failed: {exc}"}
 
         fut_qty = fut.lot_size * config.QUANTITY_LOTS
+
+        # --- Proactive funds check (user request 1 Sep 2026) - see
+        # _has_sufficient_funds's own docstring. Only ONE leg here (no PE
+        # at entry under sequential mode). ---
+        try:
+            fut_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, fut.trading_symbol)
+            sufficient = await _has_sufficient_funds(symbol, [
+                (fut.security_id, config.FUTURES_PRODUCT, fut_qty, fut_ltp),
+            ])
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not price the leg for the funds check - proceeding optimistically", symbol)
+            sufficient = True
+        if not sufficient:
+            await sequential_store.release_symbol(symbol)
+            await _record_swing_event("SEQUENTIAL_INSUFFICIENT_FUNDS", symbol, {
+                "futures_trading_symbol": fut.trading_symbol,
+            })
+            return {"symbol": symbol, "status": "skipped", "reason": "insufficient_funds"}
+
         result = await _place_leg(
             fut.trading_symbol, fut_qty, "BUY", config.FUTURES_PRODUCT, config.ORDER_TAG_PREFIX, symbol,
         )
@@ -786,6 +896,9 @@ async def _enter_basket_hedge_for_stock(symbol: str) -> dict:
             await basket_hedge_store.release_symbol(symbol)
             return {"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker"}
 
+        # --- Resolve BOTH legs first (added 1 Sep 2026, moved ATM
+        # resolution ahead of any order placement) - see
+        # enter_basket_for_stock's own identical comment for why. ---
         try:
             fut = await loop.run_in_executor(None, dhan_wrapper.get_futures_contract, symbol)
         except Exception as exc:  # noqa: BLE001
@@ -793,7 +906,37 @@ async def _enter_basket_hedge_for_stock(symbol: str) -> dict:
             await basket_hedge_store.release_symbol(symbol)
             return {"symbol": symbol, "status": "error", "reason": f"futures_lookup_failed: {exc}"}
 
+        try:
+            atm = await loop.run_in_executor(None, dhan_wrapper.get_atm_option, symbol, "PE")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "%s: could not resolve ATM PE option - basket_hedge entry aborted (neither leg placed)", symbol,
+            )
+            await basket_hedge_store.release_symbol(symbol)
+            return {"symbol": symbol, "status": "error", "reason": f"pe_lookup_failed: {exc}"}
+
         fut_qty = fut.lot_size * config.QUANTITY_LOTS
+        option_qty = atm.lot_size * config.QUANTITY_LOTS
+
+        # --- Proactive funds check (user request 1 Sep 2026) - see
+        # _has_sufficient_funds's own docstring. ---
+        try:
+            fut_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, fut.trading_symbol)
+            option_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, atm.trading_symbol)
+            sufficient = await _has_sufficient_funds(symbol, [
+                (fut.security_id, config.FUTURES_PRODUCT, fut_qty, fut_ltp),
+                (atm.security_id, config.OPTIONS_PRODUCT, option_qty, option_ltp),
+            ])
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not price legs for the funds check - proceeding optimistically", symbol)
+            sufficient = True
+        if not sufficient:
+            await basket_hedge_store.release_symbol(symbol)
+            await _record_swing_event("BASKET_HEDGE_INSUFFICIENT_FUNDS", symbol, {
+                "futures_trading_symbol": fut.trading_symbol, "option_trading_symbol": atm.trading_symbol,
+            })
+            return {"symbol": symbol, "status": "skipped", "reason": "insufficient_funds"}
+
         futures_result = await _place_leg(
             fut.trading_symbol, fut_qty, "BUY", config.FUTURES_PRODUCT, config.ORDER_TAG_PREFIX, symbol,
         )
@@ -810,18 +953,7 @@ async def _enter_basket_hedge_for_stock(symbol: str) -> dict:
 
         futures_fill_price = futures_result.get("fill_price") or 0.0
 
-        try:
-            atm = await loop.run_in_executor(None, dhan_wrapper.get_atm_option, symbol, "PE")
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("%s: could not resolve ATM PE option - unwinding the futures leg", symbol)
-            await _unwind_futures_leg(symbol, fut.trading_symbol, fut_qty)
-            await basket_hedge_store.release_symbol(symbol)
-            return {
-                "symbol": symbol, "status": "error",
-                "reason": f"pe_lookup_failed: {exc} - futures leg unwound",
-            }
-
-        option_qty = atm.lot_size * config.QUANTITY_LOTS
+        # --- Leg 2: ATM PE option (the hedge) - already resolved above ---
         option_result = await _place_leg(
             atm.trading_symbol, option_qty, "BUY", config.OPTIONS_PRODUCT, config.ORDER_TAG_PREFIX, symbol,
         )

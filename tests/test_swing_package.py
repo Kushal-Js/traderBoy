@@ -100,6 +100,9 @@ def install_all_dhan_mocks(place_order_results=None):
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
         "get_futures_contract": odc.dhan_wrapper.get_futures_contract,
+        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "get_margin_required": odc.dhan_wrapper.get_margin_required,
+        "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "_get_open_fno_positions_once": odc.dhan_wrapper._get_open_fno_positions_once,
         "subscribe_option_price": odc.dhan_wrapper.subscribe_option_price,
         "unsubscribe_option_price": odc.dhan_wrapper.unsubscribe_option_price,
@@ -113,6 +116,13 @@ def install_all_dhan_mocks(place_order_results=None):
     odc.dhan_wrapper._get_open_fno_positions_once = lambda: []
     odc.dhan_wrapper.subscribe_option_price = lambda ts: None
     odc.dhan_wrapper.unsubscribe_option_price = lambda ts: None
+    # Fixed, generous fakes - the proactive funds check (added 1 Sep
+    # 2026) calls these before every entry attempt; unmocked, they'd
+    # fall through to a REAL Dhan network call (and a real, slow
+    # authentication attempt) via _retry. Not what's under test here.
+    odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 50.0
+    odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 999.0}
+    odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 100000.0}
     # Only Swing's own leg placement touches the mocks above directly, but
     # test 7 also drives a REAL Options._process_one_entry (to prove the
     # cross-strategy race fairly) - that path additionally calls

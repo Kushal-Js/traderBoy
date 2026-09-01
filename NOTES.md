@@ -3754,6 +3754,96 @@ out of git.
     change needed for this one (pure ranking-logic change, no new
     config).
 
+81. **Proactive funds check - user request 1 Sep 2026** (verbatim,
+    answering "what happens when the fund shortfall for any basket
+    order... does bot calculate its available funds and place trade for
+    next stock basket order which can fit well in available funds?" ->
+    "yes build this get_margin_required and test and deploy it also").
+    Before this, a fund shortfall was only ever discovered REACTIVELY -
+    via a real broker-side RMS rejection at order-placement time. The
+    bot never calculated available funds or sized/selected a trade to
+    fit what was left; it always attempted the same fixed 1-lot size for
+    whichever stock won entry ranking (entry #80), and only found out
+    about a shortfall once Dhan itself rejected the order.
+
+    Now, every entry path (basket/basket_hedge/sequential) resolves its
+    contract(s), checks the REAL required margin against the REAL
+    available balance, and skips the attempt BEFORE placing any order if
+    it clearly won't fit - releasing capacity so the NEXT-ranked
+    candidate gets tried within the SAME tick, directly answering the
+    user's own original question. The broker's own RMS rejection remains
+    the LAST line of defense regardless (Dhan's `/margincalculator` has
+    ZERO combo-awareness - see `get_margin_required`'s own docstring,
+    entry #71-adjacent - it can't price a futures+PE hedge as a combo,
+    only each leg standalone, so this check sums both legs' own
+    standalone requirement and compares against `get_fund_limits`' own
+    `availabelBalance` - a real, live-money-relevant simplification that
+    can only ever read MORE conservative than what the broker would
+    actually require, never less, since Dhan may extend a combo margin
+    benefit this check can't see).
+
+    New `trading_engine._has_sufficient_funds(symbol, legs)` - `legs` is
+    a list of (security_id, product_type, quantity, price) tuples, 2 for
+    basket/basket_hedge mode's own futures+PE entry, 1 for sequential
+    mode's futures-only entry. FAILS OPEN to "sufficient" on its own
+    errors (a margin-API or funds-API outage must never itself block
+    real trading - the broker's own RMS rejection is the fallback either
+    way) and when the new `config.FUNDS_CHECK_ENABLED` flag (default
+    true) is off.
+
+    Bundled improvement, needed to run this check before EITHER leg is
+    placed: ATM PE resolution in `enter_basket_for_stock`/
+    `_enter_basket_hedge_for_stock` now happens BEFORE the futures leg
+    is placed (previously: futures bought first, THEN the PE looked up -
+    meaning a PE lookup failure required unwinding an already-filled
+    futures leg). Now a PE lookup failure aborts with NEITHER leg ever
+    placed - strictly fewer real orders in that failure mode, a genuine
+    improvement bundled in alongside the funds check itself.
+
+    New `*_INSUFFICIENT_FUNDS` swing_events (`BASKET_INSUFFICIENT_FUNDS`,
+    `BASKET_HEDGE_INSUFFICIENT_FUNDS`, `SEQUENTIAL_INSUFFICIENT_FUNDS`) -
+    every skip for this reason is durably logged, matching this
+    codebase's own "every real capital-allocation decision must be
+    observable historically" convention.
+
+    TESTING GOTCHA worth recording: adding `get_margin_required`/
+    `get_fund_limits` calls to the live entry path meant EVERY existing
+    Swing test file that exercises a real entry function now also
+    exercises these two calls - and 6 of the 7 affected test files
+    (`test_swing_basket_hedge_mode.py`, `test_swing_integration.py`,
+    `test_swing_events_log.py`, `test_swing_package.py`,
+    `test_swing_signal_logic.py`, plus the brand-new
+    `test_swing_entry_ranking.py`) had never mocked them - meaning an
+    unmocked call would fall through to Tradehull's own real PIN+TOTP
+    login attempt (`DHAN_CLIENT_ID=test` fake creds), which doesn't fail
+    fast, it HANGS for 20-30+ seconds per attempt before finally raising.
+    Running the full suite after this change caught exactly this - it
+    timed out partway through. Fixed by adding the same fixed, generous
+    `get_margin_required`/`get_fund_limits` fakes (mirroring the pattern
+    `test_swing_sequential_mode.py` already established for its own
+    paper-trading margin-logging tests) to all 6 files. Deliberately did
+    NOT loosen the existing STRICT "no fake LTP configured" raise
+    behavior in `get_option_ltp` fakes to paper over the new futures-leg
+    LTP calls this same change adds - one file's own test (a deliberate
+    "LTP fetch fails" scenario for an unrelated check) would have
+    silently changed outcome if that raise were replaced with a
+    default value. Left those specific gaps to fall back on
+    `_has_sufficient_funds`'s own fail-open behavior instead (a bit
+    noisier in test output, zero risk to correctness) rather than risk
+    quietly changing another test's own intended scenario.
+
+    New `tests/test_swing_funds_check.py` (7 scenarios): `_has_sufficient_
+    funds`'s own core logic (sufficient/insufficient correctly summed
+    across legs; fails OPEN on either API failing); all three entry
+    functions skip BEFORE placing any order when insufficient (zero
+    orders placed, capacity released, the right event logged); the
+    ranking interaction - the top-ranked candidate can't be afforded, so
+    the next-ranked one is entered instead within the SAME tick,
+    directly proving the user's own question; the bundled ATM-before-
+    futures improvement (a PE lookup failure now places ZERO orders);
+    and the feature flag disabling the check entirely. Ran all 22 test
+    suites afterward, all pass.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM

@@ -169,6 +169,23 @@ PE_PROFIT_LOCK_RS = float(os.getenv("SWING_PE_PROFIT_LOCK_RS", "2000"))
 
 QUANTITY_LOTS = int(os.getenv("SWING_QUANTITY_LOTS", "1"))
 
+# Proactive funds check (added 1 Sep 2026, user request: "what happens
+# when the fund shortfall for any basket order... does bot calculate
+# available funds and place trade for next stock basket order which can
+# fit well in available funds?" -> "yes build this get_margin_required
+# and test and deploy it also"). Before this, a fund shortfall was only
+# ever discovered reactively via a real broker-side RMS rejection at
+# order-placement time. When enabled, every entry path (basket/
+# basket_hedge/sequential) checks the real required margin (Dhan's own
+# /margincalculator) against the real available balance BEFORE placing
+# any order, skipping a candidate that clearly won't fit in favor of the
+# next-ranked one within the same tick (see trading_engine.
+# _has_sufficient_funds's own docstring for the combo-margin caveat).
+# The broker's own RMS rejection remains the final safety net either
+# way - this flag only controls the PROACTIVE check, never the reactive
+# one.
+FUNDS_CHECK_ENABLED = os.getenv("SWING_FUNDS_CHECK_ENABLED", "true").lower() == "true"
+
 # "MARGIN" is Tradehull's code for NRML/carry-forward (see Options/config.py's
 # identical OPTIONS_PRODUCT for the full rationale) - used for BOTH legs,
 # not MIS, since Swing baskets are explicitly meant to be held across
