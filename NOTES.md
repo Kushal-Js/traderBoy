@@ -3886,7 +3886,11 @@ out of git.
     this change and deploy it also") - every package flat at deploy
     time, clean restart confirmed (no ERROR-level log lines, `/health`
     OK, every position endpoint still empty). `.env` updated with the
-    new `SWING_FUNDS_CHECK_BUFFER_RS=15000`.
+    new `SWING_FUNDS_CHECK_BUFFER_RS=15000`. Restart itself verified
+    live: `swing_chartink_scan`/`Chartink watchlist scan complete` logs
+    show the new process came up healthy and immediately resumed normal
+    operation (scan re-confirmed BAJAJ-AUTO, added HCLTECH/OIL/
+    KOTAKBANK).
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
