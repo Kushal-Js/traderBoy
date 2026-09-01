@@ -3495,6 +3495,22 @@ out of git.
     disabling everything; and one symbol's fetch failure never affecting
     others in the same run. Ran all 18 test suites afterward, all pass.
 
+    Deployed with explicit go-ahead (asked first, since this request
+    itself didn't say "deploy" the way the prior basket_hedge one did) -
+    verified `/positions`/`/futures/positions`/`/luxury/positions` empty
+    and Swing's own state was APLAPOLLO in PE_HEDGE (entry ₹60.55,
+    following the same day's basket->PE-hedge swap, see entry #76's own
+    live-confirmation note) immediately before restarting; after
+    restart, confirmed via `/swing/basket-hedge-positions` that APLAPOLLO
+    reconciled again correctly as `state=PE_HEDGE`, `entry_price=60.55`.
+    No ERROR-level log lines from the new process. Also surfaced (NOT
+    part of this change, flagged for awareness only): a NEW broker
+    position appeared this same restart - `ZYDUSLIFE 29 SEP 1200 CALL`,
+    attributed to "no strategy (no record found)" by every package's own
+    reconciliation - meaning no package here opened it and none will
+    manage it automatically. Needs manual review to confirm what it is
+    and whether it needs manual closing.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM
