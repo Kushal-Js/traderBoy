@@ -3264,6 +3264,70 @@ out of git.
     before and after restart (Swing itself still had none at deploy
     time), clean startup verified.
 
+75. **BUG (found live, fixed same day): `wait_for_order_result()` could
+    record a REAL fill's entry_price as ₹0.** Discovered via the
+    first-live-entry watch from entry #74, within ~15 minutes of Swing
+    going live (entry #73): APLAPOLLO futures BUY, 350 qty, went
+    through for real (`orderStatus: TRADED`, `omsErrorDescription:
+    "TRADE CONFIRMED"`) but the bot's own log/state recorded `entry_price:
+    0.00`. Confirmed via a direct, read-only `get_order_by_id` +
+    `get_open_fno_positions` check against the live account (a separate,
+    one-off authenticated script, not a code change) that the REAL fill
+    was completely normal: ₹2263.30/share, correctly reflected in the
+    broker's own position record the whole time - this was purely a bug
+    in how OUR OWN code read the fill price back, never a bad trade or
+    money actually at risk beyond ordinary market exposure.
+
+    Root cause: `wait_for_order_result()` polls the WebSocket order-
+    update cache first (fast) and falls back to REST only if the cache
+    hasn't seen a terminal status yet - but once the cache DID report
+    terminal, the code trusted the CACHE's own `average_fill_price`
+    field directly, without ever re-checking REST. That field's schema
+    was already flagged as unverified in `_order_snapshot_from_cache`'s
+    own docstring ("the order-update WebSocket payload's exact field
+    names aren't documented... dhanhq's own source only confirms
+    `orderNo`/`status` exist on it") - the real push for this order
+    carried NO usable price field at all, silently defaulting to 0.
+
+    Fix: `wait_for_order_result()` still uses the WS cache to quickly
+    DETECT a terminal status (avoids waiting out the full retry delay),
+    but once terminal, always fetches the actual DATA (price, filled
+    quantity) from the authoritative REST `get_order_by_id` call instead
+    of trusting the cache's own copy - one extra REST call per order, a
+    negligible cost for correctness here. Falls back to the cache's own
+    snapshot only in the edge case where REST itself hasn't caught up
+    to the same terminal status yet (avoids a spurious hang/crash).
+    Shared by EVERY real-money package (Options/Futures/Luxury/Swing) -
+    this was a live risk for all of them, not just Swing, simply never
+    triggered before now (every existing test suite mocks `wait_for_
+    order_result` directly, so none had ever exercised this internal
+    cache-vs-REST logic).
+
+    New `tests/test_wait_for_order_result_price_fix.py` (4 scenarios,
+    against the REAL function, not reimplemented): a terminal cache hit
+    with an already-correct price still resolves via REST (unconditional,
+    not "only when the cache looks wrong"); the exact live bug scenario
+    reproduced (cache terminal + no price field, REST has the real fill)
+    now returns the real price; no cache entry at all still falls
+    straight through to REST unaffected; and REST-not-yet-terminal falls
+    back to the cache's own snapshot rather than hanging. Re-ran all 16
+    test suites afterward, all pass.
+
+    Immediate real-money impact assessed before deploying the fix:
+    APLAPOLLO's futures leg was still open (no exit/swap had fired yet),
+    so nothing had been mis-recorded downstream beyond the entry_price
+    field itself - sequential mode's own exit logic is purely Supertrend-
+    signal-driven, never entry_price-dependent, so no wrong trading
+    DECISION resulted from this, only a wrong bookkeeping value that
+    would have corrupted this one leg's own eventual `real_trades` P&L
+    record had it closed before the fix deployed. A restart self-heals
+    it regardless: `reconcile_sequential_positions()` reads `avg_price`
+    from the broker's own `get_open_fno_positions()` (REST-based,
+    unaffected by this bug), which already showed the correct ₹2263.30.
+
+    Deployed - confirmed APLAPOLLO reconciled with the CORRECT entry_price
+    after restart (see the deploy note immediately following this entry).
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM

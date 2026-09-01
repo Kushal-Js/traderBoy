@@ -1158,6 +1158,27 @@ class DhanWrapper:
         whole retry budget - we already know (from is_amo) that it won't
         resolve until the next session dispatches it.
 
+        BUG FOUND + FIXED 1 Sep 2026 (Swing's own first-ever live entry,
+        APLAPOLLO): a terminal-status WS push was trusted directly,
+        including its own `average_fill_price` - but
+        `_order_snapshot_from_cache`'s own docstring already flagged that
+        the WS payload's field names are UNDOCUMENTED/unverified
+        (dhanhq's own source only confirms `orderNo`/`status` exist on
+        it). Confirmed live: a genuine TRADED push carried no usable
+        price field at all, silently defaulting to 0 and recording a
+        REAL futures position's entry_price as ₹0 - the broker's own
+        REST record showed the correct fill (₹2263.30) the whole time,
+        confirmed via a direct, read-only `get_order_by_id` check. The
+        WS cache is still used to quickly DETECT that an order has
+        reached a terminal state (avoids waiting out the full retry
+        delay) - but once it has, the actual DATA (price, filled
+        quantity) always comes from the authoritative REST call, never
+        the cache's own unverified fields. One extra REST call per
+        order is a negligible cost for correctness on something this
+        important - every real-money package (Options/Futures/Luxury/
+        Swing) shares this function, so this was a live risk for all of
+        them, not just Swing.
+
         Always returns whatever the last-seen status was; callers MUST
         check `.status`/`.is_queued_amo` rather than assuming the order
         filled just because this returned."""
@@ -1165,8 +1186,15 @@ class DhanWrapper:
         for attempt in range(retries):
             cached = self._order_snapshot_from_cache(order_id)
             if cached and cached["order_status"] in OrderStatus.TERMINAL_STATUSES:
-                snapshot = cached
                 self.stats["order_status_cache_hits"] += 1
+                # Terminal STATUS from the cache is trustworthy (dhanhq's
+                # own source confirms status/orderNo are real fields) -
+                # but the cache's own price/quantity fields are NOT (see
+                # this function's own docstring for the live bug this
+                # fixed) - always get those from the authoritative REST
+                # snapshot instead of the cache's own copy.
+                rest_snapshot = self._order_snapshot_from_rest(order_id)
+                snapshot = rest_snapshot if rest_snapshot["order_status"] in OrderStatus.TERMINAL_STATUSES else cached
                 break
             self.stats["order_status_rest_calls"] += 1
             snapshot = self._order_snapshot_from_rest(order_id)
