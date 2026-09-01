@@ -2938,6 +2938,98 @@ out of git.
     strategies' `live_positions` confirmed empty before and after
     restart.
 
+70. **Luxury matched to Options' entry/exit conditions + a daily
+    re-entry cap for Options/Futures/Luxury - user request 1 Sep 2026**
+    ("Match luxury Entry and Exit conditions to Options package
+    conditions and also only allow entry into same trade max 3 times a
+    day for Luxury, Options and Future package.").
+
+    **Part 1 - matching Luxury to Options:** following up on the entry/
+    exit conditions question answered earlier the same session, a full
+    field-by-field diff of `Luxury/config.py`'s own code defaults against
+    Options' own ACTUAL DEPLOYED `.env` values (not Options' own code
+    defaults, which for several of these have never moved - see below)
+    found exactly 4 real divergences: `TARGET_PCT` (Luxury 0.10 vs
+    Options' deployed 0.25), `STOP_LOSS_PCT` (0.03 vs 0.16),
+    `DYNAMIC_SL_STEP_PCT_PE` (0.07 vs 0.09 - CE already matched at 0.07),
+    and `ENABLE_SQUARE_OFF` (Luxury's own default "true" - force-closing
+    everything at 15:15 daily - vs Options'/Futures' "false", both
+    carrying positions overnight in NRML mode). All four fixed via NEW
+    `LUXURY_`-prefixed `.env` overrides (`LUXURY_TARGET_PCT=0.25`,
+    `LUXURY_STOP_LOSS_PCT=0.16`, `LUXURY_DYNAMIC_SL_STEP_PCT_PE=0.09`,
+    `LUXURY_ENABLE_SQUARE_OFF=false`) - deliberately NOT by editing
+    `Luxury/config.py`'s own code-level defaults, matching the SAME
+    convention Options' own config already follows for these exact
+    values (its `TARGET_PCT`/`STOP_LOSS_PCT` code defaults are STILL
+    "0.10"/"0.03", the ORIGINAL values - the actual 0.25/0.16 the bot
+    runs with today has only ever lived in `.env`, never a code-default
+    edit). Root cause of the drift: Luxury's own config.py comment
+    literally said these were "defaulted to the same values Options
+    currently runs with" - true only at the instant Luxury was created
+    (31 Aug 2026); Options' own `.env` values moved afterward and
+    Luxury's code default was never updated to follow.
+
+    **Part 2 - the daily re-entry cap:** new, independent of
+    `MAX_LIVE_POSITIONS_CE`/`_PE` (that caps how many can be LIVE at
+    once; this caps how many times the SAME underlying can be entered
+    across the WHOLE DAY, even after each prior entry has already
+    exited). New shared `trade_history.count_opened_today(strategy,
+    underlying_symbol)` - reads ONLY today's own dated
+    `position_opened` log file (not the full multi-day history), counts
+    records matching both strategy and symbol. Deliberately backed by
+    this DURABLE on-disk log rather than a fresh in-memory counter
+    (which every other per-day count in `position_store.py` already is,
+    and which the whole codebase accepts resets on restart) - a re-entry
+    cap whose entire point is limiting a whipsawing stock is exactly the
+    wrong place to accept a silent reset-to-0 on a mid-day restart (a
+    deploy, or a crash-restart via `Restart=always`), so this one
+    intentionally diverges from that established in-memory tradeoff.
+    Reconciled positions never inflate the count (`reconcile_from_broker`
+    never calls `record_opened_position` - confirmed by reading its own
+    call site), so a restart correctly recovering an already-open
+    position doesn't double-count it.
+
+    New `config.MAX_DAILY_ENTRIES_PER_SYMBOL` (default 3) in all three
+    packages (`MAX_DAILY_ENTRIES_PER_SYMBOL` / `FUTURES_...` /
+    `LUXURY_...`). Checked in each package's own `_process_one_entry`,
+    right after the (Options-only) choppy-stocks filter and BEFORE the
+    `cross_strategy_registry` claim - so a stock that already hit its cap
+    today doesn't even bother claiming the cross-package lock. Counted
+    per underlying_symbol regardless of CE/PE ("same trade" = same
+    underlying, matching how a symbol can only ever hold one direction at
+    a time within one package anyway).
+
+    New `tests/test_daily_reentry_cap.py` (5 scenarios, all passing):
+    `count_opened_today`'s own counting/isolation-by-strategy/isolation-
+    by-symbol/missing-file-returns-0 correctness; a full REAL 3x
+    enter->exit cycle for Options via `_process_one_entry`/
+    `close_position`, then a real 4th attempt correctly rejected
+    (`daily_reentry_cap_reached`) with a verified ZERO orders placed,
+    while a different symbol is unaffected; the cap SURVIVING a
+    simulated restart (a brand-new `PositionStore` - zero in-memory
+    history - still blocks the 4th entry against the same on-disk log,
+    the whole point of this design); Futures'/Luxury's own independent
+    cap wiring (own strategy tag, own config knob); and the cap being
+    genuinely configurable (re-tested and enforced at 1).
+
+    **Incidental fix found while testing:** `tests/test_cross_strategy_
+    registry.py`'s test #8 (the only scenario in that file alerting 2
+    stocks per package in one batch) started failing under the now-1
+    `MAX_LIVE_POSITIONS_CE` cap (from entry #69 above) - a package's own
+    unique stock could get crowded out of its OWN capacity by the shared
+    contested stock, entirely unrelated to the cross-registry behavior
+    that test actually exercises. Fixed by explicitly raising capacity
+    for the duration of that one test (`= 10`), the same pattern
+    `test_luxury_package.py`/`test_swing_package.py` already use for
+    their own concurrency tests - not a bug in the re-entry-cap change
+    itself, just a latent test/config assumption finally surfaced by
+    timing. Re-ran all 13 test suites afterward (including 3 repeat runs
+    of the fixed test to rule out remaining flakiness), all pass.
+
+    Deployed - `SWING_STRATEGY_ENABLED` unaffected/still `false`, all
+    three real-money strategies' `live_positions` confirmed empty before
+    and after restart.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

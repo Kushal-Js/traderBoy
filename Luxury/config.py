@@ -53,6 +53,22 @@ SELECT_BOTTOM_N_STOCKS = os.getenv("LUXURY_SELECT_BOTTOM_N_STOCKS", "true").lowe
 MAX_LIVE_POSITIONS_CE = int(os.getenv("LUXURY_MAX_LIVE_POSITIONS_CE", "2"))
 MAX_LIVE_POSITIONS_PE = int(os.getenv("LUXURY_MAX_LIVE_POSITIONS_PE", "2"))
 
+# See Options/config.py's identical MAX_DAILY_ENTRIES_PER_SYMBOL - this
+# package's own independently-tunable daily re-entry cap (user request
+# 1 Sep 2026), same "same underlying, across the whole day" semantics.
+MAX_DAILY_ENTRIES_PER_SYMBOL = int(os.getenv("LUXURY_MAX_DAILY_ENTRIES_PER_SYMBOL", "3"))
+
+# Code default kept at its ORIGINAL value, same convention as Options'
+# own TARGET_PCT/STOP_LOSS_PCT (whose code default is STILL "0.10"/"0.03"
+# even though the actual deployed value moved to 0.25/0.16 purely via
+# .env override, never a code-default edit) - see .env's own
+# LUXURY_TARGET_PCT/LUXURY_STOP_LOSS_PCT for the value this package
+# actually runs with as of 1 Sep 2026 (matched to Options' own deployed
+# value, user request: "Match luxury Entry and Exit conditions to
+# Options package conditions"). This file's own comment used to claim
+# this default was "the same values Options currently runs with" - true
+# only at the moment Luxury was created, since Options' own .env value
+# moved afterward and this code default was never updated to follow it.
 TARGET_PCT = float(os.getenv("LUXURY_TARGET_PCT", "0.10"))
 STOP_LOSS_PCT = float(os.getenv("LUXURY_STOP_LOSS_PCT", "0.03"))
 
@@ -77,6 +93,9 @@ TRAILING_SL_PCT = float(os.getenv("LUXURY_TRAILING_SL_PCT", "0.015"))
 
 ENABLE_DYNAMIC_SL = os.getenv("LUXURY_ENABLE_DYNAMIC_SL", "true").lower() == "true"
 DYNAMIC_SL_STEP_PCT_CE = float(os.getenv("LUXURY_DYNAMIC_SL_STEP_PCT_CE", "0.07"))
+# Code default kept at its original 0.07 (see TARGET_PCT's own comment
+# above for why) - .env's LUXURY_DYNAMIC_SL_STEP_PCT_PE carries the
+# actual deployed value (0.09, matched to Options' own, 1 Sep 2026).
 DYNAMIC_SL_STEP_PCT_PE = float(os.getenv("LUXURY_DYNAMIC_SL_STEP_PCT_PE", "0.07"))
 DYNAMIC_SL_INCREASE_PCT = float(os.getenv("LUXURY_DYNAMIC_SL_INCREASE_PCT", "0.01"))
 
@@ -102,7 +121,12 @@ MARKET_TZ = "Asia/Kolkata"
 SQUARE_OFF_TIME = os.getenv("LUXURY_SQUARE_OFF_TIME", "15:15")
 
 # See Options/config.py's identical flag - this package's own independently-
-# tunable master switch for the automatic EOD square-off.
+# tunable master switch for the automatic EOD square-off. Code default
+# kept at its original "true" (see TARGET_PCT's own comment above for
+# why) - .env's LUXURY_ENABLE_SQUARE_OFF carries the actual deployed
+# value ("false", matched to Options'/Futures' own NRML-carry-forward
+# behavior, 1 Sep 2026 - Luxury's default had drifted to force-closing
+# everything at SQUARE_OFF_TIME daily, which Options/Futures don't do).
 ENABLE_SQUARE_OFF = os.getenv("LUXURY_ENABLE_SQUARE_OFF", "true").lower() == "true"
 
 # See Options/config.py's identical flags - this package's own independently-

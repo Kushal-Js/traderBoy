@@ -89,6 +89,19 @@ SELECT_BOTTOM_N_STOCKS = os.getenv("SELECT_BOTTOM_N_STOCKS", "true").lower() == 
 MAX_LIVE_POSITIONS_CE = int(os.getenv("MAX_LIVE_POSITIONS_CE", "2"))
 MAX_LIVE_POSITIONS_PE = int(os.getenv("MAX_LIVE_POSITIONS_PE", "2"))
 
+# Daily re-entry cap, added 1 Sep 2026 (user request: "only allow entry
+# into same trade max 3 times a day for Luxury, Options and Future
+# package") - independent of MAX_LIVE_POSITIONS_CE/_PE above (that caps
+# how many can be LIVE at once; this caps how many times the SAME
+# underlying can be entered across the whole day, even after each prior
+# entry has already been exited). Counted per underlying_symbol
+# regardless of CE/PE ("same trade" = same underlying), via
+# trade_history.count_opened_today() - see its own docstring for why
+# that's backed by the durable on-disk opened-position log rather than an
+# in-memory counter (survives a mid-day restart, unlike every other
+# per-day counter in position_store.py).
+MAX_DAILY_ENTRIES_PER_SYMBOL = int(os.getenv("MAX_DAILY_ENTRIES_PER_SYMBOL", "3"))
+
 # /chartink/webhook-papertrade (paper_webhook.py) - a second, independent
 # position pool for evaluating a new Chartink scan before trusting it with
 # real money. Deliberately separate from TOP_N_STOCKS/MAX_LIVE_POSITIONS_CE

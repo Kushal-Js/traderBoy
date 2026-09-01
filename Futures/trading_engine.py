@@ -48,7 +48,7 @@ from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from trade_history import attribute_open_broker_position
+from trade_history import attribute_open_broker_position, count_opened_today
 import cross_strategy_registry
 
 from . import config
@@ -230,6 +230,17 @@ async def _process_one_entry(symbol: str, option_type: str) -> dict:
     race window between Options/Futures/Luxury that reserve_symbol()/
     has_open_position_for_underlying() alone can't."""
     loop = asyncio.get_running_loop()
+
+    # Daily re-entry cap - see Options/trading_engine.py's identical check
+    # for the full rationale (user request 1 Sep 2026: "only allow entry
+    # into same trade max 3 times a day").
+    entries_today = await loop.run_in_executor(None, count_opened_today, "Futures", symbol)
+    if entries_today >= config.MAX_DAILY_ENTRIES_PER_SYMBOL:
+        logger.info(
+            "%s: skipped - already entered %d time(s) today, at the daily cap of %d",
+            symbol, entries_today, config.MAX_DAILY_ENTRIES_PER_SYMBOL,
+        )
+        return {"symbol": symbol, "status": "skipped", "reason": "daily_reentry_cap_reached"}
 
     if not await cross_strategy_registry.try_claim(symbol, "Futures"):
         logger.info("%s: skipped - another strategy is currently entering it", symbol)

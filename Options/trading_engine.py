@@ -27,7 +27,7 @@ from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from trade_history import attribute_open_broker_position
+from trade_history import attribute_open_broker_position, count_opened_today
 import choppy_stocks
 import cross_strategy_registry
 
@@ -302,6 +302,24 @@ async def _process_one_entry(symbol: str, option_type: str) -> dict:
     if choppy_stocks.is_choppy(symbol):
         logger.info("%s: skipped - on the manually-maintained choppy-stocks list", symbol)
         return {"symbol": symbol, "status": "skipped", "reason": "choppy_stock"}
+
+    # Daily re-entry cap (user request 1 Sep 2026: "only allow entry into
+    # same trade max 3 times a day") - independent of MAX_LIVE_POSITIONS_
+    # CE/_PE (that caps how many can be LIVE at once; this caps how many
+    # times the SAME underlying can be entered across the whole day, even
+    # after each prior entry has already been exited). Counted regardless
+    # of CE/PE ("same trade" = same underlying). Checked here, before the
+    # cross_strategy_registry claim, so a stock that's already hit its cap
+    # today doesn't even bother claiming the cross-package lock. See
+    # trade_history.count_opened_today's own docstring for why this reads
+    # the durable on-disk log rather than an in-memory counter.
+    entries_today = await loop.run_in_executor(None, count_opened_today, "Options", symbol)
+    if entries_today >= config.MAX_DAILY_ENTRIES_PER_SYMBOL:
+        logger.info(
+            "%s: skipped - already entered %d time(s) today, at the daily cap of %d",
+            symbol, entries_today, config.MAX_DAILY_ENTRIES_PER_SYMBOL,
+        )
+        return {"symbol": symbol, "status": "skipped", "reason": "daily_reentry_cap_reached"}
 
     if not await cross_strategy_registry.try_claim(symbol, "Options"):
         logger.info("%s: skipped - another strategy is currently entering it", symbol)

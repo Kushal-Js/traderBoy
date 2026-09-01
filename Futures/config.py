@@ -54,6 +54,11 @@ SELECT_BOTTOM_N_STOCKS = os.getenv("FUTURES_SELECT_BOTTOM_N_STOCKS", "true").low
 MAX_LIVE_POSITIONS_CE = int(os.getenv("FUTURES_MAX_LIVE_POSITIONS_CE", "2"))
 MAX_LIVE_POSITIONS_PE = int(os.getenv("FUTURES_MAX_LIVE_POSITIONS_PE", "2"))
 
+# See Options/config.py's identical MAX_DAILY_ENTRIES_PER_SYMBOL - this
+# package's own independently-tunable daily re-entry cap (user request
+# 1 Sep 2026), same "same underlying, across the whole day" semantics.
+MAX_DAILY_ENTRIES_PER_SYMBOL = int(os.getenv("FUTURES_MAX_DAILY_ENTRIES_PER_SYMBOL", "3"))
+
 TARGET_PCT = float(os.getenv("FUTURES_TARGET_PCT", "0.25"))
 STOP_LOSS_PCT = float(os.getenv("FUTURES_STOP_LOSS_PCT", "0.16"))
 

@@ -269,6 +269,62 @@ def attribute_open_broker_position(option_trading_symbol: str) -> Optional[str]:
     return None
 
 
+def count_opened_today(strategy: str, underlying_symbol: str) -> int:
+    """Read-only. Counts how many times `strategy` has genuinely OPENED a
+    position for `underlying_symbol` TODAY - added 1 Sep 2026 for
+    Options/Futures/Luxury's daily re-entry cap (user request: "only
+    allow entry into same trade max 3 times a day"). Backs that cap with
+    this SAME on-disk log record_opened_position already writes to
+    (OPENED_POSITIONS_NAME), rather than a fresh in-memory counter -
+    deliberately, so the cap survives a mid-day restart. An in-memory
+    counter (matching every other per-day count in position_store.py)
+    would silently reset to 0 on any restart, which is exactly the wrong
+    failure mode for a cap whose whole point is limiting how many times a
+    volatile/whipsawing stock gets re-entered - a restart on such a day
+    is a real possibility (a deploy, a crash-restart via
+    Restart=always), not just a hypothetical.
+
+    Reads only TODAY's own dated file (dated_path, not read_all_jsonl's
+    full-history glob) - cheap enough to call on every entry attempt, a
+    handful of JSON lines on a normal day. Counts genuine entries only:
+    reconcile_from_broker() never calls record_opened_position() (see
+    that function's own call site in position_store.py), so a position
+    recovered at startup - already counted whenever it was FIRST opened,
+    earlier today or on a prior day - is never double-counted here.
+
+    Fails OPEN (returns 0) on a read error, same philosophy as every
+    other logging-only path in this file (append_jsonl's own docstring:
+    "never raises, since ... must never break the caller's real flow") -
+    the position-count CAPS (MAX_LIVE_POSITIONS_CE/_PE) remain the
+    primary real-money risk control regardless of this secondary limit;
+    treating a rare disk hiccup as "silently lock this stock out for the
+    rest of the day" would be a worse failure mode than the reverse."""
+    path = dated_path(OPENED_POSITIONS_NAME)
+    if not path.exists():
+        return 0
+    count = 0
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("strategy") == strategy and record.get("underlying_symbol") == underlying_symbol:
+                    count += 1
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Could not read today's %s log for %s %s - treating as 0 entries so far "
+            "(fail open, same as every other logging-only read in this file).",
+            OPENED_POSITIONS_NAME, strategy, underlying_symbol,
+        )
+        return 0
+    return count
+
+
 # --------------------------------------------------------------------- #
 # Webhook alert log - every incoming Chartink alert, tagged by which
 # endpoint/strategy received it and what happened to it (processed vs

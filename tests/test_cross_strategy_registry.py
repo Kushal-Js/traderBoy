@@ -382,6 +382,22 @@ async def test_8_mixed_alert_shared_stock_races_unique_stocks_unaffected():
     lm.position_store = luxury_store
     lte.position_store = luxury_store
 
+    # Each package's alert here contains 2 stocks (the shared RELIANCE +
+    # its own unique one) - explicitly raise capacity so a package's own
+    # ambient MAX_LIVE_POSITIONS_CE (now 1 as of 1 Sep 2026's capacity-cap
+    # change) can't crowd out its own unique stock purely on capacity,
+    # independent of and unrelated to the cross-registry behavior this
+    # test actually exercises (tests 3/4/7 above only ever alert ONE
+    # stock per package, so they were never exposed to this). Same
+    # pattern test_luxury_package.py/test_swing_package.py already use
+    # for their own concurrency tests.
+    real_om_cap = ote.config.MAX_LIVE_POSITIONS_CE
+    real_fm_cap = fte.config.MAX_LIVE_POSITIONS_CE
+    real_lm_cap = lte.config.MAX_LIVE_POSITIONS_CE
+    ote.config.MAX_LIVE_POSITIONS_CE = 10
+    fte.config.MAX_LIVE_POSITIONS_CE = 10
+    lte.config.MAX_LIVE_POSITIONS_CE = 10
+
     real_om_rank, real_fm_rank, real_lm_rank = om.rank_and_pick_top_stocks, fm.rank_and_pick_top_stocks, lm.rank_and_pick_top_stocks
     om.rank_and_pick_top_stocks = fm.rank_and_pick_top_stocks = lm.rank_and_pick_top_stocks = fake_ranked
 
@@ -430,6 +446,9 @@ async def test_8_mixed_alert_shared_stock_races_unique_stocks_unaffected():
         restore_time()
         om.rank_and_pick_top_stocks, fm.rank_and_pick_top_stocks, lm.rank_and_pick_top_stocks = \
             real_om_rank, real_fm_rank, real_lm_rank
+        ote.config.MAX_LIVE_POSITIONS_CE = real_om_cap
+        fte.config.MAX_LIVE_POSITIONS_CE = real_fm_cap
+        lte.config.MAX_LIVE_POSITIONS_CE = real_lm_cap
 
 
 async def main():
