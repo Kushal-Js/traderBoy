@@ -2916,6 +2916,28 @@ out of git.
     strategies' `live_positions` confirmed empty before and after
     restart.
 
+69. **Options/Futures/Luxury CE+PE capacity all lowered 2->1 - user
+    request 1 Sep 2026** ("okay make it 1 for CE and PE and deploy it",
+    following a question about each package's current cap). Pure `.env`
+    change, no code touched (every cap consumer already handles any
+    value correctly - `reserve_symbol()`'s own `current >= cap` check,
+    same as every prior cap change here).
+
+    `MAX_LIVE_POSITIONS_CE`/`_PE` (Options), `FUTURES_MAX_LIVE_POSITIONS_CE`/
+    `_PE`, and `LUXURY_MAX_LIVE_POSITIONS_CE`/`_PE` all set to `1` in
+    `.env`. Two of these (`FUTURES_MAX_LIVE_POSITIONS_PE`,
+    `LUXURY_MAX_LIVE_POSITIONS_CE`/`_PE`) had never been explicitly set
+    before - they were quietly riding their own code default of `2` in
+    `Futures/config.py`/`Luxury/config.py`; made explicit now so all six
+    values are visible together in one place rather than half living in
+    `.env` and half only in code.
+
+    Existing open positions (none were open at deploy time) are
+    unaffected either way - this only gates NEW entries, same as every
+    prior capacity-cap change. Deployed - all three real-money
+    strategies' `live_positions` confirmed empty before and after
+    restart.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
