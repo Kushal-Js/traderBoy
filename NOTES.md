@@ -3598,6 +3598,64 @@ out of git.
     static seed file) - watchlist count went 19 -> 22. No ERROR-level
     log lines from the new process.
 
+79. **Stale-age watchlist prune - user request 1 Sep 2026** (verbatim):
+    "Add one more pruning logic for watchlist update that those stocks
+    that were added 10 days earlier to be removed unless they are again
+    fed in using chartink scan results." A SECOND, independent daily
+    watchlist prune alongside entry #77's trend-based one - this one is
+    purely AGE-based: any watchlist symbol left unconfirmed for
+    `WATCHLIST_STALE_AGE_DAYS` (10 by default) or more calendar days
+    gets removed, applying uniformly regardless of how it was
+    originally added (webhook, hand-edited file, or the Chartink scan
+    itself).
+
+    The design decision this hinges on: "added 10 days earlier" can't
+    literally mean the ORIGINAL add timestamp, because then "unless fed
+    in again" would have nothing to reset - a stock's age since first
+    joining the watchlist never goes backward. So `Swing/watchlist.py`'s
+    `WatchlistEntry` now carries TWO timestamps: `added_at` (permanent,
+    historical, unchanged meaning) and a new `last_confirmed_at`
+    (defaults to `added_at`, the actual clock the 10-day check reads).
+    The ONE thing that resets `last_confirmed_at` is entry #78's daily
+    Chartink scan pull re-returning that exact symbol - new
+    `WatchlistStore.confirm_chartink_symbols()` (called by
+    `_run_chartink_watchlist_scan` INSTEAD OF plain `add_symbols()`) -
+    for an already-present symbol it resets the clock to now; for a
+    genuinely new one it adds it fresh, identical to `add_symbols()`.
+    Every OTHER caller (the webhook, the hand-edited-file sync) keeps
+    calling plain `add_symbols()` unchanged, which still does NOT touch
+    an already-present symbol's own clock - only a Chartink re-feed
+    counts as "fed in again," per the user's own wording.
+
+    New `WatchlistStore.stale_symbols(max_age_days)` (read-only,
+    returns every symbol whose `last_confirmed_at` is `max_age_days` or
+    more CALENDAR days old - a plain date-to-date diff, matching the
+    user's own everyday phrasing rather than a strict 24h-multiple
+    timedelta) and `trading_engine._stale_watchlist_age_prune_tick`
+    (same once-per-trading-day DATE-gating convention as every other
+    daily tick in this codebase, sharing the SAME 09:15 IST slot as
+    entry #77's trend-based prune - both are "prune the watchlist once
+    market opens" tasks, just independently toggleable checks). Own
+    flag, `WATCHLIST_STALE_AGE_PRUNE_ENABLED` (default true). Same
+    "never touches a live position" reasoning as entry #77's prune - a
+    symbol currently held stays fully managed regardless of watchlist
+    membership.
+
+    New `tests/test_swing_stale_age_prune.py` (4 scenarios): the exact
+    age boundary (>= 10 days is stale, 9 days is not) against real
+    backdated `WatchlistEntry` objects; the once-per-day gating; a mixed
+    watchlist pruned correctly INCLUDING the crux case - a symbol
+    originally added 15 days ago but reconfirmed by the Chartink scan
+    just today survives, since its own clock is `last_confirmed_at`, not
+    `added_at`; and the feature flag disabling everything even for a
+    symbol stale by 100 days. Also updated
+    `tests/test_swing_chartink_scan.py`'s own test 2 (renamed
+    `..._adds_and_reconfirms`) to assert the new
+    `confirm_chartink_symbols` reconfirm behavior directly - an
+    already-present symbol the scan re-returns must have its own
+    `last_confirmed_at` measurably bumped forward, not just be silently
+    left alone. Ran all 20 test suites afterward, all pass.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM

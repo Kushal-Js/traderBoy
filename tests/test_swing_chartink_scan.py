@@ -188,10 +188,19 @@ def test_1_fetch_scan_symbols_once():
           "failure, or an unexpected response shape: PASSED")
 
 
-async def test_2_run_chartink_watchlist_scan_adds_and_logs():
+async def test_2_run_chartink_watchlist_scan_adds_and_reconfirms():
+    """Also covers the interaction with the new stale-age prune (user
+    request 1 Sep 2026: "unless they are again fed in using chartink
+    scan results") - an already-present symbol the scan re-returns must
+    have its own last_confirmed_at CLOCK RESET, not just be silently
+    left alone the way plain add_symbols() would leave it - see
+    test_swing_stale_age_prune.py for the removal side of this same
+    mechanism."""
     store = swl.WatchlistStore()
     ste.watchlist_store = store
     await store.add_symbols(["ALREADYTHERE"])
+    old_last_confirmed_at = store._symbols["ALREADYTHERE"].last_confirmed_at
+    await asyncio.sleep(0.01)  # ensure a measurably later timestamp on reconfirm
 
     session = FakeSession(post_response=_scan_response(["NEWSTOCK1", "NEWSTOCK2", "ALREADYTHERE"]))
     restore = install_fake_session(session)
@@ -200,20 +209,28 @@ async def test_2_run_chartink_watchlist_scan_adds_and_logs():
         assert result["symbols_returned"] == ["NEWSTOCK1", "NEWSTOCK2", "ALREADYTHERE"]
         assert result["symbols_added"] == ["NEWSTOCK1", "NEWSTOCK2"], \
             "ALREADYTHERE must not be reported as newly added"
+        assert result["symbols_reconfirmed"] == ["ALREADYTHERE"], \
+            "an already-present symbol the scan re-returns must be reported as reconfirmed"
 
         remaining = set(await store.symbols())
         assert remaining == {"ALREADYTHERE", "NEWSTOCK1", "NEWSTOCK2"}, remaining
+        new_last_confirmed_at = store._symbols["ALREADYTHERE"].last_confirmed_at
+        assert new_last_confirmed_at > old_last_confirmed_at, \
+            "ALREADYTHERE's own last_confirmed_at (the stale-age prune's clock) must be reset by this re-feed"
 
         await asyncio.sleep(0.2)
         events = [e for e in trade_history.read_all_jsonl(ste.SWING_EVENTS_LOG_NAME)
                   if e["event"] == "CHARTINK_WATCHLIST_SCAN_COMPLETED"]
         assert len(events) == 1, events
         assert events[0]["symbols_added"] == ["NEWSTOCK1", "NEWSTOCK2"]
+        assert events[0]["symbols_reconfirmed"] == ["ALREADYTHERE"]
         assert events[0]["scan_url"] == ste.config.CHARTINK_WATCHLIST_SCAN_URL
 
         print("2. _run_chartink_watchlist_scan adds only the genuinely NEW symbols to the REAL "
-              "watchlist_store, leaves an already-present one alone, and durably logs a "
-              "CHARTINK_WATCHLIST_SCAN_COMPLETED event with the right detail: PASSED")
+              "watchlist_store, and RESETS the stale-age clock (last_confirmed_at) for an "
+              "already-present symbol it re-returns rather than silently leaving it alone - the "
+              "mechanism 'unless they are again fed in using chartink scan results' depends on - "
+              "durably logging both in a CHARTINK_WATCHLIST_SCAN_COMPLETED event: PASSED")
     finally:
         restore()
 
@@ -306,7 +323,7 @@ async def test_4_feature_flag_disables_scanning_entirely():
 async def main():
     print("=== Swing daily Chartink watchlist scan test suite ===\n")
     test_1_fetch_scan_symbols_once()
-    await test_2_run_chartink_watchlist_scan_adds_and_logs()
+    await test_2_run_chartink_watchlist_scan_adds_and_reconfirms()
     await test_3_daily_once_gating_and_failure_does_not_mark_day_done()
     await test_4_feature_flag_disables_scanning_entirely()
     print("\nALL SWING CHARTINK WATCHLIST SCAN CHECKS PASSED")

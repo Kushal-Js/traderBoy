@@ -15,10 +15,15 @@ remove_symbol()/a future removal webhook for that) - this keeps the
 file's semantics simple and matches the webhook's own add-only behavior;
 nothing here silently drops something that might still matter.
 
-Deliberately just a set of symbols with an added_at timestamp - no
-ranking, no scoring, no scan metadata; those are exactly the kind of
-thing the user's own future "business logic" would want to define, not
-something to guess at now.
+Each symbol carries two timestamps (added 1 Sep 2026, for the new
+stale-age prune - see trading_engine.py's own
+_stale_watchlist_age_prune_tick): `added_at` (when it FIRST joined the
+watchlist, permanent/historical) and `last_confirmed_at` (defaults to
+added_at; reset to "now" ONLY by the daily Chartink scan pull
+re-returning this exact symbol - see confirm_chartink_symbols() below).
+Beyond that, deliberately just a set of symbols - no ranking, no
+scoring; those are exactly the kind of thing the user's own future
+"business logic" would want to define, not something to guess at now.
 
 The in-memory store itself is still pure in-memory (resets on restart,
 same tradeoff as every store in this codebase) - what's persistent is
@@ -30,32 +35,73 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("swing_watchlist")
 
 WATCHLIST_FILE = Path("data/watchlist")
 
 
+@dataclass
+class WatchlistEntry:
+    added_at: datetime
+    last_confirmed_at: Optional[datetime] = None
+
+    def __post_init__(self) -> None:
+        if self.last_confirmed_at is None:
+            self.last_confirmed_at = self.added_at
+
+
 class WatchlistStore:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
-        self._symbols: Dict[str, datetime] = {}  # symbol -> added_at
+        self._symbols: Dict[str, WatchlistEntry] = {}
 
     async def add_symbols(self, symbols: List[str]) -> List[str]:
         """Adds any symbols not already present. Returns only the ones
         actually newly added, for the webhook's own response - lets the
         caller see at a glance which of their requested symbols were
-        already on the list."""
+        already on the list. An already-present symbol is left
+        completely untouched here, including its own last_confirmed_at -
+        this does NOT reset the stale-age prune's own clock (see
+        confirm_chartink_symbols() below for the one thing that does);
+        every existing caller (the webhook, the file sync) keeps this
+        exact same behavior unchanged."""
         async with self._lock:
             added = []
+            now = datetime.now()
             for sym in symbols:
                 if sym not in self._symbols:
-                    self._symbols[sym] = datetime.now()
+                    self._symbols[sym] = WatchlistEntry(added_at=now)
                     added.append(sym)
             return added
+
+    async def confirm_chartink_symbols(self, symbols: List[str]) -> Tuple[List[str], List[str]]:
+        """Called ONLY by the daily Chartink scan pull (trading_engine.
+        _run_chartink_watchlist_scan) - user request 1 Sep 2026: "those
+        stocks that were added 10 days earlier to be removed unless they
+        are again fed in using chartink scan results." For each symbol
+        the scan just returned: a genuinely NEW one is added (same as
+        add_symbols); an ALREADY-present one has its own
+        last_confirmed_at reset to now instead - the ONE thing in this
+        codebase that resets the stale-age prune's clock for a symbol,
+        regardless of which mechanism originally added it. Returns
+        (newly_added, reconfirmed) for the caller's own logging."""
+        async with self._lock:
+            now = datetime.now()
+            newly_added, reconfirmed = [], []
+            for sym in symbols:
+                existing = self._symbols.get(sym)
+                if existing is None:
+                    self._symbols[sym] = WatchlistEntry(added_at=now)
+                    newly_added.append(sym)
+                else:
+                    existing.last_confirmed_at = now
+                    reconfirmed.append(sym)
+            return newly_added, reconfirmed
 
     async def remove_symbol(self, symbol: str) -> bool:
         async with self._lock:
@@ -65,13 +111,34 @@ class WatchlistStore:
         async with self._lock:
             return list(self._symbols.keys())
 
+    async def stale_symbols(self, max_age_days: int) -> List[Tuple[str, datetime]]:
+        """Read-only: returns (symbol, last_confirmed_at) for every
+        symbol whose own last_confirmed_at is max_age_days or more
+        CALENDAR days old (a plain date-to-date difference, matching the
+        user's own everyday phrasing "10 days earlier" - not a strict
+        24h-multiple timedelta, so a symbol confirmed at 23:59 and
+        checked at 00:01 the next calendar day already counts as "1 day
+        old"). The actual removal decision/action lives in
+        trading_engine's own prune tick, not here - keeps this store a
+        pure data structure, same convention as every other store in
+        this codebase."""
+        async with self._lock:
+            today = datetime.now().date()
+            return [
+                (sym, entry.last_confirmed_at) for sym, entry in self._symbols.items()
+                if (today - entry.last_confirmed_at.date()).days >= max_age_days
+            ]
+
     async def snapshot(self) -> dict:
         async with self._lock:
             return {
                 "count": len(self._symbols),
                 "watchlist": [
-                    {"symbol": sym, "added_at": ts.isoformat()}
-                    for sym, ts in self._symbols.items()
+                    {
+                        "symbol": sym, "added_at": entry.added_at.isoformat(),
+                        "last_confirmed_at": entry.last_confirmed_at.isoformat(),
+                    }
+                    for sym, entry in self._symbols.items()
                 ],
             }
 

@@ -294,6 +294,31 @@ CHARTINK_WATCHLIST_SCAN_CLAUSE = (
 CHARTINK_WATCHLIST_SCAN_TIME = os.getenv("SWING_CHARTINK_WATCHLIST_SCAN_TIME", "08:00")
 
 # --------------------------------------------------------------------------- #
+# Stale-age watchlist prune (user request 1 Sep 2026, verbatim): "those
+# stocks that were added 10 days earlier to be removed unless they are
+# again fed in using chartink scan results." A SECOND, independent daily
+# watchlist prune alongside WATCHLIST_DAILY_PRUNE_ENABLED above (that one
+# checks a daily TREND break; this one is purely AGE-based) - any symbol
+# whose own `last_confirmed_at` (see Swing/watchlist.py's own
+# WatchlistEntry) is WATCHLIST_STALE_AGE_DAYS or more calendar days old
+# gets removed. Applies to EVERY watchlist symbol uniformly, regardless
+# of how it was originally added (webhook, hand-edited file, or the
+# Chartink scan itself) - the ONE thing that resets a symbol's own clock
+# is the daily Chartink scan pull re-returning it (see trading_engine.
+# _run_chartink_watchlist_scan's own docstring for why only THAT source
+# counts as "fed in again," per the user's own wording). Runs at the
+# SAME 09:15 IST gate as WATCHLIST_DAILY_PRUNE_ENABLED above (its own
+# independent day-tracking variable, same tolerant date-comparison
+# convention) - both are "prune the watchlist once market opens" tasks,
+# grouped by timing even though they're separate, independently-
+# toggleable checks.
+# --------------------------------------------------------------------------- #
+WATCHLIST_STALE_AGE_PRUNE_ENABLED = os.getenv("SWING_WATCHLIST_STALE_AGE_PRUNE_ENABLED", "true").lower() == "true"
+
+# The user's own number: "added 10 days earlier."
+WATCHLIST_STALE_AGE_DAYS = int(os.getenv("SWING_WATCHLIST_STALE_AGE_DAYS", "10"))
+
+# --------------------------------------------------------------------------- #
 # Paper trading (added 1 Sep 2026 - "enable paper trading for tomorrow...
 # keep track of trades, history and profit loss also like real trades in
 # files", turned back OFF the same day once real trading went live -

@@ -1483,19 +1483,30 @@ async def _run_chartink_watchlist_scan() -> dict:
     disagree with itself about what "running the scan" means. Raises on
     a genuine fetch failure (network error, unexpected response shape) -
     callers decide what to do with that (the tick logs and retries next
-    time; the manual endpoint surfaces it as an HTTP error)."""
+    time; the manual endpoint surfaces it as an HTTP error).
+
+    Uses confirm_chartink_symbols() rather than plain add_symbols() -
+    user request 1 Sep 2026 ("those stocks that were added 10 days
+    earlier to be removed unless they are again fed in using chartink
+    scan results"): a symbol this scan returns that's ALREADY on the
+    watchlist has its own stale-age clock reset here (see
+    watchlist.WatchlistStore.confirm_chartink_symbols's own docstring -
+    the ONLY place in this codebase that does), not just a genuinely new
+    one added - this is what makes "unless fed in again" actually work,
+    see _stale_watchlist_age_prune_tick below for the removal side."""
     loop = asyncio.get_running_loop()
     symbols = await loop.run_in_executor(None, chartink_scan.fetch_scan_symbols_once)
-    added = await watchlist_store.add_symbols(symbols)
+    newly_added, reconfirmed = await watchlist_store.confirm_chartink_symbols(symbols)
     logger.info(
-        "Chartink watchlist scan complete: %d symbol(s) returned, %d newly added: %s",
-        len(symbols), len(added), added,
+        "Chartink watchlist scan complete: %d symbol(s) returned, %d newly added, %d re-confirmed "
+        "(stale-age clock reset): added=%s reconfirmed=%s",
+        len(symbols), len(newly_added), len(reconfirmed), newly_added, reconfirmed,
     )
     await _record_swing_event("CHARTINK_WATCHLIST_SCAN_COMPLETED", "ALL", {
         "scan_url": config.CHARTINK_WATCHLIST_SCAN_URL,
-        "symbols_returned": symbols, "symbols_added": added,
+        "symbols_returned": symbols, "symbols_added": newly_added, "symbols_reconfirmed": reconfirmed,
     })
-    return {"symbols_returned": symbols, "symbols_added": added}
+    return {"symbols_returned": symbols, "symbols_added": newly_added, "symbols_reconfirmed": reconfirmed}
 
 
 # Same tolerant "today != last run day" gating convention as
@@ -1532,6 +1543,59 @@ async def _daily_chartink_watchlist_scan_tick() -> None:
         )
         return
     _last_chartink_scan_date = now.date()
+
+
+# --------------------------------------------------------------------------- #
+# Stale-age watchlist prune (user request 1 Sep 2026, verbatim): "those
+# stocks that were added 10 days earlier to be removed unless they are
+# again fed in using chartink scan results." See config.py's own
+# WATCHLIST_STALE_AGE_* docstring for the full design - a SECOND,
+# independent daily prune alongside _daily_watchlist_prune_tick above
+# (that one checks a daily TREND break; this one is purely AGE-based).
+# --------------------------------------------------------------------------- #
+# Same tolerant "today != last run day" gating convention as
+# _last_watchlist_prune_date/_last_chartink_scan_date above - its own
+# independent variable so this prune's own gate can never be confused
+# with (or accidentally skipped by) the trend-based prune's.
+_last_stale_age_prune_date: Optional[date] = None
+
+
+async def _stale_watchlist_age_prune_tick() -> None:
+    """Called every monitor_loop tick; only does real work once per
+    trading day, at/after 09:15 IST (the SAME gate as the trend-based
+    prune above, run right after it - see config.py's own docstring for
+    why they share a time slot despite being separate checks). Runs
+    regardless of config.STRATEGY_ENABLED (see config.
+    WATCHLIST_STALE_AGE_PRUNE_ENABLED's own docstring) - this only ever
+    prunes watchlist_store's own candidate set, never a live position,
+    same reasoning as _daily_watchlist_prune_tick's own docstring (a
+    symbol currently held stays fully managed regardless of watchlist
+    membership)."""
+    global _last_stale_age_prune_date
+    if not config.WATCHLIST_STALE_AGE_PRUNE_ENABLED:
+        return
+    now = _now_ist()
+    if now.time() < dt_time(9, 15) or now.date() == _last_stale_age_prune_date:
+        return
+
+    stale = await watchlist_store.stale_symbols(config.WATCHLIST_STALE_AGE_DAYS)
+    for symbol, last_confirmed_at in stale:
+        await watchlist_store.remove_symbol(symbol)
+        logger.info(
+            "%s: removed from watchlist - stale (last confirmed %s, >= %d day(s) ago, never "
+            "re-fed by the Chartink scan since)",
+            symbol, last_confirmed_at.isoformat(), config.WATCHLIST_STALE_AGE_DAYS,
+        )
+        await _record_swing_event("WATCHLIST_STALE_AGE_PRUNED", symbol, {
+            "last_confirmed_at": last_confirmed_at.isoformat(),
+            "max_age_days": config.WATCHLIST_STALE_AGE_DAYS,
+        })
+
+    _last_stale_age_prune_date = now.date()
+    logger.info(
+        "Daily stale-age watchlist prune complete: removed %d symbol(s): %s",
+        len(stale), [s for s, _ in stale],
+    )
 
 
 # (as_of_date, prev_close, confirmed) per symbol - `prev_close` is
@@ -1786,10 +1850,11 @@ async def monitor_loop() -> None:
     runs every tick regardless of which mode is currently active (cheap,
     keeps a closed-today log from going stale across a mode switch).
 
-    Also runs the daily watchlist prune AND the daily Chartink scan pull
-    (both added 1 Sep 2026) every tick - see their own docstrings for
-    why each is cheap to call unconditionally (a no-op past their own
-    first successful run each day) and why both run regardless of
+    Also runs the daily Chartink scan pull, the daily trend-based
+    watchlist prune, AND the daily stale-age watchlist prune (all added
+    1 Sep 2026) every tick - see their own docstrings for why each is
+    cheap to call unconditionally (a no-op past their own first
+    successful run each day) and why all three run regardless of
     STRATEGY_ENABLED."""
     logger.info(
         "Swing monitor loop started. strategy_enabled=%s strategy_mode=%s",
@@ -1803,6 +1868,7 @@ async def monitor_loop() -> None:
             await watchlist_store.sync_from_file()
             await _daily_chartink_watchlist_scan_tick()
             await _daily_watchlist_prune_tick()
+            await _stale_watchlist_age_prune_tick()
             if config.STRATEGY_ENABLED:
                 if config.STRATEGY_MODE == "basket":
                     await _basket_monitor_tick()
