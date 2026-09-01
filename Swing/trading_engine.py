@@ -157,7 +157,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from trade_history import attribute_open_broker_position
+from trade_history import append_jsonl, attribute_open_broker_position
 
 from . import config
 from .dhan_client import OrderStatus, _compute_supertrend, _retry, dhan_wrapper
@@ -179,6 +179,48 @@ def _gen_tag(prefix: str, symbol: str) -> str:
     safe_symbol = re.sub(r"[^A-Za-z0-9]", "", symbol)
     suffix = "".join(random.choices(string.digits, k=6))
     return f"{prefix}-{safe_symbol[:6]}-{suffix}"[:25]
+
+
+SWING_EVENTS_LOG_NAME = "swing_events"
+
+
+async def _record_swing_event(event: str, symbol: str, detail: dict) -> None:
+    """Durable, queryable event log for Swing specifically (added 1 Sep
+    2026, user request: "log everything under history folder for Swing
+    package also," made right after Swing's real trading went live) -
+    closes the same "only in journald, limited retention, not queryable"
+    gap `record_webhook_alert` already closed for incoming alerts (see
+    its own docstring in trade_history.py). `position_opened`/
+    `real_trades` already capture the bare entry/exit price per LEG; this
+    captures the higher-level STATE TRANSITION and its own reasoning
+    (which basket/sequential action fired, and why) in one row per
+    event, for both basket mode (BASKET_ENTERED/BASKET_EXITED) and
+    sequential mode (SEQUENTIAL_ENTERED_FUTURES/_SWAPPED_TO_PE/
+    _SWAPPED_TO_FUTURES/_EXITED_TO_WATCHING).
+
+    Fire-and-forget-style (awaited here, but the write itself runs in
+    the executor thread pool, never the event loop, and is wrapped so it
+    can never raise into a real trading action) - same "logging must
+    never risk breaking the actual action" discipline as every other
+    trade_history write in this codebase. Called AFTER the real
+    action/store update has already succeeded, never before, so a
+    logging failure here can only ever mean a missing observability
+    record, not a missed or duplicated trade."""
+    record = {
+        "event": event,
+        "underlying_symbol": symbol,
+        "strategy_mode": config.STRATEGY_MODE,
+        "logged_at": _now_ist().isoformat(),
+        **detail,
+    }
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, append_jsonl, SWING_EVENTS_LOG_NAME, record)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Could not append Swing event record (%s, %s) - the action itself is unaffected, "
+            "this is logging-only.", event, symbol,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -340,6 +382,12 @@ async def enter_basket_for_stock(symbol: str) -> dict:
             "%s: basket ENTERED - futures %s@%.2f, PE %s@%.2f",
             symbol, fut.trading_symbol, futures_fill_price, atm.trading_symbol, option_fill_price,
         )
+        await _record_swing_event("BASKET_ENTERED", symbol, {
+            "futures_trading_symbol": fut.trading_symbol, "futures_entry_price": futures_fill_price,
+            "futures_quantity": fut_qty,
+            "option_trading_symbol": atm.trading_symbol, "option_entry_price": option_fill_price,
+            "option_quantity": option_qty,
+        })
         return {
             "symbol": symbol, "status": "entered",
             "futures_leg": {"trading_symbol": fut.trading_symbol, "entry_price": futures_fill_price, "quantity": fut_qty},
@@ -385,6 +433,11 @@ async def _exit_basket(symbol: str, basket: Basket, reason: str) -> None:
         )
 
     await basket_store.close_basket(symbol, futures_exit_price, option_exit_price, reason)
+    await _record_swing_event("BASKET_EXITED", symbol, {
+        "exit_reason": reason,
+        "futures_exit_price": futures_exit_price, "option_exit_price": option_exit_price,
+        "futures_sell_ok": futures_exit["ok"], "option_sell_ok": option_exit["ok"],
+    })
 
 
 async def _square_off_all(reason: str) -> None:
@@ -416,6 +469,10 @@ async def _square_off_all(reason: str) -> None:
                 continue
             exit_price = result.get("fill_price") or leg.entry_price
             await sequential_store.exit_to_watching(symbol, exit_price, reason)
+            await _record_swing_event("SEQUENTIAL_EXITED_TO_WATCHING", symbol, {
+                "exit_reason": reason, "leg_type": leg.option_type,
+                "exit_price": exit_price, "entry_price": leg.entry_price,
+            })
 
 
 # --------------------------------------------------------------------------- #
@@ -469,6 +526,9 @@ async def _enter_futures_for_stock(symbol: str) -> dict:
         )
         await sequential_store.set_leg(leg)
         logger.info("%s: sequential ENTRY - futures %s@%.2f", symbol, fut.trading_symbol, fill_price)
+        await _record_swing_event("SEQUENTIAL_ENTERED_FUTURES", symbol, {
+            "trading_symbol": fut.trading_symbol, "entry_price": fill_price, "quantity": fut_qty,
+        })
         return {
             "symbol": symbol, "status": "entered", "leg": "FUT",
             "trading_symbol": fut.trading_symbol, "entry_price": fill_price, "quantity": fut_qty,
@@ -511,6 +571,9 @@ async def _swap_futures_to_pe(symbol: str, futures_leg: Leg) -> None:
             "(no real exposure), will re-enter fresh on the next entry signal", symbol,
         )
         await sequential_store.release_symbol(symbol)
+        await _record_swing_event("SEQUENTIAL_LEFT_FLAT", symbol, {
+            "reason": "pe_lookup_failed_after_futures_sold", "futures_exit_price": futures_exit_price,
+        })
         return
 
     option_qty = atm.lot_size * config.QUANTITY_LOTS
@@ -524,6 +587,9 @@ async def _swap_futures_to_pe(symbol: str, futures_leg: Leg) -> None:
             symbol, option_result.get("remark") or option_result.get("error"),
         )
         await sequential_store.release_symbol(symbol)
+        await _record_swing_event("SEQUENTIAL_LEFT_FLAT", symbol, {
+            "reason": "pe_buy_failed_after_futures_sold", "futures_exit_price": futures_exit_price,
+        })
         return
 
     option_fill_price = option_result.get("fill_price") or 0.0
@@ -534,6 +600,10 @@ async def _swap_futures_to_pe(symbol: str, futures_leg: Leg) -> None:
     )
     await sequential_store.set_leg(pe_leg)
     logger.info("%s: sequential SWAP futures->PE - PE %s@%.2f", symbol, atm.trading_symbol, option_fill_price)
+    await _record_swing_event("SEQUENTIAL_SWAPPED_TO_PE", symbol, {
+        "exit_reason": "SUPERTREND_5MIN_EXIT", "futures_exit_price": futures_exit_price,
+        "pe_trading_symbol": atm.trading_symbol, "pe_entry_price": option_fill_price, "pe_quantity": option_qty,
+    })
 
 
 async def _exit_pe_to_watching(symbol: str, pe_leg: Leg, reason: str) -> None:
@@ -552,6 +622,9 @@ async def _exit_pe_to_watching(symbol: str, pe_leg: Leg, reason: str) -> None:
         return
     option_exit_price = option_exit.get("fill_price") or pe_leg.entry_price
     await sequential_store.exit_to_watching(symbol, option_exit_price, reason)
+    await _record_swing_event("SEQUENTIAL_EXITED_TO_WATCHING", symbol, {
+        "exit_reason": reason, "pe_exit_price": option_exit_price, "pe_entry_price": pe_leg.entry_price,
+    })
 
 
 async def _swap_pe_to_futures(symbol: str, pe_leg: Leg) -> None:
@@ -581,6 +654,9 @@ async def _swap_pe_to_futures(symbol: str, pe_leg: Leg) -> None:
             "(no real exposure), will re-enter fresh on the next entry signal", symbol,
         )
         await sequential_store.release_symbol(symbol)
+        await _record_swing_event("SEQUENTIAL_LEFT_FLAT", symbol, {
+            "reason": "futures_lookup_failed_after_pe_sold", "pe_exit_price": option_exit_price,
+        })
         return
 
     fut_qty = fut.lot_size * config.QUANTITY_LOTS
@@ -594,6 +670,9 @@ async def _swap_pe_to_futures(symbol: str, pe_leg: Leg) -> None:
             symbol, futures_result.get("remark") or futures_result.get("error"),
         )
         await sequential_store.release_symbol(symbol)
+        await _record_swing_event("SEQUENTIAL_LEFT_FLAT", symbol, {
+            "reason": "futures_buy_failed_after_pe_sold", "pe_exit_price": option_exit_price,
+        })
         return
 
     fill_price = futures_result.get("fill_price") or 0.0
@@ -607,6 +686,10 @@ async def _swap_pe_to_futures(symbol: str, pe_leg: Leg) -> None:
         "%s: sequential SWAP PE->futures (loop continues) - futures %s@%.2f",
         symbol, fut.trading_symbol, fill_price,
     )
+    await _record_swing_event("SEQUENTIAL_SWAPPED_TO_FUTURES", symbol, {
+        "exit_reason": "ENTRY_SIGNAL_REFIRED", "pe_exit_price": option_exit_price,
+        "futures_trading_symbol": fut.trading_symbol, "futures_entry_price": fill_price, "futures_quantity": fut_qty,
+    })
 
 
 async def _evaluate_pe_exit_signal(symbol: str, pe_leg: Leg) -> Optional[str]:

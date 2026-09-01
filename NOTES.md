@@ -3222,6 +3222,48 @@ out of git.
     had none yet, being newly activated) confirmed empty before and
     after restart, clean startup verified.
 
+74. **Durable "swing_events" log + first-live-entry watch - user request
+    1 Sep 2026** ("keep an eye on first entry and log everything under
+    history folder for 'Swing' package also"), asked immediately after
+    entry #73 took Swing live.
+
+    New `Swing/trading_engine.py` `_record_swing_event(event, symbol,
+    detail)` + `SWING_EVENTS_LOG_NAME = "swing_events"` - closes the same
+    "only in journald, limited retention, not queryable" gap
+    `trade_history.record_webhook_alert` already closed for incoming
+    alerts (see that function's own docstring: "are we logging the
+    webhook alerts received? ... only to journald"). `position_opened`/
+    `real_trades` already capture the bare entry/exit PRICE per leg; this
+    new log captures the higher-level STATE TRANSITION and its own
+    reasoning - one row per event, for every real action: `BASKET_
+    ENTERED`/`BASKET_EXITED` (basket mode), `SEQUENTIAL_ENTERED_FUTURES`/
+    `_SWAPPED_TO_PE`/`_SWAPPED_TO_FUTURES`/`_EXITED_TO_WATCHING`
+    (sequential mode), and `SEQUENTIAL_LEFT_FLAT` for the "fail safe to
+    flat" paths (entry #71) - a mid-swap failure is now visible in
+    durable storage, not just an ERROR-level journald line. Always
+    called AFTER the real action/store update has already succeeded, so
+    a logging failure here can only ever mean a missing observability
+    record, never a missed or duplicated trade.
+
+    New `tests/test_swing_events_log.py` (3 scenarios): a full real
+    sequential loop (enter->swap to PE->swap back to futures->manual
+    square-off) produces exactly the 4 expected events in order with
+    the right reasoning/price detail; basket mode's own entry/exit
+    produce `BASKET_ENTERED`/`BASKET_EXITED`; and a failure mid-swap
+    (PE unresolvable after futures is already sold) still produces a
+    `SEQUENTIAL_LEFT_FLAT` event rather than staying silent. Re-ran all
+    15 test suites afterward, all pass.
+
+    Also started a background watch (a polling script, not a bot
+    feature) checking `GET /swing/sequential-positions` every 30s for up
+    to 6 hours, to flag the very first real Swing entry the moment it
+    happens - a plain operational monitoring aid for this session, not
+    part of the deployed bot itself.
+
+    Deployed - Options/Futures/Luxury's `live_positions` confirmed empty
+    before and after restart (Swing itself still had none at deploy
+    time), clean startup verified.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM
