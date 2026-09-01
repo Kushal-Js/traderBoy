@@ -3408,10 +3408,16 @@ out of git.
     `_square_off_all`, rather than relying on whatever the live default
     currently is). Ran all 17 test suites afterward, all pass.
 
-    Deployed with the usual real-position care: verified APLAPOLLO
-    reconciled correctly as a 1-leg BASKET with the correct entry_price
-    (2263.3) via `GET /swing/basket-hedge-positions` after restart (see
-    the deploy note immediately following this entry).
+    Deployed with the usual real-position care: verified `/positions`,
+    `/futures/positions`, `/luxury/positions` empty and Swing's own
+    sequential-mode position was APLAPOLLO @2263.3 (the known baseline)
+    immediately before restarting; after restart, confirmed via the new
+    `GET /swing/basket-hedge-positions` that APLAPOLLO reconciled exactly
+    as designed - `state=BASKET`, `legs=[FUT]`, `entry_price=2263.3` -
+    and that `/swing/sequential-positions` correctly reads empty now
+    (the position lives in the new store instead). No ERROR-level log
+    lines from the new process; monitor loop actively evaluating
+    watchlist entry signals within seconds of startup.
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
