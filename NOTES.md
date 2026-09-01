@@ -3982,6 +3982,18 @@ out of git.
     identical fix already needed across Swing's own test suite when
     entry #81 first landed. Ran all 23 test suites afterward, all pass.
 
+    Deployed directly per the user's own explicit instruction ("Create
+    and Test thoroughly and deploy it also") - every package flat at
+    deploy time (checked all four - Options/Futures/Luxury/Swing -
+    unprompted regardless). Clean restart confirmed across every
+    package, no ERROR-level log lines. Live-verified `GET /funds/
+    buckets` against the REAL account balance right after restart:
+    total available ₹142,941.72 -> primary (85%) ₹121,500.46, secondary
+    (15%) ₹21,441.26 - the actual arithmetic, not just a passing test.
+    `.env` updated with `FUND_PRIMARY_BUCKET_PCT=85`/
+    `FUND_SECONDARY_BUCKET_PCT=15`/`FUNDS_CHECK_ENABLED=true` (Options)/
+    `FUTURES_FUNDS_CHECK_ENABLED=true`/`LUXURY_FUNDS_CHECK_ENABLED=true`.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM
