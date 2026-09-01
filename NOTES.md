@@ -3162,7 +3162,19 @@ out of git.
     strategies' `live_positions` confirmed empty before and after
     restart.
 
-## Design decisions
+72. **`data/watchlist` replaced with a 19-stock list - user request
+    1 Sep 2026.** ASHOKLEY, NMDC, MAHABANK, CDSL, COCHINSHIP, KAYNES,
+    ADANIENT, ZYDUSLIFE, UNOMINDA, TORNTPHARM, OFSS, ATHERENERG,
+    AUROPHARMA, GAIL, SONACOMS, BAJAJ-AUTO, MOTHERSON, VEDL, APLAPOLLO -
+    replacing the original 4 (AUROPHARMA, OFSS, TORNTPHARM, VEDL, all 4
+    of which are also in this new list, so the file's own ADD-ONLY
+    semantics - see `watchlist.py`'s own docstring - never actually
+    needed to remove anything here; a straight file overwrite converged
+    to exactly the new 19-symbol set). Deployed via `scp` directly (this
+    file is gitignored, server-only runtime data, not a code change) -
+    picked up automatically by the next `monitor_loop` tick via the
+    existing hot-reload mechanism, confirmed live via `GET /swing/
+    watchlist` (count 4 -> 19) with NO restart needed.
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
