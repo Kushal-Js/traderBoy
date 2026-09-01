@@ -31,23 +31,35 @@ Core strategy logic for the Swing package - user request 31 Aug 2026.
     to Swing, the other missing) is logged as a clear warning and left
     alone rather than guessed at - same never-guess philosophy
     attribute_open_broker_position itself follows.
-  - Entry/exit signal (added 31 Aug 2026, user request, same day as this
-    package's own creation; ENTRY extended with a gap-up gate later the
-    same day) - a daily gap check plus a dual-timeframe Supertrend
-    crossover on the underlying's own STOCK price:
-      ENTRY: today's open is greater than yesterday's close (checked via
-      `_is_gap_up()`, at most once per symbol per trading day - see its
-      own docstring for why this is cached differently from the
-      Supertrend checks below), AND the 5-min close crosses ABOVE the
+  - Entry/exit signal (added 31 Aug 2026, user request; ENTRY's price gate
+    RELAXED from a strict gap-up to a broader "at/above yesterday's
+    close" check on 1 Sep 2026) - a price-confirmation gate plus a
+    dual-timeframe Supertrend crossover on the underlying's own STOCK
+    price:
+      ENTRY: today's price is confirmed at or above yesterday's close -
+      checked via `_is_price_confirmed_above_prev_close()`, true as soon
+      as EITHER today's open >= yesterday's close (checked once, at
+      market open) OR the current price has, at any point since, reached
+      or crossed above yesterday's close (checked on later ticks until
+      it fires - see that function's own docstring for the exact
+      caching/latching behavior) - AND the 5-min close crosses ABOVE the
       5-min Supertrend, AND the 1-min close is above (or has itself just
       crossed above) the 1-min Supertrend - the two Supertrend conditions
       each read on their own most recently fully-closed candle (user's
-      own wording: "Todays Open price is greater than yesterday's close
-      price and when 5 min close cross above super trend with 1 min
-      close greater than or crossed above 1 min super trend").
+      own wording, 1 Sep 2026: "an explicit gap up is not mandatory,
+      however when market opens stock price should rise or be greater or
+      equal than yesterday's stock close price or the entry condition
+      becomes active when current price cross above yesterday close
+      price... Rest other conditions should remain as it is").
       EXIT: the 5-min close crosses BELOW the 5-min Supertrend ("5 min
       close price cross below super trend" - unchanged since first
       defined).
+      Both legs of a basket are always entered/exited together (the
+      all-or-nothing entry above; `_exit_basket()` below) - this signal
+      change only touches WHEN a basket is triggered, never WHICH legs
+      move, so that guarantee is untouched by this update (re-confirmed
+      by the user 1 Sep 2026: "Entry and Exit for both legs of same
+      trade at the same time is to be honored").
     `_fetch_supertrend_state()` is a SELF-CONTAINED dual-timeframe
     crossover detector, deliberately NOT built on top of
     Options/dhan_client.py's own single-timeframe Supertrend cache/
@@ -62,11 +74,11 @@ Core strategy logic for the Swing package - user request 31 Aug 2026.
     `intraday_minute_data` REST call shape, just parameterized by
     interval and keeping the last TWO closed candles (not just one) so
     an actual crossover (a state CHANGE between consecutive candles) can
-    be detected, not merely a current side. `_is_gap_up()` similarly
-    reuses `Options/dhan_client.py`'s new `get_today_open_and_prev_close()`
-    (the same OHLC quote `get_day_change_pct()` already fetches, just the
-    two raw values instead of a derived %) rather than a new REST call
-    shape.
+    be detected, not merely a current side. `_is_price_confirmed_above_prev_close()`
+    similarly reuses `Options/dhan_client.py`'s `get_today_open_and_prev_close()`
+    (the same OHLC quote `get_day_change_pct()` already fetches) for the
+    once-per-day open check, and the already-generic `get_option_ltp()`
+    for the cheaper intraday-crossover check on later ticks.
     `_evaluate_watchlist_entry_signal()`/`_evaluate_basket_exit_signal()`
     apply the rules above; `monitor_loop()` calls them every tick
     once `config.STRATEGY_ENABLED` is on, entering/exiting exactly as
@@ -524,52 +536,97 @@ async def _fetch_supertrend_state(symbol: str, interval_minutes: int) -> Optiona
     return state
 
 
-# (as_of_date, is_gap_up) per symbol - today's own open never changes
-# again once the session has started, so this is fetched at most ONCE PER
-# SYMBOL PER TRADING DAY rather than re-checked every monitor tick the
-# way the Supertrend signal is (that one can genuinely change candle to
-# candle; this one can't). Self-invalidates on a new day simply because
+# (as_of_date, prev_close, confirmed) per symbol - `prev_close` is
+# fetched (alongside today's open, in one OHLC call) at most ONCE PER
+# SYMBOL PER TRADING DAY, the same as the old gap-up cache this replaced.
+# `confirmed` starts as whatever the OPEN-vs-prev_close comparison gave
+# and then LATCHES to True permanently the first time it becomes true -
+# see _is_price_confirmed_above_prev_close's own docstring for why this
+# is a one-way gate ("becomes active"), not a per-tick crossover that can
+# flip back off. Self-invalidates on a new day simply because
 # `cached[0] == today` stops matching - no separate day-reset call needed.
-_gap_up_cache: dict[str, tuple[date, bool]] = {}
+_price_confirmation_cache: dict[str, tuple[date, float, bool]] = {}
 
 
-async def _is_gap_up(symbol: str) -> bool:
-    """True if today's open is greater than yesterday's close (user's own
-    wording, updated 31 Aug 2026: "Todays Open price is greater than
-    yesterday's close price"). Cached per symbol per trading day - see
-    this module's own cache comment above for why re-fetching every tick
-    would be pointless REST traffic, not just wasteful."""
+async def _is_price_confirmed_above_prev_close(symbol: str) -> bool:
+    """ENTRY price gate (user's own wording, updated 1 Sep 2026 - RELAXED
+    from a strict gap-up: "an explicit gap up is not mandatory, however
+    when market opens stock price should rise or be greater or equal
+    than yesterday's stock close price or the entry condition becomes
+    active when current price cross above yesterday close price"). True
+    as soon as EITHER:
+      - today's open >= yesterday's close (checked once, at the first
+        call of the trading day), OR
+      - the current price has, at any point since, reached or crossed
+        above yesterday's close (checked on every subsequent call until
+        it fires).
+    Once True for a symbol on a given trading day this LATCHES - it never
+    re-checks or reverts to False later that same day even if price
+    later pulls back below yesterday's close, since the rule describes a
+    gate "becoming active" (a one-way state), not a live crossover that
+    can flip back off the way the Supertrend checks can.
+
+    Cheap by construction: the FIRST call of the day is one OHLC fetch
+    (today's open + yesterday's close together, via
+    get_today_open_and_prev_close) - the same single-call shape the old
+    gap-up check used. Every call after that, until confirmed, is just a
+    plain LTP fetch (get_option_ltp - already proven generic across
+    instrument types elsewhere in this codebase) compared against the
+    ALREADY-cached prev_close, no repeated OHLC calls. Once confirmed,
+    zero further REST calls for that symbol for the rest of the day."""
     today = _now_ist().date()
-    cached = _gap_up_cache.get(symbol)
-    if cached and cached[0] == today:
-        return cached[1]
-
     loop = asyncio.get_running_loop()
+    cached = _price_confirmation_cache.get(symbol)
+
+    if cached and cached[0] == today:
+        _, prev_close, confirmed = cached
+        if confirmed:
+            return True
+        try:
+            current_price = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, symbol)
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not fetch current price for the price-confirmation check", symbol)
+            return False
+        confirmed_now = current_price >= prev_close
+        if confirmed_now:
+            _price_confirmation_cache[symbol] = (today, prev_close, True)
+            logger.info(
+                "%s: price confirmed at/above yesterday's close intraday - current price %.2f >= "
+                "previous close %.2f", symbol, current_price, prev_close,
+            )
+        return confirmed_now
+
     try:
         today_open, prev_close = await loop.run_in_executor(
             None, dhan_wrapper.get_today_open_and_prev_close, symbol
         )
-        is_gap_up = today_open > prev_close
     except Exception:  # noqa: BLE001
-        logger.exception("%s: could not fetch today's open/previous close for the gap-up check", symbol)
+        logger.exception("%s: could not fetch today's open/previous close for the price-confirmation check", symbol)
         return False
 
-    _gap_up_cache[symbol] = (today, is_gap_up)
-    if is_gap_up:
-        logger.info("%s: gap-up confirmed for today - open %.2f > previous close %.2f",
-                    symbol, today_open, prev_close)
-    return is_gap_up
+    confirmed = today_open >= prev_close
+    _price_confirmation_cache[symbol] = (today, prev_close, confirmed)
+    if confirmed:
+        logger.info(
+            "%s: price confirmed at/above yesterday's close at market open - open %.2f >= "
+            "previous close %.2f", symbol, today_open, prev_close,
+        )
+    return confirmed
 
 
 async def _evaluate_watchlist_entry_signal(symbol: str) -> bool:
-    """ENTRY rule (user's own wording, updated 31 Aug 2026): "Todays Open
-    price is greater than yesterday's close price and when 5 min close
-    cross above super trend with 1 min close greater than or crossed
-    above 1 min super trend." The gap-up check runs FIRST and short-
-    circuits the (more REST-expensive, two-timeframe) Supertrend checks
-    entirely when it fails - it's also the cheaper, more cacheable check
-    (see _is_gap_up's own docstring: at most one REST call per symbol per
-    day, vs the Supertrend checks' own SWING_SUPERTREND_REFRESH_SECONDS-
+    """ENTRY rule (user's own wording, updated 1 Sep 2026): "an explicit
+    gap up is not mandatory, however when market opens stock price
+    should rise or be greater or equal than yesterday's stock close
+    price or the entry condition becomes active when current price cross
+    above yesterday close price... 5 min close cross above super trend
+    with 1 min close greater than or crossed above 1 min super trend."
+    The price-confirmation check runs FIRST and short-circuits the (more
+    REST-expensive, two-timeframe) Supertrend checks entirely when it
+    fails - it's also the cheaper, more cacheable check (see
+    _is_price_confirmed_above_prev_close's own docstring: at most one
+    OHLC call per symbol per day plus cheap LTP polls until it latches,
+    vs the Supertrend checks' own SWING_SUPERTREND_REFRESH_SECONDS-
     throttled but still much more frequent refresh).
 
     The 1-min half of the Supertrend condition is written as two explicit
@@ -577,7 +634,7 @@ async def _evaluate_watchlist_entry_signal(symbol: str) -> bool:
     already implies `is_above` - kept both so this reads as a direct,
     auditable translation of the stated rule rather than a logically-
     equivalent but less traceable shortcut."""
-    if not await _is_gap_up(symbol):
+    if not await _is_price_confirmed_above_prev_close(symbol):
         return False
 
     entry_tf = await _fetch_supertrend_state(symbol, config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES)
@@ -591,7 +648,7 @@ async def _evaluate_watchlist_entry_signal(symbol: str) -> bool:
 
     if confirmed:
         logger.info(
-            "%s: ENTRY signal - gap-up confirmed, %d-min close %.2f crossed above Supertrend %.2f, "
+            "%s: ENTRY signal - price confirmed at/above prev close, %d-min close %.2f crossed above Supertrend %.2f, "
             "%d-min close %.2f %s its Supertrend %.2f",
             symbol, config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES, entry_tf.close, entry_tf.supertrend,
             config.SUPERTREND_CONFIRM_TIMEFRAME_MINUTES, confirm_tf.close,

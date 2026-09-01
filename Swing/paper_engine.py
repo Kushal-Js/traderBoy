@@ -36,12 +36,15 @@ no concept of "combo" margin), and PaperBasket's own field comments for
 why the combined total is only ever reported when BOTH legs' figures are
 real (never a partial, silently-understated sum).
 
-Deliberately reuses trading_engine.py's REAL, UNCHANGED entry/exit signal
-functions (_evaluate_watchlist_entry_signal/_evaluate_basket_exit_signal,
-which in turn use _is_gap_up/_fetch_supertrend_state) rather than a
-separate/simplified stand-in - the whole point of paper trading this is
-to see how the EXACT signal that would eventually place real orders
-actually performs, not to test a different approximation of it.
+Deliberately reuses trading_engine.py's REAL entry/exit signal functions
+(_evaluate_watchlist_entry_signal/_evaluate_basket_exit_signal, which in
+turn use _is_price_confirmed_above_prev_close/_fetch_supertrend_state)
+rather than a separate/simplified stand-in - the whole point of paper
+trading this is to see how the EXACT signal that would eventually place
+real orders actually performs, not to test a different approximation of
+it. This module needed NO changes at all when that price gate was
+relaxed on 1 Sep 2026 (gap-up -> "at/above prev close") - it calls the
+signal functions generically, never the gate itself directly.
 
 Runs as its own poll loop (paper_poll_loop, started from swing_main.py's
 lifespan alongside the real monitor_loop) gated by its OWN, independent
@@ -51,8 +54,9 @@ config.py's own docstring). Both loops can run at once with no real
 duplication of REST cost: entry evaluation in the real monitor_loop is
 itself gated behind STRATEGY_ENABLED (off for now), and even if both were
 ever on together, trading_engine.py's own _supertrend_state_cache/
-_gap_up_cache are module-level and shared, so a cache hit from one loop
-serves the other - only the first caller within a refresh window ever
+_price_confirmation_cache are module-level and shared, so a cache hit
+from one loop serves the other - only the first caller within a refresh
+window ever
 pays the REST cost.
 
 Persists via the SAME trade_history.py dated-file convention every other

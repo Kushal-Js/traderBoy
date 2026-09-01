@@ -1,9 +1,12 @@
 """
-Tests for Swing's entry/exit signal - user request 31 Aug 2026, entry
-extended the same day: "Todays Open price is greater than yesterday's
-close price and when 5 min close cross above super trend with 1 min
-close greater than or crossed above 1 min super trend. Exit when 5 min
-close price cross below super trend."
+Tests for Swing's entry/exit signal - user request 31 Aug 2026, entry's
+price gate RELAXED on 1 Sep 2026 from a strict gap-up to: "an explicit
+gap up is not mandatory, however when market opens stock price should
+rise or be greater or equal than yesterday's stock close price or the
+entry condition becomes active when current price cross above yesterday
+close price... 5 min close cross above super trend with 1 min close
+greater than or crossed above 1 min super trend. Exit when 5 min close
+price cross below super trend."
 
 Covers, against the REAL production functions (not reimplemented):
   1. SupertrendState.crossed_above/crossed_below - the crossover
@@ -14,22 +17,25 @@ Covers, against the REAL production functions (not reimplemented):
      _compute_supertrend function) - a genuine crossing series correctly
      produces crossed_above=True, and too little data correctly produces
      None rather than a false signal.
-  3. _is_gap_up - fires only when today's open is genuinely greater than
-     yesterday's close, is cached per symbol per trading day (a second
-     call the same day doesn't re-fetch), and the cache correctly
-     invalidates on a new day.
-  4. _evaluate_watchlist_entry_signal's full truth table across the
-     gap-up gate AND both Supertrend timeframes - entry fires only when
-     ALL THREE hold; a failing gap-up short-circuits before either
+  3. _is_price_confirmed_above_prev_close - true immediately when today's
+     open >= yesterday's close (confirmed at market open); when the open
+     is BELOW prev close, stays False until the current price later
+     reaches/crosses above it (an intraday confirmation, no OHLC re-fetch
+     needed since prev_close is already cached); LATCHES true permanently
+     once confirmed (a later price drop back below prev_close does NOT
+     revert it); and the cache correctly invalidates on a new day.
+  4. _evaluate_watchlist_entry_signal's full truth table across the price
+     gate AND both Supertrend timeframes - entry fires only when ALL
+     THREE hold; a failing price gate short-circuits before either
      Supertrend timeframe is even fetched.
   5. _evaluate_basket_exit_signal - fires only on a real 5-min
      crossed_below, returns None otherwise (unaffected by the entry-side
-     gap-up gate, which the exit rule never reads).
+     price gate, which the exit rule never reads).
   6. A full monitor-loop-shaped auto-entry: a watchlist symbol whose
-     signal evaluates True (gap-up + both Supertrend legs) gets REALLY
-     entered via enter_basket_for_stock (all-or-nothing basket placement,
-     mocked Dhan network boundary) and is removed from the watchlist
-     afterward - not reached if the signal were still a stub.
+     signal evaluates True (price gate + both Supertrend legs) gets
+     REALLY entered via enter_basket_for_stock (all-or-nothing basket
+     placement, mocked Dhan network boundary) and is removed from the
+     watchlist afterward - not reached if the signal were still a stub.
   7. A full monitor-loop-shaped auto-exit: a live basket whose signal
      evaluates to a crossed-below reason gets REALLY closed via
      _exit_basket, with both legs verified CLOSED in trade_history.
@@ -173,104 +179,149 @@ def test_2_fetch_supertrend_state_once_against_real_synthetic_data():
         ste.dhan_wrapper._equity_security_id = real_equity_lookup
 
 
-async def test_3_gap_up_check():
+async def test_3_price_confirmation_check():
     """dhan_wrapper.client is the TRADEHULL object itself - get_ohlc_data
-    lives directly on it (same call shape get_day_change_pct's own
-    _get_day_change_pct_once already uses) - so ._client is what needs
-    patching here, not ._client.Dhan."""
+    AND get_ltp_data both live directly on it (same call shapes
+    get_day_change_pct's own _get_day_change_pct_once and get_option_ltp
+    already use) - so ._client is what needs patching here, not
+    ._client.Dhan."""
     real_client = ste.dhan_wrapper._client
-    calls = {"n": 0}
+    ohlc_calls = {"n": 0}
+    ltp_calls = {"n": 0}
 
     class FakeTradehull:
-        def __init__(self, today_open, prev_close):
+        def __init__(self, today_open, prev_close, ltp=None):
             self._today_open = today_open
             self._prev_close = prev_close
+            self._ltp = ltp
 
         def get_ohlc_data(self, names):
-            calls["n"] += 1
+            ohlc_calls["n"] += 1
             return {names[0]: {"ohlc": {"open": self._today_open, "close": self._prev_close}}}
 
-    ste._gap_up_cache.clear()
+        def get_ltp_data(self, names):
+            ltp_calls["n"] += 1
+            return {names[0]: self._ltp}
+
+    ste._price_confirmation_cache.clear()
     try:
+        # Confirmed immediately at market open (open > prev_close) - the
+        # intraday LTP path must never even be tried.
         ste.dhan_wrapper._client = FakeTradehull(today_open=105.0, prev_close=100.0)
-        assert await ste._is_gap_up("RELIANCE") is True, "open > prev_close must be a gap-up"
-        assert calls["n"] == 1
+        assert await ste._is_price_confirmed_above_prev_close("RELIANCE") is True, \
+            "open > prev_close must confirm immediately"
+        assert ohlc_calls["n"] == 1 and ltp_calls["n"] == 0
 
-        # Second call the SAME day must hit the cache, not re-fetch.
-        assert await ste._is_gap_up("RELIANCE") is True
-        assert calls["n"] == 1, f"expected the cache to avoid a second REST call, got {calls['n']} calls"
+        # Second call the SAME day must hit the LATCHED cache - no re-fetch of any kind.
+        assert await ste._is_price_confirmed_above_prev_close("RELIANCE") is True
+        assert ohlc_calls["n"] == 1 and ltp_calls["n"] == 0, \
+            f"expected the latch to avoid ANY further REST call, got ohlc={ohlc_calls['n']} ltp={ltp_calls['n']}"
 
-        # A different symbol still fetches fresh (cache is per-symbol).
-        ste.dhan_wrapper._client = FakeTradehull(today_open=95.0, prev_close=100.0)
-        assert await ste._is_gap_up("TCS") is False, "open <= prev_close must NOT be a gap-up"
-        assert calls["n"] == 2
+        # Confirmed immediately on an EXACT tie too - >=, not strictly >
+        # (user's own wording: "greater or equal than yesterday's close").
+        ste.dhan_wrapper._client = FakeTradehull(today_open=100.0, prev_close=100.0)
+        assert await ste._is_price_confirmed_above_prev_close("HDFCBANK") is True, \
+            "open == prev_close must ALSO confirm at market open"
+        assert ohlc_calls["n"] == 2
 
-        # Cache invalidates on a new day.
-        ste._gap_up_cache["RELIANCE"] = (ste._now_ist().date() - timedelta(days=1), True)
-        ste.dhan_wrapper._client = FakeTradehull(today_open=95.0, prev_close=100.0)
-        assert await ste._is_gap_up("RELIANCE") is False, \
+        # Open BELOW prev_close - not confirmed at market open; a later
+        # LTP still below prev_close keeps it False (cheap LTP-only
+        # check, no OHLC re-fetch since prev_close is already cached).
+        ste.dhan_wrapper._client = FakeTradehull(today_open=95.0, prev_close=100.0, ltp=97.0)
+        assert await ste._is_price_confirmed_above_prev_close("TCS") is False, \
+            "open < prev_close must NOT confirm at market open"
+        assert ohlc_calls["n"] == 3 and ltp_calls["n"] == 0, "the first check of the day is the OHLC check only"
+
+        assert await ste._is_price_confirmed_above_prev_close("TCS") is False, "LTP still below prev_close - stays False"
+        assert ohlc_calls["n"] == 3, "must NOT re-fetch OHLC on a later same-day check - prev_close is already cached"
+        assert ltp_calls["n"] == 1
+
+        # Price later reaches/crosses prev_close intraday -> confirms
+        # (user's own wording: "the entry condition becomes active when
+        # current price cross above yesterday close price").
+        ste.dhan_wrapper._client = FakeTradehull(today_open=95.0, prev_close=100.0, ltp=100.0)
+        assert await ste._is_price_confirmed_above_prev_close("TCS") is True, \
+            "current price >= prev_close intraday must confirm (>=, not strictly >)"
+        assert ltp_calls["n"] == 2
+
+        # LATCH: even if price now falls back below prev_close, stays
+        # True with NO further LTP calls - this is a one-way gate
+        # "becoming active," not a live crossover that can flip back off.
+        ste.dhan_wrapper._client = FakeTradehull(today_open=95.0, prev_close=100.0, ltp=90.0)
+        assert await ste._is_price_confirmed_above_prev_close("TCS") is True, \
+            "must stay confirmed even after a later intraday pullback below prev_close"
+        assert ltp_calls["n"] == 2, "once latched True, no further LTP calls should ever be made"
+
+        # Cache invalidates on a new day - a stale (yesterday's) latch
+        # must be re-checked from scratch (from the open, not trusted).
+        ste._price_confirmation_cache["TCS"] = (ste._now_ist().date() - timedelta(days=1), 100.0, True)
+        ste.dhan_wrapper._client = FakeTradehull(today_open=95.0, prev_close=100.0, ltp=90.0)
+        assert await ste._is_price_confirmed_above_prev_close("TCS") is False, \
             "a stale (yesterday's) cache entry must be re-fetched, not trusted"
-        assert calls["n"] == 3
+        assert ohlc_calls["n"] == 4
 
-        print("3. Gap-up check (today's open > yesterday's close) fires correctly, is cached "
-              "per symbol per trading day (no re-fetch within the same day), and the cache "
-              "correctly invalidates on a new day: PASSED")
+        print("3. Price-confirmation gate (open >= prev_close at market open, OR the current price "
+              "later reaches/crosses above prev_close intraday) fires correctly, is cheap (no OHLC "
+              "re-fetch once prev_close is cached for the day - just a plain LTP check), LATCHES "
+              "permanently once confirmed (a later intraday pullback never reverts it), and the "
+              "cache correctly invalidates on a new day: PASSED")
     finally:
         ste.dhan_wrapper._client = real_client
-        ste._gap_up_cache.clear()
+        ste._price_confirmation_cache.clear()
 
 
 async def test_4_entry_signal_truth_table():
     real_fetch = ste._fetch_supertrend_state
-    real_gap_up = ste._is_gap_up
+    real_price_confirmed = ste._is_price_confirmed_above_prev_close
 
     async def fake_fetch(symbol, interval_minutes):
         return responses.get(interval_minutes)
 
-    async def fake_gap_up(symbol):
-        return gap_up
+    async def fake_price_confirmed(symbol):
+        return price_confirmed
 
     ste._fetch_supertrend_state = fake_fetch
-    ste._is_gap_up = fake_gap_up
+    ste._is_price_confirmed_above_prev_close = fake_price_confirmed
     try:
-        # Gap-up true + 5-min crossed above + 1-min is_above (not a fresh cross) -> True
-        gap_up = True
+        # Price confirmed + 5-min crossed above + 1-min is_above (not a fresh cross) -> True
+        price_confirmed = True
         responses = {5: _make_state(is_above=True, prev_is_above=False), 1: _make_state(is_above=True, prev_is_above=True)}
         assert await ste._evaluate_watchlist_entry_signal("RELIANCE") is True
 
-        # Gap-up true + 5-min crossed above + 1-min ALSO just crossed above -> True
+        # Price confirmed + 5-min crossed above + 1-min ALSO just crossed above -> True
         responses = {5: _make_state(is_above=True, prev_is_above=False), 1: _make_state(is_above=True, prev_is_above=False)}
         assert await ste._evaluate_watchlist_entry_signal("RELIANCE") is True
 
-        # Gap-up true + 5-min crossed above but 1-min is NOT above at all -> False
+        # Price confirmed + 5-min crossed above but 1-min is NOT above at all -> False
         responses = {5: _make_state(is_above=True, prev_is_above=False), 1: _make_state(is_above=False, prev_is_above=False)}
         assert await ste._evaluate_watchlist_entry_signal("RELIANCE") is False
 
-        # Gap-up true + 5-min did NOT cross above (already above from before) -> False, regardless of 1-min
+        # Price confirmed + 5-min did NOT cross above (already above from before) -> False, regardless of 1-min
         responses = {5: _make_state(is_above=True, prev_is_above=True), 1: _make_state(is_above=True, prev_is_above=False)}
         assert await ste._evaluate_watchlist_entry_signal("RELIANCE") is False
 
-        # Gap-up true + 5-min never above at all -> False
+        # Price confirmed + 5-min never above at all -> False
         responses = {5: _make_state(is_above=False, prev_is_above=False), 1: _make_state(is_above=True, prev_is_above=False)}
         assert await ste._evaluate_watchlist_entry_signal("RELIANCE") is False
 
-        # Gap-up true + no data at all for either timeframe -> False, never a guess
+        # Price confirmed + no data at all for either timeframe -> False, never a guess
         responses = {5: None, 1: None}
         assert await ste._evaluate_watchlist_entry_signal("RELIANCE") is False
 
-        # NEW: gap-up FALSE must short-circuit to False even when both
+        # Price gate FALSE must short-circuit to False even when both
         # Supertrend legs would otherwise be a perfect entry signal.
-        gap_up = False
+        price_confirmed = False
         responses = {5: _make_state(is_above=True, prev_is_above=False), 1: _make_state(is_above=True, prev_is_above=True)}
         assert await ste._evaluate_watchlist_entry_signal("RELIANCE") is False, \
-            "a failed gap-up must block entry even with a perfect Supertrend signal"
+            "a failed price-confirmation gate must block entry even with a perfect Supertrend signal"
 
-        print("4. Entry signal truth table (gap-up AND 5-min crossed-above AND (1-min above OR "
-              "1-min crossed-above)) - all 7 relevant combinations resolve correctly, including "
-              "gap-up correctly short-circuiting an otherwise-perfect Supertrend signal: PASSED")
+        print("4. Entry signal truth table (price-confirmation gate AND 5-min crossed-above AND "
+              "(1-min above OR 1-min crossed-above)) - all 7 relevant combinations resolve "
+              "correctly, including the price gate correctly short-circuiting an otherwise-perfect "
+              "Supertrend signal: PASSED")
     finally:
         ste._fetch_supertrend_state = real_fetch
-        ste._is_gap_up = real_gap_up
+        ste._is_price_confirmed_above_prev_close = real_price_confirmed
 
 
 async def test_5_exit_signal():
@@ -295,7 +346,7 @@ async def test_5_exit_signal():
         assert await ste._evaluate_basket_exit_signal("RELIANCE", basket=None) is None
 
         print("5. Exit signal fires ONLY on a genuine 5-min crossed-below (not an already-below "
-              "state, not missing data) - unaffected by the entry-side gap-up gate: PASSED")
+              "state, not missing data) - unaffected by the entry-side price-confirmation gate: PASSED")
     finally:
         ste._fetch_supertrend_state = real_fetch
 
@@ -305,7 +356,7 @@ async def test_6_full_auto_entry_via_watchlist_signal():
     in the same order, to prove a True signal (gap-up + both Supertrend
     legs) really enters a basket and really removes the symbol from the
     watchlist - not reached at all if the signal function were still the
-    old always-False stub, or if the gap-up gate were somehow bypassed."""
+    old always-False stub, or if the price-confirmation gate were somehow bypassed."""
     store = sps.BasketStore()
     ste.basket_store = store
     wl_store = swl.WatchlistStore()
@@ -315,16 +366,16 @@ async def test_6_full_auto_entry_via_watchlist_signal():
     real_enabled = ste.config.STRATEGY_ENABLED
     ste.config.STRATEGY_ENABLED = True
     real_fetch = ste._fetch_supertrend_state
-    real_gap_up = ste._is_gap_up
+    real_price_confirmed = ste._is_price_confirmed_above_prev_close
 
     async def fake_fetch(symbol, interval_minutes):
         return _make_state(is_above=True, prev_is_above=(interval_minutes != ste.config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES))
 
-    async def fake_gap_up(symbol):
+    async def fake_price_confirmed(symbol):
         return True
 
     ste._fetch_supertrend_state = fake_fetch
-    ste._is_gap_up = fake_gap_up
+    ste._is_price_confirmed_above_prev_close = fake_price_confirmed
     restore = install_all_dhan_mocks()
     try:
         symbol = "RELIANCE"
@@ -338,13 +389,13 @@ async def test_6_full_auto_entry_via_watchlist_signal():
         assert "RELIANCE" in store.live_baskets
         assert "RELIANCE" not in await wl_store.symbols(), \
             "a symbol must be removed from the watchlist after a successful auto-entry"
-        print("6. Full auto-entry (monitor-loop-shaped): a real entry signal (gap-up + both "
-              "Supertrend legs) genuinely enters a basket via enter_basket_for_stock and removes "
-              "the symbol from the watchlist: PASSED")
+        print("6. Full auto-entry (monitor-loop-shaped): a real entry signal (price-confirmation "
+              "gate + both Supertrend legs) genuinely enters a basket via enter_basket_for_stock "
+              "and removes the symbol from the watchlist: PASSED")
     finally:
         restore()
         ste._fetch_supertrend_state = real_fetch
-        ste._is_gap_up = real_gap_up
+        ste._is_price_confirmed_above_prev_close = real_price_confirmed
         ste.config.STRATEGY_ENABLED = real_enabled
 
 
@@ -393,7 +444,7 @@ async def main():
     print("=== Swing entry/exit Supertrend signal test suite ===\n")
     test_1_crossed_above_below_properties()
     test_2_fetch_supertrend_state_once_against_real_synthetic_data()
-    await test_3_gap_up_check()
+    await test_3_price_confirmation_check()
     await test_4_entry_signal_truth_table()
     await test_5_exit_signal()
     await test_6_full_auto_entry_via_watchlist_signal()

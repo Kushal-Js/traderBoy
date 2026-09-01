@@ -2857,6 +2857,65 @@ out of git.
     strategies' `live_positions` confirmed empty before and after
     restart.
 
+68. **Entry's gap-up gate RELAXED to a broader price-confirmation check -
+    user request 1 Sep 2026** ("an explicit gap up is not mandatory,
+    however when market opens stock price should rise or be greater or
+    equal than yesterday's stock close price or the entry condition
+    becomes active when current price cross above yesterday close
+    price... Rest other conditions should remain as it is... Entry and
+    Exit for both legs of same trade at the same time is to be
+    honored.").
+
+    `Swing/trading_engine.py`'s old `_is_gap_up()`/`_gap_up_cache`
+    (strictly `today_open > prev_close`, checked once at market open,
+    never re-checked that day) replaced with
+    `_is_price_confirmed_above_prev_close()`/`_price_confirmation_cache`
+    - true as soon as EITHER `today_open >= prev_close` (note `>=`, not
+    `>` - "greater or equal" per the user's own wording) checked once at
+    the first call of the day, OR the current price later reaches/
+    crosses above `prev_close` intraday, checked via a cheap
+    `get_option_ltp(symbol)` poll (already proven generic across
+    instrument types elsewhere in this codebase) reusing the
+    ALREADY-cached `prev_close` - no repeated OHLC calls. Once True for a
+    symbol on a given day this LATCHES permanently (never re-checked or
+    reverted that day even if price later falls back below `prev_close`
+    again) - the user's own phrase "the entry condition becomes active"
+    describes a one-way gate turning on, not a live crossover that can
+    flip back off the way the Supertrend checks can. Everything else
+    about the entry rule (both Supertrend legs) and the exit rule is
+    completely unchanged, per the user's own "rest other conditions
+    should remain as it is."
+
+    "Entry and Exit for both legs of same trade at the same time is to
+    be honored" - re-confirmed (no code change needed) that this signal
+    change only affects WHEN a basket is triggered, never WHICH legs
+    move: `enter_basket_for_stock()`'s all-or-nothing entry and
+    `_exit_basket()`'s always-both-legs exit (real trading), and
+    `_enter_paper_basket()`/`_exit_paper_basket()`'s atomic single-basket
+    entry/exit (paper trading) were already built this way from day one
+    and are untouched by this change - `paper_engine.py` itself needed
+    ZERO code changes at all, since it calls the signal functions
+    generically and never the gate itself directly.
+
+    `tests/test_swing_signal_logic.py`'s test #3 fully rewritten (was
+    `test_3_gap_up_check`, now `test_3_price_confirmation_check`) -
+    confirmed at market open on both a strict `>` and an exact `==` tie;
+    NOT confirmed at open when open < prev_close, staying False across a
+    later LTP check that's still below prev_close (with proof that this
+    does NOT re-fetch the OHLC call, only a cheap LTP call); confirms the
+    moment current price reaches prev_close intraday; LATCHES true even
+    after a later intraday pullback (with proof of zero further REST
+    calls once latched); and the cache invalidates correctly on a new
+    day. Tests #4/#6 (entry truth table, full auto-entry) and
+    `tests/test_swing_paper_engine.py`'s test #7 (full auto paper entry)
+    updated to fake/restore the renamed function instead of the old one.
+    Re-ran all 12 test suites afterward, all still pass.
+
+    Deployed - `SWING_STRATEGY_ENABLED` confirmed still `false`,
+    `SWING_PAPER_TRADING_ENABLED` confirmed still `true`, all real-money
+    strategies' `live_positions` confirmed empty before and after
+    restart.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

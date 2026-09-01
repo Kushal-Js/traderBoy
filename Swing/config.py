@@ -8,19 +8,29 @@ nothing guarantee (Dhan has no native basket-order API - see the separate
 trading-skills repo's `basket-order-feasibility.md` for the full
 investigation this design is based on).
 
-Entry/exit CONDITION logic (added 31 Aug 2026, user request, same day as
-this package's own creation; ENTRY extended with a gap-up gate later the
-same day) - a daily gap check plus a dual-timeframe Supertrend signal on
-the underlying's own STOCK price (not the futures/option premium - same
-convention Options/Futures/Luxury's own SUPERTREND_EXIT already uses):
-  - ENTRY: today's open is greater than yesterday's close (a gap-up,
-    checked once per symbol per day - see trading_engine.py's own
-    _is_gap_up), AND the 5-min close crosses ABOVE the 5-min Supertrend,
-    AND the 1-min close is above (or has itself just crossed above) the
-    1-min Supertrend - the two Supertrend conditions each read on their
-    own most recently fully-closed candle.
+Entry/exit CONDITION logic (added 31 Aug 2026, user request; ENTRY's
+price gate RELAXED from a strict gap-up to a broader "at/above
+yesterday's close" check on 1 Sep 2026) - a price-confirmation check plus
+a dual-timeframe Supertrend signal on the underlying's own STOCK price
+(not the futures/option premium - same convention Options/Futures/
+Luxury's own SUPERTREND_EXIT already uses):
+  - ENTRY: today's price is confirmed at or above yesterday's close -
+    true as soon as EITHER today's open >= yesterday's close (checked
+    once, at market open) OR the current price has, at any point since,
+    reached or crossed above yesterday's close (see trading_engine.py's
+    own _is_price_confirmed_above_prev_close for the exact one-way-latch
+    caching behavior - an explicit gap-up is no longer required, user's
+    own wording: "an explicit gap up is not mandatory... the entry
+    condition becomes active when current price cross above yesterday
+    close price"), AND the 5-min close crosses ABOVE the 5-min
+    Supertrend, AND the 1-min close is above (or has itself just crossed
+    above) the 1-min Supertrend - the two Supertrend conditions each read
+    on their own most recently fully-closed candle.
   - EXIT: the 5-min close crosses BELOW the 5-min Supertrend (unchanged
     since first defined).
+  - Both legs of a basket are always entered/exited together (unchanged -
+    the all-or-nothing entry/exit design predates and is untouched by
+    this price-gate change).
 See trading_engine.py's own module docstring for the full implementation
 (a self-contained, dual-timeframe crossover detector - deliberately NOT
 built on top of Options/dhan_client.py's own single-timeframe Supertrend

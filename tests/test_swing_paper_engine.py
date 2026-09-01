@@ -30,9 +30,10 @@ Covers, against the REAL production functions (not reimplemented):
      is False (no entry/exit evaluation, no baskets touched) - same
      "always running, internally gated" pattern as the real monitor_loop.
   7. A full poll-loop-shaped auto paper-entry-then-exit: a real entry
-     signal (gap-up + both Supertrend legs) genuinely creates a paper
-     basket via _enter_paper_basket, and a real crossed-below exit signal
-     genuinely closes it via _exit_paper_basket with the pnl recorded -
+     signal (price-confirmation gate + both Supertrend legs) genuinely
+     creates a paper basket via _enter_paper_basket, and a real
+     crossed-below exit signal genuinely closes it via _exit_paper_basket
+     with the pnl recorded -
      not reached if either were still stubs. Also confirms a symbol
      already holding an open paper basket is skipped on the next
      entry-signal check, and that the SHARED watchlist is left untouched
@@ -308,16 +309,16 @@ async def test_7_full_auto_paper_entry_then_exit_via_signal():
     real_paper_enabled = spe.config.PAPER_TRADING_ENABLED
     spe.config.PAPER_TRADING_ENABLED = True
     real_fetch = ste._fetch_supertrend_state
-    real_gap_up = ste._is_gap_up
+    real_price_confirmed = ste._is_price_confirmed_above_prev_close
 
     async def fake_fetch_entry_state(symbol, interval_minutes):
         return _make_state(is_above=True, prev_is_above=(interval_minutes != ste.config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES))
 
-    async def fake_gap_up(symbol):
+    async def fake_price_confirmed(symbol):
         return True
 
     ste._fetch_supertrend_state = fake_fetch_entry_state
-    ste._is_gap_up = fake_gap_up
+    ste._is_price_confirmed_above_prev_close = fake_price_confirmed
     entry_ltp = {"HDFCBANK FAKE EXP FUT": 1600.0, "HDFCBANK FAKE EXP PUT": 25.0}
     restore = install_all_dhan_mocks(entry_ltp)
     try:
@@ -364,7 +365,7 @@ async def test_7_full_auto_paper_entry_then_exit_via_signal():
     finally:
         restore()
         ste._fetch_supertrend_state = real_fetch
-        ste._is_gap_up = real_gap_up
+        ste._is_price_confirmed_above_prev_close = real_price_confirmed
         spe.config.PAPER_TRADING_ENABLED = real_paper_enabled
 
 
