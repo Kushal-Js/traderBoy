@@ -3892,6 +3892,96 @@ out of git.
     operation (scan re-confirmed BAJAJ-AUTO, added HCLTECH/OIL/
     KOTAKBANK).
 
+82. **Centralized 2-bucket fund allocation - user request 1 Sep 2026**
+    (verbatim): "create 2 funds buckets, primary - 85% of total fund,
+    secondary - 15% of total fund. Primary bucket to be used for
+    'Swing' strategy based basket trades. Secondary bucket to be used
+    for Options, Futures or Luxury trades only... This would help to
+    run strategies in parallel without fund issues, create a
+    centralized system for fund management and allocate buckets
+    respectively. Keep this fund division percentage configurable
+    also, we might change it in future also."
+
+    Before this, entry #81's own proactive funds check (Swing) compared
+    against the WHOLE account's real available balance - meaning a
+    Swing basket that easily fit the full account could still starve
+    Options/Futures/Luxury of capital they needed a moment later, and
+    vice versa (those three had NO funds check at all until now). New
+    top-level `fund_allocation.py` - a genuinely CENTRALIZED module
+    (alongside `trade_history.py`/`cross_strategy_registry.py`, not
+    owned by any one package) - is the single source of truth every
+    real-money package now calls into:
+      - `get_bucket_available_funds(bucket)` - fetches the account's
+        REAL current available balance (`get_fund_limits`, the same
+        shared, already-authenticated `dhan_wrapper` every package
+        reuses) and returns `bucket`'s own live PERCENTAGE share of it
+        - "primary" (`FUND_PRIMARY_BUCKET_PCT`, default 85%) or
+        "secondary" (`FUND_SECONDARY_BUCKET_PCT`, default 15%).
+        Deliberately NOT a separately reserved pool of its own money
+        sitting somewhere - a live share recomputed fresh on every
+        single check, straight off whatever the account's real balance
+        currently is.
+      - `has_sufficient_bucket_funds(bucket, symbol, legs, buffer_rs=0)`
+        - the shared proactive check itself (sums each leg's own
+          standalone `get_margin_required` figure, compares against the
+          bucket's own share, fails OPEN on its own errors) - this IS
+          entry #81's own `_has_sufficient_funds` logic, moved here
+          verbatim and made bucket-aware; Swing's own function is now a
+          thin wrapper delegating to `has_sufficient_bucket_funds(
+          "primary", ..., buffer_rs=config.FUNDS_CHECK_BUFFER_RS)`.
+      - `snapshot()` - backs the new `GET /funds/buckets` endpoint
+        (main.py) - the account's real total plus both buckets' own
+        configured percentage AND currently-computed Rupee amount in
+        one call, so a misconfiguration is visible without doing the
+        arithmetic by hand.
+      - `warn_if_buckets_dont_sum_to_100` - logs a warning (never blocks
+        startup) if the two percentages don't sum to 100% - configurable
+        independently, per the user's own "we might change it in future
+        also," doesn't require them to be a clean, exhaustive partition.
+
+    Options/Futures/Luxury's own `_enter_single_position` (near-
+    identical across all three, per their own established "near-verbatim
+    copy" convention) each gained the SAME kind of check Swing already
+    had: resolve the ATM option, fetch its LTP, call
+    `fund_allocation.has_sufficient_bucket_funds("secondary", ...)`
+    BEFORE placing any real order - skip (capacity released back to
+    that package's own `PositionStore`) if the shared secondary bucket
+    can't afford it, exactly mirroring Swing's own "skip before
+    placing, broker's own RMS rejection remains the last line of
+    defense" design. Own independent flag per package
+    (`FUNDS_CHECK_ENABLED`/`FUTURES_FUNDS_CHECK_ENABLED`/
+    `LUXURY_FUNDS_CHECK_ENABLED`, all default true) - can be toggled
+    per-package without affecting the others.
+
+    This is WHY running Swing alongside Options/Futures/Luxury no
+    longer risks one strategy's own real order starving another of
+    capital it needs: each package's own check is scoped to its OWN
+    bucket's live share, never the whole account's residual balance - a
+    Swing basket that would easily fit in the WHOLE account can still
+    correctly get skipped if it would eat into what the 15% secondary
+    share leaves for Options/Futures/Luxury, and the reverse holds too.
+
+    New `tests/test_fund_allocation.py` (7 scenarios): the pure
+    percentage math and its `ValueError` on an unknown bucket name;
+    `snapshot()`'s full picture; the 100%-sum warning firing correctly
+    both under and over, staying silent on a clean split; the shared
+    check's own core logic (bucket-scoped comparison, the optional
+    buffer, failing open on a margin-API failure); Options' own entry
+    skipping before any order when the secondary bucket can't afford
+    it; Futures' and Luxury's own entries proven to share the exact
+    SAME live secondary bucket (a simulated shrinking real account
+    balance between their two successive checks, confirming neither
+    gets an independently-tracked 15% of its own); and each package's
+    own feature flag toggling independently. Every EXISTING test file
+    across Options/Futures/Luxury that exercises a real entry
+    (`test_cross_strategy_registry.py`/`test_daily_reentry_cap.py`/
+    `test_deep_integration.py`/`test_luxury_package.py`) needed the
+    same 3 new mocks (`get_option_ltp`/`get_margin_required`/
+    `get_fund_limits`) added to their own `install_all_dhan_mocks`
+    helper, generous enough to never trip the new check - matching the
+    identical fix already needed across Swing's own test suite when
+    entry #81 first landed. Ran all 23 test suites afterward, all pass.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM

@@ -56,6 +56,7 @@ Run with:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -64,6 +65,7 @@ from fastapi import FastAPI
 from trade_history import HISTORY_DIR, read_all_trades, read_all_webhook_alerts
 import choppy_stocks
 import cross_strategy_registry
+import fund_allocation
 from Options import option_main
 from IndexScalping import index_main
 from CopperOptions import copper_main
@@ -204,3 +206,19 @@ async def entry_claims():
     would indicate a claim never got released (a bug in the try/finally
     wrapping, not expected behavior) - see this module's own docstring."""
     return {"claims": cross_strategy_registry.snapshot()}
+
+
+@app.get("/funds/buckets")
+async def funds_buckets():
+    """The 2-bucket fund allocation system's own current state (user
+    request 1 Sep 2026, see fund_allocation.py's own module docstring) -
+    the account's real total available balance, and each bucket's own
+    live computed share of it: "primary" (Swing's own basket/basket_
+    hedge/sequential entries) and "secondary" (Options/Futures/Luxury's
+    own single-leg entries, shared). Both percentages are configurable
+    (FUND_PRIMARY_BUCKET_PCT/FUND_SECONDARY_BUCKET_PCT) - this endpoint
+    is the quickest way to see the actual Rupee amount each currently
+    resolves to, and to catch a misconfiguration (the two not summing to
+    100%) without doing the arithmetic by hand."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, fund_allocation.snapshot)

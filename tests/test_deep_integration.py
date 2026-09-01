@@ -84,6 +84,9 @@ def install_all_dhan_mocks():
     restore function; callers MUST call it in a finally block."""
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
+        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "get_margin_required": odc.dhan_wrapper.get_margin_required,
+        "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "_get_open_fno_positions_once": odc.dhan_wrapper._get_open_fno_positions_once,
         "get_open_fno_positions": odc.dhan_wrapper.get_open_fno_positions,
         "subscribe_option_price": odc.dhan_wrapper.subscribe_option_price,
@@ -100,6 +103,13 @@ def install_all_dhan_mocks():
     odc.dhan_wrapper.unsubscribe_option_price = lambda ts: None
     odc.dhan_wrapper.refresh_supertrend_signal = lambda sym: None
     odc.dhan_wrapper.get_cached_supertrend_candle_start = lambda sym: None
+    # Fixed, generous fakes - the proactive funds check (added 1 Sep
+    # 2026) calls these before every entry attempt; unmocked, they'd
+    # fall through to a REAL Dhan network call (and a real, slow
+    # authentication attempt) via _retry. Not what's under test here.
+    odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 50.0
+    odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 999.0}
+    odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 100000.0}
 
     def fake_place_market_order(trading_symbol, quantity, transaction_type, tag=None, product_type=None):
         return {"order_id": f"FAKE-{trading_symbol}-{transaction_type}-{time.time_ns()}", "is_amo": False}

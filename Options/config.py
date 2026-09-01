@@ -258,6 +258,20 @@ OPTION_TYPE = os.getenv("OPTION_TYPE", "CE").upper()
 
 QUANTITY_LOTS = int(os.getenv("QUANTITY_LOTS", "1"))  # number of lots per leg
 
+# Proactive funds check (added 1 Sep 2026, user request: "create 2 funds
+# buckets, primary - 85% of total fund, secondary - 15% of total fund...
+# Secondary bucket to be used for Options, Futures or Luxury trades
+# only"). Before placing any real order, checks the required margin
+# (Dhan's own /margincalculator) against this package's own SECONDARY
+# bucket share of the account's real available balance (see
+# fund_allocation.py's own module docstring for the full 2-bucket
+# design) - never the whole account's own residual balance, so an
+# Options entry can't eat into capital the "primary" bucket reserves
+# for Swing. The broker's own reactive RMS rejection remains the final
+# safety net regardless of this flag - it controls only this proactive
+# check.
+FUNDS_CHECK_ENABLED = os.getenv("FUNDS_CHECK_ENABLED", "true").lower() == "true"
+
 # Order product for options: "MIS" = intraday (auto square-off by broker as
 # a safety net; we still explicitly square off ourselves at SQUARE_OFF_TIME
 # when ENABLE_SQUARE_OFF is on). "MARGIN" is Dhan-Tradehull's code for what's

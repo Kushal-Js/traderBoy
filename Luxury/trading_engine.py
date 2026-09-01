@@ -54,6 +54,7 @@ from zoneinfo import ZoneInfo
 
 from trade_history import attribute_open_broker_position, count_opened_today
 import cross_strategy_registry
+import fund_allocation
 
 from . import config
 from .dhan_client import OrderStatus, dhan_wrapper
@@ -308,6 +309,25 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
 
     quantity = atm.lot_size * config.QUANTITY_LOTS
     tag = _gen_tag(config.ORDER_TAG_PREFIX, symbol)
+
+    # Proactive funds check (added 1 Sep 2026) - see Options/
+    # trading_engine.py's identical check and fund_allocation.py's own
+    # module docstring for the full 2-bucket design. Checks against the
+    # shared SECONDARY bucket (Options/Futures/Luxury together).
+    if config.FUNDS_CHECK_ENABLED:
+        try:
+            option_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, atm.trading_symbol)
+            sufficient = await fund_allocation.has_sufficient_bucket_funds(
+                "secondary", symbol, [(atm.security_id, config.OPTIONS_PRODUCT, quantity, option_ltp)],
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not price the leg for the funds check - proceeding optimistically", symbol)
+            sufficient = True
+        if not sufficient:
+            return {
+                "symbol": symbol, "status": "skipped", "reason": "insufficient_funds",
+                "option_trading_symbol": atm.trading_symbol,
+            }
 
     await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, atm.trading_symbol)
 

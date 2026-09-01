@@ -159,6 +159,7 @@ from datetime import timedelta
 from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
+import fund_allocation
 from trade_history import append_jsonl, attribute_open_broker_position
 
 from . import chartink_scan, config
@@ -300,64 +301,33 @@ async def _has_sufficient_funds(symbol: str, legs: list[tuple[str, str, int, flo
     about to be BOUGHT - 2 for basket/basket_hedge mode's own
     futures+PE entry, 1 for sequential mode's own futures-only entry.
 
-    Dhan's own /margincalculator endpoint has ZERO combo-awareness (see
-    get_margin_required's own docstring) - it can't price a futures+PE
-    hedge AS A COMBO, only each leg standalone - so this sums every
-    leg's own STANDALONE margin requirement and compares that sum
-    against the account's current available balance (get_fund_limits'
-    own `availabelBalance`) PLUS config.FUNDS_CHECK_BUFFER_RS (user
-    request 1 Sep 2026, default Rs15,000) - a provisional allowance for
-    the real margin benefit Dhan likely extends for an actual hedged
-    combo that this check can't see, so a genuinely affordable basket
-    isn't skipped just because this check's own standalone-sum estimate
-    reads more conservative than reality. Meant to be refined once a
-    real live basket shows the actual combo margin Dhan applies, rather
-    than guessed further now.
+    Thin wrapper around the shared fund_allocation.has_sufficient_
+    bucket_funds (added 1 Sep 2026, the centralized 2-bucket fund
+    allocation system - see that module's own docstring) - Swing's own
+    entries always check against the "primary" bucket (85% of the
+    account's total by default, configurable via FUND_PRIMARY_BUCKET_
+    PCT), never the whole account's own residual balance, so a Swing
+    basket can't eat into capital the "secondary" bucket reserves for
+    Options/Futures/Luxury. Also applies config.FUNDS_CHECK_BUFFER_RS
+    (user request 1 Sep 2026, default Rs15,000) on top of the primary
+    bucket's own computed share - a provisional allowance for the real
+    margin benefit Dhan likely extends for an actual hedged combo that
+    the underlying per-leg-standalone check can't see (Dhan's own
+    /margincalculator has ZERO combo-awareness - see get_margin_
+    required's own docstring), so a genuinely affordable basket isn't
+    skipped just because the standalone-sum estimate reads more
+    conservative than reality. Meant to be refined once a real live
+    basket shows the actual combo margin Dhan applies, rather than
+    guessed further now.
 
-    Fails OPEN to "sufficient" (returns True) if the check itself fails
-    (a margin-API or funds-API hiccup) - a funds-check OUTAGE must never
-    itself block real trading; the broker's own RMS rejection remains
-    the final safety net either way if this optimistic assumption turns
-    out wrong. Also reads as "sufficient" unconditionally when
-    config.FUNDS_CHECK_ENABLED is False - the flag controls only this
-    PROACTIVE check, never the broker's own reactive RMS rejection."""
+    Reads as "sufficient" unconditionally when config.FUNDS_CHECK_ENABLED
+    is False - the flag controls only this PROACTIVE check, never the
+    broker's own reactive RMS rejection."""
     if not config.FUNDS_CHECK_ENABLED:
         return True
-    loop = asyncio.get_running_loop()
-    try:
-        total_required = 0.0
-        for security_id, product_type, quantity, price in legs:
-            margin_data = await loop.run_in_executor(
-                None, dhan_wrapper.get_margin_required,
-                security_id, "NSE_FNO", "BUY", quantity, product_type, price,
-            )
-            total_required += margin_data.get("totalMargin") or 0.0
-        funds = await loop.run_in_executor(None, dhan_wrapper.get_fund_limits)
-        available = funds.get("availabelBalance") or 0.0
-    except Exception:  # noqa: BLE001
-        logger.exception(
-            "%s: could not check available funds before entry - proceeding optimistically "
-            "(the broker's own RMS rejection remains the final safety net)", symbol,
-        )
-        return True
-
-    # config.FUNDS_CHECK_BUFFER_RS (user request 1 Sep 2026) - added to
-    # available balance, NOT subtracted from total_required, so the log
-    # line below always shows the real, unmodified available balance
-    # alongside the buffer actually applied. Compensates for this
-    # check's own known conservatism (summing each leg's standalone
-    # margin overstates what the broker will actually require for a
-    # real hedged combo) - a provisional estimate, to be refined once a
-    # real live basket shows the actual combo margin Dhan applies.
-    available_with_buffer = available + config.FUNDS_CHECK_BUFFER_RS
-    if total_required > available_with_buffer:
-        logger.warning(
-            "%s: skipping entry - required margin Rs%.2f (%d leg(s), summed standalone, no combo "
-            "margin benefit accounted for) exceeds available balance Rs%.2f + Rs%.2f buffer = Rs%.2f",
-            symbol, total_required, len(legs), available, config.FUNDS_CHECK_BUFFER_RS, available_with_buffer,
-        )
-        return False
-    return True
+    return await fund_allocation.has_sufficient_bucket_funds(
+        "primary", symbol, legs, buffer_rs=config.FUNDS_CHECK_BUFFER_RS,
+    )
 
 
 # --------------------------------------------------------------------------- #

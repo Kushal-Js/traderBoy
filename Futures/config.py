@@ -101,6 +101,14 @@ OPTION_TYPE = "CE"
 
 QUANTITY_LOTS = int(os.getenv("FUTURES_QUANTITY_LOTS", "1"))
 
+# Proactive funds check (added 1 Sep 2026) - see Options/config.py's
+# identical FUNDS_CHECK_ENABLED for the full rationale (the 2-bucket
+# fund allocation system, fund_allocation.py) - this package's own
+# entries check against the shared SECONDARY bucket (Options/Futures/
+# Luxury all draw from it together, never the whole account's residual
+# balance).
+FUNDS_CHECK_ENABLED = os.getenv("FUTURES_FUNDS_CHECK_ENABLED", "true").lower() == "true"
+
 # See Options/config.py's identical OPTIONS_PRODUCT for the full rationale -
 # "MARGIN" is Tradehull's code for NRML/carry-forward, not "NRML" itself.
 OPTIONS_PRODUCT = os.getenv("FUTURES_OPTIONS_PRODUCT", "MIS")  # rename to reflect futures once real contracts replace the placeholder
