@@ -3030,6 +3030,138 @@ out of git.
     three real-money strategies' `live_positions` confirmed empty before
     and after restart.
 
+71. **Swing "sequential" trading mode, switchable via a feature flag -
+    user request 1 Sep 2026** ("now it won't be a basket order but 2
+    different orders running sequentially... Disable/Turn OFF earlier
+    basket strategy code implemented in bot using a feature flag and
+    turn out new updated logic ON for time being, we may need basket
+    strategy again in coming days").
+
+    New `config.STRATEGY_MODE` ("basket" | "sequential", default now
+    "sequential") - BOTH implementations coexist unconditionally in the
+    codebase; flipping this one flag (+ restart) is the only thing
+    needed to switch either direction, no code changes required. The
+    entry/exit gap-relaxation from earlier the same day
+    (`_is_price_confirmed_above_prev_close`) needed no further changes -
+    it was already Swing-wide, and is IDENTICAL in both modes; only what
+    happens once a signal fires differs.
+
+    Sequential mode's state machine, per symbol (see
+    `Swing/trading_engine.py`'s own module docstring for the full
+    diagram): `NONE -[entry signal]-> FUTURES -[exit signal: 5-min
+    crossed below Supertrend]-> PE -[entry signal re-fires]-> FUTURES`
+    (loop continues) or `PE -[unrealized loss > config.PE_MAX_LOSS_RS
+    (2000)]-> NONE` (back to watching). Two points were genuinely
+    ambiguous in the user's own wording ("Exit this PE option contract
+    once loss become more than 2k or entry condition are met again,
+    then buy future contract again at market price") and were confirmed
+    via `AskUserQuestion` before writing any code:
+      1. A PE loss-cap exit returns to plain WATCHING, it does NOT
+         blindly re-buy futures - only the entry-condition-refire path
+         does that, since it's the only one with an actual fresh,
+         confirmed signal backing the re-entry. (The alternative reading -
+         any PE exit immediately re-buys futures - was explicitly
+         rejected.)
+      2. Paper trading mirrors whichever mode is currently active,
+         rather than staying pinned to basket mode, so paper results
+         always reflect what real trading would do if turned on right
+         now.
+
+    New `Swing/position_store.py` `SequentialPositionStore` - reuses the
+    EXACT same `Leg` dataclass basket mode uses (no new shape needed,
+    `record_opened_position`/`record_closed_trade` already read it
+    generically), but tracks at most ONE leg per symbol
+    (`live_legs: Dict[str, Leg]`) rather than a paired `Basket`. Shares
+    `config.MAX_LIVE_BASKETS` as its own capacity (a symbol under active
+    sequential management occupies one "slot," same concept as one live
+    basket) rather than a redundant second cap - safe since only one
+    mode's store is ever actually written to at a time. `try_enter()`
+    claims a NEW slot (NONE->FUTURES only); `close_leg_for_swap()`
+    closes the current leg WITHOUT releasing the slot (mid-loop swaps);
+    `exit_to_watching()` closes AND releases (the loss-cap exit only).
+
+    New `Swing/trading_engine.py` functions: `_enter_futures_for_stock`,
+    `_swap_futures_to_pe`, `_exit_pe_to_watching`, `_swap_pe_to_futures`,
+    `_evaluate_pe_exit_signal` (unrealized loss vs `PE_MAX_LOSS_RS`, same
+    mark-to-market style as every other rupee-cap in this codebase), and
+    `reconcile_sequential_positions` (a LONE Swing-attributed broker leg
+    is the NORMAL shape here, unlike basket mode where it's an anomaly
+    needing manual review - mode-aware dispatch in `swing_main.py`'s own
+    lifespan decides which reconciliation function runs). Every swap's
+    failure path is "fail safe to flat": a leg that can't be CLOSED is
+    left exactly as-is for the next tick to retry (same simple retry-via-
+    next-tick `_exit_basket`'s own SELL failures already accept); once a
+    leg IS closed, a failure to open the NEXT leg releases capacity and
+    leaves the symbol with zero real exposure rather than stuck
+    half-transitioned - a real, un-hedged position surviving
+    unintentionally would be the actually dangerous outcome, not a
+    missed re-entry. `monitor_loop` now dispatches by `config.
+    STRATEGY_MODE` each tick (`_basket_monitor_tick`/
+    `_sequential_monitor_tick`, the former a pure extraction of the
+    unchanged original body). Sequential mode's own tick deliberately
+    never removes a symbol from the watchlist (unlike basket mode) -
+    needs continuous evaluation for as long as it's under active
+    management - and unions the watchlist with currently-held-leg
+    symbols, so a symbol hand-removed from `data/watchlist` mid-loop
+    still gets managed until it naturally returns to NONE.
+    `_square_off_all` (the manual kill-switch) made mode-aware too -
+    sequential mode closes the held leg and returns to watching, never
+    into a hedge (a kill-switch means "get me flat now").
+
+    New `Swing/swing_main.py` endpoints: `GET /swing/sequential-
+    positions`, `GET /swing/sequential-paper-trades`. `POST /chartink/
+    webhook-swing-enter` and `POST /swing/square-off-now` both made
+    mode-aware (dispatch to the sequential functions/store when
+    `config.STRATEGY_MODE == "sequential"`).
+
+    New `Swing/paper_engine.py` `SequentialPaperStore` + `_enter_paper_
+    futures`/`_swap_paper_futures_to_pe`/`_swap_paper_pe_to_futures`/
+    `_exit_paper_pe_to_watching`/`_evaluate_paper_pe_exit_signal` -
+    mirrors the real state machine exactly, simulated at current LTP,
+    same safety invariant (never calls `place_market_order`/`wait_for_
+    order_result`). Persisted to its OWN log
+    (`swing_sequential_paper_trades`) with a DIFFERENT record shape than
+    basket mode's own paper log (one row per completed LEG here, not per
+    basket, since there's no pairing) - the two are never mixed.
+    `paper_poll_loop` dispatches by `config.STRATEGY_MODE` exactly like
+    the real `monitor_loop` does, so paper trading always mirrors
+    whichever mode is active (per the AskUserQuestion decision above).
+
+    New `tests/test_swing_sequential_mode.py` (7 scenarios, all passing):
+    `STRATEGY_MODE` defaults to "sequential"; a full REAL 2-loop-
+    iteration cycle (NONE->FUT->PE->FUT->PE->NONE) verifying the exact
+    8-order sequence placed and all 4 legs correctly opened+closed in
+    `trade_history` (with the loss-cap exit confirmed to NOT re-buy
+    futures); capacity staying reserved through every swap but released
+    only by the loss-cap exit, with a different symbol unaffected;
+    startup reconciliation recovering a lone leg idempotently; the
+    manual kill-switch's mode-aware behavior; `monitor_loop`'s own
+    per-tick mode isolation (basket mode never touches
+    `sequential_store` and vice versa); and sequential paper trading
+    mirroring the full state machine while never placing a real order
+    (an unmocked `get_margin_required` call was initially found hanging
+    this exact test on a real, slow Dhan auth attempt - fixed by mocking
+    it, same as every other Dhan call here).
+
+    Also fixed 3 EXISTING `tests/test_swing_integration.py` scenarios
+    (tests 1/2/5) that call the real `chartink_webhook_swing_enter`
+    webhook directly - now mode-dispatched, they started routing to the
+    NEW sequential entry function once the DEFAULT mode moved away from
+    "basket," breaking their own basket-mode assertions. Fixed by
+    explicitly pinning `config.STRATEGY_MODE = "basket"` for those
+    tests' own duration (they specifically exercise basket mode's own
+    mechanics, which are unchanged) - the same "explicitly configure
+    what you're testing" fix pattern already used earlier the same day
+    for `test_cross_strategy_registry.py`'s own capacity assumption.
+    Re-ran all 14 test suites afterward, all pass.
+
+    Deployed with `SWING_STRATEGY_MODE=sequential` (the new default,
+    made explicit in `.env` anyway for visibility) and
+    `SWING_PE_MAX_LOSS_RS=2000` - `SWING_STRATEGY_ENABLED` confirmed
+    still `false` (no real orders either mode), all real-money
+    strategies' `live_positions` confirmed empty before and after
+    restart.
+
 ## Design decisions
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug

@@ -8,6 +8,36 @@ nothing guarantee (Dhan has no native basket-order API - see the separate
 trading-skills repo's `basket-order-feasibility.md` for the full
 investigation this design is based on).
 
+STRATEGY_MODE (added 1 Sep 2026, user request) - Swing now has TWO
+entirely different trading-mechanics implementations living side by
+side, switched by this ONE flag rather than one replacing the other
+("we may need basket strategy again in coming days so a flag would be a
+better approach"):
+  - "basket" (the original design above): futures + PE bought TOGETHER,
+    all-or-nothing, exited together.
+  - "sequential" (added 1 Sep 2026, now the DEFAULT/active mode): "2
+    different orders running sequentially" - buy ONLY the futures
+    contract on entry; when the exit condition fires, SELL the futures
+    and BUY the ATM PE instead (as a hedge/hold while deciding); exit
+    that PE either on its own rupee loss cap or once the entry condition
+    fires again (which also immediately re-buys futures) - looping
+    between the two instruments indefinitely for as long as the
+    underlying keeps producing signals. See trading_engine.py's own
+    module docstring for the full state-machine diagram and the two
+    ambiguous points confirmed with the user before building this
+    (AskUserQuestion, 1 Sep 2026): a PE loss-cap exit returns to plain
+    watching rather than blindly re-buying futures, and paper trading
+    mirrors whichever mode is active here rather than staying pinned to
+    basket mode.
+Both modes' code, config, position stores, and paper-trading engines all
+coexist unconditionally - flipping this flag (and restarting) is the
+only thing needed to switch, no code changes required either direction.
+
+Entry/exit CONDITION logic (added 31 Aug 2026, user request; ENTRY's
+price gate RELAXED from a strict gap-up to a broader "at/above
+yesterday's close" check on 1 Sep 2026) is IDENTICAL in both modes - see
+below.
+
 Entry/exit CONDITION logic (added 31 Aug 2026, user request; ENTRY's
 price gate RELAXED from a strict gap-up to a broader "at/above
 yesterday's close" check on 1 Sep 2026) - a price-confirmation check plus
@@ -62,10 +92,35 @@ load_dotenv()
 # are no-ops. Deployed False - see this file's own module docstring.
 STRATEGY_ENABLED = os.getenv("SWING_STRATEGY_ENABLED", "false").lower() == "true"
 
+# Which trading-mechanics implementation is active - see this file's own
+# module docstring for the full "basket" vs "sequential" explanation.
+# Deployed "sequential" as of 1 Sep 2026 ("turn out new updated logic ON
+# for time being") - "basket" is fully preserved, not deleted, switch
+# back any time by setting this to "basket" and restarting.
+STRATEGY_MODE = os.getenv("SWING_STRATEGY_MODE", "sequential").lower()
+
 # How many baskets (futures leg + PE leg pair) can be live at once -
 # entirely separate from every other package's own capacity, since this
-# trades a different instrument combination on its own schedule.
+# trades a different instrument combination on its own schedule. ALSO
+# doubles as sequential mode's own capacity (a symbol under active
+# sequential management - whichever leg it currently holds - occupies
+# one slot, same concept as one live basket) - see
+# Swing/position_store.py's SequentialPositionStore for why sharing this
+# one cap is safe (only one mode's store is ever actually written to at
+# a time).
 MAX_LIVE_BASKETS = int(os.getenv("SWING_MAX_LIVE_BASKETS", "2"))
+
+# Sequential mode only (added 1 Sep 2026) - the PE hedge leg's own hard
+# rupee loss cap: "Exit this PE option contract once loss become more
+# than 2k" (user's own wording). Checked continuously (unrealized loss,
+# mark-to-market against current LTP) the same way every other rupee-cap
+# in this codebase works (e.g. Options/config.py's MAX_LOSS_PER_TRADE_RS_
+# BEFORE_CUTOFF) - NOT the trigger that re-buys futures (that's the
+# entry condition re-firing, a separate check) - a loss-capped PE exit
+# returns the symbol to plain watching instead (user confirmed via
+# AskUserQuestion 1 Sep 2026), so this cap alone never causes a fresh
+# futures entry on its own.
+PE_MAX_LOSS_RS = float(os.getenv("SWING_PE_MAX_LOSS_RS", "2000"))
 
 QUANTITY_LOTS = int(os.getenv("SWING_QUANTITY_LOTS", "1"))
 
@@ -124,4 +179,8 @@ SUPERTREND_REFRESH_SECONDS = int(os.getenv("SWING_SUPERTREND_REFRESH_SECONDS", "
 # paper_engine.py's own module docstring for the full design (simulated
 # fills at current LTP, its own on-disk log entirely separate from real
 # trade history, no capacity cap since nothing here risks real capital).
+# Mirrors STRATEGY_MODE (added 1 Sep 2026, user confirmed via
+# AskUserQuestion) - paper trading always simulates whichever mode
+# (basket/sequential) is currently active, so paper results actually
+# reflect what real trading would do if turned on right now.
 PAPER_TRADING_ENABLED = os.getenv("SWING_PAPER_TRADING_ENABLED", "false").lower() == "true"

@@ -86,6 +86,43 @@ Core strategy logic for the Swing package - user request 31 Aug 2026.
     watchlist (no reason to keep evaluating a stock for entry once it has
     a live basket).
 
+SEQUENTIAL mode (added 1 Sep 2026, user request - see config.py's own
+STRATEGY_MODE docstring for why both this and the basket design above
+coexist rather than one replacing the other): "now it won't be a basket
+order but 2 different orders running sequentially." A symbol holds AT
+MOST ONE leg at a time (see position_store.SequentialPositionStore),
+looping between futures and a PE hedge:
+
+    NONE --(entry signal)--------------------------> FUTURES
+    FUTURES --(exit signal: 5-min crossed below ST)-> PE
+    PE --(entry signal re-fires)---------------------> FUTURES   [loop]
+    PE --(unrealized loss > config.PE_MAX_LOSS_RS)---> NONE (watching)
+
+The entry/exit SIGNAL itself (_evaluate_watchlist_entry_signal/
+_evaluate_basket_exit_signal, both below) is IDENTICAL between the two
+modes - only what happens once a signal fires differs. Two points were
+genuinely ambiguous in the user's own wording ("Exit this PE option
+contract once loss become more than 2k or entry condition are met
+again, then buy future contract again at market price") and were
+confirmed explicitly via AskUserQuestion before building this:
+  1. A PE loss-cap exit returns the symbol to plain WATCHING (does NOT
+     blindly re-buy futures) - only the entry-condition-refire path
+     does that, since it's the only one with an actual fresh, confirmed
+     signal backing the re-entry.
+  2. Paper trading (paper_engine.py) mirrors whichever mode
+     (config.STRATEGY_MODE) is currently active, rather than staying
+     pinned to basket mode - so paper results always reflect what real
+     trading would do if turned on right now.
+_enter_futures_for_stock/_swap_futures_to_pe/_exit_pe_to_watching/
+_swap_pe_to_futures implement the four transitions above; each failure
+path is handled "fail safe to flat" (see each function's own docstring) -
+a leg that can't be closed is left exactly as-is for the next tick to
+retry, but once a leg IS closed, a failure to open the NEXT leg leaves
+the symbol with zero real exposure (capacity released) rather than
+stuck in a half-transitioned state, since a real, un-hedged futures
+position surviving unintentionally would be the actually dangerous
+outcome, not a missed re-entry.
+
 Deliberately does NOT participate in cross_strategy_registry.py (the
 shared per-symbol lock Options/Futures/Luxury use to stop two of THEM
 racing for the same underlying) - user decision 1 Sep 2026: Swing is an
@@ -124,7 +161,7 @@ from trade_history import attribute_open_broker_position
 
 from . import config
 from .dhan_client import OrderStatus, _compute_supertrend, _retry, dhan_wrapper
-from .position_store import Basket, Leg, basket_store
+from .position_store import Basket, Leg, basket_store, sequential_store
 from .watchlist import watchlist_store
 
 logger = logging.getLogger("swing_trading_engine")
@@ -351,12 +388,244 @@ async def _exit_basket(symbol: str, basket: Basket, reason: str) -> None:
 
 
 async def _square_off_all(reason: str) -> None:
-    baskets = dict(basket_store.live_baskets)
-    if not baskets:
+    """Manual kill-switch (POST /swing/square-off-now) - mode-aware
+    (added 1 Sep 2026): closes every live BASKET in basket mode, or
+    every live LEG in sequential mode, returning each symbol straight to
+    plain watching (does NOT continue the loop into a hedge - a manual
+    kill-switch means "get me flat now", not "keep managing this
+    symbol")."""
+    if config.STRATEGY_MODE == "basket":
+        baskets = dict(basket_store.live_baskets)
+        if not baskets:
+            return
+        logger.info("Swing square-off triggered (%s) for %d open basket(s)", reason, len(baskets))
+        for symbol, basket in baskets.items():
+            await _exit_basket(symbol, basket, reason)
+    else:
+        legs = dict(sequential_store.live_legs)
+        if not legs:
+            return
+        logger.info("Swing square-off triggered (%s) for %d open sequential leg(s)", reason, len(legs))
+        for symbol, leg in legs.items():
+            result = await _place_leg(leg.option_trading_symbol, leg.quantity, "SELL", leg.product_type, "Ext", symbol)
+            if not result["ok"]:
+                logger.error(
+                    "%s: leg SELL failed during manual square-off (%s) - may still be open, check manually",
+                    symbol, result.get("remark") or result.get("error"),
+                )
+                continue
+            exit_price = result.get("fill_price") or leg.entry_price
+            await sequential_store.exit_to_watching(symbol, exit_price, reason)
+
+
+# --------------------------------------------------------------------------- #
+# SEQUENTIAL mode - see this module's own docstring for the full state-
+# machine diagram (user request 1 Sep 2026)
+# --------------------------------------------------------------------------- #
+async def _enter_futures_for_stock(symbol: str) -> dict:
+    """NONE -> FUTURES. Mirrors enter_basket_for_stock's own futures leg
+    exactly (same contract lookup, same order placement), but there's no
+    second leg here and therefore no all-or-nothing rollback needed - a
+    failed futures BUY just means the symbol stays in NONE, released for
+    a later attempt."""
+    if not config.STRATEGY_ENABLED:
+        return {"symbol": symbol, "status": "ignored", "reason": "strategy_disabled"}
+
+    loop = asyncio.get_running_loop()
+    if not await sequential_store.try_enter(symbol):
+        logger.info("%s: skipped - already open/in-flight, or no sequential capacity", symbol)
+        return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
+
+    try:
+        already_open = await loop.run_in_executor(
+            None, dhan_wrapper.has_open_position_for_underlying, symbol
+        )
+        if already_open:
+            logger.warning("%s: skipped - broker already shows an open FNO position for it", symbol)
+            await sequential_store.release_symbol(symbol)
+            return {"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker"}
+
+        try:
+            fut = await loop.run_in_executor(None, dhan_wrapper.get_futures_contract, symbol)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("%s: could not resolve futures contract - entry aborted", symbol)
+            await sequential_store.release_symbol(symbol)
+            return {"symbol": symbol, "status": "error", "reason": f"futures_lookup_failed: {exc}"}
+
+        fut_qty = fut.lot_size * config.QUANTITY_LOTS
+        result = await _place_leg(
+            fut.trading_symbol, fut_qty, "BUY", config.FUTURES_PRODUCT, config.ORDER_TAG_PREFIX, symbol,
+        )
+        if not result["ok"]:
+            logger.warning("%s: futures entry failed (%s)", symbol, result.get("remark") or result.get("error"))
+            await sequential_store.release_symbol(symbol)
+            return {"symbol": symbol, "status": "rejected", "reason": "futures_leg_failed", "detail": result}
+
+        fill_price = result.get("fill_price") or 0.0
+        leg = Leg(
+            underlying_symbol=symbol, option_trading_symbol=fut.trading_symbol, option_type="FUT",
+            quantity=fut_qty, lot_size=fut.lot_size, entry_price=fill_price,
+            order_id=result["order_id"], product_type=config.FUTURES_PRODUCT, security_id=fut.security_id,
+        )
+        await sequential_store.set_leg(leg)
+        logger.info("%s: sequential ENTRY - futures %s@%.2f", symbol, fut.trading_symbol, fill_price)
+        return {
+            "symbol": symbol, "status": "entered", "leg": "FUT",
+            "trading_symbol": fut.trading_symbol, "entry_price": fill_price, "quantity": fut_qty,
+        }
+    except Exception as exc:  # noqa: BLE001
+        await sequential_store.release_symbol(symbol)
+        logger.exception("%s: unexpected error entering futures (sequential)", symbol)
+        return {"symbol": symbol, "status": "error", "reason": str(exc)}
+
+
+async def _swap_futures_to_pe(symbol: str, futures_leg: Leg) -> None:
+    """FUTURES -> PE. Sells the futures leg, then buys the ATM PE hedge.
+    If the futures SELL itself fails, the leg is left exactly as-is (no
+    state change) - the next monitor tick re-detects the same exit
+    condition and retries, the same simple retry-via-next-tick approach
+    _exit_basket's own SELL failures already accept. If the SELL
+    succeeds but the PE BUY then fails, the symbol is left FLAT
+    (capacity released) rather than stuck - the safest failure state (no
+    real exposure) - and the next entry signal picks the symbol up fresh."""
+    loop = asyncio.get_running_loop()
+    futures_exit = await _place_leg(
+        futures_leg.option_trading_symbol, futures_leg.quantity, "SELL",
+        futures_leg.product_type, "Ext", symbol,
+    )
+    if not futures_exit["ok"]:
+        logger.error(
+            "%s: futures leg SELL failed during sequential exit (%s) - leg left open, "
+            "will retry on the next tick", symbol, futures_exit.get("remark") or futures_exit.get("error"),
+        )
         return
-    logger.info("Swing square-off triggered (%s) for %d open basket(s)", reason, len(baskets))
-    for symbol, basket in baskets.items():
-        await _exit_basket(symbol, basket, reason)
+
+    futures_exit_price = futures_exit.get("fill_price") or futures_leg.entry_price
+    await sequential_store.close_leg_for_swap(symbol, futures_exit_price, "SUPERTREND_5MIN_EXIT")
+
+    try:
+        atm = await loop.run_in_executor(None, dhan_wrapper.get_atm_option, symbol, "PE")
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s: futures leg sold but could not resolve the ATM PE hedge - symbol left FLAT "
+            "(no real exposure), will re-enter fresh on the next entry signal", symbol,
+        )
+        await sequential_store.release_symbol(symbol)
+        return
+
+    option_qty = atm.lot_size * config.QUANTITY_LOTS
+    option_result = await _place_leg(
+        atm.trading_symbol, option_qty, "BUY", config.OPTIONS_PRODUCT, config.ORDER_TAG_PREFIX, symbol,
+    )
+    if not option_result["ok"]:
+        logger.error(
+            "%s: futures leg sold but the PE hedge BUY failed (%s) - symbol left FLAT "
+            "(no real exposure), will re-enter fresh on the next entry signal",
+            symbol, option_result.get("remark") or option_result.get("error"),
+        )
+        await sequential_store.release_symbol(symbol)
+        return
+
+    option_fill_price = option_result.get("fill_price") or 0.0
+    pe_leg = Leg(
+        underlying_symbol=symbol, option_trading_symbol=atm.trading_symbol, option_type="PE",
+        quantity=option_qty, lot_size=atm.lot_size, entry_price=option_fill_price,
+        order_id=option_result["order_id"], product_type=config.OPTIONS_PRODUCT, security_id=atm.security_id,
+    )
+    await sequential_store.set_leg(pe_leg)
+    logger.info("%s: sequential SWAP futures->PE - PE %s@%.2f", symbol, atm.trading_symbol, option_fill_price)
+
+
+async def _exit_pe_to_watching(symbol: str, pe_leg: Leg, reason: str) -> None:
+    """PE -> NONE (the loss-cap exit). Sells the PE and releases the
+    symbol's capacity - returns to plain watching, does NOT re-buy
+    futures (user confirmed via AskUserQuestion 1 Sep 2026 - see this
+    module's own docstring)."""
+    option_exit = await _place_leg(
+        pe_leg.option_trading_symbol, pe_leg.quantity, "SELL", pe_leg.product_type, "Ext", symbol,
+    )
+    if not option_exit["ok"]:
+        logger.error(
+            "%s: PE leg SELL failed during sequential loss-cap exit (%s) - leg left open, "
+            "will retry on the next tick", symbol, option_exit.get("remark") or option_exit.get("error"),
+        )
+        return
+    option_exit_price = option_exit.get("fill_price") or pe_leg.entry_price
+    await sequential_store.exit_to_watching(symbol, option_exit_price, reason)
+
+
+async def _swap_pe_to_futures(symbol: str, pe_leg: Leg) -> None:
+    """PE -> FUTURES (the "keep this loop going" transition - the entry
+    condition has re-fired). Sells the PE, buys futures again at market.
+    Same fail-safe-to-flat handling as _swap_futures_to_pe's own PE-buy
+    failure path, mirrored here for the futures-buy failure."""
+    loop = asyncio.get_running_loop()
+    option_exit = await _place_leg(
+        pe_leg.option_trading_symbol, pe_leg.quantity, "SELL", pe_leg.product_type, "Ext", symbol,
+    )
+    if not option_exit["ok"]:
+        logger.error(
+            "%s: PE leg SELL failed while trying to swap back to futures (%s) - leg left open, "
+            "will retry on the next tick", symbol, option_exit.get("remark") or option_exit.get("error"),
+        )
+        return
+
+    option_exit_price = option_exit.get("fill_price") or pe_leg.entry_price
+    await sequential_store.close_leg_for_swap(symbol, option_exit_price, "ENTRY_SIGNAL_REFIRED")
+
+    try:
+        fut = await loop.run_in_executor(None, dhan_wrapper.get_futures_contract, symbol)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s: PE leg sold but could not resolve the futures contract - symbol left FLAT "
+            "(no real exposure), will re-enter fresh on the next entry signal", symbol,
+        )
+        await sequential_store.release_symbol(symbol)
+        return
+
+    fut_qty = fut.lot_size * config.QUANTITY_LOTS
+    futures_result = await _place_leg(
+        fut.trading_symbol, fut_qty, "BUY", config.FUTURES_PRODUCT, config.ORDER_TAG_PREFIX, symbol,
+    )
+    if not futures_result["ok"]:
+        logger.error(
+            "%s: PE leg sold but the futures re-entry BUY failed (%s) - symbol left FLAT "
+            "(no real exposure), will re-enter fresh on the next entry signal",
+            symbol, futures_result.get("remark") or futures_result.get("error"),
+        )
+        await sequential_store.release_symbol(symbol)
+        return
+
+    fill_price = futures_result.get("fill_price") or 0.0
+    fut_leg = Leg(
+        underlying_symbol=symbol, option_trading_symbol=fut.trading_symbol, option_type="FUT",
+        quantity=fut_qty, lot_size=fut.lot_size, entry_price=fill_price,
+        order_id=futures_result["order_id"], product_type=config.FUTURES_PRODUCT, security_id=fut.security_id,
+    )
+    await sequential_store.set_leg(fut_leg)
+    logger.info(
+        "%s: sequential SWAP PE->futures (loop continues) - futures %s@%.2f",
+        symbol, fut.trading_symbol, fill_price,
+    )
+
+
+async def _evaluate_pe_exit_signal(symbol: str, pe_leg: Leg) -> Optional[str]:
+    """PE loss-cap check (user's own wording: "Exit this PE option
+    contract once loss become more than 2k") - unrealized, mark-to-market
+    against the current LTP, the same style as every other rupee-loss-cap
+    elsewhere in this codebase (e.g. Options/trading_engine.py's own
+    current_max_loss_per_trade_rs check)."""
+    loop = asyncio.get_running_loop()
+    try:
+        ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, pe_leg.option_trading_symbol)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not fetch PE LTP for the loss-cap check", symbol)
+        return None
+    loss_rs = (pe_leg.entry_price - ltp) * pe_leg.quantity
+    if loss_rs > config.PE_MAX_LOSS_RS:
+        logger.info("%s: PE loss-cap HIT - unrealized loss %.2f > cap %.2f", symbol, loss_rs, config.PE_MAX_LOSS_RS)
+        return "PE_MAX_LOSS_HIT"
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -427,6 +696,54 @@ async def reconcile_broker_positions() -> list[Basket]:
             )
 
     return baskets
+
+
+async def reconcile_sequential_positions() -> list[Leg]:
+    """Recovers a lone FUT or PE broker leg attributed to "Swing" back
+    into sequential_store at startup - see position_store.
+    SequentialPositionStore.reconcile_leg's own docstring for why a LONE
+    leg means something completely different here than it does for
+    basket mode above (there, a lone leg is an anomaly needing manual
+    review - a symbol should always hold a paired FUT+OPT; here, it's
+    the NORMAL, expected shape, since a symbol only ever holds ONE
+    instrument at a time under sequential mode). Only called by
+    swing_main.py's lifespan when config.STRATEGY_MODE == "sequential" -
+    see reconcile_broker_positions() above for the basket-mode
+    equivalent, called instead when the mode is "basket"."""
+    loop = asyncio.get_running_loop()
+    broker_positions = await loop.run_in_executor(None, dhan_wrapper.get_open_fno_positions)
+
+    legs: list[Leg] = []
+    for bp in broker_positions:
+        avg_price = bp["avg_price"]
+        if not avg_price:
+            logger.warning(
+                "Skipping sequential reconciliation for %s - broker reported no average price.",
+                bp["trading_symbol"],
+            )
+            continue
+
+        owner = await loop.run_in_executor(None, attribute_open_broker_position, bp["trading_symbol"])
+        if owner != "Swing":
+            logger.warning(
+                "Skipping sequential reconciliation for %s - attributed to %s (not Swing) by our "
+                "own opened-position history. Real broker position is unaffected; this process "
+                "just won't manage it.", bp["trading_symbol"], owner or "no strategy (no record found)",
+            )
+            continue
+
+        option_type = "FUT" if bp["trading_symbol"].endswith("FUT") else "PE"
+        leg = Leg(
+            underlying_symbol=bp["underlying_symbol"], option_trading_symbol=bp["trading_symbol"],
+            option_type=option_type, quantity=bp["quantity"], lot_size=bp["lot_size"],
+            entry_price=bp["avg_price"], order_id="",
+            product_type=config.FUTURES_PRODUCT if option_type == "FUT" else config.OPTIONS_PRODUCT,
+            reconciled=True,
+        )
+        legs.append(leg)
+        await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, bp["trading_symbol"])
+
+    return legs
 
 
 # --------------------------------------------------------------------------- #
@@ -676,41 +993,97 @@ async def _evaluate_basket_exit_signal(symbol: str, basket: Basket) -> Optional[
     return "SUPERTREND_5MIN_EXIT"
 
 
+async def _basket_monitor_tick() -> None:
+    """The ORIGINAL "basket" mode tick body - unchanged behavior, just
+    factored out of monitor_loop 1 Sep 2026 when config.STRATEGY_MODE was
+    introduced (see monitor_loop's own docstring for the mode dispatch).
+    Evaluates the entry signal for every watchlist symbol (removing it
+    from the watchlist on a successful auto-entry - no reason to keep
+    evaluating a stock once it has a live basket) and the exit signal for
+    every live basket. Paced (a small sleep between watchlist symbols)
+    the same way rank_and_pick_top_stocks() paces its own sequential Dhan
+    calls elsewhere in this codebase."""
+    watchlist_symbols = await watchlist_store.symbols()
+    for i, symbol in enumerate(watchlist_symbols):
+        if i > 0:
+            await asyncio.sleep(0.35)
+        if await _evaluate_watchlist_entry_signal(symbol):
+            result = await enter_basket_for_stock(symbol)
+            if result.get("status") == "entered":
+                await watchlist_store.remove_symbol(symbol)
+    for symbol, basket in list(basket_store.live_baskets.items()):
+        reason = await _evaluate_basket_exit_signal(symbol, basket)
+        if reason:
+            await _exit_basket(symbol, basket, reason)
+
+
+async def _sequential_monitor_tick() -> None:
+    """The "sequential" mode tick body (added 1 Sep 2026) - see this
+    module's own SEQUENTIAL mode section for the full state-machine
+    diagram. Unlike basket mode, a symbol is NEVER removed from the
+    watchlist here - it needs continuous evaluation for as long as it's
+    under active sequential management: while holding futures, to watch
+    for the exit signal; while holding PE, to watch for the entry signal
+    re-firing (the "keep this loop going" transition). Also watches
+    every symbol CURRENTLY holding a leg even if it was hand-removed
+    from data/watchlist mid-loop - a symbol's own held leg always keeps
+    it under management until it naturally returns to NONE (the PE
+    loss-cap exit)."""
+    watchlist_symbols = await watchlist_store.symbols()
+    live_legs = dict(sequential_store.live_legs)
+    all_symbols = list(dict.fromkeys(list(watchlist_symbols) + list(live_legs.keys())))
+
+    for i, symbol in enumerate(all_symbols):
+        if i > 0:
+            await asyncio.sleep(0.35)
+        leg = live_legs.get(symbol)
+        if leg is None:
+            if await _evaluate_watchlist_entry_signal(symbol):
+                await _enter_futures_for_stock(symbol)
+        elif leg.option_type == "FUT":
+            reason = await _evaluate_basket_exit_signal(symbol, None)
+            if reason:
+                await _swap_futures_to_pe(symbol, leg)
+        else:  # "PE"
+            if await _evaluate_watchlist_entry_signal(symbol):
+                await _swap_pe_to_futures(symbol, leg)
+            else:
+                pe_reason = await _evaluate_pe_exit_signal(symbol, leg)
+                if pe_reason:
+                    await _exit_pe_to_watching(symbol, leg, pe_reason)
+
+
 async def monitor_loop() -> None:
     """Runs forever, ALWAYS - see config.py's own docstring for why this
     keeps running even when config.STRATEGY_ENABLED is False (so no
     restart is needed later to pick up the flag flipping), doing nothing
-    at all in that case. Each tick: re-syncs the watchlist from
-    data/watchlist (user request 31 Aug 2026 - a hand-edit to that file
-    takes effect within one tick, no restart needed, same hot-reload UX
-    choppy_stocks.py already established - runs regardless of
-    config.STRATEGY_ENABLED, since populating the watchlist is inert on
-    its own), then evaluates the entry signal for every watchlist symbol
-    (removing it from the watchlist on a successful auto-entry - no
-    reason to keep evaluating a stock once it has a live basket) and the
-    exit signal for every live basket. Paced (a small sleep between
-    watchlist symbols) the same way rank_and_pick_top_stocks() paces its
-    own sequential Dhan calls elsewhere in this codebase - an unattended
-    loop checking many symbols has no natural per-alert pacing boundary
-    the way a webhook-triggered call does, so this provides its own."""
-    logger.info("Swing monitor loop started. strategy_enabled=%s", config.STRATEGY_ENABLED)
+    at all in that case. Re-syncs the watchlist from data/watchlist every
+    tick regardless of STRATEGY_ENABLED (user request 31 Aug 2026 - a
+    hand-edit takes effect within one tick, no restart needed, same
+    hot-reload UX choppy_stocks.py already established).
+
+    Dispatches by config.STRATEGY_MODE each tick (added 1 Sep 2026):
+    "basket" runs _basket_monitor_tick (the ORIGINAL, unchanged
+    mechanics), "sequential" runs _sequential_monitor_tick (the NEW
+    futures<->PE loop) - see config.py's own STRATEGY_MODE docstring for
+    why both coexist rather than one replacing the other. Both stores'
+    own daily reset runs every tick regardless of which mode is
+    currently active (cheap, keeps a closed-today log from going stale
+    across a mode switch)."""
+    logger.info(
+        "Swing monitor loop started. strategy_enabled=%s strategy_mode=%s",
+        config.STRATEGY_ENABLED, config.STRATEGY_MODE,
+    )
     while True:
         try:
             await basket_store.maybe_reset_for_new_day()
+            await sequential_store.maybe_reset_for_new_day()
             await watchlist_store.sync_from_file()
             if config.STRATEGY_ENABLED:
-                watchlist_symbols = await watchlist_store.symbols()
-                for i, symbol in enumerate(watchlist_symbols):
-                    if i > 0:
-                        await asyncio.sleep(0.35)
-                    if await _evaluate_watchlist_entry_signal(symbol):
-                        result = await enter_basket_for_stock(symbol)
-                        if result.get("status") == "entered":
-                            await watchlist_store.remove_symbol(symbol)
-                for symbol, basket in list(basket_store.live_baskets.items()):
-                    reason = await _evaluate_basket_exit_signal(symbol, basket)
-                    if reason:
-                        await _exit_basket(symbol, basket, reason)
+                if config.STRATEGY_MODE == "basket":
+                    await _basket_monitor_tick()
+                else:
+                    await _sequential_monitor_tick()
         except Exception:  # noqa: BLE001
             logger.exception("Error in Swing monitor loop tick")
         await asyncio.sleep(config.MONITOR_INTERVAL_SECONDS)

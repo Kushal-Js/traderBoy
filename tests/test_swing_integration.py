@@ -124,8 +124,14 @@ async def test_1_full_webhook_multi_stock_mixed_capacity_outcome():
     ste.basket_store = store
 
     real_enabled, real_cap = ste.config.STRATEGY_ENABLED, ste.config.MAX_LIVE_BASKETS
+    real_mode = ste.config.STRATEGY_MODE
     ste.config.STRATEGY_ENABLED = sm.config.STRATEGY_ENABLED = True
     ste.config.MAX_LIVE_BASKETS = 2
+    # This suite specifically exercises BASKET mode's own mechanics (the
+    # webhook is now mode-dispatched, see swing_main.py's own docstring -
+    # added 1 Sep 2026, default mode moved to "sequential") - pin it
+    # explicitly rather than relying on whatever the ambient default is.
+    ste.config.STRATEGY_MODE = "basket"
     restore = install_all_dhan_mocks()
     try:
         payload = sm.SwingWebhookPayload(
@@ -151,6 +157,7 @@ async def test_1_full_webhook_multi_stock_mixed_capacity_outcome():
         restore()
         ste.config.STRATEGY_ENABLED = sm.config.STRATEGY_ENABLED = real_enabled
         ste.config.MAX_LIVE_BASKETS = real_cap
+        ste.config.STRATEGY_MODE = real_mode
 
 
 async def test_2_full_lifecycle_enter_then_manual_squareoff():
@@ -159,7 +166,9 @@ async def test_2_full_lifecycle_enter_then_manual_squareoff():
     ste.basket_store = store
 
     real_enabled = ste.config.STRATEGY_ENABLED
+    real_mode = ste.config.STRATEGY_MODE
     ste.config.STRATEGY_ENABLED = sm.config.STRATEGY_ENABLED = True
+    ste.config.STRATEGY_MODE = "basket"  # see test_1's own comment
     restore = install_all_dhan_mocks()
     try:
         enter_payload = sm.SwingWebhookPayload(stocks="RELIANCE", alert_name="integration-test-2")
@@ -189,6 +198,7 @@ async def test_2_full_lifecycle_enter_then_manual_squareoff():
     finally:
         restore()
         ste.config.STRATEGY_ENABLED = sm.config.STRATEGY_ENABLED = real_enabled
+        ste.config.STRATEGY_MODE = real_mode
 
 
 async def test_3_four_way_reconciliation_with_a_real_swing_basket():
@@ -292,7 +302,9 @@ async def test_5_watchlist_and_enter_webhooks_operate_independently():
     sm.watchlist_store = wl_store
 
     real_enabled = ste.config.STRATEGY_ENABLED
+    real_mode = ste.config.STRATEGY_MODE
     ste.config.STRATEGY_ENABLED = sm.config.STRATEGY_ENABLED = True
+    ste.config.STRATEGY_MODE = "basket"  # see test_1's own comment
     restore = install_all_dhan_mocks()
     try:
         watchlist_payload = sm.SwingWebhookPayload(stocks="ICICIBANK", alert_name="integration-test-5-watchlist")
@@ -324,6 +336,7 @@ async def test_5_watchlist_and_enter_webhooks_operate_independently():
     finally:
         restore()
         ste.config.STRATEGY_ENABLED = sm.config.STRATEGY_ENABLED = real_enabled
+        ste.config.STRATEGY_MODE = real_mode
 
 
 async def main():

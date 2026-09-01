@@ -85,6 +85,16 @@ futures+PE entry/exit and the pnl for each leg plus the combined total,
 all in a single row. Chosen deliberately for tomorrow's stated use case
 ("we will evaluate them later") - a per-basket row is the natural unit to
 eyeball for "did this trade work", where two half-rows per trade are not.
+
+SEQUENTIAL mode paper trading (added 1 Sep 2026, own section further
+below) - mirrors trading_engine.py's own sequential futures<->PE loop
+exactly, simulated at current LTP. Persisted to its OWN log
+(SWING_SEQUENTIAL_PAPER_LOG_NAME) with a DIFFERENT record shape (one row
+per completed LEG, since there's no pairing in this mode) - never mixed
+with basket mode's own paired-leg rows. paper_poll_loop dispatches by
+config.STRATEGY_MODE each tick, same as trading_engine.monitor_loop()
+does for real trading, so paper results always reflect whichever mode
+is currently active.
 """
 from __future__ import annotations
 
@@ -381,38 +391,296 @@ async def _exit_paper_basket(symbol: str, reason: str) -> None:
     await paper_basket_store.close_basket(symbol, fut_exit_price, option_exit_price, reason)
 
 
+async def _basket_paper_tick() -> None:
+    """The ORIGINAL basket-mode paper tick - unchanged behavior, just
+    factored out 1 Sep 2026 when paper trading was made mode-aware (see
+    paper_poll_loop's own docstring). Deliberately does NOT remove a
+    symbol from the shared watchlist on a paper entry (unlike the real
+    basket loop's auto-entry), so paper trading never interferes with
+    what real trading would later see once STRATEGY_ENABLED is flipped
+    on - a symbol already holding an open paper basket is simply skipped
+    on the entry-signal check instead."""
+    watchlist_symbols = await watchlist_store.symbols()
+    open_paper_symbols = set(await paper_basket_store.symbols_with_open_baskets())
+    for i, symbol in enumerate(watchlist_symbols):
+        if i > 0:
+            await asyncio.sleep(0.35)
+        if symbol in open_paper_symbols:
+            continue
+        if await trading_engine._evaluate_watchlist_entry_signal(symbol):
+            await _enter_paper_basket(symbol)
+
+    for symbol in await paper_basket_store.symbols_with_open_baskets():
+        reason = await trading_engine._evaluate_basket_exit_signal(symbol, None)
+        if reason:
+            await _exit_paper_basket(symbol, reason)
+
+
+# --------------------------------------------------------------------------- #
+# SEQUENTIAL mode paper trading (added 1 Sep 2026) - simulates the EXACT
+# same NONE/FUTURES/PE state machine trading_engine.py's own sequential
+# functions implement for real, at current LTP, never placing a real
+# order. See this module's own docstring for the safety invariant (only
+# read-only Dhan calls) and trading_engine.py's own module docstring for
+# the full state-machine diagram and the two points confirmed with the
+# user via AskUserQuestion (a PE loss-cap exit returns to watching rather
+# than re-buying futures; paper trading mirrors whichever mode is active
+# rather than staying pinned to basket mode - this section IS that
+# mirroring). Persisted to its OWN log (SWING_SEQUENTIAL_PAPER_LOG_NAME) -
+# a completely different record SHAPE from basket mode's paired-leg rows
+# (one row per COMPLETED LEG here, not one row per completed basket),
+# so the two are never mixed in one file.
+# --------------------------------------------------------------------------- #
+SWING_SEQUENTIAL_PAPER_LOG_NAME = "swing_sequential_paper_trades"
+
+
+class SequentialPaperStore:
+    """Mirrors position_store.SequentialPositionStore's own state shape
+    (at most one PaperLeg per symbol at a time) but for simulated fills -
+    no capacity cap (see PaperBasketStore's own docstring for why: this
+    doesn't risk real capital), no locking rigor beyond basic consistency."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self.live_legs: Dict[str, PaperLeg] = {}
+        self.completed: List[dict] = read_all_jsonl(SWING_SEQUENTIAL_PAPER_LOG_NAME)
+
+    async def symbols_with_open_legs(self) -> List[str]:
+        async with self._lock:
+            return list(self.live_legs.keys())
+
+    async def set_leg(self, symbol: str, leg: PaperLeg) -> None:
+        async with self._lock:
+            self.live_legs[symbol] = leg
+
+    async def close_leg(self, symbol: str, exit_price: float, reason: str) -> Optional[dict]:
+        """One completed trade = one JSON record per LEG (not per basket -
+        there's no pairing here, each leg is its own independent
+        simulated trade) - includes `next_action` ("swap_to_pe" |
+        "swap_to_futures" | "back_to_watching") so a later analysis can
+        tell a loop-continuing close apart from a final one without
+        having to cross-reference the next row's opened_at."""
+        async with self._lock:
+            leg = self.live_legs.pop(symbol, None)
+            if leg is None:
+                return None
+            pnl = (exit_price - leg.entry_price) * leg.quantity
+            trade = {
+                "underlying_symbol": symbol,
+                "instrument_type": leg.instrument_type,
+                "trading_symbol": leg.trading_symbol,
+                "quantity": leg.quantity,
+                "entry_price": leg.entry_price,
+                "exit_price": exit_price,
+                "exit_reason": reason,
+                "pnl": pnl,
+                "margin_required": leg.margin_required,
+                "logged_at": _now_ist().isoformat(),
+            }
+            self.completed.append(trade)
+            append_jsonl(SWING_SEQUENTIAL_PAPER_LOG_NAME, trade)
+            logger.info(
+                "%s: SWING SEQUENTIAL PAPER EXIT (no real order placed) leg=%s reason=%s pnl=%.2f",
+                symbol, leg.instrument_type, reason, pnl,
+            )
+            return trade
+
+    async def snapshot(self, limit: int = 50) -> dict:
+        async with self._lock:
+            recent = list(reversed(self.completed))[:limit]
+            total_pnl = sum(t["pnl"] for t in self.completed)
+            wins = sum(1 for t in self.completed if t["pnl"] > 0)
+            return {
+                "paper_trading_enabled": config.PAPER_TRADING_ENABLED,
+                "live_legs": [vars(leg) | {"underlying_symbol": sym} for sym, leg in self.live_legs.items()],
+                "total_completed_paper_trades": len(self.completed),
+                "pnl_total": total_pnl,
+                "win_rate": (wins / len(self.completed)) if self.completed else None,
+                "recent_trades": recent,
+            }
+
+
+sequential_paper_store = SequentialPaperStore()
+
+
+async def _fetch_margin(security_id: str, product_type: str, quantity: int, price: float, symbol: str, leg_name: str) -> Optional[float]:
+    """Shared best-effort margin fetch for the sequential paper legs -
+    same "log a warning, leave None, never block the trade" philosophy
+    as _enter_paper_basket's own two margin fetches above."""
+    loop = asyncio.get_running_loop()
+    try:
+        data = await loop.run_in_executor(
+            None, dhan_wrapper.get_margin_required, security_id, "NSE_FNO", "BUY", quantity, product_type, price,
+        )
+        return data.get("totalMargin")
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s: could not fetch margin required for the %s leg - the paper trade still "
+            "proceeds, this figure will read as null for analysis", symbol, leg_name,
+        )
+        return None
+
+
+async def _enter_paper_futures(symbol: str) -> None:
+    """NONE -> FUTURES (paper). Mirrors trading_engine._enter_futures_for_stock
+    exactly, simulated at current LTP."""
+    loop = asyncio.get_running_loop()
+    try:
+        fut = await loop.run_in_executor(None, dhan_wrapper.get_futures_contract, symbol)
+        fut_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, fut.trading_symbol)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: SWING SEQUENTIAL PAPER entry skipped - could not resolve/price the futures leg", symbol)
+        return
+
+    fut_qty = fut.lot_size * config.QUANTITY_LOTS
+    margin = await _fetch_margin(fut.security_id, config.FUTURES_PRODUCT, fut_qty, fut_ltp, symbol, "futures")
+    leg = PaperLeg("FUT", fut.trading_symbol, fut_qty, fut.lot_size, fut_ltp, margin_required=margin)
+    await sequential_paper_store.set_leg(symbol, leg)
+    logger.info(
+        "%s: SWING SEQUENTIAL PAPER ENTRY (no real order placed) - futures %s@%.2f (margin=%s)",
+        symbol, fut.trading_symbol, fut_ltp, margin,
+    )
+
+
+async def _swap_paper_futures_to_pe(symbol: str, futures_leg: PaperLeg) -> None:
+    """FUTURES -> PE (paper). If the ATM PE can't be resolved/priced, the
+    futures leg is simply closed with nothing new opened (paper's
+    equivalent of "left FLAT" - there's no real position to strand, so
+    this is even simpler than the real version's fail-safe handling)."""
+    loop = asyncio.get_running_loop()
+    try:
+        exit_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, futures_leg.trading_symbol)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not fetch exit LTP for the futures leg - falling back to entry price", symbol)
+        exit_ltp = futures_leg.entry_price
+    await sequential_paper_store.close_leg(symbol, exit_ltp, "SUPERTREND_5MIN_EXIT")
+
+    try:
+        atm = await loop.run_in_executor(None, dhan_wrapper.get_atm_option, symbol, "PE")
+        option_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, atm.trading_symbol)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s: futures leg closed but could not resolve/price the ATM PE hedge - symbol left "
+            "flat (paper), will re-enter fresh on the next entry signal", symbol,
+        )
+        return
+
+    option_qty = atm.lot_size * config.QUANTITY_LOTS
+    margin = await _fetch_margin(atm.security_id, config.OPTIONS_PRODUCT, option_qty, option_ltp, symbol, "PE")
+    pe_leg = PaperLeg("PE", atm.trading_symbol, option_qty, atm.lot_size, option_ltp, margin_required=margin)
+    await sequential_paper_store.set_leg(symbol, pe_leg)
+    logger.info(
+        "%s: SWING SEQUENTIAL PAPER SWAP futures->PE (no real order placed) - PE %s@%.2f (margin=%s)",
+        symbol, atm.trading_symbol, option_ltp, margin,
+    )
+
+
+async def _exit_paper_pe_to_watching(symbol: str, pe_leg: PaperLeg, reason: str) -> None:
+    """PE -> NONE (paper loss-cap exit) - returns to plain watching, does
+    NOT re-buy futures (same choice confirmed for real trading)."""
+    loop = asyncio.get_running_loop()
+    try:
+        exit_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, pe_leg.trading_symbol)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not fetch exit LTP for the PE leg - falling back to entry price", symbol)
+        exit_ltp = pe_leg.entry_price
+    await sequential_paper_store.close_leg(symbol, exit_ltp, reason)
+
+
+async def _swap_paper_pe_to_futures(symbol: str, pe_leg: PaperLeg) -> None:
+    """PE -> FUTURES (paper) - the "keep this loop going" transition."""
+    loop = asyncio.get_running_loop()
+    try:
+        exit_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, pe_leg.trading_symbol)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not fetch exit LTP for the PE leg - falling back to entry price", symbol)
+        exit_ltp = pe_leg.entry_price
+    await sequential_paper_store.close_leg(symbol, exit_ltp, "ENTRY_SIGNAL_REFIRED")
+
+    try:
+        fut = await loop.run_in_executor(None, dhan_wrapper.get_futures_contract, symbol)
+        fut_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, fut.trading_symbol)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s: PE leg closed but could not resolve/price the futures contract - symbol left "
+            "flat (paper), will re-enter fresh on the next entry signal", symbol,
+        )
+        return
+
+    fut_qty = fut.lot_size * config.QUANTITY_LOTS
+    margin = await _fetch_margin(fut.security_id, config.FUTURES_PRODUCT, fut_qty, fut_ltp, symbol, "futures")
+    fut_leg = PaperLeg("FUT", fut.trading_symbol, fut_qty, fut.lot_size, fut_ltp, margin_required=margin)
+    await sequential_paper_store.set_leg(symbol, fut_leg)
+    logger.info(
+        "%s: SWING SEQUENTIAL PAPER SWAP PE->futures (loop continues, no real order placed) - "
+        "futures %s@%.2f (margin=%s)", symbol, fut.trading_symbol, fut_ltp, margin,
+    )
+
+
+async def _evaluate_paper_pe_exit_signal(symbol: str, pe_leg: PaperLeg) -> Optional[str]:
+    """Paper equivalent of trading_engine._evaluate_pe_exit_signal - same
+    unrealized-loss-vs-config.PE_MAX_LOSS_RS check, against PaperLeg's own
+    field names (`trading_symbol`, not the real Leg's `option_trading_
+    symbol`) rather than reusing the real function directly."""
+    loop = asyncio.get_running_loop()
+    try:
+        ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, pe_leg.trading_symbol)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not fetch PE LTP for the paper loss-cap check", symbol)
+        return None
+    loss_rs = (pe_leg.entry_price - ltp) * pe_leg.quantity
+    if loss_rs > config.PE_MAX_LOSS_RS:
+        return "PE_MAX_LOSS_HIT"
+    return None
+
+
+async def _sequential_paper_tick() -> None:
+    """Mirrors trading_engine._sequential_monitor_tick exactly (same
+    watchlist-union-with-held-legs approach, same per-state dispatch),
+    driving the paper transition functions instead of the real ones."""
+    watchlist_symbols = await watchlist_store.symbols()
+    live_legs = dict(sequential_paper_store.live_legs)
+    all_symbols = list(dict.fromkeys(list(watchlist_symbols) + list(live_legs.keys())))
+
+    for i, symbol in enumerate(all_symbols):
+        if i > 0:
+            await asyncio.sleep(0.35)
+        leg = live_legs.get(symbol)
+        if leg is None:
+            if await trading_engine._evaluate_watchlist_entry_signal(symbol):
+                await _enter_paper_futures(symbol)
+        elif leg.instrument_type == "FUT":
+            reason = await trading_engine._evaluate_basket_exit_signal(symbol, None)
+            if reason:
+                await _swap_paper_futures_to_pe(symbol, leg)
+        else:  # "PE"
+            if await trading_engine._evaluate_watchlist_entry_signal(symbol):
+                await _swap_paper_pe_to_futures(symbol, leg)
+            else:
+                pe_reason = await _evaluate_paper_pe_exit_signal(symbol, leg)
+                if pe_reason:
+                    await _exit_paper_pe_to_watching(symbol, leg, pe_reason)
+
+
 async def paper_poll_loop() -> None:
     """Runs forever, ALWAYS - same "always running, internally gated"
     pattern as trading_engine.monitor_loop() (see config.py), so flipping
-    config.PAPER_TRADING_ENABLED later never needs a restart. Reuses the
-    SAME watchlist (data/watchlist / the watchlist webhook) the real
-    monitor loop reads - deliberately does NOT remove a symbol from that
-    shared watchlist on a paper entry (unlike the real loop's auto-entry),
-    so paper trading never interferes with what the real loop would later
-    see once STRATEGY_ENABLED is flipped on; a symbol already holding an
-    open paper basket is simply skipped on the entry-signal check
-    instead."""
+    config.PAPER_TRADING_ENABLED later never needs a restart. Dispatches
+    by config.STRATEGY_MODE each tick (added 1 Sep 2026, user confirmed
+    via AskUserQuestion: paper trading mirrors whichever mode is active) -
+    "basket" runs _basket_paper_tick (the ORIGINAL mechanics), "sequential"
+    runs _sequential_paper_tick (the NEW futures<->PE loop, simulated)."""
     logger.info(
         "Swing PAPER-trading poll loop started (PAPER ONLY - no real orders will ever be placed). "
-        "paper_trading_enabled=%s", config.PAPER_TRADING_ENABLED,
+        "paper_trading_enabled=%s strategy_mode=%s", config.PAPER_TRADING_ENABLED, config.STRATEGY_MODE,
     )
     while True:
         try:
             if config.PAPER_TRADING_ENABLED:
-                watchlist_symbols = await watchlist_store.symbols()
-                open_paper_symbols = set(await paper_basket_store.symbols_with_open_baskets())
-                for i, symbol in enumerate(watchlist_symbols):
-                    if i > 0:
-                        await asyncio.sleep(0.35)
-                    if symbol in open_paper_symbols:
-                        continue
-                    if await trading_engine._evaluate_watchlist_entry_signal(symbol):
-                        await _enter_paper_basket(symbol)
-
-                for symbol in await paper_basket_store.symbols_with_open_baskets():
-                    reason = await trading_engine._evaluate_basket_exit_signal(symbol, None)
-                    if reason:
-                        await _exit_paper_basket(symbol, reason)
+                if config.STRATEGY_MODE == "basket":
+                    await _basket_paper_tick()
+                else:
+                    await _sequential_paper_tick()
         except Exception:  # noqa: BLE001
             logger.exception("Error in Swing PAPER-trading poll loop tick")
         await asyncio.sleep(config.MONITOR_INTERVAL_SECONDS)

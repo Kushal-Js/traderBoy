@@ -13,6 +13,15 @@ Unlike those, though, Swing baskets are meant to carry across restarts
 BY DESIGN (no daily square-off) - trading_engine.reconcile_broker_positions()
 is what recovers a still-open basket after a restart, into this same
 in-memory store, from the broker's own reported positions.
+
+Also tracks SEQUENTIAL positions (added 1 Sep 2026, user request - see
+`SequentialPositionStore` below) - the alternate "2 different orders
+running sequentially" strategy shape, switched via config.STRATEGY_MODE
+("basket" | "sequential") rather than replacing the basket code, since
+"we may need basket strategy again in coming days." Both stores always
+exist; only the one matching the current mode is ever written to by
+trading_engine.py's monitor_loop (see its own docstring for the full
+mode-dispatch).
 """
 from __future__ import annotations
 
@@ -222,3 +231,191 @@ class BasketStore:
 
 
 basket_store = BasketStore()
+
+
+class SequentialPositionStore:
+    """State for config.STRATEGY_MODE == "sequential" (user request
+    1 Sep 2026: "now it won't be a basket order but 2 different orders
+    running sequentially"). Unlike a Basket (always BOTH legs at once),
+    a symbol here holds AT MOST ONE leg at a time - `live_legs` maps
+    underlying_symbol -> the currently-held Leg, whose own `option_type`
+    ("FUT" | "PE") says which instrument that is. No leg at all for a
+    symbol means it's in the NONE/watching state.
+
+    Reuses the exact same `Leg` dataclass basket mode uses (unchanged) -
+    record_opened_position/record_closed_trade/attribute_open_broker_
+    position already read it generically, no new shape needed.
+
+    Capacity is shared conceptually with basket mode's own
+    config.MAX_LIVE_BASKETS (a symbol under active sequential management -
+    whichever leg it currently holds - occupies one "slot", same as one
+    live basket does) rather than inventing a second, redundant cap -
+    only one mode's store is ever actually written to at a time (the
+    other mode's monitor-loop branch never runs), so there's no risk of
+    the two competing for the same numeric budget in practice.
+
+    Reservation lifecycle (see trading_engine.py's own state-machine
+    docstring for the full transition diagram):
+      - try_enter(): NONE -> FUTURES (the only transition that claims a
+        NEW capacity slot).
+      - swap_leg(): FUTURES -> PE, or PE -> FUTURES (the "loop" itself -
+        does NOT touch the reservation, since the symbol stays under
+        active management throughout).
+      - exit_to_watching(): PE -> NONE (the PE loss-cap exit, user
+        confirmed via AskUserQuestion 1 Sep 2026: returns to watching
+        for a fresh entry signal, does NOT blindly re-buy futures) -
+        the ONLY transition that RELEASES the slot, freeing it for a
+        different symbol (or this same one again later, once its entry
+        condition next fires)."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self.live_legs: Dict[str, Leg] = {}
+        self.reserved_symbols: Set[str] = set()
+        self.closed_legs_today: List[Leg] = []
+        self._trading_day: date = date.today()
+
+    async def maybe_reset_for_new_day(self) -> None:
+        """Same choice as BasketStore's own identical method - live_legs
+        carries across a day boundary by design (no EOD square-off here
+        either); only the day-scoped closed_legs_today log resets."""
+        async with self._lock:
+            today = date.today()
+            if today != self._trading_day:
+                logger.info(
+                    "New trading day detected (%s) - resetting only the daily closed-legs "
+                    "log (live_legs carries over by design, see config.py).", today,
+                )
+                self.closed_legs_today.clear()
+                self._trading_day = today
+
+    async def try_enter(self, underlying_symbol: str) -> bool:
+        """NONE -> FUTURES: claims a fresh capacity slot for a symbol not
+        currently under active sequential management at all. See
+        BasketStore.reserve_symbol's identical race-condition rationale."""
+        async with self._lock:
+            if underlying_symbol in self.reserved_symbols or underlying_symbol in self.live_legs:
+                return False
+            if len(self.reserved_symbols) >= config.MAX_LIVE_BASKETS:
+                return False
+            self.reserved_symbols.add(underlying_symbol)
+            return True
+
+    async def release_symbol(self, underlying_symbol: str) -> None:
+        """Undoes try_enter() when the futures BUY didn't end up
+        happening (order rejected, exception, etc.) - mirrors
+        BasketStore.release_symbol."""
+        async with self._lock:
+            if underlying_symbol not in self.live_legs:
+                self.reserved_symbols.discard(underlying_symbol)
+
+    async def remaining_capacity(self) -> int:
+        async with self._lock:
+            return max(0, config.MAX_LIVE_BASKETS - len(self.reserved_symbols))
+
+    async def set_leg(self, leg: Leg) -> None:
+        """Records the leg now held for leg.underlying_symbol - used both
+        for the very first FUTURES entry (after try_enter) and for each
+        swap within the loop (FUTURES->PE or PE->FUTURES, after the OLD
+        leg has already been closed via swap_leg's own close half). Fires
+        record_opened_position exactly as BasketStore.add_basket does -
+        this is what lets a restart correctly recover an in-progress
+        sequential position (see trading_engine.reconcile_sequential_
+        positions)."""
+        async with self._lock:
+            self.live_legs[leg.underlying_symbol] = leg
+            self.reserved_symbols.add(leg.underlying_symbol)
+            fire_and_forget(record_opened_position("Swing", leg))
+            logger.info(
+                "Sequential leg OPENED: %s %s %s@%.2f",
+                leg.underlying_symbol, leg.option_type, leg.option_trading_symbol, leg.entry_price,
+            )
+
+    async def reconcile_leg(self, leg: Leg) -> None:
+        """Startup-only: imports a leg already open at Dhan (recovered
+        after a restart mid-loop) - mirrors BasketStore.reconcile_from_broker,
+        but for a single leg rather than a pair. See trading_engine.
+        reconcile_sequential_positions for how a lone Swing-attributed
+        broker position is routed here specifically when
+        config.STRATEGY_MODE == "sequential" (routed to the basket
+        reconciliation's own "unpaired leg" warning instead when the
+        mode is "basket" - a lone leg means something different in each
+        mode)."""
+        async with self._lock:
+            if leg.underlying_symbol in self.live_legs:
+                return
+            self.live_legs[leg.underlying_symbol] = leg
+            self.reserved_symbols.add(leg.underlying_symbol)
+            logger.info(
+                "Reconciled existing sequential leg: %s %s %s (qty=%s avg_price=%.2f)",
+                leg.underlying_symbol, leg.option_type, leg.option_trading_symbol,
+                leg.quantity, leg.entry_price,
+            )
+
+    async def close_leg_for_swap(self, underlying_symbol: str, exit_price: float, reason: str) -> Optional[Leg]:
+        """Closes the CURRENTLY held leg as part of a swap (FUTURES->PE
+        or PE->FUTURES) - fires record_closed_trade, logs to
+        closed_legs_today, but does NOT release the symbol's reservation,
+        since it's about to hold the OTHER instrument (still under
+        active management). Caller MUST follow this with set_leg() for
+        the new leg - if the new leg's own entry then fails, the caller
+        is responsible for deciding whether to fall back to
+        release_symbol() (see trading_engine.py's own swap functions for
+        the "fail safe to flat" choice made there)."""
+        async with self._lock:
+            leg = self.live_legs.pop(underlying_symbol, None)
+            if leg is None:
+                return None
+            self._close_leg_fields(leg, exit_price, reason)
+            self.closed_legs_today.append(leg)
+            fire_and_forget(record_closed_trade("Swing", leg))
+            logger.info(
+                "Sequential leg CLOSED (swap): %s %s reason=%s exit=%.2f",
+                underlying_symbol, leg.option_type, reason, exit_price,
+            )
+            return leg
+
+    async def exit_to_watching(self, underlying_symbol: str, exit_price: float, reason: str) -> Optional[Leg]:
+        """PE -> NONE: the loss-cap exit. Closes the leg AND releases the
+        symbol's reservation - the only transition that frees capacity -
+        so the symbol returns to plain watching (a later fresh entry
+        signal re-enters it via try_enter, same as any never-before-seen
+        symbol)."""
+        async with self._lock:
+            leg = self.live_legs.pop(underlying_symbol, None)
+            if leg is None:
+                return None
+            self._close_leg_fields(leg, exit_price, reason)
+            self.closed_legs_today.append(leg)
+            fire_and_forget(record_closed_trade("Swing", leg))
+            self.reserved_symbols.discard(underlying_symbol)
+            logger.info(
+                "Sequential leg CLOSED (back to watching): %s %s reason=%s exit=%.2f",
+                underlying_symbol, leg.option_type, reason, exit_price,
+            )
+            return leg
+
+    @staticmethod
+    def _close_leg_fields(leg: Leg, exit_price: float, reason: str) -> None:
+        leg.status = "CLOSED"
+        leg.exit_price = exit_price
+        leg.exit_reason = reason
+        leg.closed_at = datetime.now()
+
+    async def snapshot(self) -> dict:
+        async with self._lock:
+            return {
+                "live_legs": [self._leg_dict(leg) for leg in self.live_legs.values()],
+                "reserved_symbols": sorted(self.reserved_symbols),
+                "closed_legs_today": [self._leg_dict(leg) for leg in self.closed_legs_today],
+            }
+
+    @staticmethod
+    def _leg_dict(leg: Leg) -> dict:
+        return vars(leg) | {
+            "opened_at": leg.opened_at.isoformat() if leg.opened_at else None,
+            "closed_at": leg.closed_at.isoformat() if leg.closed_at else None,
+        }
+
+
+sequential_store = SequentialPositionStore()
