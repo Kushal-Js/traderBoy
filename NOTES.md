@@ -3844,6 +3844,13 @@ out of git.
     and the feature flag disabling the check entirely. Ran all 22 test
     suites afterward, all pass.
 
+    Deployed directly per the user's own explicit instruction ("yes...
+    test and deploy it also") - every package was flat at deploy time
+    (checked unprompted regardless). Clean restart confirmed: no
+    ERROR-level log lines from the new process, `/health` OK, every
+    package's own positions endpoint still empty afterward. `.env`
+    updated with the new `SWING_FUNDS_CHECK_ENABLED=true`.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM
