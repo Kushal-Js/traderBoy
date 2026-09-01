@@ -3328,6 +3328,91 @@ out of git.
     Deployed - confirmed APLAPOLLO reconciled with the CORRECT entry_price
     after restart (see the deploy note immediately following this entry).
 
+76. **Swing's third trading-mechanics mode, "basket_hedge" - user request
+    1 Sep 2026** (verbatim): "enabling basket buy strategy but with a
+    caveat that when exit conditions are met, we will sell off this
+    basket and buy a single PE ATM option contract and would keep it
+    until 1. Loss becomes more than 2k 2. Lock profit when it becomes
+    more than 2k 3. Super trend reversal comes again even if buy signal
+    is not yet triggered." A THIRD `config.STRATEGY_MODE` value
+    (`"basket_hedge"`), coexisting with `"basket"` and `"sequential"`
+    (neither deleted, same flag-based-switching philosophy as entry #71) -
+    made the new default (`SWING_STRATEGY_MODE=basket_hedge`), replacing
+    `"sequential"` as the mode now live with real money.
+
+    Entry is IDENTICAL to plain basket mode (futures + ATM PE bought
+    together, all-or-nothing, same compensating-rollback design). Exit is
+    what's new: when the basket's own exit condition fires (5-min close
+    crosses below Supertrend, unchanged), the WHOLE basket is sold and a
+    SINGLE standalone ATM PE hedge is bought (not paired with anything).
+    That PE hedge is held until any of the user's 3 conditions: (1) loss
+    exceeds `PE_MAX_LOSS_RS` (reused from sequential mode, entry #71); (2)
+    profit exceeds a NEW `PE_PROFIT_LOCK_RS` config var (default 2000,
+    "lock profit"); (3) a BARE Supertrend reversal (5-min close crosses
+    back ABOVE its Supertrend), checked directly via `_fetch_supertrend_
+    state` rather than the full entry-signal function (price-confirmation
+    gate + 1-min confirm) - per the user's own words, "even if buy signal
+    is not yet triggered." After any of the 3, the symbol returns to
+    plain watching - the one real design assumption made this pass (not
+    asked via AskUserQuestion this time, given how explicit the request
+    already was): none of the 3 conditions carries a confirmed fresh BUY
+    signal, so nothing auto-re-enters, mirroring the same choice already
+    confirmed for sequential mode's own loss-cap exit (entry #71).
+
+    The user's own closing instruction - "consider the open trade as a
+    basket order for this time as it is already live" - required
+    `BasketHedgePosition.legs` to hold either 1 leg (the real, already-
+    open APLAPOLLO futures position, entered under sequential mode before
+    this one existed - a "grandfathered"/degraded BASKET) or 2 legs (a
+    normal fresh all-or-nothing entry). `reconcile_basket_hedge_positions()`
+    is deliberately MORE PERMISSIVE than plain basket mode's own
+    reconciliation (which treats any lone leg as an anomaly needing
+    manual review): a lone FUT -> 1-leg BASKET, a lone PE -> PE_HEDGE, a
+    matched FUT+PE pair -> normal 2-leg BASKET.
+
+    New: `Swing/position_store.BasketHedgePosition`/`BasketHedgeStore`
+    (own `live_positions`/`reserved_symbols`/`closed_today`, its own
+    `try_enter`/`set_basket`/`close_current_legs_for_hedge_swap`/
+    `set_pe_hedge`/`exit_to_watching`/`snapshot`); `Swing/trading_engine.
+    _enter_basket_hedge_for_stock`/`_exit_basket_hedge_to_pe`/
+    `_exit_pe_hedge_to_watching`/`_evaluate_pe_hedge_exit_signal`/
+    `reconcile_basket_hedge_positions`/`_basket_hedge_monitor_tick`, each
+    wired to the durable `swing_events` log (entry #74) for every real
+    transition including LEFT_FLAT failure paths; `monitor_loop`/
+    `_square_off_all` extended to 3-way mode dispatch; new `GET /swing/
+    basket-hedge-positions` endpoint; `chartink_webhook_swing_enter`
+    extended to 3-way dispatch too.
+
+    Known gap, left as-is rather than silently building around it: no
+    basket_hedge paper-trading variant this pass (scope/time) - harmless
+    today since `PAPER_TRADING_ENABLED` is `False`, but flagged in
+    `config.py`'s own comments for whoever turns paper trading back on
+    next.
+
+    New `tests/test_swing_basket_hedge_mode.py` (8 scenarios, against the
+    REAL production functions): full NONE->BASKET->PE_HEDGE->NONE cycle
+    via the loss-cap exit; the profit-lock exit independently; the bare
+    Supertrend-reversal exit independently (proven to fire even when the
+    full entry-signal gate would not have); capacity blocking a duplicate
+    entry while leaving other symbols unaffected; reconciliation of all 3
+    leg shapes (lone FUT as 1-leg BASKET, lone PE as PE_HEDGE, matched
+    pair as 2-leg BASKET) including the exact APLAPOLLO numbers; manual
+    square-off closing every current leg; and the 3-way monitor_loop
+    dispatch. Two existing test files needed small updates for the
+    default-mode change: `test_swing_sequential_mode.py`'s own test 1
+    (previously asserted the default WAS "sequential"; now just confirms
+    "sequential" remains a valid, fully switchable value - every other
+    test in that file already pins its own mode explicitly) and
+    `test_swing_events_log.py`'s own test 1 (pins `STRATEGY_MODE =
+    "sequential"` explicitly before calling the mode-dispatched
+    `_square_off_all`, rather than relying on whatever the live default
+    currently is). Ran all 17 test suites afterward, all pass.
+
+    Deployed with the usual real-position care: verified APLAPOLLO
+    reconciled correctly as a 1-leg BASKET with the correct entry_price
+    (2263.3) via `GET /swing/basket-hedge-positions` after restart (see
+    the deploy note immediately following this entry).
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM

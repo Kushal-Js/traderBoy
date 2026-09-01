@@ -43,11 +43,13 @@ from trade_history import fire_and_forget, record_webhook_alert
 
 from . import config
 from .paper_engine import paper_basket_store, paper_poll_loop, sequential_paper_store
-from .position_store import basket_store, sequential_store
+from .position_store import basket_hedge_store, basket_store, sequential_store
 from .trading_engine import (
+    _enter_basket_hedge_for_stock,
     _enter_futures_for_stock,
     enter_basket_for_stock,
     monitor_loop,
+    reconcile_basket_hedge_positions,
     reconcile_broker_positions,
     reconcile_sequential_positions,
 )
@@ -84,11 +86,16 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         logger.exception("Could not sync watchlist from data/watchlist at startup - continuing without it.")
 
-    # Mode-aware (added 1 Sep 2026) - a lone Swing-attributed broker leg
-    # means something different in each mode (an anomaly in basket mode,
-    # the NORMAL shape in sequential mode), so each mode runs its own
-    # reconciliation function against its own store. See
-    # reconcile_sequential_positions's own docstring.
+    # Mode-aware (added 1 Sep 2026, extended to 3-way 1 Sep 2026) - a lone
+    # Swing-attributed broker leg means something different in each mode
+    # (an anomaly in basket mode, the NORMAL shape in sequential mode, and
+    # ONE OF TWO normal shapes in basket_hedge mode - see
+    # reconcile_basket_hedge_positions's own docstring, which is also
+    # what grandfathers the real, already-open APLAPOLLO futures position
+    # into basket_hedge mode's own store as a degraded 1-leg BASKET, per
+    # the user's own words: "consider the open trade as a basket order
+    # for this time as it is already live"), so each mode runs its own
+    # reconciliation function against its own store.
     if config.STRATEGY_MODE == "basket":
         try:
             reconciled = await reconcile_broker_positions()
@@ -100,6 +107,19 @@ async def lifespan(app: FastAPI):
                 )
         except Exception:  # noqa: BLE001
             logger.exception("Could not reconcile broker baskets at startup - continuing without them.")
+    elif config.STRATEGY_MODE == "basket_hedge":
+        try:
+            reconciled_positions = await reconcile_basket_hedge_positions()
+            for position in reconciled_positions:
+                await basket_hedge_store.reconcile_position(position)
+            if reconciled_positions:
+                logger.info(
+                    "Reconciled %d existing Swing basket_hedge position(s) at startup: %s",
+                    len(reconciled_positions),
+                    [(p.underlying_symbol, p.state) for p in reconciled_positions],
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not reconcile broker basket_hedge positions at startup - continuing without them.")
     else:
         try:
             reconciled_legs = await reconcile_sequential_positions()
@@ -171,12 +191,15 @@ async def chartink_webhook_swing_enter(payload: SwingWebhookPayload):
     the decision of WHICH stock to send and WHEN lives outside the bot
     for now; this endpoint just executes the entry mechanics.
 
-    Mode-aware (added 1 Sep 2026): under config.STRATEGY_MODE ==
-    "sequential", this drives the SAME NONE -> FUTURES transition
-    monitor_loop's own entry-signal path uses (futures only, no PE leg
-    yet - the PE only ever comes in as the hedge once the futures leg
-    later exits) rather than the basket entry, and checks
-    sequential_store's own capacity instead of basket_store's."""
+    Mode-aware (added 1 Sep 2026, extended to 3-way 1 Sep 2026): under
+    config.STRATEGY_MODE == "sequential", this drives the SAME NONE ->
+    FUTURES transition monitor_loop's own entry-signal path uses (futures
+    only, no PE leg yet - the PE only ever comes in as the hedge once the
+    futures leg later exits) rather than the basket entry, and checks
+    sequential_store's own capacity instead of basket_store's. Under
+    "basket_hedge", this drives the same all-or-nothing basket entry as
+    plain "basket" mode (futures+PE together) but against
+    basket_hedge_store's own capacity instead."""
     stocks = payload.stock_list()
 
     def _log_alert(status: str, reason: Optional[str] = None) -> None:
@@ -190,7 +213,12 @@ async def chartink_webhook_swing_enter(payload: SwingWebhookPayload):
         return {"status": "ignored", "reason": "strategy_disabled", "stocks": stocks}
 
     logger.info("Swing enter webhook received: stocks=%s mode=%s", stocks, config.STRATEGY_MODE)
-    store = basket_store if config.STRATEGY_MODE == "basket" else sequential_store
+    if config.STRATEGY_MODE == "basket":
+        store = basket_store
+    elif config.STRATEGY_MODE == "basket_hedge":
+        store = basket_hedge_store
+    else:
+        store = sequential_store
     remaining = await store.remaining_capacity()
     if remaining == 0:
         logger.info("No capacity left (%s live/in-flight already) - ignoring alert.", config.MAX_LIVE_BASKETS)
@@ -200,7 +228,12 @@ async def chartink_webhook_swing_enter(payload: SwingWebhookPayload):
             "max_live_baskets": config.MAX_LIVE_BASKETS,
         }
 
-    entry_fn = enter_basket_for_stock if config.STRATEGY_MODE == "basket" else _enter_futures_for_stock
+    if config.STRATEGY_MODE == "basket":
+        entry_fn = enter_basket_for_stock
+    elif config.STRATEGY_MODE == "basket_hedge":
+        entry_fn = _enter_basket_hedge_for_stock
+    else:
+        entry_fn = _enter_futures_for_stock
     results = [await entry_fn(symbol) for symbol in stocks]
     _log_alert("processed")
     return {"status": "processed", "mode": config.STRATEGY_MODE, "entries": results}
@@ -251,6 +284,18 @@ async def get_sequential_positions():
     return {"strategy_mode": config.STRATEGY_MODE} | await sequential_store.snapshot()
 
 
+@router.get("/swing/basket-hedge-positions")
+async def get_basket_hedge_positions():
+    """basket_hedge-mode positions (added 1 Sep 2026) - live_positions/
+    reserved_symbols read empty unless config.STRATEGY_MODE ==
+    "basket_hedge". Each position's own `state` field (BASKET or
+    PE_HEDGE) and `legs` list (1 or 2 entries) show exactly what's
+    currently held - use this right after a restart to confirm a
+    grandfathered position (e.g. APLAPOLLO) reconciled correctly as a
+    1-leg BASKET with the right entry_price."""
+    return {"strategy_mode": config.STRATEGY_MODE} | await basket_hedge_store.snapshot()
+
+
 @router.get("/swing/watchlist")
 async def get_watchlist():
     return await watchlist_store.snapshot()
@@ -278,14 +323,18 @@ async def get_sequential_paper_trades():
 @router.post("/swing/square-off-now")
 async def manual_square_off():
     """Manual kill-switch: closes every live Swing position immediately -
-    both legs of every basket in basket mode, or the single held leg of
-    every symbol in sequential mode (returning each straight to plain
-    watching, not continuing the loop into a hedge) - works regardless of
-    config.STRATEGY_ENABLED (an open position should always be closeable,
-    even while new entries are currently disabled). See trading_engine.
-    _square_off_all's own docstring for the mode dispatch."""
+    both legs of every basket in basket mode, the single held leg of
+    every symbol in sequential mode, or every leg of every basket_hedge
+    position (whatever state it's currently in) in basket_hedge mode -
+    returning each straight to plain watching, never continuing into or
+    past a hedge - works regardless of config.STRATEGY_ENABLED (an open
+    position should always be closeable, even while new entries are
+    currently disabled). See trading_engine._square_off_all's own
+    docstring for the mode dispatch."""
     from .trading_engine import _square_off_all  # local import to avoid cycles at module load
     await _square_off_all("MANUAL_SQUARE_OFF")
     if config.STRATEGY_MODE == "basket":
         return {"strategy_mode": config.STRATEGY_MODE} | await basket_store.snapshot()
+    if config.STRATEGY_MODE == "basket_hedge":
+        return {"strategy_mode": config.STRATEGY_MODE} | await basket_hedge_store.snapshot()
     return {"strategy_mode": config.STRATEGY_MODE} | await sequential_store.snapshot()

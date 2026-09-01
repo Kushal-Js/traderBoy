@@ -8,20 +8,19 @@ nothing guarantee (Dhan has no native basket-order API - see the separate
 trading-skills repo's `basket-order-feasibility.md` for the full
 investigation this design is based on).
 
-STRATEGY_MODE (added 1 Sep 2026, user request) - Swing now has TWO
+STRATEGY_MODE (added 1 Sep 2026, user request) - Swing now has THREE
 entirely different trading-mechanics implementations living side by
-side, switched by this ONE flag rather than one replacing the other
-("we may need basket strategy again in coming days so a flag would be a
+side, switched by this ONE flag rather than one replacing another ("we
+may need basket strategy again in coming days so a flag would be a
 better approach"):
   - "basket" (the original design above): futures + PE bought TOGETHER,
-    all-or-nothing, exited together.
-  - "sequential" (added 1 Sep 2026, now the DEFAULT/active mode): "2
-    different orders running sequentially" - buy ONLY the futures
-    contract on entry; when the exit condition fires, SELL the futures
-    and BUY the ATM PE instead (as a hedge/hold while deciding); exit
-    that PE either on its own rupee loss cap or once the entry condition
-    fires again (which also immediately re-buys futures) - looping
-    between the two instruments indefinitely for as long as the
+    all-or-nothing, exited together, then back to plain watching.
+  - "sequential": "2 different orders running sequentially" - buy ONLY
+    the futures contract on entry; when the exit condition fires, SELL
+    the futures and BUY the ATM PE instead (as a hedge/hold while
+    deciding); exit that PE either on its own rupee loss cap or once the
+    entry condition fires again (which also immediately re-buys futures) -
+    looping between the two instruments indefinitely for as long as the
     underlying keeps producing signals. See trading_engine.py's own
     module docstring for the full state-machine diagram and the two
     ambiguous points confirmed with the user before building this
@@ -29,9 +28,30 @@ better approach"):
     watching rather than blindly re-buying futures, and paper trading
     mirrors whichever mode is active here rather than staying pinned to
     basket mode.
-Both modes' code, config, position stores, and paper-trading engines all
-coexist unconditionally - flipping this flag (and restarting) is the
-only thing needed to switch, no code changes required either direction.
+  - "basket_hedge" (added 1 Sep 2026, now the DEFAULT/active mode, user
+    request: "enabling basket buy strategy but with a caveat") - ENTRY is
+    the SAME as "basket" (futures + PE bought together, all-or-nothing).
+    But once the exit condition fires, instead of just going flat, sells
+    the basket and buys ONE standalone ATM PE hedge instead - held until
+    ANY of THREE conditions (user's own numbered list): (1) loss exceeds
+    PE_MAX_LOSS_RS, (2) profit exceeds PE_PROFIT_LOCK_RS ("lock profit"),
+    or (3) the underlying's 5-min close crosses back ABOVE its own
+    Supertrend again - checked as a BARE Supertrend reversal, deliberately
+    NOT the full entry signal (user's own words: "even if buy signal is
+    not yet triggered" - the price-confirmation gate and 1-min confirm
+    timeframe are NOT required for this specific exit). Once the PE hedge
+    exits (any of the 3), returns to plain watching for a fresh basket
+    entry - same "does not blindly chain into a new position" choice
+    already made for sequential mode's own loss-cap exit, since none of
+    the three PE-hedge exit conditions carry a confirmed fresh BUY signal
+    the way sequential mode's own entry-refire path does.
+Every mode's code, config, position store, and (for "basket"/"sequential")
+paper-trading engine all coexist unconditionally - flipping this flag
+(and restarting) is the only thing needed to switch, no code changes
+required in any direction. Paper trading does NOT yet have a
+"basket_hedge" implementation (see paper_engine.py's own docstring) -
+harmless today since PAPER_TRADING_ENABLED is False, but flag this if
+paper trading and basket_hedge mode are ever both wanted at once.
 
 Entry/exit CONDITION logic (added 31 Aug 2026, user request; ENTRY's
 price gate RELAXED from a strict gap-up to a broader "at/above
@@ -73,6 +93,17 @@ Deployed DISABLED from this package's own creation (31 Aug 2026) until
 this date, paper-traded in the meantime (PAPER_TRADING_ENABLED, now
 turned back off below now that real trading is live - the two were
 always meant to be mutually exclusive, see that flag's own comment).
+Mode switched again the same day, "sequential" -> "basket_hedge" (see
+STRATEGY_MODE's own docstring) - the one real position already open at
+that point (APLAPOLLO futures, entered under sequential mode) was
+explicitly grandfathered in as a "basket_hedge" BASKET-state position by
+user request ("consider the open trade as a basket order for this time
+as it is already live") rather than left behind in the now-inactive
+sequential mode's own store - see reconcile_basket_hedge_positions()'s
+own docstring for how a lone futures leg (no paired PE - true for this
+one, since it was never bought as part of an all-or-nothing entry) is
+handled as a degraded/incomplete BASKET rather than treated as an
+anomaly the way pure "basket" mode's own reconciliation would.
 
 Reuses the Options package's single authenticated Dhan connection (see
 this package's own dhan_client.py) - no DHAN_CLIENT_ID/DHAN_PIN/etc. auth
@@ -95,39 +126,46 @@ load_dotenv()
 STRATEGY_ENABLED = os.getenv("SWING_STRATEGY_ENABLED", "false").lower() == "true"
 
 # Which trading-mechanics implementation is active - see this file's own
-# module docstring for the full "basket" vs "sequential" explanation.
-# Deployed "sequential" as of 1 Sep 2026 ("turn out new updated logic ON
-# for time being") - "basket" is fully preserved, not deleted, switch
-# back any time by setting this to "basket" and restarting.
-STRATEGY_MODE = os.getenv("SWING_STRATEGY_MODE", "sequential").lower()
+# module docstring for the full "basket"/"sequential"/"basket_hedge"
+# explanation. Deployed "basket_hedge" as of 1 Sep 2026 ("enabling basket
+# buy strategy but with a caveat") - the other two modes are fully
+# preserved, not deleted, switch back any time by setting this to
+# "basket" or "sequential" and restarting.
+STRATEGY_MODE = os.getenv("SWING_STRATEGY_MODE", "basket_hedge").lower()
 
-# How many baskets (futures leg + PE leg pair) can be live at once -
-# entirely separate from every other package's own capacity, since this
-# trades a different instrument combination on its own schedule. ALSO
-# doubles as sequential mode's own capacity (a symbol under active
-# sequential management - whichever leg it currently holds - occupies
-# one slot, same concept as one live basket) - see
-# Swing/position_store.py's SequentialPositionStore for why sharing this
-# one cap is safe (only one mode's store is ever actually written to at
-# a time).
+# How many baskets/positions can be live at once - entirely separate
+# from every other package's own capacity, since this trades a different
+# instrument combination on its own schedule. Shared across all THREE
+# modes (a symbol under active management in ANY mode occupies one slot,
+# same concept regardless of mode) - safe since only one mode's store is
+# ever actually written to at a time.
 #
 # Lowered 2->1 (user request 1 Sep 2026), deliberately, for the first
 # real live run of the new sequential mode ("make capacity smaller to 1,
 # we will change it later") - only one symbol can be under active real
-# management at a time until the user chooses to raise it again.
+# management at a time until the user chooses to raise it again. Still 1
+# after the same-day switch to basket_hedge mode.
 MAX_LIVE_BASKETS = int(os.getenv("SWING_MAX_LIVE_BASKETS", "2"))
 
-# Sequential mode only (added 1 Sep 2026) - the PE hedge leg's own hard
-# rupee loss cap: "Exit this PE option contract once loss become more
-# than 2k" (user's own wording). Checked continuously (unrealized loss,
-# mark-to-market against current LTP) the same way every other rupee-cap
-# in this codebase works (e.g. Options/config.py's MAX_LOSS_PER_TRADE_RS_
-# BEFORE_CUTOFF) - NOT the trigger that re-buys futures (that's the
-# entry condition re-firing, a separate check) - a loss-capped PE exit
-# returns the symbol to plain watching instead (user confirmed via
-# AskUserQuestion 1 Sep 2026), so this cap alone never causes a fresh
-# futures entry on its own.
+# The standalone PE hedge leg's own hard rupee loss cap (sequential mode,
+# and basket_hedge mode's own PE-hedge phase): "Exit this PE option
+# contract once loss become more than 2k" (user's own wording, reused
+# verbatim for basket_hedge mode's own condition 1). Checked continuously
+# (unrealized loss, mark-to-market against current LTP) the same way
+# every other rupee-cap in this codebase works (e.g. Options/config.py's
+# MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF) - NOT the trigger that re-buys
+# futures/re-enters a basket (that's a separate, signal-driven check in
+# both modes) - a loss-capped PE exit returns the symbol to plain
+# watching instead (user confirmed via AskUserQuestion 1 Sep 2026 for
+# sequential mode; explicitly requested outright for basket_hedge mode).
 PE_MAX_LOSS_RS = float(os.getenv("SWING_PE_MAX_LOSS_RS", "2000"))
+
+# basket_hedge mode only (added 1 Sep 2026) - condition 2 of the PE
+# hedge's own 3-way exit: "Lock profit when it becomes more than 2k"
+# (user's own wording) - the mirror image of PE_MAX_LOSS_RS above, on the
+# upside. Unrealized profit, mark-to-market against current LTP, checked
+# every tick alongside the loss cap.
+PE_PROFIT_LOCK_RS = float(os.getenv("SWING_PE_PROFIT_LOCK_RS", "2000"))
 
 QUANTITY_LOTS = int(os.getenv("SWING_QUANTITY_LOTS", "1"))
 
@@ -190,8 +228,13 @@ SUPERTREND_REFRESH_SECONDS = int(os.getenv("SWING_SUPERTREND_REFRESH_SECONDS", "
 # paper_engine.py's own module docstring for the full design (simulated
 # fills at current LTP, its own on-disk log entirely separate from real
 # trade history, no capacity cap since nothing here risks real capital).
-# Mirrors STRATEGY_MODE (user confirmed via AskUserQuestion) - paper
-# trading always simulates whichever mode (basket/sequential) is
-# currently active, so paper results actually reflect what real trading
-# would do if turned on right now.
+# Mirrors STRATEGY_MODE for "basket"/"sequential" (user confirmed via
+# AskUserQuestion) - paper trading simulates whichever of THOSE two modes
+# is active, so paper results actually reflect what real trading would do
+# if turned on right now. Does NOT yet have a "basket_hedge" simulation
+# (added 1 Sep 2026, after paper trading was already turned off for
+# going live) - harmless while this stays False, but if paper trading and
+# basket_hedge mode are ever both wanted at once, paper_engine.py's own
+# poll loop needs a third tick implementation first (see its own
+# docstring).
 PAPER_TRADING_ENABLED = os.getenv("SWING_PAPER_TRADING_ENABLED", "false").lower() == "true"

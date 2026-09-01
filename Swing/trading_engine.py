@@ -161,7 +161,14 @@ from trade_history import append_jsonl, attribute_open_broker_position
 
 from . import config
 from .dhan_client import OrderStatus, _compute_supertrend, _retry, dhan_wrapper
-from .position_store import Basket, Leg, basket_store, sequential_store
+from .position_store import (
+    Basket,
+    BasketHedgePosition,
+    Leg,
+    basket_hedge_store,
+    basket_store,
+    sequential_store,
+)
 from .watchlist import watchlist_store
 
 logger = logging.getLogger("swing_trading_engine")
@@ -442,11 +449,14 @@ async def _exit_basket(symbol: str, basket: Basket, reason: str) -> None:
 
 async def _square_off_all(reason: str) -> None:
     """Manual kill-switch (POST /swing/square-off-now) - mode-aware
-    (added 1 Sep 2026): closes every live BASKET in basket mode, or
-    every live LEG in sequential mode, returning each symbol straight to
-    plain watching (does NOT continue the loop into a hedge - a manual
-    kill-switch means "get me flat now", not "keep managing this
-    symbol")."""
+    (added 1 Sep 2026, extended to 3-way 1 Sep 2026): closes every live
+    BASKET in basket mode, every live LEG in sequential mode, or every
+    live basket_hedge POSITION (whatever state it's currently in - a
+    BASKET's both/one leg(s), or a standalone PE hedge) in basket_hedge
+    mode - returning each symbol straight to plain watching (does NOT
+    continue into a hedge from a BASKET-state position, and does NOT
+    re-enter after a PE_HEDGE-state one - a manual kill-switch means "get
+    me flat now", not "keep managing this symbol")."""
     if config.STRATEGY_MODE == "basket":
         baskets = dict(basket_store.live_baskets)
         if not baskets:
@@ -454,6 +464,39 @@ async def _square_off_all(reason: str) -> None:
         logger.info("Swing square-off triggered (%s) for %d open basket(s)", reason, len(baskets))
         for symbol, basket in baskets.items():
             await _exit_basket(symbol, basket, reason)
+    elif config.STRATEGY_MODE == "basket_hedge":
+        positions = dict(basket_hedge_store.live_positions)
+        if not positions:
+            return
+        logger.info("Swing square-off triggered (%s) for %d open basket_hedge position(s)", reason, len(positions))
+        for symbol, position in positions.items():
+            exit_results = {}
+            all_sold = True
+            for leg in position.legs:
+                result = await _place_leg(leg.option_trading_symbol, leg.quantity, "SELL", leg.product_type, "Ext", symbol)
+                if not result["ok"]:
+                    logger.error(
+                        "%s: %s leg SELL failed during manual basket_hedge square-off (%s) - "
+                        "leg left open, check manually", symbol, leg.option_type,
+                        result.get("remark") or result.get("error"),
+                    )
+                    all_sold = False
+                    continue
+                exit_results[leg.option_trading_symbol] = result.get("fill_price") or leg.entry_price
+            if not all_sold:
+                continue
+            # close_current_legs_for_hedge_swap closes EVERY current leg
+            # (1 or 2, whatever this position holds) with its own real
+            # exit price - unlike exit_to_watching, which only closes
+            # legs[0] and is meant for the single-leg PE_HEDGE state. It
+            # doesn't release capacity on its own (normally the next step
+            # is buying a PE hedge), so release_symbol() is called right
+            # after - a manual square-off means "get flat," not "swap."
+            await basket_hedge_store.close_current_legs_for_hedge_swap(symbol, exit_results, reason)
+            await basket_hedge_store.release_symbol(symbol)
+            await _record_swing_event("BASKET_HEDGE_SQUARED_OFF", symbol, {
+                "exit_reason": reason, "state_at_square_off": position.state, "exit_prices": exit_results,
+            })
     else:
         legs = dict(sequential_store.live_legs)
         if not legs:
@@ -712,6 +755,262 @@ async def _evaluate_pe_exit_signal(symbol: str, pe_leg: Leg) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------- #
+# BASKET_HEDGE mode - see config.py's own STRATEGY_MODE docstring for the
+# full explanation (user request 1 Sep 2026: "enabling basket buy
+# strategy but with a caveat"). Entry is IDENTICAL to plain basket mode
+# (all-or-nothing futures+PE); only what happens on EXIT differs - sell
+# the basket, buy a single standalone PE hedge, hold it until any of 3
+# conditions, then back to plain watching.
+# --------------------------------------------------------------------------- #
+async def _enter_basket_hedge_for_stock(symbol: str) -> dict:
+    """NONE -> BASKET. Same all-or-nothing rollback as enter_basket_for_stock
+    (futures leg fails -> PE never attempted; PE fails after futures fills
+    -> futures unwound) - the only difference from that function is which
+    store records the result."""
+    if not config.STRATEGY_ENABLED:
+        return {"symbol": symbol, "status": "ignored", "reason": "strategy_disabled"}
+
+    loop = asyncio.get_running_loop()
+    if not await basket_hedge_store.try_enter(symbol):
+        logger.info("%s: skipped - already open/in-flight, or no basket_hedge capacity", symbol)
+        return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
+
+    try:
+        already_open = await loop.run_in_executor(
+            None, dhan_wrapper.has_open_position_for_underlying, symbol
+        )
+        if already_open:
+            logger.warning("%s: skipped - broker already shows an open FNO position for it", symbol)
+            await basket_hedge_store.release_symbol(symbol)
+            return {"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker"}
+
+        try:
+            fut = await loop.run_in_executor(None, dhan_wrapper.get_futures_contract, symbol)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("%s: could not resolve futures contract - basket_hedge entry aborted", symbol)
+            await basket_hedge_store.release_symbol(symbol)
+            return {"symbol": symbol, "status": "error", "reason": f"futures_lookup_failed: {exc}"}
+
+        fut_qty = fut.lot_size * config.QUANTITY_LOTS
+        futures_result = await _place_leg(
+            fut.trading_symbol, fut_qty, "BUY", config.FUTURES_PRODUCT, config.ORDER_TAG_PREFIX, symbol,
+        )
+        if not futures_result["ok"]:
+            logger.warning(
+                "%s: futures leg failed (%s) - basket_hedge entry aborted, PE leg never attempted (neither)",
+                symbol, futures_result.get("remark") or futures_result.get("error"),
+            )
+            await basket_hedge_store.release_symbol(symbol)
+            return {
+                "symbol": symbol, "status": "rejected", "reason": "futures_leg_failed",
+                "detail": futures_result,
+            }
+
+        futures_fill_price = futures_result.get("fill_price") or 0.0
+
+        try:
+            atm = await loop.run_in_executor(None, dhan_wrapper.get_atm_option, symbol, "PE")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("%s: could not resolve ATM PE option - unwinding the futures leg", symbol)
+            await _unwind_futures_leg(symbol, fut.trading_symbol, fut_qty)
+            await basket_hedge_store.release_symbol(symbol)
+            return {
+                "symbol": symbol, "status": "error",
+                "reason": f"pe_lookup_failed: {exc} - futures leg unwound",
+            }
+
+        option_qty = atm.lot_size * config.QUANTITY_LOTS
+        option_result = await _place_leg(
+            atm.trading_symbol, option_qty, "BUY", config.OPTIONS_PRODUCT, config.ORDER_TAG_PREFIX, symbol,
+        )
+        if not option_result["ok"]:
+            logger.warning(
+                "%s: PE leg failed (%s) - unwinding the already-filled futures leg (neither)",
+                symbol, option_result.get("remark") or option_result.get("error"),
+            )
+            await _unwind_futures_leg(symbol, fut.trading_symbol, fut_qty)
+            await basket_hedge_store.release_symbol(symbol)
+            return {
+                "symbol": symbol, "status": "rejected", "reason": "pe_leg_failed_futures_unwound",
+                "detail": option_result,
+            }
+
+        option_fill_price = option_result.get("fill_price") or 0.0
+
+        futures_leg = Leg(
+            underlying_symbol=symbol, option_trading_symbol=fut.trading_symbol, option_type="FUT",
+            quantity=fut_qty, lot_size=fut.lot_size, entry_price=futures_fill_price,
+            order_id=futures_result["order_id"], product_type=config.FUTURES_PRODUCT,
+            security_id=fut.security_id,
+        )
+        option_leg = Leg(
+            underlying_symbol=symbol, option_trading_symbol=atm.trading_symbol, option_type="PE",
+            quantity=option_qty, lot_size=atm.lot_size, entry_price=option_fill_price,
+            order_id=option_result["order_id"], product_type=config.OPTIONS_PRODUCT,
+            security_id=atm.security_id,
+        )
+        await basket_hedge_store.set_basket(symbol, [futures_leg, option_leg])
+
+        logger.info(
+            "%s: basket_hedge BASKET ENTERED - futures %s@%.2f, PE %s@%.2f",
+            symbol, fut.trading_symbol, futures_fill_price, atm.trading_symbol, option_fill_price,
+        )
+        await _record_swing_event("BASKET_HEDGE_BASKET_ENTERED", symbol, {
+            "futures_trading_symbol": fut.trading_symbol, "futures_entry_price": futures_fill_price,
+            "futures_quantity": fut_qty,
+            "option_trading_symbol": atm.trading_symbol, "option_entry_price": option_fill_price,
+            "option_quantity": option_qty,
+        })
+        return {
+            "symbol": symbol, "status": "entered",
+            "futures_leg": {"trading_symbol": fut.trading_symbol, "entry_price": futures_fill_price, "quantity": fut_qty},
+            "option_leg": {"trading_symbol": atm.trading_symbol, "entry_price": option_fill_price, "quantity": option_qty},
+        }
+    except Exception as exc:  # noqa: BLE001
+        await basket_hedge_store.release_symbol(symbol)
+        logger.exception("%s: unexpected error entering basket_hedge basket", symbol)
+        return {"symbol": symbol, "status": "error", "reason": str(exc)}
+
+
+async def _exit_basket_hedge_to_pe(symbol: str, position: BasketHedgePosition) -> None:
+    """BASKET -> PE_HEDGE. Sells every leg CURRENTLY held (1 for the
+    grandfathered position, 2 for a normal all-or-nothing entry - see
+    BasketHedgePosition's own docstring), then buys ONE ATM PE hedge.
+    Same "fail safe to flat" philosophy as sequential mode's own swaps:
+    a leg that can't be SOLD is left exactly as-is for the next tick to
+    retry (nothing here proceeds to the PE buy until every current leg
+    is confirmed sold); once all are sold, a failure to buy the PE hedge
+    leaves the symbol FLAT (capacity released) rather than stuck."""
+    loop = asyncio.get_running_loop()
+    exit_results = {}
+    all_sold = True
+    for leg in position.legs:
+        result = await _place_leg(leg.option_trading_symbol, leg.quantity, "SELL", leg.product_type, "Ext", symbol)
+        if not result["ok"]:
+            logger.error(
+                "%s: %s leg SELL failed during basket_hedge exit (%s) - leg left open, "
+                "will retry on the next tick", symbol, leg.option_type,
+                result.get("remark") or result.get("error"),
+            )
+            all_sold = False
+            continue
+        exit_results[leg.option_trading_symbol] = result.get("fill_price") or leg.entry_price
+
+    if not all_sold:
+        return  # at least one leg still open - next tick re-detects the same exit condition and retries
+
+    await basket_hedge_store.close_current_legs_for_hedge_swap(symbol, exit_results, "SUPERTREND_5MIN_EXIT")
+    await _record_swing_event("BASKET_HEDGE_BASKET_EXITED", symbol, {
+        "exit_reason": "SUPERTREND_5MIN_EXIT", "exit_prices": exit_results,
+    })
+
+    try:
+        atm = await loop.run_in_executor(None, dhan_wrapper.get_atm_option, symbol, "PE")
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s: basket sold but could not resolve the ATM PE hedge - symbol left FLAT "
+            "(no real exposure), will re-enter fresh on the next entry signal", symbol,
+        )
+        await basket_hedge_store.release_symbol(symbol)
+        await _record_swing_event("BASKET_HEDGE_LEFT_FLAT", symbol, {"reason": "pe_lookup_failed_after_basket_sold"})
+        return
+
+    option_qty = atm.lot_size * config.QUANTITY_LOTS
+    option_result = await _place_leg(
+        atm.trading_symbol, option_qty, "BUY", config.OPTIONS_PRODUCT, config.ORDER_TAG_PREFIX, symbol,
+    )
+    if not option_result["ok"]:
+        logger.error(
+            "%s: basket sold but the PE hedge BUY failed (%s) - symbol left FLAT "
+            "(no real exposure), will re-enter fresh on the next entry signal",
+            symbol, option_result.get("remark") or option_result.get("error"),
+        )
+        await basket_hedge_store.release_symbol(symbol)
+        await _record_swing_event("BASKET_HEDGE_LEFT_FLAT", symbol, {"reason": "pe_buy_failed_after_basket_sold"})
+        return
+
+    option_fill_price = option_result.get("fill_price") or 0.0
+    pe_leg = Leg(
+        underlying_symbol=symbol, option_trading_symbol=atm.trading_symbol, option_type="PE",
+        quantity=option_qty, lot_size=atm.lot_size, entry_price=option_fill_price,
+        order_id=option_result["order_id"], product_type=config.OPTIONS_PRODUCT, security_id=atm.security_id,
+    )
+    await basket_hedge_store.set_pe_hedge(symbol, pe_leg)
+    logger.info(
+        "%s: basket_hedge SWAP basket->PE hedge - PE %s@%.2f", symbol, atm.trading_symbol, option_fill_price,
+    )
+    await _record_swing_event("BASKET_HEDGE_PE_HEDGE_ENTERED", symbol, {
+        "trading_symbol": atm.trading_symbol, "entry_price": option_fill_price, "quantity": option_qty,
+    })
+
+
+async def _exit_pe_hedge_to_watching(symbol: str, pe_leg: Leg, reason: str) -> None:
+    """PE_HEDGE -> NONE. Sells the standalone PE hedge and releases the
+    symbol's capacity - back to plain watching for a fresh basket entry.
+    None of the 3 PE-hedge exit conditions (loss cap, profit lock, bare
+    Supertrend reversal) carries a confirmed fresh BUY signal the way
+    sequential mode's own entry-refire path does, so this never re-enters
+    anything on its own - same "don't blindly chain" choice made for
+    sequential mode's own loss-cap exit."""
+    option_exit = await _place_leg(
+        pe_leg.option_trading_symbol, pe_leg.quantity, "SELL", pe_leg.product_type, "Ext", symbol,
+    )
+    if not option_exit["ok"]:
+        logger.error(
+            "%s: PE hedge SELL failed during basket_hedge exit (%s) - leg left open, "
+            "will retry on the next tick", symbol, option_exit.get("remark") or option_exit.get("error"),
+        )
+        return
+    option_exit_price = option_exit.get("fill_price") or pe_leg.entry_price
+    await basket_hedge_store.exit_to_watching(symbol, option_exit_price, reason)
+    await _record_swing_event("BASKET_HEDGE_PE_HEDGE_EXITED", symbol, {
+        "exit_reason": reason, "exit_price": option_exit_price, "entry_price": pe_leg.entry_price,
+    })
+
+
+async def _evaluate_pe_hedge_exit_signal(symbol: str, pe_leg: Leg) -> Optional[str]:
+    """The PE hedge's own 3-way exit check (user's own numbered list):
+      1. Loss exceeds config.PE_MAX_LOSS_RS.
+      2. Profit exceeds config.PE_PROFIT_LOCK_RS ("lock profit").
+      3. The underlying's 5-min close crosses back ABOVE its own
+         Supertrend - checked as a BARE reversal via _fetch_supertrend_state
+         directly, deliberately NOT the full _evaluate_watchlist_entry_signal
+         (user's own words: "even if buy signal is not yet triggered" -
+         the price-confirmation gate and 1-min confirm timeframe are NOT
+         required for this specific exit).
+    Checked in this order (loss, then profit-lock, then Supertrend) since
+    the first two only need one cheap LTP fetch; the Supertrend check is
+    tried regardless of an LTP fetch failure (they're independent data
+    sources), so one failing never masks the other."""
+    loop = asyncio.get_running_loop()
+    try:
+        ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, pe_leg.option_trading_symbol)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not fetch PE LTP for the basket_hedge loss/profit check", symbol)
+        ltp = None
+
+    if ltp is not None:
+        loss_rs = (pe_leg.entry_price - ltp) * pe_leg.quantity
+        if loss_rs > config.PE_MAX_LOSS_RS:
+            logger.info("%s: PE hedge loss-cap HIT - unrealized loss %.2f > cap %.2f", symbol, loss_rs, config.PE_MAX_LOSS_RS)
+            return "PE_MAX_LOSS_HIT"
+        profit_rs = (ltp - pe_leg.entry_price) * pe_leg.quantity
+        if profit_rs > config.PE_PROFIT_LOCK_RS:
+            logger.info("%s: PE hedge profit-lock HIT - unrealized profit %.2f > cap %.2f", symbol, profit_rs, config.PE_PROFIT_LOCK_RS)
+            return "PE_PROFIT_LOCK_HIT"
+
+    state = await _fetch_supertrend_state(symbol, config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES)
+    if state is not None and state.crossed_above:
+        logger.info(
+            "%s: PE hedge Supertrend reversal HIT - %d-min close %.2f crossed above Supertrend %.2f "
+            "(bare reversal, entry signal not required)",
+            symbol, config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES, state.close, state.supertrend,
+        )
+        return "PE_SUPERTREND_REVERSAL_EXIT"
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Reconciliation
 # --------------------------------------------------------------------------- #
 async def reconcile_broker_positions() -> list[Basket]:
@@ -827,6 +1126,88 @@ async def reconcile_sequential_positions() -> list[Leg]:
         await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, bp["trading_symbol"])
 
     return legs
+
+
+async def reconcile_basket_hedge_positions() -> list[BasketHedgePosition]:
+    """Recovers any Swing-attributed broker legs into basket_hedge_store
+    at startup - MORE PERMISSIVE than plain basket mode's own
+    reconcile_broker_positions() (which treats a lone leg as an anomaly
+    needing manual review), since basket_hedge mode legitimately has TWO
+    different single-leg shapes of its own:
+      - a lone FUTSTK leg with NO paired OPTSTK -> BASKET state with just
+        that one leg (the "grandfathered" shape - e.g. APLAPOLLO, entered
+        under sequential mode before this mode existed, user request:
+        "consider the open trade as a basket order for this time as it
+        is already live" - also covers a genuine mid-restart interruption
+        during a fresh basket_hedge entry between the two legs' own real
+        orders).
+      - a lone OPTSTK (PE) leg with NO paired FUTSTK -> PE_HEDGE state
+        (the NORMAL shape once a basket has already swapped into its
+        hedge phase - see _exit_basket_hedge_to_pe).
+      - BOTH legs present, same underlying -> BASKET state with both (a
+        complete, freshly-entered basket, exactly like plain basket
+        mode's own pairing).
+    Only called by swing_main.py's lifespan when
+    config.STRATEGY_MODE == "basket_hedge"."""
+    loop = asyncio.get_running_loop()
+    broker_positions = await loop.run_in_executor(None, dhan_wrapper.get_open_fno_positions)
+
+    futures_by_underlying: dict[str, dict] = {}
+    options_by_underlying: dict[str, dict] = {}
+    for bp in broker_positions:
+        avg_price = bp["avg_price"]
+        if not avg_price:
+            logger.warning(
+                "Skipping basket_hedge reconciliation for %s - broker reported no average price.",
+                bp["trading_symbol"],
+            )
+            continue
+
+        owner = await loop.run_in_executor(None, attribute_open_broker_position, bp["trading_symbol"])
+        if owner != "Swing":
+            logger.warning(
+                "Skipping basket_hedge reconciliation for %s - attributed to %s (not Swing) by our "
+                "own opened-position history. Real broker position is unaffected; this process "
+                "just won't manage it.", bp["trading_symbol"], owner or "no strategy (no record found)",
+            )
+            continue
+
+        if bp["trading_symbol"].endswith("FUT"):
+            futures_by_underlying[bp["underlying_symbol"]] = bp
+        else:
+            options_by_underlying[bp["underlying_symbol"]] = bp
+
+    positions: list[BasketHedgePosition] = []
+    for symbol in set(futures_by_underlying) | set(options_by_underlying):
+        fut_bp = futures_by_underlying.get(symbol)
+        opt_bp = options_by_underlying.get(symbol)
+        legs: list[Leg] = []
+        if fut_bp:
+            legs.append(Leg(
+                underlying_symbol=symbol, option_trading_symbol=fut_bp["trading_symbol"], option_type="FUT",
+                quantity=fut_bp["quantity"], lot_size=fut_bp["lot_size"], entry_price=fut_bp["avg_price"],
+                order_id="", product_type=config.FUTURES_PRODUCT, reconciled=True,
+            ))
+            await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, fut_bp["trading_symbol"])
+        if opt_bp:
+            legs.append(Leg(
+                underlying_symbol=symbol, option_trading_symbol=opt_bp["trading_symbol"], option_type="PE",
+                quantity=opt_bp["quantity"], lot_size=opt_bp["lot_size"], entry_price=opt_bp["avg_price"],
+                order_id="", product_type=config.OPTIONS_PRODUCT, reconciled=True,
+            ))
+            await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, opt_bp["trading_symbol"])
+
+        # BASKET state whenever a futures leg is present (whether alone -
+        # the grandfathered/incomplete shape - or paired with its PE);
+        # PE_HEDGE state only when it's a lone PE with no futures at all.
+        state = "BASKET" if fut_bp else "PE_HEDGE"
+        positions.append(BasketHedgePosition(underlying_symbol=symbol, state=state, legs=legs))
+        logger.info(
+            "%s: reconciling as basket_hedge state=%s legs=%s",
+            symbol, state, [l.option_type for l in legs],
+        )
+
+    return positions
 
 
 # --------------------------------------------------------------------------- #
@@ -1136,6 +1517,39 @@ async def _sequential_monitor_tick() -> None:
                     await _exit_pe_to_watching(symbol, leg, pe_reason)
 
 
+async def _basket_hedge_monitor_tick() -> None:
+    """The "basket_hedge" mode tick body (added 1 Sep 2026) - entry side
+    behaves like plain basket mode (a symbol leaves the watchlist once it
+    enters a basket); a symbol whose basket has already swapped into its
+    PE hedge is NOT on the watchlist any more (basket entry removed it),
+    so - same as sequential mode's own tick - every symbol CURRENTLY held
+    (BASKET or PE_HEDGE state) is evaluated too, watchlist or not, until
+    it naturally returns to plain watching via one of the PE hedge's own
+    3 exit conditions."""
+    watchlist_symbols = await watchlist_store.symbols()
+    live_positions = dict(basket_hedge_store.live_positions)
+    all_symbols = list(dict.fromkeys(list(watchlist_symbols) + list(live_positions.keys())))
+
+    for i, symbol in enumerate(all_symbols):
+        if i > 0:
+            await asyncio.sleep(0.35)
+        position = live_positions.get(symbol)
+        if position is None:
+            if await _evaluate_watchlist_entry_signal(symbol):
+                result = await _enter_basket_hedge_for_stock(symbol)
+                if result.get("status") == "entered":
+                    await watchlist_store.remove_symbol(symbol)
+        elif position.state == "BASKET":
+            reason = await _evaluate_basket_exit_signal(symbol, None)
+            if reason:
+                await _exit_basket_hedge_to_pe(symbol, position)
+        else:  # "PE_HEDGE"
+            pe_leg = position.legs[0]
+            reason = await _evaluate_pe_hedge_exit_signal(symbol, pe_leg)
+            if reason:
+                await _exit_pe_hedge_to_watching(symbol, pe_leg, reason)
+
+
 async def monitor_loop() -> None:
     """Runs forever, ALWAYS - see config.py's own docstring for why this
     keeps running even when config.STRATEGY_ENABLED is False (so no
@@ -1145,14 +1559,15 @@ async def monitor_loop() -> None:
     hand-edit takes effect within one tick, no restart needed, same
     hot-reload UX choppy_stocks.py already established).
 
-    Dispatches by config.STRATEGY_MODE each tick (added 1 Sep 2026):
-    "basket" runs _basket_monitor_tick (the ORIGINAL, unchanged
-    mechanics), "sequential" runs _sequential_monitor_tick (the NEW
-    futures<->PE loop) - see config.py's own STRATEGY_MODE docstring for
-    why both coexist rather than one replacing the other. Both stores'
-    own daily reset runs every tick regardless of which mode is
-    currently active (cheap, keeps a closed-today log from going stale
-    across a mode switch)."""
+    Dispatches by config.STRATEGY_MODE each tick (added 1 Sep 2026,
+    extended to 3-way 1 Sep 2026): "basket" runs _basket_monitor_tick
+    (the ORIGINAL, unchanged mechanics), "sequential" runs
+    _sequential_monitor_tick (the futures<->PE loop), "basket_hedge" runs
+    _basket_hedge_monitor_tick (basket entry, single-PE-hedge exit) - see
+    config.py's own STRATEGY_MODE docstring for why all three coexist
+    rather than one replacing another. All three stores' own daily reset
+    runs every tick regardless of which mode is currently active (cheap,
+    keeps a closed-today log from going stale across a mode switch)."""
     logger.info(
         "Swing monitor loop started. strategy_enabled=%s strategy_mode=%s",
         config.STRATEGY_ENABLED, config.STRATEGY_MODE,
@@ -1161,10 +1576,13 @@ async def monitor_loop() -> None:
         try:
             await basket_store.maybe_reset_for_new_day()
             await sequential_store.maybe_reset_for_new_day()
+            await basket_hedge_store.maybe_reset_for_new_day()
             await watchlist_store.sync_from_file()
             if config.STRATEGY_ENABLED:
                 if config.STRATEGY_MODE == "basket":
                     await _basket_monitor_tick()
+                elif config.STRATEGY_MODE == "basket_hedge":
+                    await _basket_hedge_monitor_tick()
                 else:
                     await _sequential_monitor_tick()
         except Exception:  # noqa: BLE001

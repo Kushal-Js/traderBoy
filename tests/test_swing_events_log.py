@@ -115,9 +115,15 @@ async def test_1_full_sequential_loop_produces_expected_events_in_order():
     real_enabled = ste.config.STRATEGY_ENABLED
     real_cap = ste.config.MAX_LIVE_BASKETS
     real_pe_cap = ste.config.PE_MAX_LOSS_RS
+    real_mode = ste.config.STRATEGY_MODE
     ste.config.STRATEGY_ENABLED = True
     ste.config.MAX_LIVE_BASKETS = 10
     ste.config.PE_MAX_LOSS_RS = 2000.0
+    # _square_off_all below is mode-dispatched (default STRATEGY_MODE is
+    # "basket_hedge" as of 1 Sep 2026, not "sequential") - pin it
+    # explicitly so this test exercises the sequential-mode code path
+    # regardless of whatever the live default currently is.
+    ste.config.STRATEGY_MODE = "sequential"
     symbol = "RELIANCE"
     restore = install_all_dhan_mocks(fill_prices=[100.0, 110.0, 20.0, 15.0, 112.0])
     try:
@@ -167,6 +173,7 @@ async def test_1_full_sequential_loop_produces_expected_events_in_order():
         ste.config.STRATEGY_ENABLED = real_enabled
         ste.config.MAX_LIVE_BASKETS = real_cap
         ste.config.PE_MAX_LOSS_RS = real_pe_cap
+        ste.config.STRATEGY_MODE = real_mode
 
 
 async def test_2_basket_mode_entry_and_exit_events():

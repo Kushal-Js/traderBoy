@@ -16,11 +16,14 @@ in-memory store, from the broker's own reported positions.
 
 Also tracks SEQUENTIAL positions (added 1 Sep 2026, user request - see
 `SequentialPositionStore` below) - the alternate "2 different orders
-running sequentially" strategy shape, switched via config.STRATEGY_MODE
-("basket" | "sequential") rather than replacing the basket code, since
-"we may need basket strategy again in coming days." Both stores always
-exist; only the one matching the current mode is ever written to by
-trading_engine.py's monitor_loop (see its own docstring for the full
+running sequentially" strategy shape - and BASKET_HEDGE positions (added
+1 Sep 2026, user request - see `BasketHedgeStore` below) - basket entry,
+but the exit sells the basket and buys a single standalone PE hedge
+instead of going flat. All switched via config.STRATEGY_MODE ("basket" |
+"sequential" | "basket_hedge") rather than one replacing another, since
+"we may need basket strategy again in coming days." All three stores
+always exist; only the one matching the current mode is ever written to
+by trading_engine.py's monitor_loop (see its own docstring for the full
 mode-dispatch).
 """
 from __future__ import annotations
@@ -419,3 +422,194 @@ class SequentialPositionStore:
 
 
 sequential_store = SequentialPositionStore()
+
+
+@dataclass
+class BasketHedgePosition:
+    """One symbol's current state under config.STRATEGY_MODE ==
+    "basket_hedge" (user request 1 Sep 2026: "enabling basket buy
+    strategy but with a caveat"). `state` is "BASKET" (holding the
+    original entry) or "PE_HEDGE" (holding the standalone PE bought
+    after the basket's own exit condition fired).
+
+    `legs` is normally [futures_leg, option_leg] in BASKET state (both
+    bought together, all-or-nothing, exactly like plain "basket" mode's
+    own entry) and [pe_leg] in PE_HEDGE state - EXCEPT for the one real
+    position grandfathered in from sequential mode at the exact moment
+    this mode went live (APLAPOLLO, futures-only - user's own words:
+    "consider the open trade as a basket order for this time as it is
+    already live"), which sits in BASKET state with just [futures_leg]
+    until it naturally reaches its own exit condition. See
+    reconcile_basket_hedge_positions()'s own docstring for why a lone
+    leg is accepted here rather than flagged as an anomaly the way plain
+    "basket" mode's own reconciliation treats one."""
+    underlying_symbol: str
+    state: str  # "BASKET" | "PE_HEDGE"
+    legs: List[Leg]
+    opened_at: datetime = field(default_factory=datetime.now)
+
+
+class BasketHedgeStore:
+    """See BasketHedgePosition's own docstring for the state shape.
+    Capacity/dedup follow the exact same pattern as BasketStore/
+    SequentialPositionStore above - one symbol occupies one slot for as
+    long as it's under active management in EITHER state, released only
+    when the PE hedge phase exits back to plain watching."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self.live_positions: Dict[str, BasketHedgePosition] = {}
+        self.reserved_symbols: Set[str] = set()
+        self.closed_today: List[dict] = []
+        self._trading_day: date = date.today()
+
+    async def maybe_reset_for_new_day(self) -> None:
+        async with self._lock:
+            today = date.today()
+            if today != self._trading_day:
+                logger.info(
+                    "New trading day detected (%s) - resetting only the daily closed log "
+                    "(live_positions carries over by design, see config.py).", today,
+                )
+                self.closed_today.clear()
+                self._trading_day = today
+
+    async def try_enter(self, underlying_symbol: str) -> bool:
+        """NONE -> BASKET: claims a fresh capacity slot for a symbol not
+        currently under active management at all."""
+        async with self._lock:
+            if underlying_symbol in self.reserved_symbols or underlying_symbol in self.live_positions:
+                return False
+            if len(self.reserved_symbols) >= config.MAX_LIVE_BASKETS:
+                return False
+            self.reserved_symbols.add(underlying_symbol)
+            return True
+
+    async def release_symbol(self, underlying_symbol: str) -> None:
+        async with self._lock:
+            if underlying_symbol not in self.live_positions:
+                self.reserved_symbols.discard(underlying_symbol)
+
+    async def remaining_capacity(self) -> int:
+        async with self._lock:
+            return max(0, config.MAX_LIVE_BASKETS - len(self.reserved_symbols))
+
+    async def set_basket(self, underlying_symbol: str, legs: List[Leg]) -> None:
+        """Records the BASKET state (the initial entry, or a startup
+        reconciliation) - fires record_opened_position for every leg
+        given (1 for the grandfathered position, 2 for a normal
+        all-or-nothing entry)."""
+        async with self._lock:
+            self.live_positions[underlying_symbol] = BasketHedgePosition(
+                underlying_symbol=underlying_symbol, state="BASKET", legs=list(legs),
+            )
+            self.reserved_symbols.add(underlying_symbol)
+            for leg in legs:
+                fire_and_forget(record_opened_position("Swing", leg))
+            logger.info(
+                "BasketHedge BASKET OPENED: %s legs=%s",
+                underlying_symbol, [(l.option_type, l.option_trading_symbol, l.entry_price) for l in legs],
+            )
+
+    async def reconcile_position(self, position: BasketHedgePosition) -> None:
+        """Startup-only: imports a position already open at Dhan
+        (recovered after a restart) - mirrors BasketStore/
+        SequentialPositionStore's own reconcile methods."""
+        async with self._lock:
+            if position.underlying_symbol in self.live_positions:
+                return
+            self.live_positions[position.underlying_symbol] = position
+            self.reserved_symbols.add(position.underlying_symbol)
+            logger.info(
+                "Reconciled existing basket_hedge position: %s state=%s legs=%s",
+                position.underlying_symbol, position.state,
+                [(l.option_type, l.option_trading_symbol, l.quantity, l.entry_price) for l in position.legs],
+            )
+
+    async def close_current_legs_for_hedge_swap(
+        self, underlying_symbol: str, exit_prices: Dict[str, float], reason: str,
+    ) -> Optional[BasketHedgePosition]:
+        """BASKET -> (about to be) PE_HEDGE: closes every leg CURRENTLY
+        held (1 or 2, see BasketHedgePosition's own docstring), fires
+        record_closed_trade for each, but does NOT release the symbol's
+        reservation - it's about to hold the PE hedge instead, still
+        under active management. `exit_prices` keyed by each leg's own
+        `option_trading_symbol`. Caller MUST follow this with
+        set_pe_hedge() for the new leg."""
+        async with self._lock:
+            position = self.live_positions.pop(underlying_symbol, None)
+            if position is None:
+                return None
+            closed_at = datetime.now()
+            for leg in position.legs:
+                exit_price = exit_prices.get(leg.option_trading_symbol, leg.entry_price)
+                leg.status = "CLOSED"
+                leg.exit_price = exit_price
+                leg.exit_reason = reason
+                leg.closed_at = closed_at
+                fire_and_forget(record_closed_trade("Swing", leg))
+            self.closed_today.append(self._position_dict(position))
+            logger.info(
+                "BasketHedge BASKET CLOSED (swap to PE hedge): %s reason=%s", underlying_symbol, reason,
+            )
+            return position
+
+    async def set_pe_hedge(self, underlying_symbol: str, pe_leg: Leg) -> None:
+        async with self._lock:
+            self.live_positions[underlying_symbol] = BasketHedgePosition(
+                underlying_symbol=underlying_symbol, state="PE_HEDGE", legs=[pe_leg],
+            )
+            self.reserved_symbols.add(underlying_symbol)
+            fire_and_forget(record_opened_position("Swing", pe_leg))
+            logger.info(
+                "BasketHedge PE_HEDGE OPENED: %s %s@%.2f",
+                underlying_symbol, pe_leg.option_trading_symbol, pe_leg.entry_price,
+            )
+
+    async def exit_to_watching(self, underlying_symbol: str, exit_price: float, reason: str) -> Optional[Leg]:
+        """PE_HEDGE -> NONE: the final exit (any of the 3 conditions).
+        Closes the PE leg AND releases the symbol's reservation - back to
+        plain watching for a fresh basket entry."""
+        async with self._lock:
+            position = self.live_positions.pop(underlying_symbol, None)
+            if position is None:
+                return None
+            leg = position.legs[0]
+            leg.status = "CLOSED"
+            leg.exit_price = exit_price
+            leg.exit_reason = reason
+            leg.closed_at = datetime.now()
+            fire_and_forget(record_closed_trade("Swing", leg))
+            self.closed_today.append(self._position_dict(position))
+            self.reserved_symbols.discard(underlying_symbol)
+            logger.info(
+                "BasketHedge PE_HEDGE CLOSED (back to watching): %s reason=%s exit=%.2f",
+                underlying_symbol, reason, exit_price,
+            )
+            return leg
+
+    async def snapshot(self) -> dict:
+        async with self._lock:
+            return {
+                "live_positions": [self._position_dict(p) for p in self.live_positions.values()],
+                "reserved_symbols": sorted(self.reserved_symbols),
+                "closed_today": list(self.closed_today),
+            }
+
+    @staticmethod
+    def _position_dict(position: BasketHedgePosition) -> dict:
+        return {
+            "underlying_symbol": position.underlying_symbol,
+            "state": position.state,
+            "opened_at": position.opened_at.isoformat() if position.opened_at else None,
+            "legs": [
+                vars(leg) | {
+                    "opened_at": leg.opened_at.isoformat() if leg.opened_at else None,
+                    "closed_at": leg.closed_at.isoformat() if leg.closed_at else None,
+                }
+                for leg in position.legs
+            ],
+        }
+
+
+basket_hedge_store = BasketHedgeStore()

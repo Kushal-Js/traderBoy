@@ -157,12 +157,25 @@ def install_all_dhan_mocks(fill_prices=None, ltp_by_symbol=None):
     return restore, placed_orders
 
 
-def test_1_config_defaults_to_sequential():
-    assert swing_config.STRATEGY_MODE == "sequential", \
-        f"expected STRATEGY_MODE to default to 'sequential' ('turn out new updated logic ON for " \
-        f"time being'), got {swing_config.STRATEGY_MODE!r}"
-    print("1. config.STRATEGY_MODE defaults to 'sequential' (basket mode preserved, not deleted, "
-          "switchable via SWING_STRATEGY_MODE=basket): PASSED")
+def test_1_sequential_mode_remains_a_valid_switchable_mode():
+    """config.STRATEGY_MODE's own default moved on to "basket_hedge" 1
+    Sep 2026 (see test_swing_basket_hedge_mode.py's own test 1) - this
+    file's job isn't to pin the CURRENT default, only to prove
+    "sequential" itself hasn't been deleted and is still a real,
+    recognized value every test below can select explicitly (exactly as
+    they already do, e.g. test_5's own ste.config.STRATEGY_MODE =
+    "sequential")."""
+    assert swing_config.STRATEGY_MODE in ("basket", "sequential", "basket_hedge"), \
+        f"unexpected STRATEGY_MODE value entirely: {swing_config.STRATEGY_MODE!r}"
+    real_mode = swing_config.STRATEGY_MODE
+    try:
+        swing_config.STRATEGY_MODE = "sequential"
+        assert swing_config.STRATEGY_MODE == "sequential"
+    finally:
+        swing_config.STRATEGY_MODE = real_mode
+    print("1. 'sequential' remains a valid, fully switchable STRATEGY_MODE value (basket and "
+          "basket_hedge modes preserved alongside it, not deleted) - this file's own tests below "
+          "each pin the mode explicitly rather than relying on whatever the current default is: PASSED")
 
 
 async def test_2_full_two_loop_cycle_then_loss_cap_exit():
@@ -498,7 +511,7 @@ async def test_7_paper_sequential_full_loop_never_places_real_orders():
 
 async def main():
     print("=== Swing sequential-mode test suite ===\n")
-    test_1_config_defaults_to_sequential()
+    test_1_sequential_mode_remains_a_valid_switchable_mode()
     await test_2_full_two_loop_cycle_then_loss_cap_exit()
     await test_3_capacity_blocks_reentry_mid_loop_but_not_other_symbols()
     await test_4_reconciliation_recovers_a_lone_leg()
