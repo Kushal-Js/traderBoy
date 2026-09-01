@@ -3746,6 +3746,14 @@ out of git.
     signal but an unmocked Supertrend fetch, so none needed updating) -
     21 test suites total afterward, all pass.
 
+    Deployed with explicit go-ahead (asked first, this request didn't
+    say "deploy") - every package was flat at deploy time. Clean
+    restart confirmed: no ERROR-level log lines from the new process,
+    `/health` OK, `/positions`/`/futures/positions`/`/luxury/positions`/
+    `/swing/basket-hedge-positions` all still empty afterward. No `.env`
+    change needed for this one (pure ranking-logic change, no new
+    config).
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM
