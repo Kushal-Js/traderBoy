@@ -4218,6 +4218,54 @@ out of git.
     live-trading safety practice (no code path here touches
     `place_market_order`/production ranking at all).
 
+86. **Relative Strength vs NIFTY momentum ranking - user request 2 Sep
+    2026, BACKTEST-ONLY.** After tuning didn't rescue entry #85's HH/HL
+    signal, user's own words: "explore a different signal idea and keep
+    this on hold" (HH/HL) - "Relative Strength ranking vs Nifty" chosen
+    as the first alternative to try. Deliberately simpler than HH/HL's
+    four-weight composite: ONE tunable parameter (the trailing lookback
+    window), specifically to lower overfitting risk after the HH/HL
+    tuning sweep's own caution about trusting a many-parameter score on
+    a modest sample.
+
+    New `Swing/relative_strength.py` (pure, unit-tested, 6 scenarios in
+    `tests/test_swing_relative_strength.py`): `align_series_by_date`
+    (keeps only dates present in BOTH the stock's and NIFTY's own daily
+    series - protects against a data gap, like the MOTHERSON one found
+    during the HH/HL backtest, silently misaligning two different days'
+    closes) and `relative_strength_score` (a stock's own trailing
+    N-trading-day return MINUS NIFTY's own return over the identical
+    window, ending at "yesterday" relative to the scoring point - never
+    today's own still-forming day).
+
+    New `backtest_relative_strength.py` reused the IDENTICAL 782 real
+    Swing entry-signal events already found and cached for entry #85's
+    own backtest (same entry rule, same forward-return definition -
+    directly, apples-to-apples comparable). Only one new fetch: NIFTY's
+    own daily OHLC (security_id "13", `IDX_I`/`INDEX` segment - already
+    used live by `IndexScalping/paper_engine.py`, confirmed working, the
+    same endpoint the earlier "false alarm" investigation already
+    cleared). Swept `lookback_days` in {10, 20, 40}.
+
+    **Result: no usable edge, and it points the WRONG direction
+    consistently across all three windows, not just one noisy
+    outlier.** Correlation was negative or ~zero at every window (-0.061
+    / -0.026 / -0.003), and the same-day horse race was BELOW 50% at
+    every single window too (30.8% / 42.9% / 36.4% for 10/20/40 days) -
+    the LOWER-RS candidate outperformed the higher-RS one more often
+    than not. Plausible (sourced, not proven) explanation recorded in
+    trading-skills' `designs/relative-strength-momentum-ranking.md`:
+    these 10-40 trading-day windows sit in the well-documented SHORT-TERM
+    REVERSAL zone (Jegadeesh 1990 and others) rather than the 3-12 month
+    horizon momentum-factor research actually validates - a stock
+    that's already been the market's strongest recent outperformer right
+    as Swing's own Supertrend crossover fires may simply be more
+    "extended" already, similar in spirit to entry #85's own extension-
+    penalty component.
+
+    Ran the full 27-file test suite afterward, all pass. No deploy -
+    analysis/backtest work only.
+
     Deployed directly per the user's own explicit instruction ("Create
     and Test thoroughly and deploy it also") - every package flat at
     deploy time (checked all four - Options/Futures/Luxury/Swing -
