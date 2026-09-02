@@ -24,17 +24,18 @@ Methodology (read before trusting any number this prints)
    Dhan or burn the rate limit a second time.
 3. "Daily" context (previous close, for the price-confirmation gate) is
    DERIVED by resampling the fetched 5-min candles into daily OHLC,
-   NOT fetched from Dhan's own historical_daily_data endpoint - that
-   endpoint is currently returning DH-905 "bad parameters" for this
-   account regardless of instrument_type/date-range tried (confirmed via
-   a direct raw REST call, bypassing the SDK entirely, same error) -
-   this looks like a genuinely broken/changed Dhan endpoint right now,
-   worth flagging separately since Swing's own LIVE daily watchlist
-   prune (_fetch_daily_closes_once) depends on this exact same endpoint
-   and is very likely silently doing nothing in production as a result
-   (it fails open by design, so nothing would have surfaced as an
-   error). Resampling from 5-min data sidesteps it entirely for this
-   backtest and is arguably more consistent (one data source, ticks
+   NOT fetched from Dhan's own historical_daily_data endpoint. Initially
+   avoided because that endpoint appeared to reject every request during
+   this backtest's own development - CORRECTED same day: that was a
+   stale local access token producing a misleading DH-905 "bad
+   parameters" error rather than a genuine endpoint problem: re-verified
+   directly against the live traderBoy droplet with a fresh token and
+   it returned a clean, correct daily-candle result, and Swing's own
+   live daily watchlist prune (_fetch_daily_closes_once, same endpoint)
+   is unaffected - see trading-skills' learnings/dhan-charts-historical-
+   endpoint-broken.md for the full corrected writeup. Resampling from
+   5-min data sidesteps the question entirely either way and is
+   arguably more consistent (one data source, ticks
    line up exactly) - not a compromise made to save time.
 4. Entry trigger replicated EXACTLY as production defines it
    (Swing/trading_engine.py._evaluate_watchlist_entry_signal): price
