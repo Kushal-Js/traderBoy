@@ -4170,6 +4170,48 @@ out of git.
     was never affected. Full corrected writeup in trading-skills'
     `learnings/dhan-charts-historical-endpoint-broken.md`.
 
+    **Follow-up same day, user request: "tune the parameters and re-test
+    and also verify /v2/charts/historical (daily candles) endpoint in
+    production and let me know the results."** Two separate pieces:
+
+    1. **Endpoint verification** - SSH'd into the live droplet and ran
+       the actual production `_fetch_daily_closes_once('RELIANCE')`
+       directly: returned a clean, correct 63-daily-candle result. A raw
+       call to the same endpoint from the droplet also returned
+       `status: success` with real OHLCV data. Confirms the correction
+       above - the daily watchlist prune has never actually been broken
+       in production; the original alarm was purely a local-machine
+       stale-token artifact.
+
+    2. **Parameter sweep** - new `backtest_momentum_signal_tune.py`
+       (read-only, reuses the SAME 782 real entry-signal events already
+       found - only the scoring parameters vary, no new Dhan calls
+       needed) swept 36 configurations: fractal `k` in {2,3,4} x 3
+       coil/baseline windows x 4 weight profiles. Found `k=2` robustly
+       beats `k=3`/`k=4` on population-wide correlation (every single
+       k=2 config outranked every k=3/k=4 config - a real, non-noisy
+       pattern), best correlation +0.071 (up from the original +0.061) -
+       still weak in absolute terms, and that exact best-correlation
+       config's own same-day "which candidate should Swing pick" test
+       came out to 50.9% - a coin flip. The single best horse-race
+       result across all 36 configs (67.3%) belonged to a DIFFERENT
+       configuration with NEGATIVE correlation and an inverted bucket-
+       return ordering (its own "high score" tercile actually
+       UNDERPERFORMED its "low score" tercile on average return) - the
+       textbook signature of a multiple-comparisons artifact from
+       scanning 36 configs on a 55-day sample, not a real, generalizable
+       edge. One genuinely encouraging (but still weak-correlation-
+       riding) data point: at the best-by-correlation config, the high
+       tercile's average WINNING trade (+1.79%) is meaningfully bigger
+       than the low tercile's (+1.12%), not just a marginally higher win
+       rate. **Overall verdict unchanged: tuning did not rescue this
+       into a deployable signal** - full sweep table and reasoning in
+       trading-skills' `designs/hhhl-momentum-continuation.md`.
+
+    Ran the full test suite afterward (no production code touched by
+    either piece), all pass. No deploy - verification + backtest-tuning
+    work only.
+
     Ran the full 25-file test suite afterward, all pass. No deploy - this
     is analysis/backtest work only, per the user's own "show me results
     first... then we'll think about deploying" and the established
