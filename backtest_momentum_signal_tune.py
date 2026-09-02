@@ -144,7 +144,7 @@ def find_entry_events(symbol: str) -> tuple[dict, list[dict]] | None:
         forward_return_pct = (closes5[exit_idx] - closes5[t]) / closes5[t] * 100.0
         events.append({"symbol": symbol, "index": t, "entry_date": day, "forward_return_pct": forward_return_pct})
 
-    candle_data = {"highs": highs5, "lows": lows5, "closes": closes5, "volumes": vols5}
+    candle_data = {"highs": highs5, "lows": lows5, "closes": closes5, "volumes": vols5, "timestamps": ts5}
     return candle_data, events
 
 

@@ -4266,6 +4266,53 @@ out of git.
     Ran the full 27-file test suite afterward, all pass. No deploy -
     analysis/backtest work only.
 
+87. **ORB + VWAP + Volume confluence re-ranking signal - user request 2
+    Sep 2026, BACKTEST-ONLY - the second of two "different signal
+    ideas" ("explore a different signal idea and keep this on hold"
+    referring to entry #85's HH/HL signal; entry #86's Relative Strength
+    was the first alternative tried, also no edge).** Sourced pattern
+    (already cited in trading-skills' own momentum-entry-conditions
+    research, never built anywhere in this codebase): a candle CLOSING
+    beyond the day's own opening range, price above VWAP, and volume
+    meaningfully above its own recent average - a third, genuinely
+    different mechanism from both prior signals (no chart-pattern swing
+    geometry, no cross-sectional benchmark comparison - a purely
+    intraday, session-anchored confluence check).
+
+    New `Swing/orb_vwap_signal.py` (pure, unit-tested, 7 scenarios in
+    `tests/test_swing_orb_vwap_signal.py`): `day_boundaries`/`opening_
+    range` (first N bars of each trading day), `vwap_series` (session-
+    anchored, RESETS every day), `orb_breakout_score`/`vwap_confluence_
+    score` (0 until price genuinely closes beyond the reference level,
+    then scales up in ATR units), combined with `rvol_score` (reused
+    as-is from entry #85's own module) via `orb_vwap_composite_score`.
+
+    New `backtest_orb_vwap_signal.py` reused the IDENTICAL 782 real
+    Swing entry-signal events used for BOTH prior signal backtests -
+    directly comparable to both. Swept the opening-range window
+    (15/30/60 minutes). **Result: no usable edge** - negative
+    correlation at all three windows (-0.031/-0.024/-0.013), same-day
+    horse race below 50% at every window (40.7%/40.0%/47.4%).
+
+    **Cross-signal synthesis, all three tested against the identical 782
+    entries**: HH/HL (+0.071 best correlation, but only a 50.9% coin-flip
+    horse race at that same setting), Relative Strength (-0.003 best
+    correlation, consistently below-50% horse race), ORB+VWAP+Volume
+    (-0.013 best correlation, near-50% horse race). **None of the three
+    cleared a bar that would justify production deployment.** Recorded
+    as a genuinely useful negative result about this specific ~90-day/
+    22-symbol dataset - doesn't prove no such signal could ever help,
+    but three honestly-implemented, reasonably-sourced approaches all
+    came up empty here. Full synthesis in trading-skills'
+    `designs/orb-vwap-volume-confluence.md`, which also recommends
+    questioning the evaluation setup itself (a longer/different backtest
+    window, a less noisy forward-return definition) before trying a
+    fourth signal idea, rather than continuing to cycle through more
+    signal families against the same narrow window.
+
+    Ran the full 28-file test suite afterward, all pass. No deploy -
+    analysis/backtest work only.
+
     Deployed directly per the user's own explicit instruction ("Create
     and Test thoroughly and deploy it also") - every package flat at
     deploy time (checked all four - Options/Futures/Luxury/Swing -
