@@ -4156,17 +4156,19 @@ out of git.
     `designs/hhhl-momentum-continuation.md`.
 
     **Unrelated discovery made getting this backtest's daily-context
-    data**: Dhan's own `/v2/charts/historical` (daily candles) endpoint
-    is currently rejecting EVERY request for this account with `DH-905`,
-    regardless of `instrument_type`/date-range tried - confirmed via a
-    raw REST call bypassing the SDK entirely (genuine HTTP 400 from
-    Dhan's own server, not an SDK bug). This is the SAME endpoint
-    `_fetch_daily_closes_once` (entry #77's daily watchlist prune) uses
-    live - that function fails open by design, so this could be silently
-    doing nothing in production with zero visible error. NOT yet
-    verified directly against the live droplet - full details in
-    trading-skills' `learnings/dhan-charts-historical-endpoint-broken.md`,
-    flagged to the user, not yet independently investigated further.
+    data, CORRECTED same day (false alarm)**: initially looked like
+    Dhan's own `/v2/charts/historical` (daily candles) endpoint was
+    rejecting every request for this account with `DH-905`, the SAME
+    endpoint `_fetch_daily_closes_once` (entry #77's daily watchlist
+    prune) uses live. **Verified directly against the live droplet a few
+    hours later - the production function returned a clean, correct
+    63-candle result, and the endpoint itself is fine.** Root cause was a
+    stale LOCAL access token producing a misleading `DH-905` "bad
+    parameters" error instead of the clear `DH-906 Invalid Token` other
+    endpoints return for the same problem - re-testing locally with a
+    fresh token succeeded immediately. Swing's live daily watchlist prune
+    was never affected. Full corrected writeup in trading-skills'
+    `learnings/dhan-charts-historical-endpoint-broken.md`.
 
     Ran the full 25-file test suite afterward, all pass. No deploy - this
     is analysis/backtest work only, per the user's own "show me results
