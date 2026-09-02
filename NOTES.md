@@ -4091,6 +4091,89 @@ out of git.
     compare only the symbol part of each line, since the real file now
     carries dates. Ran the full 24-file suite afterward, all pass.
 
+85. **HH/HL momentum-continuation composite score - user request 2 Sep
+    2026, BACKTEST-ONLY, not deployed.** User's own framing of the idea:
+    "there is a higher high, higher low kind of a formation over a five
+    minute candle than a stock price is rising over daily time frame...
+    before rising, there would be a kind of a consolidation period" -
+    proposed as "an additional pre-filter/context layer ahead of current
+    Supertrend crossover entry trigger and this should re-rank them (soft
+    signal)... show me results first... then we will think of deploying
+    it or not based on profits or higher profitability signal detection."
+
+    New `Swing/momentum_signal.py` - pure, unit-tested functions
+    (`tests/test_swing_momentum_signal.py`, 16 scenarios): fractal swing-
+    high/low detection (`k` bars each side, user's own suggested method,
+    "this can further be optimized also" - k=2 used for this backtest,
+    not yet swept), `detect_hh_hl_breakouts` (fires the first bar price
+    crosses a pivot where the last two confirmed swing highs AND the
+    last two confirmed swing lows are both ascending - the Dow Theory
+    definition of a resumed uptrend, respecting each swing's own k-bar
+    confirmation lag so there's no lookahead), and four soft-score
+    components the user explicitly asked for: coil tightness (ATR
+    contraction before the breakout vs a longer baseline - the intraday-
+    scale analogue of VCP's volume/range "dry-up", already researched in
+    trading-skills' own `vcp.md`), freshness (linear decay from the
+    breakout bar, same principle entry #80's ranking already uses),
+    RVOL (breakout bar's volume vs the historical average for that SAME
+    time-of-day slot), and extension (penalizes a candidate that's
+    already run far above its own pivot, in ATR multiples). Combined via
+    `composite_momentum_score` - untuned default weights, not a fit
+    result.
+
+    New top-level `backtest_momentum_signal.py` (read-only, same
+    discipline `bt_common.py` already follows) - fetched real Dhan 5-min
+    AND 1-min candles, ~90 calendar days back (confirmed empirically to
+    be the actual limit for BOTH intervals on this account - the
+    `dhanhq` SDK's own docstring claiming 1-min only goes back 5 trading
+    days is wrong), for all 22 `data/watchlist` symbols. Replicated
+    Swing's own REAL production entry rule EXACTLY
+    (`_evaluate_watchlist_entry_signal`'s price-confirmation gate + 5-min
+    crossed-above-Supertrend + 1-min at/crossed-above-Supertrend) rather
+    than inventing an easier one, so the backtest isolates exactly one
+    variable: does the new score correctly rank real entry-signal
+    candidates. "Daily" context (previous close) was derived by
+    resampling the fetched 5-min candles instead of calling Dhan's own
+    daily-candle endpoint - see the discovery below for why. Forward
+    return = the underlying's own % move to the same Supertrend-reversal
+    exit rule (or a 150-bar cap) - a setup-quality proxy via the
+    underlying's price move, not a full options/futures P&L simulation.
+
+    **Result across 792 real historical entry signals (21 symbols with
+    data, ~90 days): a weak positive signal, not a strong one.** Pearson
+    correlation between composite score and forward return: +0.061.
+    Score-tercile breakdown: low/mid/high buckets averaged -0.06% /
+    +0.18% / +0.22% forward return respectively (win rates 35.7% / 37.4%
+    / 38.3% - barely different). The direct "which candidate should
+    Swing actually pick" test - on the 57 days where 2+ symbols scored
+    at once, the higher-scored one had the equal-or-better return 33/57
+    times (57.9%) - a modest edge over a coin flip, not a dramatic one.
+    **Not compelling enough on its own to recommend production
+    deployment as currently parameterized** - full writeup, honest
+    read, and concrete next steps if pursued further (sweep k and the
+    coil window, separately measure winner/loser magnitude not just win
+    rate, wider time window) in trading-skills'
+    `designs/hhhl-momentum-continuation.md`.
+
+    **Unrelated discovery made getting this backtest's daily-context
+    data**: Dhan's own `/v2/charts/historical` (daily candles) endpoint
+    is currently rejecting EVERY request for this account with `DH-905`,
+    regardless of `instrument_type`/date-range tried - confirmed via a
+    raw REST call bypassing the SDK entirely (genuine HTTP 400 from
+    Dhan's own server, not an SDK bug). This is the SAME endpoint
+    `_fetch_daily_closes_once` (entry #77's daily watchlist prune) uses
+    live - that function fails open by design, so this could be silently
+    doing nothing in production with zero visible error. NOT yet
+    verified directly against the live droplet - full details in
+    trading-skills' `learnings/dhan-charts-historical-endpoint-broken.md`,
+    flagged to the user, not yet independently investigated further.
+
+    Ran the full 25-file test suite afterward, all pass. No deploy - this
+    is analysis/backtest work only, per the user's own "show me results
+    first... then we'll think about deploying" and the established
+    live-trading safety practice (no code path here touches
+    `place_market_order`/production ranking at all).
+
     Deployed directly per the user's own explicit instruction ("Create
     and Test thoroughly and deploy it also") - every package flat at
     deploy time (checked all four - Options/Futures/Luxury/Swing -
