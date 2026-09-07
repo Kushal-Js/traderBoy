@@ -346,6 +346,18 @@ async def test_5_basket_mode_tick_ranks_entries_too():
     ste.config.WATCHLIST_ENTRY_ENABLED = True
     real_cap = ste.config.MAX_LIVE_BASKETS
     ste.config.MAX_LIVE_BASKETS = 1
+    # "basket" mode's own tick (unlike sequential/basket_hedge) re-checks
+    # EVERY live basket for exit in the same tick right after placing a
+    # fresh entry (see _basket_monitor_tick's own code) - so the new
+    # FUTURES_MAX_LOSS_RS check (added 7 Sep 2026) would immediately
+    # evaluate against this fixture's flat get_option_ltp fake (50.0),
+    # which reads as a huge "loss" against FRESHSTOCK's fake fill price
+    # (100.0) that has nothing to do with what THIS file tests (entry
+    # ranking, not the exit-side rupee caps) - pinned high so it can
+    # never fire here; real production sees ~0 loss immediately after a
+    # genuine fill either way.
+    real_futures_cap = ste.config.FUTURES_MAX_LOSS_RS
+    ste.config.FUTURES_MAX_LOSS_RS = 10_000_000.0
 
     older = datetime(2026, 9, 1, 10, 5, tzinfo=ste.IST)
     newer = datetime(2026, 9, 1, 10, 10, tzinfo=ste.IST)
@@ -367,6 +379,7 @@ async def test_5_basket_mode_tick_ranks_entries_too():
         ste.config.STRATEGY_ENABLED = real_enabled
         ste.config.WATCHLIST_ENTRY_ENABLED = real_watch_enabled
         ste.config.MAX_LIVE_BASKETS = real_cap
+        ste.config.FUTURES_MAX_LOSS_RS = real_futures_cap
 
 
 async def main():

@@ -143,7 +143,7 @@ async def test_1_full_sequential_loop_produces_expected_events_in_order():
 
         # FUTURES -> PE
         leg = store.live_legs[symbol]
-        await ste._swap_futures_to_pe(symbol, leg)
+        await ste._swap_futures_to_pe(symbol, leg, "SUPERTREND_5MIN_EXIT")
         assert store.live_legs[symbol].option_type == "PE"
 
         # PE -> FUTURES (loop continues)
@@ -237,7 +237,7 @@ async def test_3_left_flat_event_on_mid_swap_failure():
     # Now force the ATM PE lookup to fail during the swap.
     restore = install_all_dhan_mocks(fill_prices=[105.0], fail_atm_option=True)
     try:
-        await ste._swap_futures_to_pe(symbol, leg)
+        await ste._swap_futures_to_pe(symbol, leg, "SUPERTREND_5MIN_EXIT")
         assert symbol not in store.live_legs, "must be left flat (no leg held) after the failed swap"
         assert symbol not in store.reserved_symbols
 

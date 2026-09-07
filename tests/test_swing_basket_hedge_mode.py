@@ -217,7 +217,7 @@ async def test_2_full_cycle_basket_to_pe_hedge_to_loss_cap_exit():
 
         # --- BASKET -> PE_HEDGE (exit signal fires: sell both legs, buy 1 PE) ---
         exit_fires["value"] = True
-        await ste._exit_basket_hedge_to_pe(symbol, position)
+        await ste._exit_basket_hedge_to_pe(symbol, position, "SUPERTREND_5MIN_EXIT")
         position = store.live_positions[symbol]
         assert position.state == "PE_HEDGE", position.state
         assert len(position.legs) == 1, position.legs

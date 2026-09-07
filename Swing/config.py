@@ -187,7 +187,14 @@ MAX_LIVE_BASKETS = int(os.getenv("SWING_MAX_LIVE_BASKETS", "2"))
 # both modes) - a loss-capped PE exit returns the symbol to plain
 # watching instead (user confirmed via AskUserQuestion 1 Sep 2026 for
 # sequential mode; explicitly requested outright for basket_hedge mode).
-PE_MAX_LOSS_RS = float(os.getenv("SWING_PE_MAX_LOSS_RS", "2000"))
+#
+# Lowered 2000->1500 (user request 7 Sep 2026), straight off a real
+# backtest of the "longTerm" Chartink scan's own alert history through
+# basket_hedge's live mechanics: 5 of 6 replayed trades exited via this
+# cap or PE_PROFIT_LOCK_RS rather than the bare Supertrend reversal, and
+# the user tightened the loss side without being asked to touch the
+# profit side.
+PE_MAX_LOSS_RS = float(os.getenv("SWING_PE_MAX_LOSS_RS", "1500"))
 
 # basket_hedge mode only (added 1 Sep 2026) - condition 2 of the PE
 # hedge's own 3-way exit: "Lock profit when it becomes more than 2k"
@@ -195,6 +202,28 @@ PE_MAX_LOSS_RS = float(os.getenv("SWING_PE_MAX_LOSS_RS", "2000"))
 # upside. Unrealized profit, mark-to-market against current LTP, checked
 # every tick alongside the loss cap.
 PE_PROFIT_LOCK_RS = float(os.getenv("SWING_PE_PROFIT_LOCK_RS", "2000"))
+
+# The FUTURES leg's own hard rupee loss cap (added 7 Sep 2026, user
+# request: "Futures leg max loss to 5000" - given straight off seeing a
+# real backtest of the "longTerm" Chartink scan's own alert history where
+# the BASKET-phase futures leg lost Rs 8,100 and Rs 13,500 uncapped,
+# because until now the ONLY thing that could end BASKET state was the
+# 5-min Supertrend crossing below - no rupee floor under it at all, unlike
+# the PE-hedge phase which already had PE_MAX_LOSS_RS/PE_PROFIT_LOCK_RS).
+# Checked in _evaluate_basket_exit_signal (shared by "basket" mode's own
+# BASKET state, "sequential" mode's plain FUTURES-leg state, and
+# basket_hedge mode's own BASKET state - all three hold a bare futures
+# leg with no rupee floor before this), mark-to-market against current
+# LTP, BEFORE the Supertrend check - same priority PE_MAX_LOSS_RS gets
+# over the bare reversal in the PE-hedge phase. Deliberately loss-only,
+# no profit-lock mirror - not requested. A hit here routes through
+# exactly the same downstream path the Supertrend exit already used
+# (BASKET -> flat for "basket" mode, BASKET -> PE hedge for
+# "sequential"/basket_hedge - see _evaluate_basket_exit_signal's own
+# docstring), just with a different exit_reason string
+# ("FUTURES_MAX_LOSS_HIT") recorded so it's distinguishable in
+# /trade-history and /swing_events from a genuine Supertrend exit.
+FUTURES_MAX_LOSS_RS = float(os.getenv("SWING_FUTURES_MAX_LOSS_RS", "5000"))
 
 QUANTITY_LOTS = int(os.getenv("SWING_QUANTITY_LOTS", "1"))
 

@@ -4706,6 +4706,107 @@ out of git.
     `FUND_SECONDARY_BUCKET_PCT=15`/`FUNDS_CHECK_ENABLED=true` (Options)/
     `FUTURES_FUNDS_CHECK_ENABLED=true`/`LUXURY_FUNDS_CHECK_ENABLED=true`.
 
+93. **`PE_MAX_LOSS_RS` lowered 2000->1500 + new `FUTURES_MAX_LOSS_RS`
+    (5000) added to the futures leg - user request 7 Sep 2026, given
+    straight off a real backtest** (the same conversation: the user
+    supplied a real Chartink "longTerm" scan alert-firing export,
+    `/chartink/webhook-swing-enter`'s CURRENT alert history for 28 Aug -
+    7 Sep 2026, and asked for a day-wise/trade-wise backtest of
+    basket_hedge's own live mechanics against it, then a P&L figure).
+    The P&L pass fetched REAL historical Dhan data throughout (not the
+    first pass's underlying-%-move proxy): real futures lot sizes for
+    the exact futures-leg P&L, and real historical ATM PE premium data
+    (nearest-strike-to-price PUT, nearest not-yet-expired monthly
+    expiry, resolved straight from the instrument master) to replay the
+    PE-hedge phase's actual `PE_MAX_LOSS_RS`/`PE_PROFIT_LOCK_RS`/bare-
+    reversal priority order. Result: the BASKET-phase futures leg lost
+    Rs 8,100 and Rs 13,500 UNCAPPED in two of the six replayed trades -
+    until now, only the 5-min Supertrend crossing below could ever end
+    BASKET state, no rupee floor under the futures leg at all, unlike
+    the PE-hedge phase which already had two. User's response: tighten
+    `PE_MAX_LOSS_RS` (2000->1500) and add a new, equivalent `FUTURES_
+    MAX_LOSS_RS` (5000) - deliberately loss-only, no profit-lock mirror
+    requested for the futures side.
+
+    `_evaluate_basket_exit_signal` (`Swing/trading_engine.py`, shared
+    unchanged by "basket" mode's own BASKET state, "sequential" mode's
+    plain FUTURES-leg state, and basket_hedge mode's own BASKET state -
+    all three hold a bare futures leg here) gained a new FIRST check:
+    the futures leg's own mark-to-market loss against a fresh
+    `get_option_ltp` call (confirmed this call is generic - Tradehull's
+    `get_ltp_data` under the hood - and the futures leg is ALREADY
+    subscribed to the live price feed via `subscribe_option_price` at
+    reconciliation time, so no new subscription plumbing was needed) -
+    over `FUTURES_MAX_LOSS_RS` fires `FUTURES_MAX_LOSS_HIT`, checked
+    BEFORE the original Supertrend crossed-below check, same priority
+    `PE_MAX_LOSS_RS`/`PE_PROFIT_LOCK_RS` already get over the bare
+    reversal in the PE-hedge phase's own `_evaluate_pe_hedge_exit_
+    signal`. Renamed the function's own second parameter from `basket`
+    (a whole `Basket` object, only ever populated by plain basket mode)
+    to `futures_leg: Optional[Leg]` (the ONE leg every mode actually
+    needs for this check) - all 3 call sites updated to pass the real
+    futures leg (`basket.futures_leg` / the sequential `leg` already in
+    scope / basket_hedge's `position.legs[0]`, always the futures leg in
+    BASKET state per `BasketHedgePosition`'s own docstring) instead of
+    `None`.
+
+    **A real, if narrow, pre-existing gap this surfaced**: `_swap_
+    futures_to_pe`/`_exit_basket_hedge_to_pe` (the swap functions
+    sequential/basket_hedge call once this signal fires) had NEVER
+    actually threaded the real exit reason through - both hardcoded a
+    literal `"SUPERTREND_5MIN_EXIT"` string into their own store-update
+    and `_record_swing_event` calls regardless of what `_evaluate_
+    basket_exit_signal` returned. Harmless while that function only ever
+    returned one possible non-None reason; would have silently
+    mislabeled every future `FUTURES_MAX_LOSS_HIT` swap as a Supertrend
+    exit in `/trade-history` and `/swing_events` had it not been caught
+    here. Fixed: both functions now take `reason: str` and record it
+    verbatim; both call sites pass through whatever `_evaluate_basket_
+    exit_signal` actually returned. `_exit_basket` (plain basket mode's
+    own exit) already threaded `reason` correctly - untouched.
+
+    **Test fallout, found by running the full 30-file suite (not just
+    the modified files) per the now-standing post-`.env`-change
+    practice**: every direct call to the renamed/now-required-arg
+    functions across `test_swing_signal_logic.py` (`basket=None` ->
+    `futures_leg=None`; the one real-Basket-object call updated to pass
+    `.futures_leg`, plus its `get_option_ltp` fake overridden from the
+    shared 50.0 flat-fake to a small under-the-cap loss so it still
+    genuinely exercises the Supertrend branch, not the new cap),
+    `test_swing_basket_hedge_mode.py`, `test_swing_sequential_mode.py`
+    (x2), `test_swing_watchlist_entry_toggle.py`, and `test_swing_
+    events_log.py` (x2) all updated to pass the new required `reason`
+    argument. New `test_8_futures_max_loss_signal` added to `test_swing_
+    signal_logic.py`: a loss over the cap fires `FUTURES_MAX_LOSS_HIT`
+    even with NO Supertrend signal present at all (proves the priority
+    ordering, not just that the check exists), a loss under the cap
+    correctly falls through to the ordinary Supertrend check, and
+    `futures_leg=None` (paper trading's own two call sites, deliberately
+    left unextended - paper trading doesn't track a live futures LTP the
+    same way and its `PaperLeg` doesn't share `Leg`'s attribute names)
+    skips the Rs check entirely.
+
+    **A second, unrelated but real regression found the same way**:
+    `test_swing_entry_ranking.py`'s test 5 (`_basket_monitor_tick`,
+    plain basket mode) started failing - NOT from a signature change,
+    but because "basket" mode's own tick (unlike sequential/basket_
+    hedge) re-checks EVERY live basket for exit in the SAME tick right
+    after placing a fresh entry (see that function's own code), so the
+    new check immediately evaluated against this fixture's flat
+    `get_option_ltp` fake (a flat 50.0 against a fake fill price of
+    100.0) - a "loss" with nothing to do with what this file actually
+    tests (entry ranking), which closed the freshly-ranked-in basket
+    within the same tick before the assertion ran. Fixed by pinning
+    `FUTURES_MAX_LOSS_RS` very high for that one test's own duration,
+    same explicit-pin pattern already used for `WATCHLIST_ENTRY_
+    ENABLED` after entry #91's own `.env` change. Real production sees
+    ~0 loss immediately after a genuine fill either way - this was
+    purely a fixture artifact, not a live risk.
+
+    Ran the full 30-file suite (18 Swing + 12 other) twice after the
+    fixes, all pass. Updated `README.md` (`Swing/config.py`'s own row,
+    `Swing/trading_engine.py`'s own row), `tests/README.md`.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM

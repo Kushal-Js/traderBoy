@@ -94,13 +94,17 @@ MOST ONE leg at a time (see position_store.SequentialPositionStore),
 looping between futures and a PE hedge:
 
     NONE --(entry signal)--------------------------> FUTURES
-    FUTURES --(exit signal: 5-min crossed below ST)-> PE
+    FUTURES --(exit signal: 5-min crossed below ST,
+               OR futures loss > config.FUTURES_MAX_LOSS_RS)-> PE
     PE --(entry signal re-fires)---------------------> FUTURES   [loop]
     PE --(unrealized loss > config.PE_MAX_LOSS_RS)---> NONE (watching)
 
 The entry/exit SIGNAL itself (_evaluate_watchlist_entry_signal/
 _evaluate_basket_exit_signal, both below) is IDENTICAL between the two
-modes - only what happens once a signal fires differs. Two points were
+modes - only what happens once a signal fires differs (and, since 7 Sep
+2026, the exit_reason it fires with can be "FUTURES_MAX_LOSS_HIT" instead
+of "SUPERTREND_5MIN_EXIT" - see config.FUTURES_MAX_LOSS_RS's own
+docstring). Two points were
 genuinely ambiguous in the user's own wording ("Exit this PE option
 contract once loss become more than 2k or entry condition are met
 again, then buy future contract again at market price") and were
@@ -674,7 +678,7 @@ async def _enter_futures_for_stock(symbol: str) -> dict:
         return {"symbol": symbol, "status": "error", "reason": str(exc)}
 
 
-async def _swap_futures_to_pe(symbol: str, futures_leg: Leg) -> None:
+async def _swap_futures_to_pe(symbol: str, futures_leg: Leg, reason: str) -> None:
     """FUTURES -> PE. Sells the futures leg, then buys the ATM PE hedge.
     If the futures SELL itself fails, the leg is left exactly as-is (no
     state change) - the next monitor tick re-detects the same exit
@@ -682,7 +686,14 @@ async def _swap_futures_to_pe(symbol: str, futures_leg: Leg) -> None:
     _exit_basket's own SELL failures already accept. If the SELL
     succeeds but the PE BUY then fails, the symbol is left FLAT
     (capacity released) rather than stuck - the safest failure state (no
-    real exposure) - and the next entry signal picks the symbol up fresh."""
+    real exposure) - and the next entry signal picks the symbol up fresh.
+
+    `reason` (added 7 Sep 2026 alongside FUTURES_MAX_LOSS_RS) is whatever
+    _evaluate_basket_exit_signal actually returned - "SUPERTREND_5MIN_EXIT"
+    or "FUTURES_MAX_LOSS_HIT" - recorded verbatim below instead of the
+    previous hardcoded "SUPERTREND_5MIN_EXIT" literal, so a rupee-cap swap
+    is distinguishable from a genuine Supertrend one in /trade-history and
+    /swing_events."""
     loop = asyncio.get_running_loop()
     futures_exit = await _place_leg(
         futures_leg.option_trading_symbol, futures_leg.quantity, "SELL",
@@ -696,7 +707,7 @@ async def _swap_futures_to_pe(symbol: str, futures_leg: Leg) -> None:
         return
 
     futures_exit_price = futures_exit.get("fill_price") or futures_leg.entry_price
-    await sequential_store.close_leg_for_swap(symbol, futures_exit_price, "SUPERTREND_5MIN_EXIT")
+    await sequential_store.close_leg_for_swap(symbol, futures_exit_price, reason)
 
     try:
         atm = await loop.run_in_executor(None, dhan_wrapper.get_atm_option, symbol, "PE")
@@ -736,7 +747,7 @@ async def _swap_futures_to_pe(symbol: str, futures_leg: Leg) -> None:
     await sequential_store.set_leg(pe_leg)
     logger.info("%s: sequential SWAP futures->PE - PE %s@%.2f", symbol, atm.trading_symbol, option_fill_price)
     await _record_swing_event("SEQUENTIAL_SWAPPED_TO_PE", symbol, {
-        "exit_reason": "SUPERTREND_5MIN_EXIT", "futures_exit_price": futures_exit_price,
+        "exit_reason": reason, "futures_exit_price": futures_exit_price,
         "pe_trading_symbol": atm.trading_symbol, "pe_entry_price": option_fill_price, "pe_quantity": option_qty,
     })
 
@@ -986,7 +997,7 @@ async def _enter_basket_hedge_for_stock(symbol: str) -> dict:
         return {"symbol": symbol, "status": "error", "reason": str(exc)}
 
 
-async def _exit_basket_hedge_to_pe(symbol: str, position: BasketHedgePosition) -> None:
+async def _exit_basket_hedge_to_pe(symbol: str, position: BasketHedgePosition, reason: str) -> None:
     """BASKET -> PE_HEDGE. Sells every leg CURRENTLY held (1 for the
     grandfathered position, 2 for a normal all-or-nothing entry - see
     BasketHedgePosition's own docstring), then buys ONE ATM PE hedge.
@@ -994,7 +1005,14 @@ async def _exit_basket_hedge_to_pe(symbol: str, position: BasketHedgePosition) -
     a leg that can't be SOLD is left exactly as-is for the next tick to
     retry (nothing here proceeds to the PE buy until every current leg
     is confirmed sold); once all are sold, a failure to buy the PE hedge
-    leaves the symbol FLAT (capacity released) rather than stuck."""
+    leaves the symbol FLAT (capacity released) rather than stuck.
+
+    `reason` (added 7 Sep 2026 alongside FUTURES_MAX_LOSS_RS) is whatever
+    _evaluate_basket_exit_signal actually returned - "SUPERTREND_5MIN_EXIT"
+    or "FUTURES_MAX_LOSS_HIT" - recorded verbatim below instead of the
+    previous hardcoded "SUPERTREND_5MIN_EXIT" literal, so a rupee-cap swap
+    is distinguishable from a genuine Supertrend one in /trade-history and
+    /swing_events."""
     loop = asyncio.get_running_loop()
     exit_results = {}
     all_sold = True
@@ -1013,9 +1031,9 @@ async def _exit_basket_hedge_to_pe(symbol: str, position: BasketHedgePosition) -
     if not all_sold:
         return  # at least one leg still open - next tick re-detects the same exit condition and retries
 
-    await basket_hedge_store.close_current_legs_for_hedge_swap(symbol, exit_results, "SUPERTREND_5MIN_EXIT")
+    await basket_hedge_store.close_current_legs_for_hedge_swap(symbol, exit_results, reason)
     await _record_swing_event("BASKET_HEDGE_BASKET_EXITED", symbol, {
-        "exit_reason": "SUPERTREND_5MIN_EXIT", "exit_prices": exit_results,
+        "exit_reason": reason, "exit_prices": exit_results,
     })
 
     try:
@@ -1960,15 +1978,47 @@ async def _rank_and_enter_candidates(
     return results
 
 
-async def _evaluate_basket_exit_signal(symbol: str, basket: Basket) -> Optional[str]:
-    """EXIT rule (user's own wording, 31 Aug 2026): "5 min close price
-    cross below super trend." Mutually exclusive with the entry rule by
-    construction (a single candle can't be both a crossed-above and a
-    crossed-below at once), so this can never immediately re-fire on the
-    very candle that justified the basket's own entry - no extra
-    entry-candle guard needed the way Options/Futures/Luxury's own
-    SUPERTREND_EXIT feature requires for its own (differently-shaped)
-    check."""
+async def _evaluate_basket_exit_signal(symbol: str, futures_leg: Optional[Leg]) -> Optional[str]:
+    """EXIT rule for the BASKET state - shared unchanged by "basket"
+    mode's own BASKET state, "sequential" mode's plain FUTURES-leg state,
+    and basket_hedge mode's own BASKET state (all three hold a bare
+    futures leg here). Two checks, in priority order:
+
+    1. config.FUTURES_MAX_LOSS_RS (added 7 Sep 2026, user request
+       straight off a real backtest showing this leg lose Rs 8,100/
+       13,500 with nothing capping it) - the futures leg's own
+       mark-to-market loss against its current LTP. Checked FIRST, same
+       priority PE_MAX_LOSS_RS/PE_PROFIT_LOCK_RS get over the bare
+       reversal in the PE-hedge phase's own _evaluate_pe_hedge_exit_
+       signal. `futures_leg` is expected non-None at every real call
+       site (a Basket always has one; sequential/basket_hedge only call
+       this while a futures leg is actually held) - stays Optional and
+       fails open (skips straight to the Supertrend check) only as a
+       defensive fallback, never actually exercised in practice.
+    2. The original rule (user's own wording, 31 Aug 2026): "5 min close
+       price cross below super trend." Mutually exclusive with the entry
+       rule by construction (a single candle can't be both a
+       crossed-above and a crossed-below at once), so this can never
+       immediately re-fire on the very candle that justified the
+       basket's own entry - no extra entry-candle guard needed the way
+       Options/Futures/Luxury's own SUPERTREND_EXIT feature requires for
+       its own (differently-shaped) check."""
+    if futures_leg is not None:
+        loop = asyncio.get_running_loop()
+        try:
+            ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, futures_leg.option_trading_symbol)
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not fetch futures LTP for the Rs loss-cap check this tick", symbol)
+            ltp = None
+        if ltp is not None:
+            loss_rs = (futures_leg.entry_price - ltp) * futures_leg.quantity
+            if loss_rs > config.FUTURES_MAX_LOSS_RS:
+                logger.info(
+                    "%s: EXIT signal - futures leg loss Rs %.2f exceeds FUTURES_MAX_LOSS_RS (Rs %.2f)",
+                    symbol, loss_rs, config.FUTURES_MAX_LOSS_RS,
+                )
+                return "FUTURES_MAX_LOSS_HIT"
+
     state = await _fetch_supertrend_state(symbol, config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES)
     if state is None or not state.crossed_below:
         return None
@@ -2019,7 +2069,7 @@ async def _basket_monitor_tick() -> None:
             await watchlist_store.remove_symbol(symbol)
 
     for symbol, basket in list(basket_store.live_baskets.items()):
-        reason = await _evaluate_basket_exit_signal(symbol, basket)
+        reason = await _evaluate_basket_exit_signal(symbol, basket.futures_leg)
         if reason:
             await _exit_basket(symbol, basket, reason)
 
@@ -2071,9 +2121,9 @@ async def _sequential_monitor_tick() -> None:
                 candle_start, volume = _entry_candidate_rank_key(entry_tf)
                 fresh_entry_candidates.append((candle_start, volume, symbol))
         elif leg.option_type == "FUT":
-            reason = await _evaluate_basket_exit_signal(symbol, None)
+            reason = await _evaluate_basket_exit_signal(symbol, leg)
             if reason:
-                await _swap_futures_to_pe(symbol, leg)
+                await _swap_futures_to_pe(symbol, leg, reason)
         else:  # "PE"
             if await _evaluate_watchlist_entry_signal(symbol):
                 await _swap_pe_to_futures(symbol, leg)
@@ -2130,9 +2180,9 @@ async def _basket_hedge_monitor_tick() -> None:
                 candle_start, volume = _entry_candidate_rank_key(entry_tf)
                 entry_candidates.append((candle_start, volume, symbol))
         elif position.state == "BASKET":
-            reason = await _evaluate_basket_exit_signal(symbol, None)
+            reason = await _evaluate_basket_exit_signal(symbol, position.legs[0])
             if reason:
-                await _exit_basket_hedge_to_pe(symbol, position)
+                await _exit_basket_hedge_to_pe(symbol, position, reason)
         else:  # "PE_HEDGE"
             pe_leg = position.legs[0]
             reason = await _evaluate_pe_hedge_exit_signal(symbol, pe_leg)

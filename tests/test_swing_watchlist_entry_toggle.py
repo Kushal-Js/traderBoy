@@ -297,7 +297,7 @@ async def test_4_sequential_mode_fresh_entry_blocked_but_loop_continuation_unaff
         })
         await ste._enter_futures_for_stock("LOOPSTOCK")
         fut_leg = store.live_legs["LOOPSTOCK"]
-        await ste._swap_futures_to_pe("LOOPSTOCK", fut_leg)
+        await ste._swap_futures_to_pe("LOOPSTOCK", fut_leg, "SUPERTREND_5MIN_EXIT")
         assert store.live_legs["LOOPSTOCK"].option_type == "PE", store.live_legs.get("LOOPSTOCK")
         restore_signal()
 

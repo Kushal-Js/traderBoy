@@ -343,17 +343,17 @@ async def test_5_exit_signal():
     ste._fetch_supertrend_state = fake_fetch
     try:
         state_5min = _make_state(is_above=False, prev_is_above=True)  # a genuine crossed-below
-        reason = await ste._evaluate_basket_exit_signal("RELIANCE", basket=None)
+        reason = await ste._evaluate_basket_exit_signal("RELIANCE", futures_leg=None)
         assert reason == "SUPERTREND_5MIN_EXIT", reason
 
         state_5min = _make_state(is_above=False, prev_is_above=False)  # already below, not a fresh cross
-        assert await ste._evaluate_basket_exit_signal("RELIANCE", basket=None) is None
+        assert await ste._evaluate_basket_exit_signal("RELIANCE", futures_leg=None) is None
 
         state_5min = _make_state(is_above=True, prev_is_above=True)  # still above, no signal
-        assert await ste._evaluate_basket_exit_signal("RELIANCE", basket=None) is None
+        assert await ste._evaluate_basket_exit_signal("RELIANCE", futures_leg=None) is None
 
         state_5min = None  # no data
-        assert await ste._evaluate_basket_exit_signal("RELIANCE", basket=None) is None
+        assert await ste._evaluate_basket_exit_signal("RELIANCE", futures_leg=None) is None
 
         print("5. Exit signal fires ONLY on a genuine 5-min crossed-below (not an already-below "
               "state, not missing data) - unaffected by the entry-side price-confirmation gate: PASSED")
@@ -428,8 +428,15 @@ async def test_7_full_auto_exit_via_basket_signal():
 
     ste._fetch_supertrend_state = fake_fetch
     restore = install_all_dhan_mocks()
+    # install_all_dhan_mocks()'s own get_option_ltp fake (flat 50.0) would
+    # look like a huge, cap-breaching loss against this futures leg's own
+    # entry_price (4000.0) - override it here to a small, under-the-cap
+    # loss so this test genuinely exercises the SUPERTREND branch, not the
+    # new FUTURES_MAX_LOSS_RS one (see test_8_futures_max_loss_signal for
+    # that check's own dedicated coverage).
+    odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 3990.0
     try:
-        reason = await ste._evaluate_basket_exit_signal("TCS", basket)
+        reason = await ste._evaluate_basket_exit_signal("TCS", basket.futures_leg)
         assert reason == "SUPERTREND_5MIN_EXIT", reason
         await ste._exit_basket("TCS", basket, reason)
 
@@ -450,6 +457,66 @@ async def test_7_full_auto_exit_via_basket_signal():
         ste._fetch_supertrend_state = real_fetch
 
 
+async def test_8_futures_max_loss_signal():
+    """config.FUTURES_MAX_LOSS_RS (added 7 Sep 2026, user request straight
+    off a real backtest showing this leg lose Rs 8,100/13,500 uncapped):
+    a futures-leg unrealized loss over the cap fires FUTURES_MAX_LOSS_HIT
+    - BEFORE the Supertrend check even runs (same priority
+    PE_MAX_LOSS_RS/PE_PROFIT_LOCK_RS get over the bare reversal in the
+    PE-hedge phase) - and a loss under the cap correctly falls through to
+    the ordinary Supertrend check unaffected."""
+    real_ltp = odc.dhan_wrapper.get_option_ltp
+    real_cap = ste.config.FUTURES_MAX_LOSS_RS
+    real_fetch = ste._fetch_supertrend_state
+    ste.config.FUTURES_MAX_LOSS_RS = 5000.0
+    futures_leg = sps.Leg(underlying_symbol="HDFCBANK", option_trading_symbol="HDFCBANK FAKE EXP FUT",
+                           option_type="FUT", quantity=550, lot_size=550, entry_price=1700.0,
+                           order_id="OID1", product_type="MARGIN")
+    try:
+        # Loss = (1700 - 1690) * 550 = Rs 5,500 > Rs 5,000 cap - fires
+        # immediately, WITHOUT ever consulting the (still-above,
+        # no-signal) Supertrend state below.
+        odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 1690.0
+
+        async def fake_fetch_still_above(symbol, interval_minutes):
+            return _make_state(is_above=True, prev_is_above=True)  # no Supertrend signal at all
+
+        ste._fetch_supertrend_state = fake_fetch_still_above
+        reason = await ste._evaluate_basket_exit_signal("HDFCBANK", futures_leg)
+        assert reason == "FUTURES_MAX_LOSS_HIT", reason
+
+        # Loss = (1700 - 1695) * 550 = Rs 2,750 < Rs 5,000 cap - falls
+        # through to the Supertrend check, which is a genuine crossed-below
+        # here, so the ORIGINAL reason still fires correctly.
+        odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 1695.0
+
+        async def fake_fetch_crossed_below(symbol, interval_minutes):
+            return _make_state(is_above=False, prev_is_above=True)
+
+        ste._fetch_supertrend_state = fake_fetch_crossed_below
+        reason = await ste._evaluate_basket_exit_signal("HDFCBANK", futures_leg)
+        assert reason == "SUPERTREND_5MIN_EXIT", reason
+
+        # Loss under the cap AND no Supertrend signal either -> None.
+        ste._fetch_supertrend_state = fake_fetch_still_above
+        assert await ste._evaluate_basket_exit_signal("HDFCBANK", futures_leg) is None
+
+        # futures_leg=None (paper trading's own call sites) skips the Rs
+        # check entirely and falls straight to Supertrend, unaffected -
+        # already covered by test_5_exit_signal, re-asserted here for
+        # this exact function under the same LTP-fake conditions.
+        ste._fetch_supertrend_state = fake_fetch_crossed_below
+        assert await ste._evaluate_basket_exit_signal("HDFCBANK", None) == "SUPERTREND_5MIN_EXIT"
+
+        print("8. FUTURES_MAX_LOSS_RS: a futures-leg loss over the cap fires FUTURES_MAX_LOSS_HIT "
+              "before the Supertrend check ever runs; a loss under the cap correctly falls through "
+              "to the ordinary Supertrend check; futures_leg=None skips the Rs check entirely: PASSED")
+    finally:
+        odc.dhan_wrapper.get_option_ltp = real_ltp
+        ste.config.FUTURES_MAX_LOSS_RS = real_cap
+        ste._fetch_supertrend_state = real_fetch
+
+
 async def main():
     print("=== Swing entry/exit Supertrend signal test suite ===\n")
     test_1_crossed_above_below_properties()
@@ -459,6 +526,7 @@ async def main():
     await test_5_exit_signal()
     await test_6_full_auto_entry_via_watchlist_signal()
     await test_7_full_auto_exit_via_basket_signal()
+    await test_8_futures_max_loss_signal()
     print("\nALL SWING SIGNAL LOGIC CHECKS PASSED")
 
 

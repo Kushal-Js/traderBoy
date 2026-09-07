@@ -223,7 +223,7 @@ async def test_2_full_two_loop_cycle_then_loss_cap_exit():
         entry_fires["value"] = False
         exit_fires["value"] = True
         fut_leg = store.live_legs[symbol]
-        await ste._swap_futures_to_pe(symbol, fut_leg)
+        await ste._swap_futures_to_pe(symbol, fut_leg, "SUPERTREND_5MIN_EXIT")
         assert store.live_legs[symbol].option_type == "PE", store.live_legs.get(symbol)
         assert symbol in store.reserved_symbols, "capacity must stay RESERVED during a swap, not released"
 
@@ -239,7 +239,7 @@ async def test_2_full_two_loop_cycle_then_loss_cap_exit():
         entry_fires["value"] = False
         exit_fires["value"] = True
         fut_leg_2 = store.live_legs[symbol]
-        await ste._swap_futures_to_pe(symbol, fut_leg_2)
+        await ste._swap_futures_to_pe(symbol, fut_leg_2, "SUPERTREND_5MIN_EXIT")
         assert store.live_legs[symbol].option_type == "PE"
 
         # --- PE -> NONE (loss-cap exit, NOT a re-entry into futures) ---
