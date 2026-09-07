@@ -4616,7 +4616,83 @@ out of git.
     ENABLED=false` set in the droplet's own `.env` - Options/Futures/
     Luxury/Swing all checked flat (zero live positions) both before
     `git pull`/`.env` update and again immediately before `systemctl
-    restart`, clean restart confirmed.
+    restart`, clean restart confirmed. **One real, live position was
+    open at restart time** (MAHABANK, `PE_HEDGE`) - flagged to the user
+    before restarting (reconciliation resets a position's own
+    accumulated `highest_price` peak-tracking, a real if narrow risk to
+    the profit-lock exit condition), user confirmed to proceed given the
+    market was already closed for the day; MAHABANK reconciled correctly
+    afterward with its exact original entry price/quantity intact.
+
+92. **Chartink entry webhook's real-signal-evaluation + ranking step
+    REVERTED - user request 7 Sep 2026, verbatim, a same-day follow-up
+    to entry #90**: "I don't think we need steps 2, 3, 4 for webhook
+    based entry system now, however the basket and PE based strategy
+    and other logic are still the same or as it is." ("Steps 2, 3, 4"
+    referred to a numbered explanation given earlier the same
+    conversation of exactly what entry #90 added: per-stock signal
+    evaluation, ranking, and the entry attempt built on top of them.)
+
+    `chartink_webhook_swing_enter` (`Swing/swing_main.py`) reverted to
+    its ORIGINAL behavior: entering EVERY stock in the payload directly,
+    one at a time, unconditionally - no `_evaluate_watchlist_entry_
+    signal` check, no `_entry_candidate_rank_key` ranking. The actual
+    entry MECHANICS the user explicitly asked to leave alone are
+    untouched: `enter_basket_for_stock`/`_enter_basket_hedge_for_stock`/
+    `_enter_futures_for_stock` (basket/PE-hedge state machines, the
+    funds check, dedup, ATM/futures contract resolution) are called
+    exactly as before entry #90 ever existed. `STRATEGY_ENABLED`/
+    capacity checks at the top of the webhook are unchanged either way.
+
+    `_rank_and_enter_candidates` itself (`Swing/trading_engine.py`) was
+    NOT deleted - kept, currently unused by anything, same "never
+    delete, might need it again" convention already established for
+    Swing's own 3 trading modes, in case this behavior is wanted again
+    later (for this webhook or elsewhere). Its own docstring updated to
+    say so explicitly.
+
+    **Test suite fallout, found and fixed**: `tests/test_swing_chartink_
+    entry_webhook.py`'s own test 5 (which asserted the webhook DOES
+    ranking) was rewritten to assert the OPPOSITE - the real, current
+    webhook enters every payload stock directly and unconditionally,
+    confirming the revert took effect at the webhook level, not just
+    that `_rank_and_enter_candidates` still works correctly in
+    isolation (tests 1-4, which call that function DIRECTLY, needed no
+    changes - still valid, still passing). `tests/test_swing_
+    integration.py`'s own 3 tests that had gained `install_fake_signal_
+    fetch` mocking for entry #90 no longer need it at all (the webhook
+    doesn't check any signal anymore) - removed, restoring this file to
+    its original simplicity.
+
+    **A second, unrelated but real test-suite regression found and
+    fixed while running the full suite**: `tests/test_swing_entry_
+    ranking.py` and `tests/test_swing_funds_check.py` (both call the
+    real monitor-tick functions directly, e.g. `_basket_hedge_monitor_
+    tick()`) started failing with "zero entries" - NOT caused by
+    today's revert, but by entry #91's own `.env` change from earlier
+    today: `SWING_WATCHLIST_ENTRY_ENABLED=false` is now set in the real
+    `.env` these tests load, and neither test explicitly overrode the
+    flag back to `True` for its own scenario (every OTHER config value
+    they depend on - `STRATEGY_ENABLED`, `MAX_LIVE_BASKETS` - IS
+    explicitly set already, this one was simply added after those
+    tests were written). Fixed by adding the same explicit
+    `WATCHLIST_ENTRY_ENABLED = True` / restore pattern already used
+    everywhere else in both files. Worth remembering: any NEW config
+    flag that gates something a real, deployed `.env` might set
+    differently from its own code-level default can silently affect
+    every EXISTING test that relies on the ambient value rather than
+    setting it explicitly - checked by actually running the full suite
+    after `.env` changes, not just the new/modified test file.
+
+    Ran the full 29-file test suite afterward, all pass. Updated
+    `README.md` (the webhook's own endpoint row, `Swing/trading_
+    engine.py`'s own row), `tests/README.md`. Deployed directly per the
+    user's own explicit instruction (the original webhook-integration
+    request said "Implement, test and deploy this to droplet," and this
+    follow-up revert continues under that same standing instruction) -
+    Options/Futures/Luxury/Swing all checked flat (zero live positions)
+    before `git pull` and again immediately before `systemctl restart`,
+    clean restart confirmed.
 
     Deployed directly per the user's own explicit instruction ("Create
     and Test thoroughly and deploy it also") - every package flat at

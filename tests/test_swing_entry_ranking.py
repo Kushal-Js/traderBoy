@@ -209,6 +209,11 @@ async def test_2_basket_hedge_tick_prefers_freshest_crossover():
 
     real_enabled = ste.config.STRATEGY_ENABLED
     ste.config.STRATEGY_ENABLED = True
+    # Explicitly True regardless of the ambient .env (the live deploy's
+    # own .env sets this False as of 7 Sep 2026 - see NOTES.md entry #91)
+    # - this suite specifically exercises watchlist-driven entry ranking.
+    real_watch_enabled = ste.config.WATCHLIST_ENTRY_ENABLED
+    ste.config.WATCHLIST_ENTRY_ENABLED = True
     real_cap = ste.config.MAX_LIVE_BASKETS
     ste.config.MAX_LIVE_BASKETS = 1  # only ONE can win
 
@@ -240,6 +245,7 @@ async def test_2_basket_hedge_tick_prefers_freshest_crossover():
         restore_dhan()
         restore_signal()
         ste.config.STRATEGY_ENABLED = real_enabled
+        ste.config.WATCHLIST_ENTRY_ENABLED = real_watch_enabled
         ste.config.MAX_LIVE_BASKETS = real_cap
 
 
@@ -252,6 +258,11 @@ async def test_3_basket_hedge_tick_uses_volume_as_tiebreak():
 
     real_enabled = ste.config.STRATEGY_ENABLED
     ste.config.STRATEGY_ENABLED = True
+    # Explicitly True regardless of the ambient .env (the live deploy's
+    # own .env sets this False as of 7 Sep 2026 - see NOTES.md entry #91)
+    # - this suite specifically exercises watchlist-driven entry ranking.
+    real_watch_enabled = ste.config.WATCHLIST_ENTRY_ENABLED
+    ste.config.WATCHLIST_ENTRY_ENABLED = True
     real_cap = ste.config.MAX_LIVE_BASKETS
     ste.config.MAX_LIVE_BASKETS = 1
 
@@ -276,6 +287,7 @@ async def test_3_basket_hedge_tick_uses_volume_as_tiebreak():
         restore_dhan()
         restore_signal()
         ste.config.STRATEGY_ENABLED = real_enabled
+        ste.config.WATCHLIST_ENTRY_ENABLED = real_watch_enabled
         ste.config.MAX_LIVE_BASKETS = real_cap
 
 
@@ -288,6 +300,11 @@ async def test_4_sequential_tick_ranks_fresh_entries_but_not_pe_loop_continuatio
 
     real_enabled = ste.config.STRATEGY_ENABLED
     ste.config.STRATEGY_ENABLED = True
+    # Explicitly True regardless of the ambient .env (the live deploy's
+    # own .env sets this False as of 7 Sep 2026 - see NOTES.md entry #91)
+    # - this suite specifically exercises watchlist-driven entry ranking.
+    real_watch_enabled = ste.config.WATCHLIST_ENTRY_ENABLED
+    ste.config.WATCHLIST_ENTRY_ENABLED = True
     real_cap = ste.config.MAX_LIVE_BASKETS
     ste.config.MAX_LIVE_BASKETS = 1
 
@@ -309,6 +326,7 @@ async def test_4_sequential_tick_ranks_fresh_entries_but_not_pe_loop_continuatio
         restore_dhan()
         restore_signal()
         ste.config.STRATEGY_ENABLED = real_enabled
+        ste.config.WATCHLIST_ENTRY_ENABLED = real_watch_enabled
         ste.config.MAX_LIVE_BASKETS = real_cap
 
 
@@ -321,6 +339,11 @@ async def test_5_basket_mode_tick_ranks_entries_too():
 
     real_enabled = ste.config.STRATEGY_ENABLED
     ste.config.STRATEGY_ENABLED = True
+    # Explicitly True regardless of the ambient .env (the live deploy's
+    # own .env sets this False as of 7 Sep 2026 - see NOTES.md entry #91)
+    # - this suite specifically exercises watchlist-driven entry ranking.
+    real_watch_enabled = ste.config.WATCHLIST_ENTRY_ENABLED
+    ste.config.WATCHLIST_ENTRY_ENABLED = True
     real_cap = ste.config.MAX_LIVE_BASKETS
     ste.config.MAX_LIVE_BASKETS = 1
 
@@ -342,6 +365,7 @@ async def test_5_basket_mode_tick_ranks_entries_too():
         restore_dhan()
         restore_signal()
         ste.config.STRATEGY_ENABLED = real_enabled
+        ste.config.WATCHLIST_ENTRY_ENABLED = real_watch_enabled
         ste.config.MAX_LIVE_BASKETS = real_cap
 
 

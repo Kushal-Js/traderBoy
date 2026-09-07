@@ -1906,13 +1906,22 @@ async def _rank_and_enter_candidates(
     once and MAX_LIVE_BASKETS can't take them all, the best-ranked one is
     tried first. This is the exact same "collect, rank, then enter"
     sequencing each monitor tick already does for the whole watchlist;
-    this is a NEW, standalone function (added 7 Sep 2026, for the
-    Chartink entry webhook below) built from the same trusted, already-
-    tested primitives (_evaluate_watchlist_entry_signal/
-    _fetch_supertrend_state/_entry_candidate_rank_key/the 3 real entry
-    functions) rather than a refactor of the already-live monitor ticks
-    themselves - deliberately, so this can't introduce any regression
+    this was built (7 Sep 2026) as a NEW, standalone function for the
+    Chartink entry webhook (swing_main.py's own chartink_webhook_swing_
+    enter) rather than a refactor of the already-live monitor ticks
+    themselves, deliberately, so it couldn't introduce any regression
     risk to the currently-deployed, real-money monitor loop.
+
+    CURRENTLY UNUSED (same day, 7 Sep 2026, user's own explicit follow-up
+    request: "I don't think we need steps 2, 3, 4 for webhook based
+    entry system now") - the webhook reverted to entering every payload
+    stock directly, unconditionally, same as its own original behavior.
+    Kept here, not deleted - the same "never delete, might need it
+    again" convention already established for Swing's own 3 trading
+    modes - in case this signal-evaluation-then-ranking behavior is
+    wanted again for the webhook (or anything else) later. Still fully
+    tested (tests/test_swing_chartink_entry_webhook.py exercises this
+    function directly).
 
     remove_from_watchlist_on_entry (default True, matches basket/
     basket_hedge mode's own established behavior in every monitor tick)

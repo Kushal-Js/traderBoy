@@ -9,17 +9,15 @@ the investigation this is based on).
 Entry/exit condition logic (price-confirmation gate + dual-timeframe
 Supertrend crossover, see trading_engine.py's own module docstring) has
 been fully defined and live since 1 Sep 2026 - what's live today is a
-continuously-monitored watchlist plus two webhooks:
+continuously-monitored watchlist (though its own fresh-entry side is
+currently OFF, see config.WATCHLIST_ENTRY_ENABLED) plus two webhooks:
    - POST /chartink/webhook-swing-enter      - a continuously-polled
-     Chartink entry webhook (updated 7 Sep 2026, user request: "a
-     chartink webhook... which can continuously sends json feeds and
-     bot should consume them... calculate best stock to place trade
-     upon based on conditions already predefined in our code"). Every
-     alert's own stock(s) are evaluated against Swing's REAL entry
-     signal and ranked (freshest crossover, higher volume as the
-     tiebreak - see trading_engine.py's own _rank_and_enter_candidates)
-     before the best-qualifying one(s) are actually entered, up to
-     available capacity - not a blind "enter everything in the alert."
+     Chartink entry webhook. Directly enters every stock in the payload,
+     one at a time, up to available capacity - the decision of WHICH
+     stock and WHEN lives in the Chartink scan/alert itself, not in an
+     extra evaluation step here (briefly gained real signal evaluation +
+     ranking 7 Sep 2026, reverted the same day per explicit user
+     request - see chartink_webhook_swing_enter's own docstring).
    - POST /chartink/webhook-swing-watchlist  - adds stock(s) to the
      watchlist trading_engine.monitor_loop() continuously polls, without
      attempting an immediate entry (use webhook-swing-enter for that).
@@ -50,8 +48,10 @@ from . import config
 from .paper_engine import paper_basket_store, paper_poll_loop, sequential_paper_store
 from .position_store import basket_hedge_store, basket_store, sequential_store
 from .trading_engine import (
-    _rank_and_enter_candidates,
+    _enter_basket_hedge_for_stock,
+    _enter_futures_for_stock,
     _run_chartink_watchlist_scan,
+    enter_basket_for_stock,
     monitor_loop,
     reconcile_basket_hedge_positions,
     reconcile_broker_positions,
@@ -185,42 +185,41 @@ class SwingWebhookPayload(BaseModel):
 # --------------------------------------------------------------------------- #
 @router.post("/chartink/webhook-swing-enter")
 async def chartink_webhook_swing_enter(payload: SwingWebhookPayload):
-    """Continuously-polled Chartink entry webhook (user request 7 Sep
-    2026: "a chartink webhook to be directly integrated in Swing
-    strategy... which can continuously sends json feeds and bot should
-    consume them over for placing order... calculate best stock to
-    place trade upon based on conditions already predefined in our code
-    under 'Swing' strategy"). Point a Chartink scan's alert at this URL
-    and every alert it fires gets evaluated for a real entry immediately,
-    rather than waiting for monitor_loop's own next periodic tick.
+    """Continuously-polled Chartink entry webhook. Directly enters a
+    basket (or the mode-appropriate equivalent) for each stock in the
+    payload, one at a time (deliberately sequential, not concurrent like
+    Options/Futures/Luxury's own multi-stock ranking - each basket entry
+    is already a multi-step, two-leg operation; keeping multiple entries
+    from interleaving keeps the all-or-nothing rollback easy to reason
+    about). The decision of WHICH stock to send and WHEN lives in the
+    Chartink scan/alert itself, not in an extra evaluation step here.
 
-    UPDATED 7 Sep 2026 - before this, the endpoint entered EVERY stock in
-    the payload directly with no evaluation at all (the decision of
-    "which stock, and whether now is actually a good moment" lived
-    entirely outside the bot, per this endpoint's own original
-    docstring). It now runs each incoming stock through Swing's own REAL
-    entry signal (_evaluate_watchlist_entry_signal - the identical
-    price-confirmation + dual-timeframe Supertrend crossover check
-    monitor_loop's own tick already uses) and ranks whichever ones
-    qualify (_rank_and_enter_candidates - freshest crossover, higher
-    volume as the tiebreak, the SAME ranking already used to pick among
-    several watchlist symbols firing in the same tick) before attempting
-    entry - so an alert listing several stocks results in the BEST-
-    qualifying one(s) actually being traded, up to whatever capacity is
-    left, not every single one blindly. A stock whose signal doesn't
-    confirm is reported back as skipped/entry_signal_not_confirmed
-    rather than silently ignored, so the response always accounts for
-    every stock in the alert.
+    REVERTED 7 Sep 2026 (user request, verbatim): "I don't think we need
+    steps 2, 3, 4 for webhook based entry system now, however the basket
+    and PE based strategy and other logic are still the same or as it
+    is." Earlier the same day this briefly gained a real entry-signal
+    evaluation + ranking step (_rank_and_enter_candidates - price
+    confirmation + dual-timeframe Supertrend crossover, then freshest-
+    crossover/higher-volume ranking) before attempting entry. That
+    pre-filter is removed again here - every stock in the payload is
+    entered directly, unconditionally, same as this endpoint's own
+    original behavior - while the actual entry MECHANICS (basket/PE
+    hedge/sequential state machines, the funds check, dedup, ATM/futures
+    contract resolution) are completely untouched, exactly as the user
+    asked. _rank_and_enter_candidates itself is NOT deleted (see its own
+    docstring in trading_engine.py) - kept, unused for now, in case this
+    behavior is wanted again later, same "never delete, might need it
+    again" convention already established for Swing's own 3 trading
+    modes.
 
-    Mode-aware (added 1 Sep 2026, extended to 3-way 1 Sep 2026, ranking
-    added 7 Sep 2026): under config.STRATEGY_MODE == "sequential", this
-    drives the SAME NONE -> FUTURES transition monitor_loop's own
-    entry-signal path uses (futures only, no PE leg yet) rather than the
-    basket entry, checks sequential_store's own capacity, and (like that
-    mode's own tick) does NOT remove an entered symbol from the
-    watchlist - it still needs continuous evaluation for its own loop.
-    Under "basket_hedge", this drives the same all-or-nothing basket
-    entry as plain "basket" mode (futures+PE together) but against
+    Mode-aware (added 1 Sep 2026, extended to 3-way 1 Sep 2026): under
+    config.STRATEGY_MODE == "sequential", this drives the SAME NONE ->
+    FUTURES transition monitor_loop's own entry-signal path uses (futures
+    only, no PE leg yet - the PE only ever comes in as the hedge once the
+    futures leg later exits) rather than the basket entry, and checks
+    sequential_store's own capacity instead of basket_store's. Under
+    "basket_hedge", this drives the same all-or-nothing basket entry as
+    plain "basket" mode (futures+PE together) but against
     basket_hedge_store's own capacity instead."""
     stocks = payload.stock_list()
 
@@ -250,16 +249,15 @@ async def chartink_webhook_swing_enter(payload: SwingWebhookPayload):
             "max_live_baskets": config.MAX_LIVE_BASKETS,
         }
 
-    entered_or_attempted = await _rank_and_enter_candidates(
-        stocks, remove_from_watchlist_on_entry=(config.STRATEGY_MODE != "sequential"),
-    )
-    attempted_symbols = {r["symbol"] for r in entered_or_attempted}
-    not_qualified = [
-        {"symbol": symbol, "status": "skipped", "reason": "entry_signal_not_confirmed"}
-        for symbol in stocks if symbol not in attempted_symbols
-    ]
+    if config.STRATEGY_MODE == "basket":
+        entry_fn = enter_basket_for_stock
+    elif config.STRATEGY_MODE == "basket_hedge":
+        entry_fn = _enter_basket_hedge_for_stock
+    else:
+        entry_fn = _enter_futures_for_stock
+    results = [await entry_fn(symbol) for symbol in stocks]
     _log_alert("processed")
-    return {"status": "processed", "mode": config.STRATEGY_MODE, "entries": entered_or_attempted + not_qualified}
+    return {"status": "processed", "mode": config.STRATEGY_MODE, "entries": results}
 
 
 @router.post("/chartink/webhook-swing-watchlist")

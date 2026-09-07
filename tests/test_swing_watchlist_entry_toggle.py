@@ -30,9 +30,10 @@ Covers, against the REAL production tick functions (not reimplemented):
      still correctly swaps back to FUTURES on its own loop-continuation
      signal (not a "fresh entry", so unaffected), and a symbol ALREADY
      holding a FUT leg still correctly exits on its own signal.
-  5. The flag defaults to True and, when True, entries proceed exactly
-     as before (a direct regression check for this file, on top of
-     test_swing_entry_ranking.py's own implicit coverage).
+  5. When the flag is True, entries proceed exactly as before - a pure
+     opt-in restriction, not a change to the default behavior (a direct
+     regression check for this file, on top of test_swing_entry_
+     ranking.py's own implicit coverage).
   6. POST /chartink/webhook-swing-enter (the real-time alert-driven
      path added the same day) is completely UNAFFECTED by this flag,
      since it never reads watchlist_store at all - a qualifying alert
@@ -327,36 +328,47 @@ async def test_4_sequential_mode_fresh_entry_blocked_but_loop_continuation_unaff
         ste.config.STRATEGY_MODE = real_mode
 
 
-async def test_5_flag_defaults_true_and_entries_proceed_normally_when_true():
+async def test_5_entries_proceed_normally_when_the_flag_is_true():
+    """Confirms this is a pure opt-in restriction, not a behavior change
+    for anyone who leaves it True - checked by explicitly setting True
+    here (like every other test in this file explicitly sets whatever it
+    needs) rather than asserting on whatever the ambient .env happens to
+    carry, since the live deploy's own .env now sets this False (see
+    NOTES.md entry #91) - the code-level default (config.py's own
+    `os.getenv(..., "true")`) is a plain source-level fact, not something
+    this test needs to independently re-verify against a real .env."""
     store = sps.BasketHedgeStore()
     ste.basket_hedge_store = store
     wl_store = swl.WatchlistStore()
     ste.watchlist_store = wl_store
     await wl_store.add_symbols(["NORMALSTOCK"])
 
-    assert ste.config.WATCHLIST_ENTRY_ENABLED is True, \
-        "the flag must default to True - this feature must not silently change behavior for anyone who hasn't set it"
-
-    real_enabled = ste.config.STRATEGY_ENABLED
+    real_enabled, real_watch_enabled = ste.config.STRATEGY_ENABLED, ste.config.WATCHLIST_ENTRY_ENABLED
     ste.config.STRATEGY_ENABLED = True
+    ste.config.WATCHLIST_ENTRY_ENABLED = True
     restore_signal = install_fake_signal_fetch({"NORMALSTOCK": _entry_state()})
     restore_dhan, placed_orders = install_all_dhan_mocks(fill_prices=[100.0, 20.0])
     try:
         await ste._basket_hedge_monitor_tick()
-        assert "NORMALSTOCK" in store.live_positions, "with the flag at its default (True), entry must proceed normally"
-        print("5. The flag defaults to True, and watchlist-sourced entries proceed completely normally "
-              "when it's True (or simply left unset) - this is a pure opt-in restriction: PASSED")
+        assert "NORMALSTOCK" in store.live_positions, "with the flag True, entry must proceed normally"
+        print("5. Watchlist-sourced entries proceed completely normally when the flag is True - "
+              "this is a pure opt-in restriction, not a change to the default behavior: PASSED")
     finally:
         restore_dhan()
         restore_signal()
         ste.config.STRATEGY_ENABLED = real_enabled
+        ste.config.WATCHLIST_ENTRY_ENABLED = real_watch_enabled
 
 
 async def test_6_alert_driven_webhook_unaffected_by_the_flag():
     """POST /chartink/webhook-swing-enter never reads watchlist_store at
-    all (its candidates come straight from the alert payload) - the
-    whole reason this flag exists is to let that path keep working
-    while the OLD watchlist-driven path is turned off."""
+    all (its candidates come straight from the alert payload, entered
+    directly and unconditionally - see swing_main.py's own docstring for
+    why, reverted 7 Sep 2026) - the whole reason this flag exists is to
+    let that path keep working while the OLD watchlist-driven path is
+    turned off. No signal mocking needed here at all: the webhook enters
+    ALERTSTOCK unconditionally regardless of any Supertrend/price state,
+    so this test only needs to prove the flag itself has no bearing."""
     store = sps.BasketHedgeStore()
     sm.basket_hedge_store = store
     ste.basket_hedge_store = store
@@ -372,7 +384,6 @@ async def test_6_alert_driven_webhook_unaffected_by_the_flag():
     ste.config.WATCHLIST_ENTRY_ENABLED = False  # the flag under test
     ste.config.STRATEGY_MODE = sm.config.STRATEGY_MODE = "basket_hedge"
 
-    restore_signal = install_fake_signal_fetch({"ALERTSTOCK": _entry_state()})
     restore_dhan, placed_orders = install_all_dhan_mocks(fill_prices=[100.0, 20.0])
     try:
         payload = sm.SwingWebhookPayload(stocks="ALERTSTOCK", alert_name="toggle-test-6")
@@ -381,11 +392,10 @@ async def test_6_alert_driven_webhook_unaffected_by_the_flag():
         assert result["entries"][0]["status"] == "entered", \
             f"the alert-driven webhook must be completely unaffected by WATCHLIST_ENTRY_ENABLED, got {result}"
         assert "ALERTSTOCK" in store.live_positions
-        print("6. POST /chartink/webhook-swing-enter still enters a genuinely-qualifying alert stock normally "
+        print("6. POST /chartink/webhook-swing-enter still enters an alert stock normally "
               "with WATCHLIST_ENTRY_ENABLED=False - it never reads watchlist_store, so it's unaffected: PASSED")
     finally:
         restore_dhan()
-        restore_signal()
         ste.config.STRATEGY_ENABLED = sm.config.STRATEGY_ENABLED = real_enabled
         ste.config.WATCHLIST_ENTRY_ENABLED = real_watch_enabled
         ste.config.STRATEGY_MODE = sm.config.STRATEGY_MODE = real_mode
@@ -397,7 +407,7 @@ async def main():
     await test_2_basket_hedge_exit_checking_unaffected_when_disabled()
     await test_3_basket_mode_no_fresh_entry_when_disabled()
     await test_4_sequential_mode_fresh_entry_blocked_but_loop_continuation_unaffected()
-    await test_5_flag_defaults_true_and_entries_proceed_normally_when_true()
+    await test_5_entries_proceed_normally_when_the_flag_is_true()
     await test_6_alert_driven_webhook_unaffected_by_the_flag()
     print("\nALL SWING WATCHLIST-ENTRY TOGGLE CHECKS PASSED")
 

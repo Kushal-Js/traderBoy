@@ -308,6 +308,11 @@ async def test_5_ranked_tick_falls_through_to_next_candidate_when_top_cannot_aff
 
     real_enabled = ste.config.STRATEGY_ENABLED
     ste.config.STRATEGY_ENABLED = True
+    # Explicitly True regardless of the ambient .env (the live deploy's
+    # own .env sets this False as of 7 Sep 2026 - see NOTES.md entry #91)
+    # - this test specifically exercises watchlist-driven entry ranking.
+    real_watch_enabled = ste.config.WATCHLIST_ENTRY_ENABLED
+    ste.config.WATCHLIST_ENTRY_ENABLED = True
     real_cap = ste.config.MAX_LIVE_BASKETS
     ste.config.MAX_LIVE_BASKETS = 1
 
@@ -371,6 +376,7 @@ async def test_5_ranked_tick_falls_through_to_next_candidate_when_top_cannot_aff
         ste._fetch_supertrend_state = real_fetch
         ste._is_price_confirmed_above_prev_close = real_price_confirmed
         ste.config.STRATEGY_ENABLED = real_enabled
+        ste.config.WATCHLIST_ENTRY_ENABLED = real_watch_enabled
         ste.config.MAX_LIVE_BASKETS = real_cap
 
 

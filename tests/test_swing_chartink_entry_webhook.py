@@ -1,54 +1,49 @@
 """
-Tests for Swing's Chartink entry webhook gaining REAL signal evaluation +
-ranking - user request 7 Sep 2026 (verbatim): "I need a chartink webhook
-to be directly integrated in Swing strategy bot which can continuously
-sends json feeds and bot should consume them over for placing order
-using data send from webhook url. The bot should calculate best stock to
-place trade upon based on conditions already predefined in our code
-under 'Swing' strategy."
+Tests for Swing's _rank_and_enter_candidates (Swing/trading_engine.py) -
+built 7 Sep 2026 to give the Chartink entry webhook real signal
+evaluation + ranking (user request, verbatim): "I need a chartink
+webhook to be directly integrated in Swing strategy bot which can
+continuously sends json feeds and bot should consume them over for
+placing order using data send from webhook url. The bot should
+calculate best stock to place trade upon based on conditions already
+predefined in our code under 'Swing' strategy."
 
-POST /chartink/webhook-swing-enter already existed (built earlier) but,
-per its own original docstring, entered EVERY stock in the payload
-directly with NO evaluation at all - "the decision of WHICH stock to
-send and WHEN lives outside the bot." This closes that exact gap: the
-webhook now runs each incoming stock through Swing's own REAL entry
-signal (_evaluate_watchlist_entry_signal - the identical price-
-confirmation + dual-timeframe Supertrend crossover check monitor_loop's
-own tick already uses) and ranks whichever ones qualify
-(_rank_and_enter_candidates - freshest crossover, higher volume as the
-tiebreak, the SAME ranking already used to pick among several watchlist
-symbols firing in the same tick) before attempting entry - so an alert
-listing several stocks results in the BEST-qualifying one(s) actually
-being traded, not every single one blindly.
+REVERTED THE SAME DAY (user's own explicit follow-up, verbatim): "I
+don't think we need steps 2, 3, 4 for webhook based entry system now,
+however the basket and PE based strategy and other logic are still the
+same or as it is." POST /chartink/webhook-swing-enter (swing_main.py) no
+longer calls this function - it went back to entering every payload
+stock directly, unconditionally, same as its own original behavior.
 
-New shared helper: Swing/trading_engine.py's own _rank_and_enter_
-candidates - a NEW, standalone function (not a refactor of the already-
-live monitor ticks, to avoid any regression risk to the currently-
-deployed real-money monitor loop) built from the same trusted, already-
-tested primitives those ticks use.
+_rank_and_enter_candidates itself was NOT deleted - kept, unused for
+now, same "never delete, might need it again" convention already
+established for Swing's own 3 trading modes. This file keeps testing it
+DIRECTLY (not through the webhook, since the webhook doesn't call it
+anymore) so the function stays proven correct in case it's wired back in
+later.
 
-Covers, against the REAL production functions (not reimplemented):
+Covers, against the REAL production function (not reimplemented):
   1. _rank_and_enter_candidates only attempts entry for candidates whose
      REAL entry signal actually fires - a non-qualifying candidate is
      never even ranked, let alone entered.
   2. When multiple candidates qualify and capacity is scarce, the
      FRESHEST crossover wins (same ranking basket_hedge_monitor_tick
-     already uses) - proving this new function's own ranking is
-     genuinely wired to the same _entry_candidate_rank_key, not
-     reimplemented.
+     already uses) - proving this function's own ranking is genuinely
+     wired to the same _entry_candidate_rank_key, not reimplemented.
   3. remove_from_watchlist_on_entry=True (the default, basket/
      basket_hedge's own behavior) removes a winner from the watchlist;
      =False (sequential's own behavior) leaves it there.
   4. Mode dispatch - the SAME candidate list is routed to
      enter_basket_for_stock/_enter_basket_hedge_for_stock/
      _enter_futures_for_stock depending on config.STRATEGY_MODE.
-  5. Full webhook-level integration through the REAL chartink_webhook_
-     swing_enter: a payload with a mix of qualifying and non-qualifying
-     stocks reports BOTH correctly (entered vs skipped/entry_signal_not_
-     confirmed) - every stock in the alert is accounted for in the
-     response, not just the winners; STRATEGY_ENABLED=False and zero
-     capacity both still short-circuit before any signal is even
-     evaluated, exactly as before this change.
+  5. The REAL, current (reverted) chartink_webhook_swing_enter enters
+     EVERY payload stock directly and unconditionally - no signal
+     gating, no ranking - proving the revert actually took effect at
+     the webhook level, not just that the old function still works in
+     isolation.
+  6. STRATEGY_ENABLED=False and zero capacity both still short-circuit
+     before any order is placed, unchanged throughout this whole
+     add-then-revert cycle.
 
 HOW TO RUN:
     uv run python tests/test_swing_chartink_entry_webhook.py
@@ -292,7 +287,15 @@ async def test_4_mode_dispatch_routes_to_the_right_real_entry_function():
         ste.config.STRATEGY_ENABLED, ste.config.STRATEGY_MODE = real_enabled, real_mode
 
 
-async def test_5_full_webhook_reports_both_qualifying_and_non_qualifying_stocks():
+async def test_5_reverted_webhook_enters_every_stock_directly_unconditionally():
+    """The REAL, current chartink_webhook_swing_enter - confirms the
+    revert actually took effect: with NO signal mocked/qualifying for
+    either stock (a real, unmocked _evaluate_watchlist_entry_signal
+    would return False for both), BOTH still enter, since the webhook no
+    longer calls _rank_and_enter_candidates/_evaluate_watchlist_entry_
+    signal at all - it dispatches straight to the real entry function
+    for every payload stock, unconditionally, same as basket/basket_
+    hedge/sequential mode's own established mechanics."""
     store = sps.BasketHedgeStore()
     sm.basket_hedge_store = store
     ste.basket_hedge_store = store
@@ -300,34 +303,33 @@ async def test_5_full_webhook_reports_both_qualifying_and_non_qualifying_stocks(
     sm.watchlist_store = wl_store
     ste.watchlist_store = wl_store
 
-    real_enabled, real_mode = ste.config.STRATEGY_ENABLED, ste.config.STRATEGY_MODE
+    real_enabled, real_mode, real_cap = ste.config.STRATEGY_ENABLED, ste.config.STRATEGY_MODE, ste.config.MAX_LIVE_BASKETS
     ste.config.STRATEGY_ENABLED = sm.config.STRATEGY_ENABLED = True
     ste.config.STRATEGY_MODE = "basket_hedge"
-    restore_signal = install_fake_signal_fetch({"WINNER": _entry_state(datetime.now(ste.IST))})
-    restore_dhan, placed_orders = install_all_dhan_mocks(fill_prices=[100.0, 20.0])
+    ste.config.MAX_LIVE_BASKETS = 2  # room for both - capacity isn't what's under test here
+    restore_dhan, placed_orders = install_all_dhan_mocks(fill_prices=[100.0, 20.0, 100.0, 20.0])
     try:
-        payload = sm.SwingWebhookPayload(stocks="WINNER,LOSER", alert_name="entry-webhook-test-5")
+        payload = sm.SwingWebhookPayload(stocks="FIRSTSTOCK,SECONDSTOCK", alert_name="entry-webhook-test-5")
         result = await sm.chartink_webhook_swing_enter(payload)
         assert result["status"] == "processed", result
 
         by_symbol = {e["symbol"]: e for e in result["entries"]}
-        assert by_symbol["WINNER"]["status"] == "entered", by_symbol
-        assert by_symbol["LOSER"]["status"] == "skipped", by_symbol
-        assert by_symbol["LOSER"]["reason"] == "entry_signal_not_confirmed", by_symbol
-        assert "WINNER" in store.live_positions
-        assert "LOSER" not in store.live_positions
+        assert by_symbol["FIRSTSTOCK"]["status"] == "entered", \
+            f"the reverted webhook must enter EVERY payload stock unconditionally, got {by_symbol}"
+        assert by_symbol["SECONDSTOCK"]["status"] == "entered", by_symbol
+        assert "FIRSTSTOCK" in store.live_positions and "SECONDSTOCK" in store.live_positions
 
-        print("5. The full real webhook reports BOTH the entered winner AND the non-qualifying "
-              "stock (entry_signal_not_confirmed) - every stock in the alert is accounted for, "
-              "not just the winners: PASSED")
+        print("5. The REAL, current chartink_webhook_swing_enter enters EVERY payload stock directly "
+              "and unconditionally (no signal gate, no ranking) - confirms the revert took effect "
+              "at the webhook level, not just that _rank_and_enter_candidates still works alone: PASSED")
     finally:
         restore_dhan()
-        restore_signal()
         ste.config.STRATEGY_ENABLED = sm.config.STRATEGY_ENABLED = real_enabled
         ste.config.STRATEGY_MODE = real_mode
+        ste.config.MAX_LIVE_BASKETS = real_cap
 
 
-async def test_6_strategy_disabled_short_circuits_before_any_signal_check():
+async def test_6_strategy_disabled_short_circuits_before_any_order():
     real_enabled = ste.config.STRATEGY_ENABLED
     sm.config.STRATEGY_ENABLED = ste.config.STRATEGY_ENABLED = False
     restore_dhan, placed_orders = install_all_dhan_mocks()
@@ -336,14 +338,14 @@ async def test_6_strategy_disabled_short_circuits_before_any_signal_check():
         result = await sm.chartink_webhook_swing_enter(payload)
         assert result["status"] == "ignored" and result["reason"] == "strategy_disabled", result
         assert placed_orders == []
-        print("6. STRATEGY_ENABLED=False still short-circuits immediately, unchanged from before "
-              "this webhook gained real signal evaluation: PASSED")
+        print("6. STRATEGY_ENABLED=False still short-circuits immediately, unchanged throughout "
+              "this whole add-then-revert cycle: PASSED")
     finally:
         restore_dhan()
         sm.config.STRATEGY_ENABLED = ste.config.STRATEGY_ENABLED = real_enabled
 
 
-async def test_7_zero_capacity_short_circuits_before_any_signal_check():
+async def test_7_zero_capacity_short_circuits_before_any_order():
     store = sps.BasketHedgeStore()
     sm.basket_hedge_store = store
     real_enabled, real_mode, real_cap = ste.config.STRATEGY_ENABLED, ste.config.STRATEGY_MODE, ste.config.MAX_LIVE_BASKETS
@@ -356,8 +358,8 @@ async def test_7_zero_capacity_short_circuits_before_any_signal_check():
         result = await sm.chartink_webhook_swing_enter(payload)
         assert result["status"] == "ignored" and result["reason"] == "max_live_baskets_reached", result
         assert placed_orders == []
-        print("7. Zero capacity still short-circuits immediately before any signal is evaluated, "
-              "unchanged from before this webhook gained real signal evaluation: PASSED")
+        print("7. Zero capacity still short-circuits immediately before any order is attempted, "
+              "unchanged throughout this whole add-then-revert cycle: PASSED")
     finally:
         restore_dhan()
         sm.config.STRATEGY_ENABLED, ste.config.STRATEGY_ENABLED = real_enabled, real_enabled
@@ -366,14 +368,14 @@ async def test_7_zero_capacity_short_circuits_before_any_signal_check():
 
 
 async def main():
-    print("=== Swing Chartink entry webhook (real signal evaluation + ranking) test suite ===\n")
+    print("=== Swing _rank_and_enter_candidates + reverted Chartink entry webhook test suite ===\n")
     await test_1_non_qualifying_candidate_is_never_entered()
     await test_2_freshest_crossover_wins_when_capacity_is_scarce()
     await test_3_remove_from_watchlist_flag_controls_watchlist_removal()
     await test_4_mode_dispatch_routes_to_the_right_real_entry_function()
-    await test_5_full_webhook_reports_both_qualifying_and_non_qualifying_stocks()
-    await test_6_strategy_disabled_short_circuits_before_any_signal_check()
-    await test_7_zero_capacity_short_circuits_before_any_signal_check()
+    await test_5_reverted_webhook_enters_every_stock_directly_unconditionally()
+    await test_6_strategy_disabled_short_circuits_before_any_order()
+    await test_7_zero_capacity_short_circuits_before_any_order()
     print("\nALL SWING CHARTINK ENTRY WEBHOOK CHECKS PASSED")
 
 
