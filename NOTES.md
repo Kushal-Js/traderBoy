@@ -5132,6 +5132,38 @@ concluding anything from an exit-logic change.
   scratch on every authentication - there's no more manually-managed
   token to go stale or fall out of sync in the first place.
 
+## Corrective action items queued for a future deploy
+
+Things identified as worth doing but deliberately NOT done yet - user's
+own instruction (7 Sep 2026): "we will get this done with other items
+while deploying later." Batch these up rather than deploying each one
+in isolation.
+
+1. **Circuit-breaker / longer backoff after sustained `get_ohlc_data`
+   failures** (found 7 Sep 2026, investigating "why didn't Swing trigger
+   on Wednesday [2 Sep 2026]"). Root cause was a Dhan-side OHLC-quote
+   outage lasting the ENTIRE trading day (`journalctl` showed 78,127
+   occurrences of an empty-envelope `get_ohlc_data` failure, 09:13 IST
+   through 23:59 IST, zero the next day) - this single call feeds BOTH
+   Swing's own price-confirmation entry gate
+   (`_is_price_confirmed_above_prev_close`) and Options/Luxury's own
+   stock ranking (`get_day_change_pct`), so the outage silently zeroed
+   out real trading bot-wide for the whole day (confirmed: 150 Luxury
+   alerts all returned `could_not_rank_any_stock`, zero successful
+   entries anywhere). Every affected path already fails SAFE (no entry
+   on bad data - not a correctness bug), but a sustained outage like
+   this one currently just keeps retrying at the same cadence forever,
+   producing tens of thousands of near-identical ERROR lines in one day
+   with no way to tell "outage" apart from "market had no good setups"
+   from any dashboard. Proposed fix: after N consecutive
+   `get_ohlc_data` failures (for the SAME symbol, or system-wide),
+   back off to a much longer retry interval and/or surface a distinct,
+   loud "data pipeline degraded" signal (e.g. on `/health` or a new
+   incident-log entry) instead of silently retrying at full cadence -
+   purely a log-volume/observability improvement, not a trading-logic
+   change. Full incident writeup: trading-skills'
+   `incidents/2026-09-02-ohlc-outage-zero-trades.md`.
+
 ## Safety practice for anyone working on this repo
 
 This bot places real trades with real money the moment it's running
