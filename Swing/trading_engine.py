@@ -1986,8 +1986,14 @@ async def _basket_monitor_tick() -> None:
     rather than whichever happened to iterate first. Removes a symbol
     from the watchlist on a successful auto-entry - no reason to keep
     evaluating a stock once it has a live basket. Then evaluates the
-    exit signal for every live basket, unchanged."""
-    watchlist_symbols = await watchlist_store.symbols()
+    exit signal for every live basket, unchanged.
+
+    config.WATCHLIST_ENTRY_ENABLED (added 7 Sep 2026) gates the
+    watchlist-sourced entry side only - when False, watchlist_symbols is
+    forced empty so no watchlist symbol is ever evaluated for a fresh
+    entry this tick, while the exit-checking loop below (for whatever's
+    already live) runs completely unaffected."""
+    watchlist_symbols = await watchlist_store.symbols() if config.WATCHLIST_ENTRY_ENABLED else []
     entry_candidates: list[Tuple[datetime, float, str]] = []
     for i, symbol in enumerate(watchlist_symbols):
         if i > 0:
@@ -2030,8 +2036,18 @@ async def _sequential_monitor_tick() -> None:
     branch) does NOT compete for new capacity - that symbol's own slot
     was already reserved back when it first entered and stays reserved
     throughout the whole loop - so it fires immediately as soon as
-    detected, same as before, never deferred behind a ranking step."""
-    watchlist_symbols = await watchlist_store.symbols()
+    detected, same as before, never deferred behind a ranking step.
+
+    config.WATCHLIST_ENTRY_ENABLED (added 7 Sep 2026) gates only the
+    genuinely-FRESH (`leg is None`) entry path - forcing watchlist_
+    symbols empty when False means all_symbols becomes just live_legs'
+    own keys, so every symbol iterated already has a leg and the
+    `leg is None` branch (the only place a NEW watchlist-sourced entry
+    can happen) never runs. The FUT exit-check and the PE->FUTURES loop-
+    continuation swap below are both about managing a symbol ALREADY
+    under active sequential management, not a fresh entry - both keep
+    running exactly as before regardless of this flag."""
+    watchlist_symbols = await watchlist_store.symbols() if config.WATCHLIST_ENTRY_ENABLED else []
     live_legs = dict(sequential_store.live_legs)
     all_symbols = list(dict.fromkeys(list(watchlist_symbols) + list(live_legs.keys())))
 
@@ -2078,8 +2094,19 @@ async def _basket_hedge_monitor_tick() -> None:
     first rather than entered immediately, so that when more than one
     fires in the SAME tick and MAX_LIVE_BASKETS can't take them all, the
     best one is attempted first instead of whichever happened to iterate
-    first."""
-    watchlist_symbols = await watchlist_store.symbols()
+    first.
+
+    config.WATCHLIST_ENTRY_ENABLED (added 7 Sep 2026, THIS mode is the
+    one it was actually built for - see its own docstring for the live
+    incident) gates only the watchlist-sourced entry side - forcing
+    watchlist_symbols empty when False means all_symbols becomes just
+    live_positions' own keys, so `position is None` never happens and
+    the fresh-entry branch never runs; the BASKET/PE_HEDGE exit-checking
+    branches below (managing whatever's already live) are completely
+    unaffected, and POST /chartink/webhook-swing-enter's own real-time
+    entries (which never read watchlist_store at all) aren't touched by
+    this flag either way."""
+    watchlist_symbols = await watchlist_store.symbols() if config.WATCHLIST_ENTRY_ENABLED else []
     live_positions = dict(basket_hedge_store.live_positions)
     all_symbols = list(dict.fromkeys(list(watchlist_symbols) + list(live_positions.keys())))
 

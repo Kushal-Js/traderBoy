@@ -133,6 +133,35 @@ STRATEGY_ENABLED = os.getenv("SWING_STRATEGY_ENABLED", "false").lower() == "true
 # "basket" or "sequential" and restarting.
 STRATEGY_MODE = os.getenv("SWING_STRATEGY_MODE", "basket_hedge").lower()
 
+# Watchlist-based entry kill switch (added 7 Sep 2026, user request:
+# "disable watchlist based trade execution for Swing strategy as of
+# now"). Scoped narrowly to just the WATCHLIST-sourced fresh-entry path
+# each monitor tick runs - flipping this False does NOT touch: exit-
+# condition monitoring for whatever's already live (a held basket/PE
+# hedge/sequential leg keeps being managed exactly as before, since it's
+# no longer on the watchlist anyway once entered); sequential mode's own
+# PE->FUTURES loop-continuation swap for an ALREADY-held symbol (that's
+# managing existing exposure, not a fresh watchlist-sourced entry); the
+# daily trend/stale-age prunes or the Chartink scan pull (both just
+# maintain watchlist_store's own membership, place no orders); or (the
+# whole reason this was requested) the newer, independent real-time
+# entry path added the same day, POST /chartink/webhook-swing-enter -
+# that one takes its own candidate list straight from each Chartink
+# alert's own payload, never from watchlist_store, so it was never
+# affected by this flag either way.
+#
+# Added after observing the two paths race live for the one shared
+# MAX_LIVE_BASKETS slot: ADANIENT/AUROPHARMA (both still on the
+# watchlist, both genuinely trend-confirmed) kept re-attempting entry
+# every tick, repeatedly blocked by the funds check (each one's own
+# required margin alone exceeded the entire primary bucket), and while
+# each attempt briefly held the slot's reservation it caused a couple of
+# the new webhook's own alert firings to see "no capacity" for stocks
+# that had nothing to do with either of those two symbols. Turning this
+# off removes that source of contention while the alert-driven path is
+# the one actually being relied on.
+WATCHLIST_ENTRY_ENABLED = os.getenv("SWING_WATCHLIST_ENTRY_ENABLED", "true").lower() == "true"
+
 # How many baskets/positions can be live at once - entirely separate
 # from every other package's own capacity, since this trades a different
 # instrument combination on its own schedule. Shared across all THREE

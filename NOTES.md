@@ -4551,6 +4551,73 @@ out of git.
     checked flat (zero live positions) both before `git pull` and again
     immediately before `systemctl restart`, clean restart confirmed.
 
+91. **Watchlist-entry kill switch - user request 7 Sep 2026, verbatim**:
+    "Let's put a flag and disable watchlist based trade execution for
+    Swing strategy as of now." Found investigating a real alert
+    ("check trades and evaluate" - the previous message): ADANIENT and
+    AUROPHARMA (both on the watchlist, both with a genuinely-firing,
+    real entry signal - price confirmed, 5-min crossed above Supertrend,
+    1-min confirmed) kept re-attempting entry every monitor tick,
+    repeatedly and correctly blocked by the funds check (each one's own
+    required margin ALONE exceeded the entire primary bucket's whole
+    85% allowance - ADANIENT needed ~Rs.239,667 vs ~Rs.149,073
+    available, AUROPHARMA ~Rs.185,083 vs the same). While each attempt
+    briefly held the ONE shared `MAX_LIVE_BASKETS` slot's reservation,
+    it caused 2 of entry #90's own new alert-webhook firings (for a
+    completely different stock) to see `max_live_baskets_reached` and
+    get ignored, before the reservation cleared and later firings went
+    through to `processed` normally. No real money was ever at risk
+    (everything correctly blocked/filtered throughout), but it showed
+    the two entry paths visibly competing for one scarce resource.
+
+    New `config.WATCHLIST_ENTRY_ENABLED` (`Swing/config.py`, default
+    `true` - a pure opt-in restriction, zero behavior change for anyone
+    who hasn't set it) - deliberately scoped NARROWLY to just the
+    watchlist-SOURCED fresh-entry side of each of the 3 monitor-tick
+    functions (`_basket_monitor_tick`/`_sequential_monitor_tick`/
+    `_basket_hedge_monitor_tick`), one line changed in each: `watchlist_
+    symbols` is forced to an empty list when the flag is False, so no
+    watchlist symbol is ever entry-evaluated that tick. Everything else
+    stays completely untouched:
+      - Exit-condition monitoring for whatever's ALREADY live (a held
+        basket/PE hedge/sequential leg) keeps running exactly as
+        before - it's no longer on the watchlist anyway once entered,
+        so it was never sourced from `watchlist_symbols` in the first
+        place.
+      - Sequential mode's own PE->FUTURES loop-continuation swap for an
+        ALREADY-held symbol still fires immediately - that's managing
+        existing exposure, not a fresh watchlist-sourced entry.
+      - The daily trend/stale-age prunes and the Chartink scan pull
+        still run - they only maintain `watchlist_store`'s own
+        membership, place no orders themselves.
+      - `POST /chartink/webhook-swing-enter` (entry #90) is completely
+        UNAFFECTED either way - it sources its own candidates straight
+        from each alert's own payload via `_rank_and_enter_candidates`,
+        never from `watchlist_store` - which is exactly why disabling
+        the OLD watchlist-driven path is safe to do while still relying
+        on the NEW alert-driven one.
+
+    New `tests/test_swing_watchlist_entry_toggle.py` (6 scenarios, all
+    against the REAL production tick functions): a watchlist symbol
+    whose signal genuinely fires places ZERO orders and is left
+    completely untouched with the flag off, for all 3 modes; an
+    ALREADY-live position's own exit condition still fires and is acted
+    on normally regardless of the flag; sequential mode's own PE-
+    >FUTURES loop continuation for an already-held symbol still fires
+    with the flag off; the flag defaults to `true` with entries
+    proceeding normally at that default (a direct regression check); and
+    the alert-driven webhook still enters a genuinely-qualifying alert
+    stock normally with the flag off, proving it's truly unaffected.
+
+    Updated `README.md` (`Swing/trading_engine.py`'s own row),
+    `tests/README.md`. Ran the full 29-file test suite afterward, all
+    pass. Deployed directly per the user's own explicit instruction
+    ("update code and deploy also") with `SWING_WATCHLIST_ENTRY_
+    ENABLED=false` set in the droplet's own `.env` - Options/Futures/
+    Luxury/Swing all checked flat (zero live positions) both before
+    `git pull`/`.env` update and again immediately before `systemctl
+    restart`, clean restart confirmed.
+
     Deployed directly per the user's own explicit instruction ("Create
     and Test thoroughly and deploy it also") - every package flat at
     deploy time (checked all four - Options/Futures/Luxury/Swing -
