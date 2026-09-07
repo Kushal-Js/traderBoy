@@ -4467,6 +4467,90 @@ out of git.
     log lines beyond the already-known-benign pre-market OHLC-not-yet-
     available noise.
 
+90. **Chartink entry webhook gained REAL entry-signal evaluation +
+    ranking - user request 7 Sep 2026** (verbatim): "I need a chartink
+    webhook to be directly integrated in Swing strategy bot which can
+    continuously sends json feeds and bot should consume them over for
+    placing order using data send from webhook url. The bot should
+    calculate best stock to place trade upon based on conditions
+    already predefined in our code under 'Swing' strategy. Implement,
+    test and deploy this to droplet."
+
+    `POST /chartink/webhook-swing-enter` already existed (built earlier
+    this session) but, per its own original docstring, entered EVERY
+    stock in the payload directly with NO evaluation at all - "the
+    decision of WHICH stock to send and WHEN lives outside the bot for
+    now." This closes exactly that gap.
+
+    New shared `_rank_and_enter_candidates` (`Swing/trading_engine.py`)
+    - given a candidate list, evaluates each one's REAL entry signal
+    (`_evaluate_watchlist_entry_signal` - the identical price-
+    confirmation + dual-timeframe Supertrend crossover check
+    `monitor_loop`'s own tick already uses), ranks whichever ones
+    qualify by freshness+volume (`_entry_candidate_rank_key` - the SAME
+    ranking entry #80 already built for picking among several watchlist
+    symbols firing in the same tick), then attempts entry for each in
+    ranked order via the mode-appropriate real entry function
+    (dispatched by `config.STRATEGY_MODE`), up to whatever capacity
+    remains - so a Chartink alert listing several stocks results in the
+    BEST-qualifying one(s) actually being traded, not every single one
+    blindly. Deliberately a NEW, standalone function rather than a
+    refactor of the 3 already-live monitor-tick functions (which share
+    this exact same "collect, rank, then enter" shape internally) - to
+    avoid ANY regression risk to the currently-deployed, real-money
+    monitor loop; built from the same trusted, already-tested primitives
+    those ticks use, not reimplemented.
+
+    `chartink_webhook_swing_enter` (`Swing/swing_main.py`) rewritten to
+    call this instead of blindly looping `entry_fn(symbol)` over every
+    requested stock. `remove_from_watchlist_on_entry` is passed as
+    `config.STRATEGY_MODE != "sequential"` - matches each mode's own
+    established watchlist-removal behavior (basket/basket_hedge remove
+    on entry; sequential doesn't, since it still needs continuous
+    evaluation for its own FUTURES<->PE loop). A stock whose signal
+    never confirms is now reported back as `skipped`/
+    `entry_signal_not_confirmed` in the response rather than silently
+    entered anyway - every stock in the alert is accounted for.
+    `STRATEGY_ENABLED=false` and zero capacity both still short-circuit
+    before any signal is even evaluated, unchanged from before.
+
+    **Found + fixed while testing**: this change broke 3 existing tests
+    in `test_swing_integration.py` that had encoded the OLD "blindly
+    enter everything" behavior as their own expected behavior (asserting
+    stocks entered purely based on capacity, with no signal check at
+    all) - and running the affected tests without first mocking the new
+    signal-evaluation path triggered a REAL, slow Dhan login attempt
+    that hit Dhan's own login rate limiter ("Too many attempts"),
+    hanging the test run - the identical failure mode documented earlier
+    this session for the exact same reason (an unmocked call on the new
+    code path). Fixed by adding the same `install_fake_signal_fetch`
+    helper `test_swing_entry_ranking.py` already established to that
+    file too, giving each test's own intended stocks a genuinely
+    qualifying fake signal so the tests keep exercising what they always
+    meant to (capacity/lifecycle/reconciliation), not signal
+    confirmation.
+
+    New `tests/test_swing_chartink_entry_webhook.py` (7 scenarios): a
+    non-qualifying candidate is never even ranked, let alone entered;
+    the freshest crossover wins when capacity is scarce (proving the new
+    function's own ranking is genuinely wired to the SAME rank key, not
+    reimplemented); `remove_from_watchlist_on_entry` correctly differs
+    by mode; mode dispatch routes to the right real entry function; full
+    webhook-level integration reports both a winner and a non-qualifying
+    stock correctly; and `STRATEGY_ENABLED=false`/zero capacity both
+    still short-circuit exactly as before. Ran the full 29-file test
+    suite afterward, all pass (one unrelated, pre-existing flaky test -
+    `test_choppy_stocks.py` - hit Dhan's own login rate limiter from the
+    sheer volume of real auth attempts made across this whole session
+    today; confirmed passing on its own, unrelated to this change).
+
+    Updated `README.md` (the webhook's own endpoint row, and
+    `Swing/trading_engine.py`'s own row), `tests/README.md`. Deployed
+    directly per the user's own explicit instruction ("Implement, test
+    and deploy this to droplet") - Options/Futures/Luxury/Swing all
+    checked flat (zero live positions) both before `git pull` and again
+    immediately before `systemctl restart`, clean restart confirmed.
+
     Deployed directly per the user's own explicit instruction ("Create
     and Test thoroughly and deploy it also") - every package flat at
     deploy time (checked all four - Options/Futures/Luxury/Swing -

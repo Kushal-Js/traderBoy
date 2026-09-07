@@ -128,10 +128,63 @@ def install_all_dhan_mocks():
     return restore
 
 
+def _entry_state(candle_start, volume=100.0) -> ste.SupertrendState:
+    """Same helper as test_swing_entry_ranking.py's own - a SupertrendState
+    that satisfies the ENTRY timeframe's own crossed_above requirement."""
+    return ste.SupertrendState(candle_start=candle_start, close=110.0, supertrend=100.0, is_above=True,
+                                prev_close=95.0, prev_supertrend=100.0, prev_is_above=False, volume=volume)
+
+
+def _confirm_state() -> ste.SupertrendState:
+    """Satisfies the CONFIRM timeframe's own requirement (is_above True)."""
+    return ste.SupertrendState(candle_start=datetime.now(ste.IST), close=10.0, supertrend=9.0, is_above=True,
+                                prev_close=9.5, prev_supertrend=9.0, prev_is_above=True, volume=0.0)
+
+
+def install_fake_signal_fetch(qualifying_symbols):
+    """Makes _evaluate_watchlist_entry_signal genuinely return True (via
+    the REAL production function) for every symbol in `qualifying_symbols`
+    - added 7 Sep 2026 alongside chartink_webhook_swing_enter's own new
+    real signal-evaluation step (previously this webhook entered every
+    requested stock unconditionally, so no test in this file ever needed
+    to fake a qualifying signal at all). Same shape as test_swing_entry_
+    ranking.py's own identically-named helper - faking the price-
+    confirmation gate and both Supertrend timeframes' own REST fetch,
+    never the evaluation/ranking logic itself, which stays completely
+    real. All qualifying symbols share the identical candle_start/volume
+    (a tie) - fine for every test in this file, none of which cares
+    WHICH specific symbol wins a ranking tie, only how many get in."""
+    real_fetch = ste._fetch_supertrend_state
+    real_price_confirmed = ste._is_price_confirmed_above_prev_close
+    same_candle = datetime(2026, 9, 1, 10, 0, tzinfo=ste.IST)
+    qualifying = set(qualifying_symbols)
+
+    async def fake_fetch(symbol, interval_minutes):
+        if symbol not in qualifying:
+            return None
+        if interval_minutes == ste.config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES:
+            return _entry_state(same_candle)
+        return _confirm_state()
+
+    async def fake_price_confirmed(symbol):
+        return symbol in qualifying
+
+    ste._fetch_supertrend_state = fake_fetch
+    ste._is_price_confirmed_above_prev_close = fake_price_confirmed
+
+    def restore():
+        ste._fetch_supertrend_state = real_fetch
+        ste._is_price_confirmed_above_prev_close = real_price_confirmed
+    return restore
+
+
 async def test_1_full_webhook_multi_stock_mixed_capacity_outcome():
     store = sps.BasketStore()
     sm.basket_store = store
     ste.basket_store = store
+    wl_store = swl.WatchlistStore()
+    sm.watchlist_store = wl_store
+    ste.watchlist_store = wl_store
 
     real_enabled, real_cap = ste.config.STRATEGY_ENABLED, ste.config.MAX_LIVE_BASKETS
     real_mode = ste.config.STRATEGY_MODE
@@ -143,6 +196,11 @@ async def test_1_full_webhook_multi_stock_mixed_capacity_outcome():
     # explicitly rather than relying on whatever the ambient default is.
     ste.config.STRATEGY_MODE = "basket"
     restore = install_all_dhan_mocks()
+    # All 3 requested stocks genuinely qualify (added 7 Sep 2026, the
+    # webhook now evaluates a REAL entry signal per stock instead of
+    # blindly entering everything) - capacity remains the only bottleneck
+    # this test is actually exercising, unchanged from its original intent.
+    restore_signal = install_fake_signal_fetch(["RELIANCE", "TCS", "SBIN"])
     try:
         payload = sm.SwingWebhookPayload(
             stocks="RELIANCE,TCS,SBIN", alert_name="integration-test-1",
@@ -165,6 +223,7 @@ async def test_1_full_webhook_multi_stock_mixed_capacity_outcome():
               "3 requested, exactly 2 entered (capacity=2), 1 correctly skipped, webhook_alerts logged: PASSED")
     finally:
         restore()
+        restore_signal()
         ste.config.STRATEGY_ENABLED = sm.config.STRATEGY_ENABLED = real_enabled
         ste.config.MAX_LIVE_BASKETS = real_cap
         ste.config.STRATEGY_MODE = real_mode
@@ -174,12 +233,16 @@ async def test_2_full_lifecycle_enter_then_manual_squareoff():
     store = sps.BasketStore()
     sm.basket_store = store
     ste.basket_store = store
+    wl_store = swl.WatchlistStore()
+    sm.watchlist_store = wl_store
+    ste.watchlist_store = wl_store
 
     real_enabled = ste.config.STRATEGY_ENABLED
     real_mode = ste.config.STRATEGY_MODE
     ste.config.STRATEGY_ENABLED = sm.config.STRATEGY_ENABLED = True
     ste.config.STRATEGY_MODE = "basket"  # see test_1's own comment
     restore = install_all_dhan_mocks()
+    restore_signal = install_fake_signal_fetch(["RELIANCE"])  # see test_1's own comment on why this is needed now
     try:
         enter_payload = sm.SwingWebhookPayload(stocks="RELIANCE", alert_name="integration-test-2")
         enter_result = await sm.chartink_webhook_swing_enter(enter_payload)
@@ -207,6 +270,7 @@ async def test_2_full_lifecycle_enter_then_manual_squareoff():
               "closed in trade_history, tagged Swing, reason MANUAL_SQUARE_OFF): PASSED")
     finally:
         restore()
+        restore_signal()
         ste.config.STRATEGY_ENABLED = sm.config.STRATEGY_ENABLED = real_enabled
         ste.config.STRATEGY_MODE = real_mode
 
@@ -310,12 +374,14 @@ async def test_5_watchlist_and_enter_webhooks_operate_independently():
     ste.basket_store = store
     wl_store = swl.WatchlistStore()
     sm.watchlist_store = wl_store
+    ste.watchlist_store = wl_store
 
     real_enabled = ste.config.STRATEGY_ENABLED
     real_mode = ste.config.STRATEGY_MODE
     ste.config.STRATEGY_ENABLED = sm.config.STRATEGY_ENABLED = True
     ste.config.STRATEGY_MODE = "basket"  # see test_1's own comment
     restore = install_all_dhan_mocks()
+    restore_signal = install_fake_signal_fetch(["WIPRO"])  # see test_1's own comment on why this is needed now
     try:
         watchlist_payload = sm.SwingWebhookPayload(stocks="ICICIBANK", alert_name="integration-test-5-watchlist")
         watchlist_result = await sm.chartink_webhook_swing_watchlist(watchlist_payload)
@@ -345,6 +411,7 @@ async def test_5_watchlist_and_enter_webhooks_operate_independently():
               "('Swing' vs 'Swing-Watchlist'): PASSED")
     finally:
         restore()
+        restore_signal()
         ste.config.STRATEGY_ENABLED = sm.config.STRATEGY_ENABLED = real_enabled
         ste.config.STRATEGY_MODE = real_mode
 

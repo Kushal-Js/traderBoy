@@ -156,7 +156,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from datetime import time as dt_time
 from datetime import timedelta
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import fund_allocation
@@ -1891,6 +1891,64 @@ def _entry_candidate_rank_key(entry_tf: Optional[SupertrendState]) -> Tuple[date
     if entry_tf is None or entry_tf.candle_start is None:
         return (datetime.min.replace(tzinfo=IST), 0.0)
     return (entry_tf.candle_start, entry_tf.volume)
+
+
+async def _rank_and_enter_candidates(
+    candidate_symbols: List[str], remove_from_watchlist_on_entry: bool = True,
+) -> List[dict]:
+    """Given a list of candidate symbols, evaluates each one's REAL entry
+    signal (_evaluate_watchlist_entry_signal - price confirmation +
+    dual-timeframe Supertrend crossover, exactly what monitor_loop's own
+    tick checks), ranks whichever ones qualify by freshness+volume
+    (_entry_candidate_rank_key), then attempts entry for each in ranked
+    order via the mode-appropriate REAL entry function (dispatched by
+    config.STRATEGY_MODE) - so when more than one candidate qualifies at
+    once and MAX_LIVE_BASKETS can't take them all, the best-ranked one is
+    tried first. This is the exact same "collect, rank, then enter"
+    sequencing each monitor tick already does for the whole watchlist;
+    this is a NEW, standalone function (added 7 Sep 2026, for the
+    Chartink entry webhook below) built from the same trusted, already-
+    tested primitives (_evaluate_watchlist_entry_signal/
+    _fetch_supertrend_state/_entry_candidate_rank_key/the 3 real entry
+    functions) rather than a refactor of the already-live monitor ticks
+    themselves - deliberately, so this can't introduce any regression
+    risk to the currently-deployed, real-money monitor loop.
+
+    remove_from_watchlist_on_entry (default True, matches basket/
+    basket_hedge mode's own established behavior in every monitor tick)
+    - pass False for sequential mode, where a freshly-entered symbol
+    still needs continuous evaluation for its own FUTURES->PE->FUTURES
+    loop, unlike basket/basket_hedge where a live position is tracked
+    entirely separately from the watchlist once entered.
+
+    Returns one result dict per candidate that reached the entry step
+    (i.e. whose own signal fired) - a candidate whose signal never fired
+    is NOT included here; the caller (the webhook handler) reports that
+    separately, since "not on the ranked list at all" and "ranked but
+    lost to a better candidate/no capacity" are different things worth
+    telling apart in the response."""
+    entry_candidates: list[Tuple[datetime, float, str]] = []
+    for i, symbol in enumerate(candidate_symbols):
+        if i > 0:
+            await asyncio.sleep(0.35)
+        if await _evaluate_watchlist_entry_signal(symbol):
+            entry_tf = await _fetch_supertrend_state(symbol, config.SUPERTREND_ENTRY_TIMEFRAME_MINUTES)
+            candle_start, volume = _entry_candidate_rank_key(entry_tf)
+            entry_candidates.append((candle_start, volume, symbol))
+
+    entry_candidates.sort(reverse=True)
+    results: List[dict] = []
+    for _, _, symbol in entry_candidates:
+        if config.STRATEGY_MODE == "basket":
+            result = await enter_basket_for_stock(symbol)
+        elif config.STRATEGY_MODE == "basket_hedge":
+            result = await _enter_basket_hedge_for_stock(symbol)
+        else:  # "sequential"
+            result = await _enter_futures_for_stock(symbol)
+        if result.get("status") == "entered" and remove_from_watchlist_on_entry:
+            await watchlist_store.remove_symbol(symbol)
+        results.append(result)
+    return results
 
 
 async def _evaluate_basket_exit_signal(symbol: str, basket: Basket) -> Optional[str]:
