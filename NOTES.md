@@ -4402,6 +4402,71 @@ out of git.
     positions) before restart, clean restart confirmed, no ERROR-level
     log lines.
 
+89. **BUG (found live, fixed same day): the watchlist prunes' own
+    removals were being silently undone by the very next monitor tick -
+    user request 7 Sep 2026.** User asked "any stock shortlisted yet for
+    todays trade for Swing strategy" - checking `swing_events` for the
+    day surfaced 3 `WATCHLIST_PRUNED` events (UNOMINDA/ATHERENERG/GAIL,
+    `DAILY_EMA12_CROSSED_BELOW`, all at 09:15:17-20 IST), but `GET
+    /swing/watchlist` still listed all three symbols moments later.
+    Confirmed via `data/watchlist` on the droplet: all three were still
+    listed there (`UNOMINDA,2026-09-01` etc).
+
+    Root cause: `sync_from_file()` runs on EVERY monitor_loop tick and
+    only ever ADDS symbols still found in the file (by design - see
+    entry for the file-backed watchlist, 31 Aug 2026: "removing a line
+    from the file does NOT remove that symbol from the live watchlist").
+    `remove_symbol()` (called by both the trend-based prune and the
+    stale-age prune) takes a symbol OUT of the in-memory store, but
+    since the file itself is never touched, the very NEXT tick's
+    `sync_from_file()` sees that symbol "missing" and silently re-adds
+    it right back - undoing the prune within one tick
+    (`MONITOR_INTERVAL_SECONDS`, a few seconds). Both prunes only
+    evaluate once per calendar day (date-gated, not per-symbol), so once
+    undone this way, an affected symbol survived the ENTIRE REST OF THE
+    DAY, every single day, for as long as it stayed in the file - this
+    has been true since BOTH prunes were first built (1 Sep 2026, entries
+    for the trend-based and stale-age prunes), completely unnoticed
+    until now because the symptom (a pruned symbol quietly reappearing)
+    looks identical to "the prune just didn't find anything to remove."
+
+    Fix: `WatchlistStore.remove_symbol()` gained a new
+    `suppress_resync_today: bool = False` parameter (`Swing/
+    watchlist.py`) - when True, ALSO marks the symbol as pruned for the
+    rest of today; `sync_from_file()` now skips re-adding anything in
+    that set for the same calendar day (resets automatically the next
+    day, or sooner if the Chartink scan itself re-confirms the symbol -
+    a genuinely different, deliberate signal, left untouched). Both
+    `_daily_watchlist_prune_tick` and `_stale_watchlist_age_prune_tick`
+    (`Swing/trading_engine.py`) now pass `suppress_resync_today=True`.
+
+    Deliberately NOT applied to the OTHER two `remove_symbol` call sites
+    in this codebase (a symbol taken off the watchlist because it just
+    entered a real basket/basket_hedge position) - that removal SHOULD
+    become re-watchable again as soon as it's re-synced (once the
+    position eventually exits), and a genuine duplicate entry attempt in
+    the meantime is already independently prevented by
+    `basket_store`'s/`position_store`'s own `reserve_symbol` dedup - no
+    bug on that path, so no reason to suppress it there.
+
+    New tests in `tests/test_swing_watchlist_file.py` (tests 8-11): a
+    suppressed removal survives a subsequent `sync_from_file()` the same
+    day (the exact bug, reproduced at the store level); an unsuppressed
+    removal still resyncs normally, completely unchanged (proving this
+    fix is additive, not a behavior change for the "just entered a
+    position" path); the suppression is scoped to the same calendar day
+    only, not permanent; and the REAL production
+    `_daily_watchlist_prune_tick` itself, followed by a REAL
+    `sync_from_file()` call, reproduces the exact live scenario
+    end-to-end. Ran the full 28-file test suite afterward, all pass.
+
+    Deployed directly per the user's own explicit instruction ("yes fix
+    and deploy now") - Options/Futures/Luxury/Swing all checked flat
+    (zero live positions) both before `git pull` and again immediately
+    before `systemctl restart`, clean restart confirmed, no ERROR-level
+    log lines beyond the already-known-benign pre-market OHLC-not-yet-
+    available noise.
+
     Deployed directly per the user's own explicit instruction ("Create
     and Test thoroughly and deploy it also") - every package flat at
     deploy time (checked all four - Options/Futures/Luxury/Swing -

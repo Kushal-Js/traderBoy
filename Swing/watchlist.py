@@ -15,6 +15,13 @@ remove_symbol()/a future removal webhook for that) - this keeps the
 file's semantics simple and matches the webhook's own add-only behavior;
 nothing here silently drops something that might still matter.
 
+Fixed 7 Sep 2026 (real bug found live): since this per-tick re-add and
+the trend/stale-age prunes' own removals were fighting each other for
+any symbol still listed in the file, a prune's own removal used to get
+silently undone by the very next tick - see remove_symbol()'s own
+suppress_resync_today docstring for the full mechanism. sync_from_file()
+now skips re-adding anything pruned earlier the same day.
+
 A line may optionally carry `,YYYY-MM-DD` after the symbol (e.g.
 `AUROPHARMA,2026-09-01`) - the date this symbol was ACTUALLY curated,
 used as its `added_at`/`last_confirmed_at` instead of "now" (added 2 Sep
@@ -49,9 +56,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger("swing_watchlist")
 
@@ -72,6 +79,13 @@ class WatchlistStore:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._symbols: Dict[str, WatchlistEntry] = {}
+        # symbol -> pruned TODAY for an editorial reason (trend break /
+        # stale age) - see remove_symbol()'s own suppress_resync_today
+        # docstring and sync_from_file()'s own use of this set for the
+        # bug this fixes (added 7 Sep 2026). Resets to empty the moment
+        # the calendar date rolls over past _pruned_today_date.
+        self._pruned_today: Set[str] = set()
+        self._pruned_today_date: Optional[date] = None
 
     async def add_symbols(
         self, symbols: List[str], added_at_override: Optional[Dict[str, datetime]] = None
@@ -124,9 +138,41 @@ class WatchlistStore:
                     reconfirmed.append(sym)
             return newly_added, reconfirmed
 
-    async def remove_symbol(self, symbol: str) -> bool:
+    async def remove_symbol(self, symbol: str, suppress_resync_today: bool = False) -> bool:
+        """suppress_resync_today (added 7 Sep 2026, fixing a real bug
+        found live) - when True, ALSO marks `symbol` as pruned for the
+        rest of today so sync_from_file() won't silently re-add it from
+        data/watchlist on the very next monitor tick, undoing this
+        removal within seconds. Before this fix, the trend-based and
+        stale-age prunes' own removals were being immediately
+        overwritten this way for any symbol still listed in the file -
+        confirmed live 7 Sep 2026: UNOMINDA/ATHERENERG/GAIL were pruned
+        for a genuine daily-EMA12 trend break at 09:15 IST, but `GET
+        /swing/watchlist` still showed all three moments later, and the
+        prune itself only evaluates once per calendar day (date-gated),
+        so once silently undone this way a symbol survived the ENTIRE
+        rest of the day, every day, for as long as it stayed in the
+        file - since 1 Sep 2026 when both prunes were first built.
+
+        Deliberately left False (the default) for the OTHER kind of
+        removal in this codebase - a symbol taken off the watchlist
+        because it just entered a real position
+        (trading_engine.py's own basket/basket_hedge entry paths). That
+        removal SHOULD become re-watchable again as soon as it's
+        re-synced (once its position eventually exits) - a genuine
+        duplicate entry attempt is already independently prevented by
+        basket_store's/position_store's own reserve_symbol dedup, so
+        there's no bug to fix on that path and no reason to suppress it
+        there."""
         async with self._lock:
-            return self._symbols.pop(symbol, None) is not None
+            removed = self._symbols.pop(symbol, None) is not None
+            if removed and suppress_resync_today:
+                today = datetime.now().date()
+                if self._pruned_today_date != today:
+                    self._pruned_today = set()
+                    self._pruned_today_date = today
+                self._pruned_today.add(symbol)
+            return removed
 
     async def symbols(self) -> List[str]:
         async with self._lock:
@@ -176,7 +222,18 @@ class WatchlistStore:
         Each line may optionally carry `,YYYY-MM-DD` after the symbol -
         see the module docstring. An unparseable date is logged and
         ignored (falls back to "now" for that one symbol, rather than
-        aborting the whole sync)."""
+        aborting the whole sync).
+
+        Skips re-adding any symbol pruned earlier TODAY via remove_symbol
+        (..., suppress_resync_today=True) - see that method's own
+        docstring for the real live bug this fixes (added 7 Sep 2026):
+        without this, a symbol still listed in the file would get
+        silently re-added on the very next tick after an editorial
+        prune, undoing it within seconds. It becomes eligible for
+        re-sync again the moment the calendar date rolls over (or
+        sooner, via the Chartink scan's own confirm_chartink_symbols -
+        a genuinely different, deliberate re-confirmation signal, not
+        this passive per-tick resync, so that path is untouched)."""
         try:
             with open(WATCHLIST_FILE) as f:
                 lines = f.readlines()
@@ -186,14 +243,22 @@ class WatchlistStore:
             logger.exception("Could not read %s - skipping this sync", WATCHLIST_FILE)
             return []
 
+        async with self._lock:
+            today = datetime.now().date()
+            pruned_today = set(self._pruned_today) if self._pruned_today_date == today else set()
+
         symbols: List[str] = []
         added_at_override: Dict[str, datetime] = {}
+        skipped_pruned: List[str] = []
         for raw_line in lines:
             line = raw_line.strip()
             if not line or line.startswith("#"):
                 continue
             sym_part, _, date_part = line.partition(",")
             sym = sym_part.strip().upper()
+            if sym in pruned_today:
+                skipped_pruned.append(sym)
+                continue
             date_part = date_part.strip()
             if date_part:
                 try:
@@ -204,6 +269,11 @@ class WatchlistStore:
                         date_part, sym, WATCHLIST_FILE,
                     )
             symbols.append(sym)
+        if skipped_pruned:
+            logger.info(
+                "Not re-adding %s from %s - pruned earlier today, eligible again tomorrow "
+                "(or sooner if the Chartink scan re-confirms it)", skipped_pruned, WATCHLIST_FILE,
+            )
         if not symbols:
             return []
         added = await self.add_symbols(symbols, added_at_override=added_at_override)

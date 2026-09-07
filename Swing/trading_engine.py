@@ -1575,7 +1575,12 @@ async def _daily_watchlist_prune_tick() -> None:
             logger.exception("%s: could not evaluate daily trend for watchlist prune - leaving it as-is", symbol)
             continue
         if reason:
-            await watchlist_store.remove_symbol(symbol)
+            # suppress_resync_today=True (added 7 Sep 2026, fixing a real
+            # bug found live - see remove_symbol's own docstring): without
+            # this, sync_from_file()'s own per-tick re-read of
+            # data/watchlist was silently re-adding this symbol on the
+            # very next tick, undoing the prune within seconds.
+            await watchlist_store.remove_symbol(symbol, suppress_resync_today=True)
             removed.append((symbol, reason))
             logger.info("%s: removed from watchlist - %s", symbol, reason)
             await _record_swing_event("WATCHLIST_PRUNED", symbol, {"reason": reason})
@@ -1700,7 +1705,9 @@ async def _stale_watchlist_age_prune_tick() -> None:
 
     stale = await watchlist_store.stale_symbols(config.WATCHLIST_STALE_AGE_DAYS)
     for symbol, last_confirmed_at in stale:
-        await watchlist_store.remove_symbol(symbol)
+        # suppress_resync_today=True - same fix/reasoning as the
+        # trend-based prune above (see remove_symbol's own docstring).
+        await watchlist_store.remove_symbol(symbol, suppress_resync_today=True)
         logger.info(
             "%s: removed from watchlist - stale (last confirmed %s, >= %d day(s) ago, never "
             "re-fed by the Chartink scan since)",

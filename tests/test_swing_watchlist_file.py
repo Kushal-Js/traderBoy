@@ -24,6 +24,19 @@ Covers:
      backdates that symbol's own added_at/last_confirmed_at, a plain
      symbol still gets "now", and an unparseable date falls back to
      "now" for that one symbol rather than aborting the sync.
+  8-11. A real bug found live 7 Sep 2026: sync_from_file()'s own per-tick
+     re-add was silently undoing the trend/stale-age prunes' own
+     removals for any symbol still listed in the file (confirmed live -
+     UNOMINDA/ATHERENERG/GAIL were pruned at 09:15 IST but still showed
+     up on GET /swing/watchlist moments later). remove_symbol(...,
+     suppress_resync_today=True) - what both prunes now call - survives
+     a subsequent sync_from_file() the same day (8); an UNSUPPRESSED
+     removal (the OTHER remove_symbol call sites, "just entered a real
+     position") still resyncs normally, unchanged (9); the suppression
+     is scoped to the same calendar day only, not permanent (10); and
+     the REAL production _daily_watchlist_prune_tick's own removal
+     survives a REAL subsequent sync_from_file() call, full end-to-end
+     (11).
 
 HOW TO RUN:
     uv run python tests/test_swing_watchlist_file.py
@@ -32,7 +45,7 @@ import asyncio
 import os
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -204,6 +217,143 @@ async def test_7_optional_per_line_date_sets_added_at():
         restore()
 
 
+async def test_8_suppressed_removal_survives_a_resync():
+    """Reproduces the real live bug found 7 Sep 2026: UNOMINDA/
+    ATHERENERG/GAIL were pruned for a genuine trend break at 09:15 IST,
+    but GET /swing/watchlist still showed all three moments later,
+    because sync_from_file() was silently re-adding them from
+    data/watchlist on the very next tick. remove_symbol(...,
+    suppress_resync_today=True) - what the trend/stale-age prunes now
+    both call - must survive a subsequent sync_from_file() the same
+    day."""
+    store = swl.WatchlistStore()
+    restore = _use_scratch_watchlist_file()
+    try:
+        swl.WATCHLIST_FILE.write_text("UNOMINDA,2026-09-01\n")
+        await store.sync_from_file()
+        assert "UNOMINDA" in await store.symbols()
+
+        removed = await store.remove_symbol("UNOMINDA", suppress_resync_today=True)
+        assert removed is True
+        assert "UNOMINDA" not in await store.symbols()
+
+        # The exact bug: data/watchlist STILL lists UNOMINDA (removing a
+        # line from the file was never part of this mechanism - see the
+        # module's own docstring) - a naive re-sync would silently bring
+        # it right back.
+        again = await store.sync_from_file()
+        assert "UNOMINDA" not in again, \
+            f"a suppressed removal must NOT be undone by the very next sync, got {again}"
+        assert "UNOMINDA" not in await store.symbols(), \
+            "UNOMINDA must still be absent from the live watchlist after the resync"
+        print("8. A prune's own removal (suppress_resync_today=True) correctly survives a "
+              "subsequent sync_from_file() the same day - the exact live bug this fixes: PASSED")
+    finally:
+        restore()
+
+
+async def test_9_unsuppressed_removal_still_resyncs_normally():
+    """The OTHER remove_symbol call sites in this codebase (a symbol
+    taken off the watchlist because it just entered a real position)
+    deliberately do NOT pass suppress_resync_today - that removal SHOULD
+    become watchable again as soon as it's re-synced. Confirms the
+    default (suppress_resync_today=False) keeps the pre-fix behavior
+    completely unchanged - this fix is additive, not a behavior change
+    for every other caller."""
+    store = swl.WatchlistStore()
+    restore = _use_scratch_watchlist_file()
+    try:
+        swl.WATCHLIST_FILE.write_text("RELIANCE\n")
+        await store.sync_from_file()
+        await store.remove_symbol("RELIANCE")  # default: suppress_resync_today=False
+        assert "RELIANCE" not in await store.symbols()
+
+        again = await store.sync_from_file()
+        assert "RELIANCE" in again, \
+            "an UNSUPPRESSED removal must still resync normally - this fix must not change that path"
+        print("9. An unsuppressed removal (the default) still resyncs normally on the next tick - "
+              "this fix doesn't change behavior for the 'just entered a position' removal path: PASSED")
+    finally:
+        restore()
+
+
+async def test_10_suppression_resets_on_a_new_day():
+    """A symbol pruned today must become eligible for re-sync again
+    tomorrow - the suppression is a same-day-only guard, not permanent
+    (a permanent block would need its own explicit un-prune mechanism,
+    which isn't what was asked for or built here)."""
+    store = swl.WatchlistStore()
+    restore = _use_scratch_watchlist_file()
+    try:
+        swl.WATCHLIST_FILE.write_text("MAHABANK,2026-09-01\n")
+        await store.sync_from_file()
+        await store.remove_symbol("MAHABANK", suppress_resync_today=True)
+        assert "MAHABANK" not in (await store.sync_from_file())
+
+        # Simulate the next calendar day by backdating the store's own
+        # bookkeeping directly (the same field remove_symbol/sync_from_file
+        # themselves read) rather than reaching for a real datetime mock.
+        store._pruned_today_date = store._pruned_today_date - timedelta(days=1)
+
+        again = await store.sync_from_file()
+        assert "MAHABANK" in again, "the suppression must NOT still apply on a new calendar day"
+        print("10. The suppression is scoped to the SAME calendar day only - a new day makes the "
+              "symbol eligible for re-sync again: PASSED")
+    finally:
+        restore()
+
+
+async def test_11_real_daily_prune_tick_removal_survives_a_real_resync():
+    """Full real integration - the actual production
+    _daily_watchlist_prune_tick (imported from Swing.trading_engine)
+    against a real trend-broken symbol, followed by a real
+    sync_from_file() call, reproducing the exact live scenario end to
+    end rather than only testing the store's own two methods in
+    isolation."""
+    import Swing.trading_engine as ste
+
+    real_watchlist_store = ste.watchlist_store
+    real_last_prune_date = ste._last_watchlist_prune_date
+    real_enabled = ste.config.WATCHLIST_DAILY_PRUNE_ENABLED
+    real_now_ist = ste._now_ist
+    real_evaluate = ste._evaluate_daily_trend_break
+
+    store = swl.WatchlistStore()
+    ste.watchlist_store = store
+    ste._last_watchlist_prune_date = None
+    ste.config.WATCHLIST_DAILY_PRUNE_ENABLED = True
+    ste._now_ist = lambda: datetime.now().replace(hour=9, minute=20)  # past the 09:15 gate
+    ste._evaluate_daily_trend_break = lambda symbol: (
+        "DAILY_EMA12_CROSSED_BELOW" if symbol == "GAIL" else None
+    )
+    restore = _use_scratch_watchlist_file()
+    try:
+        swl.WATCHLIST_FILE.write_text("GAIL,2026-09-01\nRELIANCE,2026-09-01\n")
+        await store.sync_from_file()
+        assert set(await store.symbols()) == {"GAIL", "RELIANCE"}
+
+        await ste._daily_watchlist_prune_tick()
+        assert "GAIL" not in await store.symbols(), "the real prune tick must have removed GAIL"
+
+        # The exact live bug: a later real sync_from_file() call (as
+        # monitor_loop makes every tick) must NOT bring GAIL back, even
+        # though data/watchlist still lists it.
+        await store.sync_from_file()
+        assert "GAIL" not in await store.symbols(), \
+            "GAIL must still be absent after a real sync_from_file() call - this is the exact live bug"
+        assert "RELIANCE" in await store.symbols(), "an unaffected symbol must be untouched throughout"
+
+        print("11. The REAL production _daily_watchlist_prune_tick's own removal survives a REAL "
+              "subsequent sync_from_file() call, full end-to-end - the exact live scenario: PASSED")
+    finally:
+        restore()
+        ste.watchlist_store = real_watchlist_store
+        ste._last_watchlist_prune_date = real_last_prune_date
+        ste.config.WATCHLIST_DAILY_PRUNE_ENABLED = real_enabled
+        ste._now_ist = real_now_ist
+        ste._evaluate_daily_trend_break = real_evaluate
+
+
 async def main():
     print("=== Swing file-backed watchlist test suite ===\n")
     await test_1_sync_adds_all_symbols_uppercased()
@@ -213,6 +363,10 @@ async def main():
     await test_5_hot_edit_picked_up_without_restart()
     await test_6_real_seed_file_round_trips()
     await test_7_optional_per_line_date_sets_added_at()
+    await test_8_suppressed_removal_survives_a_resync()
+    await test_9_unsuppressed_removal_still_resyncs_normally()
+    await test_10_suppression_resets_on_a_new_day()
+    await test_11_real_daily_prune_tick_removal_survives_a_real_resync()
     print("\nALL SWING WATCHLIST FILE CHECKS PASSED")
 
 
