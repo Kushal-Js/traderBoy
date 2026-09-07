@@ -58,6 +58,36 @@ MAX_LIVE_POSITIONS_PE = int(os.getenv("LUXURY_MAX_LIVE_POSITIONS_PE", "2"))
 # 1 Sep 2026), same "same underlying, across the whole day" semantics.
 MAX_DAILY_ENTRIES_PER_SYMBOL = int(os.getenv("LUXURY_MAX_DAILY_ENTRIES_PER_SYMBOL", "3"))
 
+# Same-day loss cooldown (added 2 Sep 2026, user's own corrective-action
+# request after investigating 2-3 Sep real trades: MAHABANK/PHOENIXLTD/
+# GVT&D each got re-entered multiple times the same day right after
+# stopping out, and the re-entries mostly lost again too - MAHABANK went
+# 0-for-3 that way, -Rs.2,600 total). Skips a fresh entry into an
+# underlying that stopped THIS strategy out (a real pnl<=0 close) within
+# the last LOSS_COOLDOWN_MINUTES, backed by trade_history.
+# minutes_since_last_loss_today() (the SAME durable real_trades log
+# record_closed_trade() already writes, same "survives a restart"
+# reasoning MAX_DAILY_ENTRIES_PER_SYMBOL's own cap already relies on).
+# Independent of and stacks with the daily re-entry cap above - this one
+# is about TIMING (don't immediately chase a loss), that one is about
+# COUNT (at most N times all day, no matter how spaced out).
+LOSS_COOLDOWN_ENABLED = os.getenv("LUXURY_LOSS_COOLDOWN_ENABLED", "true").lower() == "true"
+# 20 minutes - CORRECTED after backtesting a sweep of cooldown lengths
+# against all 37 real Luxury trades from 2-3 Sep 2026. The original
+# guess (30 min) actually backtests NET NEGATIVE (-Rs.367): it blocks
+# BOTH of MAHABANK's/RVNL's genuine repeat-losses AND a GVT&D re-entry
+# that went on to hit PROFIT_PROTECTION_HIT for +Rs.1,512 - a real
+# false positive. At 20 minutes, only the two genuine back-to-back
+# losses get blocked (MAHABANK's second attempt launched barely a
+# minute after its first loss closed; RVNL similarly close) while the
+# GVT&D win survives untouched (its own gap before re-entering was
+# just past 20 minutes) - net backtested effect: +Rs.1,146, the best of
+# every length tested (5/10/15/20/25/30/45/60/90/120 minutes all
+# swept). Full sweep table in NOTES.md's corrective-action entry for
+# this feature - worth re-validating as more real trade data
+# accumulates, since this is tuned against only 2 days.
+LOSS_COOLDOWN_MINUTES = float(os.getenv("LUXURY_LOSS_COOLDOWN_MINUTES", "20"))
+
 # Code default kept at its ORIGINAL value, same convention as Options'
 # own TARGET_PCT/STOP_LOSS_PCT (whose code default is STILL "0.10"/"0.03"
 # even though the actual deployed value moved to 0.25/0.16 purely via
@@ -104,6 +134,27 @@ ENABLE_SUPERTREND_EXIT = os.getenv("LUXURY_ENABLE_SUPERTREND_EXIT", "true").lowe
 # Options/config.py's identical removal note (user request 27 Aug 2026).
 # The only remaining delay is trading_engine._supertrend_signal_for()
 # never acting on the exact same candle a position was entered on.
+
+# Liquidity guard (added 2 Sep 2026, user's own corrective-action request
+# after investigating a CHOLAFIN MAX_LOSS_HIT overshoot 3 Sep 2026 - real
+# 1-min option-candle replay showed price sitting flat on ZERO traded
+# volume for 4 straight minutes, then gapping ~7% straight past the
+# stop-loss threshold in one untracked candle, -Rs.2,594 against a
+# Rs.1,000 cap). A thinly-traded option going quiet for several minutes
+# is exactly the precursor pattern behind that kind of un-catchable gap -
+# this exits a held position EARLY (before any price threshold is even
+# close to firing) the moment its OWN option contract has printed ZERO
+# volume for several consecutive completed 1-min bars, rather than
+# waiting for MAX_LOSS_HIT to (over)fire after the gap has already
+# happened. This package's own on/off gate, same pattern as
+# ENABLE_SUPERTREND_EXIT above - the actual bar-count/refresh-cadence
+# parameters are shared, global computation settings that live in
+# Options/config.py (LIQUIDITY_GUARD_ZERO_VOLUME_BARS/_REFRESH_SECONDS),
+# since refresh_liquidity_signal()/get_cached_illiquid() live in the
+# shared dhan_client.py - identical reasoning to why SUPERTREND_PERIOD/
+# MULTIPLIER/REFRESH_SECONDS are ALSO only ever set in Options/config.py
+# even though every package's own ENABLE_SUPERTREND_EXIT is independent.
+LIQUIDITY_GUARD_ENABLED = os.getenv("LUXURY_LIQUIDITY_GUARD_ENABLED", "true").lower() == "true"
 
 # Fallback default only (used where Dhan's own reported option_type comes
 # back missing/None, e.g. reconciliation/AMO-sync) - both real webhooks

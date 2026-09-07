@@ -234,6 +234,48 @@ SUPERTREND_INTERVAL_MINUTES = int(os.getenv("SUPERTREND_INTERVAL_MINUTES", "5"))
 # (see NOTES.md bug #5).
 SUPERTREND_REFRESH_SECONDS = int(os.getenv("SUPERTREND_REFRESH_SECONDS", "15"))
 
+# Liquidity guard (added 2 Sep 2026, user's own corrective-action request
+# after investigating a real CHOLAFIN MAX_LOSS_HIT overshoot 3 Sep 2026 -
+# see Luxury/config.py's own LIQUIDITY_GUARD_ENABLED docstring for the
+# full incident/rationale). Shared, global computation parameters for
+# dhan_client.refresh_liquidity_signal()/get_cached_illiquid() - lives
+# here rather than per-package for the identical reason SUPERTREND_
+# PERIOD/MULTIPLIER/REFRESH_SECONDS above do (the function itself lives
+# in this shared dhan_client.py, keyed by option_trading_symbol - the
+# SAME contract quotes the same way regardless of which package happens
+# to be holding it). Currently wired into Luxury ONLY (LUXURY_LIQUIDITY_
+# GUARD_ENABLED, that package's own on/off gate) - the evidenced package
+# from the 2-3 Sep investigation; Options/Futures don't check this yet,
+# not because it wouldn't apply to them too, but so this first version
+# ships scoped to where it was actually validated against real trades.
+#
+# LIQUIDITY_GUARD_ZERO_VOLUME_BARS=4 means 4 CONSECUTIVE completed
+# 1-min bars of exactly zero traded volume. Originally guessed at 3
+# (matching the CHOLAFIN replay's own 4 quiet minutes, minus one for an
+# earlier margin) - CORRECTED after backtesting against all 37 real
+# Luxury trades from 2-3 Sep 2026 (not just replaying CHOLAFIN in
+# isolation): at 3 bars, the guard also fired on a BLUESTARCO position
+# that was actually fine and went on to hit PROFIT_PROTECTION_HIT for
+# +1,056.25 - the guard would have turned that real win into a
+# -666.25 loss (a false positive, net -1,722.50 on that one trade). At
+# 4 bars, that false positive disappears entirely while EVERY genuine
+# catch is preserved (CHOLAFIN, NBCC, PIIND - each only 1 minute later
+# than at 3 bars, no meaningful loss of protection) - net backtested
+# effect across the 2 days: +Rs.3,201 at 4 bars vs +Rs.1,479 at 3 bars.
+# 5+ bars becomes too conservative (misses NBCC and CHOLAFIN too, only
+# +Rs.280 net). Full sweep in trading-skills' own incident/backtest
+# writeup - see NOTES.md's corrective-action entry for this feature.
+# LIQUIDITY_GUARD_REFRESH_SECONDS=30 (vs Supertrend's own 15s) - this
+# REST call fetches the OPTION's own candles (not the underlying's), one
+# extra call per HELD position on top of Supertrend's own per-underlying
+# call; a slightly longer cache window keeps total REST volume
+# reasonable without meaningfully widening the detection window, since
+# the underlying condition (multiple minutes of zero volume) is itself
+# already a multi-minute-scale signal, not one where a few extra seconds
+# of staleness materially changes the outcome.
+LIQUIDITY_GUARD_ZERO_VOLUME_BARS = int(os.getenv("LIQUIDITY_GUARD_ZERO_VOLUME_BARS", "4"))
+LIQUIDITY_GUARD_REFRESH_SECONDS = int(os.getenv("LIQUIDITY_GUARD_REFRESH_SECONDS", "30"))
+
 # REMOVED (user request 27 Aug 2026): there used to be two extra "waiting"
 # knobs here - SUPERTREND_ENTRY_GRACE_MINUTES (extra minutes past the
 # entry candle before honoring a reversal) and SUPERTREND_MIN_WARMUP_CANDLES

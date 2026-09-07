@@ -210,6 +210,13 @@ class DhanWrapper:
         # underlying_symbol -> (fetched_at, is_bearish, candle_start) - see
         # refresh_supertrend_signal()/get_cached_supertrend_bearish().
         self._supertrend_cache: dict[str, tuple[datetime, bool, Optional[datetime]]] = {}
+        # option_trading_symbol -> (fetched_at, is_illiquid) - see
+        # refresh_liquidity_signal()/get_cached_illiquid() (added 2 Sep
+        # 2026, same cache-then-poll-refresh shape as _supertrend_cache
+        # above, keyed by the OPTION's own trading_symbol rather than the
+        # underlying since liquidity is a property of the specific
+        # contract being held, not the underlying stock).
+        self._liquidity_cache: dict[str, tuple[datetime, bool]] = {}
         # Observability: proves (or disproves) whether the WebSocket caches
         # are actually being used instead of REST, rather than assuming it.
         self.stats = {
@@ -971,6 +978,79 @@ class DhanWrapper:
         entry in the first place."""
         cached = self._supertrend_cache.get(underlying_symbol)
         return cached[2] if cached else None
+
+    # ------------------------------------------------------------------ #
+    # Liquidity guard (added 2 Sep 2026, see config.LIQUIDITY_GUARD_
+    # ZERO_VOLUME_BARS's own docstring for the CHOLAFIN incident this
+    # was built from). Computed on the OPTION's OWN candles - unlike
+    # Supertrend above, illiquidity is a property of the specific
+    # contract being held, not the underlying stock, so this is keyed by
+    # option_trading_symbol.
+    # ------------------------------------------------------------------ #
+    def refresh_liquidity_signal(self, option_trading_symbol: str) -> None:
+        """Fetches the OPTION's own 1-min candles for today and checks
+        whether the last config.LIQUIDITY_GUARD_ZERO_VOLUME_BARS fully-
+        closed bars ALL show exactly zero traded volume - a thinly-traded
+        contract going quiet for several minutes straight, the precursor
+        pattern behind an un-catchable price gap (confirmed live via a
+        real 1-min replay of the CHOLAFIN MAX_LOSS_HIT overshoot, 3 Sep
+        2026). Cached (see get_cached_illiquid) and only re-fetched every
+        config.LIQUIDITY_GUARD_REFRESH_SECONDS - same throttling
+        reasoning as refresh_supertrend_signal.
+
+        Blocking (REST call) - call via run_in_executor from async code,
+        and only from the poll loop, never the WebSocket tick path (same
+        restriction as refresh_supertrend_signal, for the same reason)."""
+        cached = self._liquidity_cache.get(option_trading_symbol)
+        if cached and (datetime.now(IST) - cached[0]).total_seconds() < config.LIQUIDITY_GUARD_REFRESH_SECONDS:
+            return
+        try:
+            security_id = self._instrument_meta(option_trading_symbol)["security_id"]
+            today = datetime.now(IST).strftime("%Y-%m-%d")
+            resp = _retry(
+                self.client.Dhan.intraday_minute_data,
+                security_id=security_id,
+                exchange_segment="NSE_FNO",
+                instrument_type="OPTSTK",
+                from_date=today,
+                to_date=today,
+                interval=1,
+            )
+            data = resp.get("data") or {}
+            volumes = data.get("volume") or []
+            timestamps = data.get("timestamp") or []
+            n = config.LIQUIDITY_GUARD_ZERO_VOLUME_BARS
+
+            # Drop the current, still-forming candle if Dhan included one -
+            # same guard refresh_supertrend_signal uses. A partially-formed
+            # bar's own volume-so-far can look artificially low/zero simply
+            # because the minute hasn't finished yet, not because the
+            # contract is actually illiquid.
+            if timestamps:
+                last_candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST)
+                if datetime.now(IST) < last_candle_start + timedelta(minutes=1):
+                    volumes = volumes[:-1]
+
+            if len(volumes) < n:
+                # Not enough completed bars yet to judge (e.g. right after
+                # market open, or right after entry) - treat as liquid
+                # rather than guessing an illiquidity verdict from too
+                # little data.
+                is_illiquid = False
+            else:
+                is_illiquid = all(v == 0 for v in volumes[-n:])
+            self._liquidity_cache[option_trading_symbol] = (datetime.now(IST), is_illiquid)
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not refresh liquidity signal for %s", option_trading_symbol)
+
+    def get_cached_illiquid(self, option_trading_symbol: str) -> Optional[bool]:
+        """Synchronous, cache-only read - safe to call from the WebSocket
+        tick path without blocking the event loop. None means no signal has
+        been computed yet (e.g. right after entry, before the poll loop's
+        first refresh) - callers should treat that as "not illiquid", not
+        force an exit on missing data."""
+        cached = self._liquidity_cache.get(option_trading_symbol)
+        return cached[1] if cached else None
 
     # ------------------------------------------------------------------ #
     # Portfolio (positions already open at the broker)

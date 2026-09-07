@@ -52,7 +52,7 @@ from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from trade_history import attribute_open_broker_position, count_opened_today
+from trade_history import attribute_open_broker_position, count_opened_today, minutes_since_last_loss_today
 import cross_strategy_registry
 import fund_allocation
 
@@ -243,6 +243,22 @@ async def _process_one_entry(symbol: str, option_type: str) -> dict:
             symbol, entries_today, config.MAX_DAILY_ENTRIES_PER_SYMBOL,
         )
         return {"symbol": symbol, "status": "skipped", "reason": "daily_reentry_cap_reached"}
+
+    # Same-day loss cooldown (added 2 Sep 2026) - see config.LOSS_COOLDOWN_
+    # ENABLED's own docstring for the MAHABANK/PHOENIXLTD/GVT&D incidents
+    # this was built from. Independent of the daily re-entry cap above -
+    # that one is a COUNT limit (at most N times all day); this one is a
+    # TIMING limit (not immediately after a loss on this same symbol).
+    if config.LOSS_COOLDOWN_ENABLED:
+        minutes_since_loss = await loop.run_in_executor(
+            None, minutes_since_last_loss_today, "Luxury", symbol, datetime.now()
+        )
+        if minutes_since_loss is not None and minutes_since_loss < config.LOSS_COOLDOWN_MINUTES:
+            logger.info(
+                "%s: skipped - stopped out %.1f minute(s) ago today, inside the %s-minute loss cooldown",
+                symbol, minutes_since_loss, config.LOSS_COOLDOWN_MINUTES,
+            )
+            return {"symbol": symbol, "status": "skipped", "reason": "loss_cooldown_active"}
 
     if not await cross_strategy_registry.try_claim(symbol, "Luxury"):
         logger.info("%s: skipped - another strategy is currently entering it", symbol)
@@ -608,12 +624,26 @@ def _supertrend_signal_for(position: Position) -> bool:
     return candle_start > entry_candle_start
 
 
-def _exit_reason_for(position: Position, ltp: float, supertrend_against_position: bool = False) -> Optional[str]:
+def _exit_reason_for(
+    position: Position, ltp: float, supertrend_against_position: bool = False,
+    liquidity_guard_triggered: bool = False,
+) -> Optional[str]:
     """See Options/trading_engine.py's version - identical logic, including
     the current_max_loss_per_trade_rs() absolute rupee-loss cap checked
     first and the current_profit_protection_threshold_rs() rupee profit-
     lock checked after TARGET_HIT - both split into a before/after-
-    config.RISK_THRESHOLD_CUTOFF_TIME pair."""
+    config.RISK_THRESHOLD_CUTOFF_TIME pair.
+
+    liquidity_guard_triggered (added 2 Sep 2026, this package only so
+    far - see config.LIQUIDITY_GUARD_ENABLED's own docstring) is checked
+    LAST, deliberately - it's an independent, additional early-warning
+    trigger (the option's own contract has gone quiet for several
+    minutes straight), not meant to override a genuine profit-taking
+    exit that already fired first on the exact same tick; it only
+    matters when NONE of the price-threshold checks above have fired
+    yet, which is exactly the CHOLAFIN scenario this was built from -
+    price was still roughly flat (nowhere near any threshold) when the
+    illiquidity was already visible, several minutes before the gap."""
     loss_rs = (position.entry_price - ltp) * position.quantity
     if loss_rs >= current_max_loss_per_trade_rs():
         return "MAX_LOSS_HIT"
@@ -627,6 +657,8 @@ def _exit_reason_for(position: Position, ltp: float, supertrend_against_position
         return "TRAILING_SL_HIT" if trailing_sl > position.hard_stop_loss else "STOP_LOSS_HIT"
     if config.ENABLE_SUPERTREND_EXIT and supertrend_against_position:
         return "SUPERTREND_EXIT"
+    if config.LIQUIDITY_GUARD_ENABLED and liquidity_guard_triggered:
+        return "LIQUIDITY_GUARD_ZERO_VOLUME"
     return None
 
 
@@ -648,7 +680,13 @@ async def _check_one_position(symbol: str, position: Position) -> None:
         await loop.run_in_executor(None, dhan_wrapper.refresh_supertrend_signal, position.underlying_symbol)
         supertrend_against_position = _supertrend_signal_for(position)
 
-    reason = _exit_reason_for(position, ltp, supertrend_against_position)
+    liquidity_guard_triggered = False
+    if config.LIQUIDITY_GUARD_ENABLED:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, dhan_wrapper.refresh_liquidity_signal, position.option_trading_symbol)
+        liquidity_guard_triggered = bool(dhan_wrapper.get_cached_illiquid(position.option_trading_symbol))
+
+    reason = _exit_reason_for(position, ltp, supertrend_against_position, liquidity_guard_triggered)
     if reason and await position_store.try_start_exit(symbol):
         await _exit_position(symbol, position, ltp, reason)
 
@@ -675,8 +713,11 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
 
         await position_store.update_highest_price(symbol, ltp)
         supertrend_against_position = config.ENABLE_SUPERTREND_EXIT and _supertrend_signal_for(position)
+        liquidity_guard_triggered = config.LIQUIDITY_GUARD_ENABLED and bool(
+            dhan_wrapper.get_cached_illiquid(position.option_trading_symbol)
+        )
 
-        reason = _exit_reason_for(position, ltp, supertrend_against_position)
+        reason = _exit_reason_for(position, ltp, supertrend_against_position, liquidity_guard_triggered)
         if reason and await position_store.try_start_exit(symbol):
             await _exit_position(symbol, position, ltp, reason)
     except Exception:  # noqa: BLE001

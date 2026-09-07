@@ -325,6 +325,64 @@ def count_opened_today(strategy: str, underlying_symbol: str) -> int:
     return count
 
 
+def minutes_since_last_loss_today(strategy: str, underlying_symbol: str, now: Optional[datetime] = None) -> Optional[float]:
+    """Read-only. Minutes elapsed since `strategy`'s own most recent
+    LOSING real trade (pnl <= 0) for `underlying_symbol` closed TODAY, or
+    None if there hasn't been one today - added 2 Sep 2026 for Options/
+    Futures/Luxury's same-day loss cooldown (user request: investigating
+    2-3 Sep real trades found MAHABANK/PHOENIXLTD/GVT&D each re-entered
+    multiple times the same day right after stopping out, and the re-
+    entries mostly lost again too - MAHABANK went 0-for-3 that way,
+    -Rs.2,600 total).
+
+    Reads only TODAY's own dated `real_trades` file (same efficiency
+    reasoning as count_opened_today, right above - a handful of JSON
+    lines on a normal day, cheap enough to call on every entry attempt).
+    `now` is injectable for tests; defaults to datetime.now() (naive,
+    server-local - the same clock every timestamp in this file already
+    uses, so no timezone conversion is needed to compare against a
+    trade's own `closed_at`).
+
+    Fails OPEN (returns None, i.e. "no cooldown active") on a read
+    error - same philosophy as count_opened_today: a rare disk hiccup
+    should never silently lock a stock out for the rest of the day, and
+    this is a secondary risk-management layer, not the primary one."""
+    now = now or datetime.now()
+    path = dated_path(REAL_TRADES_NAME)
+    if not path.exists():
+        return None
+    last_loss_at: Optional[datetime] = None
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("strategy") != strategy or record.get("underlying_symbol") != underlying_symbol:
+                    continue
+                pnl = record.get("pnl")
+                closed_at = record.get("closed_at")
+                if pnl is None or pnl > 0 or not closed_at:
+                    continue
+                closed_dt = datetime.fromisoformat(closed_at)
+                if last_loss_at is None or closed_dt > last_loss_at:
+                    last_loss_at = closed_dt
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Could not read today's %s log for %s %s - treating as no cooldown "
+            "(fail open, same as every other logging-only read in this file).",
+            REAL_TRADES_NAME, strategy, underlying_symbol,
+        )
+        return None
+    if last_loss_at is None:
+        return None
+    return (now - last_loss_at).total_seconds() / 60.0
+
+
 # --------------------------------------------------------------------- #
 # Webhook alert log - every incoming Chartink alert, tagged by which
 # endpoint/strategy received it and what happened to it (processed vs

@@ -4313,6 +4313,95 @@ out of git.
     Ran the full 28-file test suite afterward, all pass. No deploy -
     analysis/backtest work only.
 
+88. **Two Luxury corrective actions, backtested against real 2-3 Sep
+    trades, then deployed - user request 2 Sep 2026** (verbatim):
+    "Implement 1 and 2 items, back test them with last 2 days trading
+    data also, deploy it then." Items #1/#2 refer to a prior message's
+    own numbered list of suggested fixes from a deep-dive into real
+    2-3 Sep trades. Scoped to Luxury only (the package the evidence came
+    from) - Options/Futures share the same risk shapes but don't have
+    either check wired in yet.
+
+    **Item 1 - same-day loss cooldown.** New `trade_history.
+    minutes_since_last_loss_today(strategy, symbol, now)` (same
+    read-only, today's-dated-file-only efficiency as `count_opened_
+    today` right above it) plus a new check in `_process_one_entry`
+    right after the daily re-entry cap: skip a fresh entry if this
+    symbol stopped Luxury out (a real `pnl<=0` close) within the last
+    `LOSS_COOLDOWN_MINUTES` - independent of the count-based re-entry
+    cap (this one is about TIMING, not COUNT).
+
+    **Backtest result (sweeping cooldown length against all 37 real
+    Luxury trades from 2-3 Sep): the original guess of 30 minutes is
+    actually NET NEGATIVE (-Rs.367)** - it blocks MAHABANK's and RVNL's
+    genuine back-to-back repeat-losses, but ALSO blocks a GVT&D
+    re-entry that went on to hit `PROFIT_PROTECTION_HIT` for
+    +Rs.1,512.50 (a real false positive). Swept 5/10/15/20/25/30/45/60/
+    90/120 minutes - **20 minutes is the best of every length tested**
+    (+Rs.1,146 net): MAHABANK's second entry launched barely a minute
+    after its first loss closed (correctly blocked at any cooldown
+    ≥2 min), while GVT&D's own gap before re-entering was just past 20
+    minutes (correctly survives). Deployed with `LUXURY_LOSS_COOLDOWN_
+    MINUTES=20` instead of the originally-planned 30 - the backtest
+    step caught this before it shipped a net-negative default.
+
+    **Item 2 - liquidity guard on exit.** New `Options/dhan_client.py`
+    functions `refresh_liquidity_signal`/`get_cached_illiquid` (same
+    cache-then-poll-refresh shape as `refresh_supertrend_signal`,
+    keyed by `option_trading_symbol` instead of the underlying since
+    illiquidity is a property of the specific contract) - fetches the
+    OPTION's own 1-min candles and flags it illiquid once
+    `LIQUIDITY_GUARD_ZERO_VOLUME_BARS` consecutive completed bars all
+    show exactly zero traded volume. Wired into Luxury's own
+    `_exit_reason_for` as a new, LAST-checked exit reason
+    (`LIQUIDITY_GUARD_ZERO_VOLUME`) - deliberately checked after every
+    price-threshold check, so a genuine profit-taking exit on the same
+    tick still takes priority; it only matters when NOTHING else has
+    fired yet, exactly the real CHOLAFIN shape (price still roughly
+    flat, several minutes before the gap). Built from a real, verified
+    incident: replaying CHOLAFIN's own 1-min option candles (3 Sep,
+    `MAX_LOSS_HIT` at -Rs.2,594 against a Rs.1,000 cap) showed price
+    sitting flat on ZERO volume for 4 straight minutes, then gapping
+    ~7% past the stop-loss threshold in one untracked candle.
+
+    **Backtest result (fetching real 1-min option candles for all 37
+    Luxury trades' own contracts, sweeping the zero-volume-bar
+    threshold): the original guess of 3 bars has a real false positive**
+    - it also fires on a BLUESTARCO position that was actually fine and
+    went on to hit `PROFIT_PROTECTION_HIT` for +Rs.1,056.25, turning it
+    into a -Rs.666.25 loss instead (net -Rs.1,722.50 on that one trade).
+    Swept 2/3/4/5/6 bars - **4 bars removes the BLUESTARCO false
+    positive entirely while still catching every genuine overshoot**
+    (CHOLAFIN, NBCC, PIIND - each only ~1 minute later than at 3 bars,
+    no meaningful loss of protection): net effect +Rs.3,201 at 4 bars
+    vs +Rs.1,479 at 3 bars (5+ bars becomes too conservative, drops to
+    +Rs.280, missing NBCC and CHOLAFIN too). Deployed with
+    `LIQUIDITY_GUARD_ZERO_VOLUME_BARS=4` instead of the originally-
+    planned 3 - same lesson as item 1: backtesting against the FULL
+    2-day dataset (not just replaying the one incident that inspired
+    the fix) caught a real false positive before it shipped.
+
+    New `tests/test_luxury_corrective_actions.py` (16 scenarios) covers
+    both features' pure logic and full real integration (a genuine
+    `MAX_LOSS_HIT` correctly blocks an immediate real re-entry attempt
+    with zero orders placed; the liquidity guard's own exit-priority
+    ordering against a real `Position`). Ran the full 28-file test suite
+    afterward, all pass.
+
+    **Both corrective-action defaults documented here were CHANGED from
+    the values first implemented, specifically because the backtest step
+    the user asked for surfaced that the original guesses would have
+    been worse than doing nothing (item 1) or introduced a real false
+    positive (item 2) - this is exactly why "backtest before deploying"
+    was the right instruction, not a formality.** Worth re-validating
+    both as more real trade data accumulates, since both are tuned
+    against only 2 days.
+
+    Deployed directly per the user's own explicit instruction ("deploy
+    it then") - Options/Futures/Luxury/Swing all checked flat (zero live
+    positions) before restart, clean restart confirmed, no ERROR-level
+    log lines.
+
     Deployed directly per the user's own explicit instruction ("Create
     and Test thoroughly and deploy it also") - every package flat at
     deploy time (checked all four - Options/Futures/Luxury/Swing -
