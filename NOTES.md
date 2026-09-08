@@ -4901,6 +4901,84 @@ out of git.
     `BasketHedgeStore`, no other module touches it directly). Updated
     `README.md` (`Swing/position_store.py`'s own row), `tests/README.md`.
 
+96. **Real live bug found + fixed same day (8 Sep 2026): `_place_leg`'s
+    own success check silently accepted a stuck, never-filled order as a
+    successful trade - MAHABANK's own PE_HEDGE exit was phantom-closed
+    while the REAL position stayed open and unmonitored at the broker
+    for ~2.5 hours.** Found because the user directly compared the bot's
+    own dashboard against the real Dhan app and noticed they disagreed
+    ("why I can see MAHA bank put still open then?") - the bot's own
+    `GET /swing/basket-hedge-positions` said MAHABANK's PE_HEDGE exited
+    cleanly at 04:55:08 UTC via `PE_SUPERTREND_REVERSAL_EXIT`, flat at
+    2.18; a direct read-only query of Dhan's own real `/positions`
+    showed the position completely unchanged - qty 6500, avg_price 2.18,
+    still fully open. Full incident writeup, including the root-cause
+    trace: trading-skills' `incidents/2026-09-08-mahabank-phantom-pe-
+    hedge-exit.md`.
+
+    Root cause, two things stacking: (1) Dhan/Tradehull silently
+    converted our "MARKET" SELL into a protected LIMIT order (price
+    2.04) - not something our own code chose (it explicitly passes
+    `order_type="MARKET"`) - and the underlying's own PE premium then
+    drifted below that limit price (LTP 1.87), so the order sat
+    genuinely unfilled (`filledQty=0`, still `PENDING`). (2)
+    `Swing/trading_engine.py:_place_leg`'s own `ok` check was `status
+    not in REJECTED_STATUSES and status != CANCELLED` - this ONLY ever
+    excluded REJECTED/CANCELLED, so PENDING (and TRANSIT/PART_TRADED)
+    silently counted as a genuine fill. The bot recorded the PE_HEDGE
+    CLOSED, released `MAX_LIVE_BASKETS` capacity, and never checked this
+    position's own loss-cap/profit-lock/reversal conditions again.
+
+    **Manual recovery (same session, user's explicit go-ahead - "yes go
+    ahead and fix it now")**: ran a read-only/order-placing diagnostic
+    script directly ON THE DROPLET (not locally) specifically to reuse
+    its own already-cached Dhan token rather than repeat the SAME
+    invalidation mistake from earlier in the session (entry #93's own
+    lesson) - confirmed safe each time ("Already logged in for today,
+    so reusing the validated token"). Cancelled the stale PENDING order
+    (`222260908224307`, confirmed `CANCELLED`), placed a fresh real
+    market SELL for the full qty 6500 (filled immediately, `TRADED`, avg
+    1.85), confirmed zero open FNO positions at the broker afterward.
+    **Real corrected economics**: entry 2.18 -> real exit 1.85 = a
+    genuine Rs 2,145 loss on this leg - NOT the flat/zero-P&L the
+    original phantom "exit" had recorded. `history/*_real_trades.log`/
+    `swing_events.log` for this leg's exit still carry the WRONG (2.18)
+    numbers - these are append-only logs and were deliberately NOT
+    rewritten (the incident writeup itself is the correction record);
+    anyone pulling historical Swing P&L for 8 Sep 2026 needs to know the
+    true MAHABANK exit was 1.85.
+
+    **Code fix**: `_place_leg` now requires the ACTUAL terminal `TRADED`
+    status for `ok=True`. PENDING, TRANSIT, PART_TRADED (a partial fill
+    Swing has no mechanism to track separately - conservatively treated
+    as not-done), and a genuinely queued AMO (Swing has no promotion
+    path for one, unlike Options/Futures/Luxury's own `_sync_pending_
+    orders`) are all now `ok=False`, so every EXISTING caller's own
+    "leg left open, will retry on the next tick" handling applies
+    uniformly instead of a false success - no caller-level changes
+    needed, this was purely a one-function fix with a wide blast radius.
+    New regression suite `tests/test_swing_place_leg_fill_confirmation.py`
+    proves this both at the unit level (TRADED/PENDING/TRANSIT/
+    PART_TRADED/REJECTED/CANCELLED, one assertion each) and end-to-end
+    through the REAL `_exit_pe_hedge_to_watching` call site (a stuck-
+    PENDING exit correctly leaves the position OPEN, capacity RESERVED,
+    nothing recorded as closed). Ran the full 31-file suite, all pass.
+
+    **Known still-open exposure, flagged not fixed**: the IDENTICAL `ok`
+    pattern (`status in REJECTED_STATUSES or status == CANCELLED` as the
+    ONLY failure check) exists unchanged in `Options/trading_engine.py`,
+    `Futures/trading_engine.py`, and `Luxury/trading_engine.py` - every
+    one of them could suffer the exact same phantom-success outcome from
+    the exact same mechanism (a market order converted to a limit order
+    that then drifts unfillable). Not fixed in this pass - those three
+    packages already have a proper `is_queued_amo` -> `_sync_pending_
+    orders` promotion path Swing never had, so their own fix needs to
+    distinguish "genuinely still resolving, handled by that existing
+    path" from "stuck and should be treated as failed" more carefully
+    than Swing's own blunter fix could get away with. Should be
+    prioritized - this is a systemic, codebase-wide exposure, not a
+    Swing-specific one.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM

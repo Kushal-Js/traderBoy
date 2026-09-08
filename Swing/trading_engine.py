@@ -247,7 +247,41 @@ async def _place_leg(
     """Places ONE real order and waits for its result. Never raises - the
     caller decides what a failure means for the basket as a whole (abort
     with no PE leg attempted, unwind an already-filled futures leg,
-    etc.)."""
+    etc.).
+
+    BUG FOUND + FIXED 8 Sep 2026 (found live: a real MAHABANK PE_HEDGE
+    exit SELL was placed, but Dhan filled it in as a protected LIMIT
+    order (price 2.04) rather than a true market fill; the underlying
+    kept moving and the LTP drifted to 1.87 - below the limit price - so
+    nobody would trade at 2.04 and the order sat genuinely unfilled
+    (filledQty=0). wait_for_order_result's own retry budget (6 x 1s) ran
+    out with the order still PENDING at the broker. The OLD `ok` check
+    here (`status not in REJECTED_STATUSES and status != CANCELLED`)
+    treated that PENDING status as SUCCESS - it only ever excluded
+    REJECTED/CANCELLED, so anything else (PENDING, TRANSIT, PART_TRADED)
+    silently counted as a filled leg. The bot recorded the PE hedge
+    CLOSED and released capacity while the REAL position sat open at the
+    broker, completely unmonitored (no more loss-cap/profit-lock/
+    reversal checks), until the mistake was found by directly querying
+    the broker's own real open positions - see trading-skills'
+    `incidents/2026-09-08-mahabank-phantom-pe-hedge-exit.md` for the
+    full story and manual recovery (cancelled the stale order, placed a
+    fresh SELL, confirmed flat at the broker - real fill 1.85, not the
+    2.18 the original phantom "exit" had recorded).
+
+    `ok` now requires the ACTUAL terminal TRADED status - a stuck
+    PENDING order, a PART_TRADED partial fill (Swing has no mechanism to
+    track a partially-filled leg's own reduced quantity separately -
+    conservatively treated as not-yet-done rather than accepted), and a
+    genuinely queued AMO (Swing has no promotion path for one, unlike
+    Options/Futures/Luxury's own `_sync_pending_orders` - see is_queued_
+    amo below) are ALL now `ok=False`, so every caller's own EXISTING
+    "leg left open, will retry on the next tick" handling applies
+    uniformly instead of a false success. NOTE: the identical bug
+    pattern (`status in REJECTED_STATUSES or status == CANCELLED` as the
+    ONLY failure check) exists in Options/Futures/Luxury's own
+    trading_engine.py files too - flagged to the user, not yet fixed
+    there as of this commit."""
     loop = asyncio.get_running_loop()
     tag = _gen_tag(tag_prefix, symbol)
     try:
@@ -257,7 +291,15 @@ async def _place_leg(
         order_id = order_resp["order_id"]
         is_amo = order_resp["is_amo"]
         result = await loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, is_amo)
-        ok = result.status not in OrderStatus.REJECTED_STATUSES and result.status != OrderStatus.CANCELLED
+        ok = result.status == OrderStatus.TRADED
+        if not ok and result.status not in OrderStatus.REJECTED_STATUSES and result.status != OrderStatus.CANCELLED:
+            logger.error(
+                "%s: %s order %s for %s did NOT reach a terminal TRADED status (status=%s, "
+                "is_queued_amo=%s, remark=%s) - treating as a FAILED leg (not a fill), never assuming "
+                "success the way this did before 8 Sep 2026's fix. If this is a genuine AMO queued for "
+                "the next session, Swing currently has no promotion path for it - needs manual handling.",
+                symbol, transaction_type, order_id, trading_symbol, result.status, result.is_queued_amo, result.remark,
+            )
         return {
             "ok": ok, "order_id": order_id, "status": result.status, "remark": result.remark,
             "fill_price": result.fill_price, "is_queued_amo": result.is_queued_amo,
