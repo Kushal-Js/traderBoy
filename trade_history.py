@@ -383,6 +383,67 @@ def minutes_since_last_loss_today(strategy: str, underlying_symbol: str, now: Op
     return (now - last_loss_at).total_seconds() / 60.0
 
 
+def loss_exit_count_today(
+    strategy: str, underlying_symbol: str, exit_reasons: tuple[str, ...], now: Optional[datetime] = None,
+) -> int:
+    """Read-only. Counts how many times `strategy` has closed a real
+    trade for `underlying_symbol` TODAY with an `exit_reason` in
+    `exit_reasons` - added 8 Sep 2026 for Luxury's own repeat-loss entry
+    block (user request, straight off a real Chartink-alert backtest:
+    "after a loss is hit 2 times on a same stock trade on that day, same
+    stock trading should not be allowed for loss based condition only").
+
+    Deliberately keyed on the EXIT REASON string, not `pnl <= 0` the way
+    minutes_since_last_loss_today (right above) is - the user's own
+    wording scopes this to "loss based condition[s]" specifically
+    (MAX_LOSS_HIT/STOP_LOSS_HIT for Luxury/Options/Futures), not every
+    trade that happened to close slightly negative for some other
+    reason (e.g. a SUPERTREND_EXIT or a TRAILING_SL_HIT that fired a
+    few rupees under the entry price isn't what "hit a loss" means
+    here). Callers pass their own package's exact loss-designated
+    reason strings.
+
+    Same efficiency/fail-open pattern as count_opened_today/minutes_
+    since_last_loss_today, right above - reads only today's own dated
+    `real_trades` file, fails OPEN (returns 0, i.e. "no block") on a
+    read error since this is a secondary risk-management layer, not the
+    primary one (the rupee cap itself already fired for every trade
+    counted here)."""
+    now = now or datetime.now()
+    path = dated_path(REAL_TRADES_NAME)
+    if not path.exists():
+        return 0
+    count = 0
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("strategy") != strategy or record.get("underlying_symbol") != underlying_symbol:
+                    continue
+                if record.get("exit_reason") not in exit_reasons:
+                    continue
+                closed_at = record.get("closed_at")
+                if not closed_at:
+                    continue
+                closed_dt = datetime.fromisoformat(closed_at)
+                if closed_dt.date() == now.date():
+                    count += 1
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Could not read today's %s log for %s %s - treating as 0 loss exits "
+            "(fail open, same as every other logging-only read in this file).",
+            REAL_TRADES_NAME, strategy, underlying_symbol,
+        )
+        return 0
+    return count
+
+
 # --------------------------------------------------------------------- #
 # Webhook alert log - every incoming Chartink alert, tagged by which
 # endpoint/strategy received it and what happened to it (processed vs

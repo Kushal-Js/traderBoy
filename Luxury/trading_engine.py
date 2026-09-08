@@ -52,7 +52,9 @@ from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from trade_history import attribute_open_broker_position, count_opened_today, minutes_since_last_loss_today
+from trade_history import (
+    attribute_open_broker_position, count_opened_today, loss_exit_count_today, minutes_since_last_loss_today,
+)
 import cross_strategy_registry
 import fund_allocation
 
@@ -260,6 +262,25 @@ async def _process_one_entry(symbol: str, option_type: str) -> dict:
             )
             return {"symbol": symbol, "status": "skipped", "reason": "loss_cooldown_active"}
 
+    # Repeat-loss same-day block (added 8 Sep 2026) - see config.LOSS_
+    # REPEAT_BLOCK_ENABLED's own docstring for how this differs from both
+    # guards above. Unlike the timing-based cooldown just above, this one
+    # never expires today once tripped - only a genuine loss-designated
+    # exit reason counts (a symbol that's merely had several trades, or
+    # even several small losing-by-a-hair TRAILING_SL_HIT exits, is not
+    # blocked by this - only real MAX_LOSS_HIT/STOP_LOSS_HIT hits are).
+    if config.LOSS_REPEAT_BLOCK_ENABLED:
+        loss_count = await loop.run_in_executor(
+            None, loss_exit_count_today, "Luxury", symbol, config.LOSS_REPEAT_BLOCK_EXIT_REASONS, datetime.now(),
+        )
+        if loss_count >= config.LOSS_REPEAT_BLOCK_COUNT:
+            logger.info(
+                "%s: skipped - already hit a loss-based exit %d time(s) today (limit %d), "
+                "blocked for the rest of the day",
+                symbol, loss_count, config.LOSS_REPEAT_BLOCK_COUNT,
+            )
+            return {"symbol": symbol, "status": "skipped", "reason": "loss_repeat_block_active"}
+
     if not await cross_strategy_registry.try_claim(symbol, "Luxury"):
         logger.info("%s: skipped - another strategy is currently entering it", symbol)
         return {"symbol": symbol, "status": "skipped", "reason": "claimed_by_another_strategy"}
@@ -426,6 +447,36 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
 
     entry_candle_start = await _capture_supertrend_entry_candle(loop, symbol)
 
+    # Broker-side stop-loss order (added 8 Sep 2026) - see config.
+    # BROKER_STOP_LOSS_ENABLED's own docstring. Placed here, right after
+    # the real fill_price is known, using whichever MAX_LOSS cutoff value
+    # is active RIGHT NOW (same "computed once at entry" convention as
+    # target_price/hard_stop_loss above). A failure to place this is
+    # logged loudly but never blocks the entry itself - stop_loss_order_id
+    # simply stays None, and the position is exactly as protected as it
+    # always was via the existing poll/tick-driven MAX_LOSS_HIT check.
+    stop_loss_order_id = None
+    if config.BROKER_STOP_LOSS_ENABLED:
+        trigger_price = fill_price - (current_max_loss_per_trade_rs() / quantity)
+        try:
+            stop_tag = _gen_tag("SL", symbol)
+            stop_resp = await loop.run_in_executor(
+                None, dhan_wrapper.place_stop_loss_market_order,
+                atm.trading_symbol, quantity, "SELL", trigger_price, stop_tag, config.OPTIONS_PRODUCT,
+            )
+            stop_loss_order_id = stop_resp["order_id"]
+            logger.info(
+                "%s: broker-side SELL stop-loss order %s placed for %s, trigger=%.2f",
+                symbol, stop_loss_order_id, atm.trading_symbol, trigger_price,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: could not place the broker-side stop-loss order for %s (trigger would have been "
+                "%.2f) - proceeding without it, the existing poll/tick-driven MAX_LOSS_HIT check still "
+                "protects this position exactly as before",
+                symbol, atm.trading_symbol, trigger_price,
+            )
+
     position = Position(
         underlying_symbol=symbol,
         option_trading_symbol=atm.trading_symbol,
@@ -439,6 +490,7 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
         order_id=order_id,
         product_type=config.OPTIONS_PRODUCT,
         supertrend_entry_candle_start=entry_candle_start,
+        stop_loss_order_id=stop_loss_order_id,
     )
     await position_store.add_position(position)
 
@@ -662,8 +714,56 @@ def _exit_reason_for(
     return None
 
 
+async def _check_broker_stop_already_filled(symbol: str, position: Position) -> bool:
+    """See config.BROKER_STOP_LOSS_ENABLED's own docstring for the full
+    design. Cheap (cache-only unless the order has actually gone
+    terminal - see check_if_order_filled's own docstring) - safe to call
+    on every single monitor tick/price tick for every open position.
+    Returns True if the broker's own stop-loss order had ALREADY filled
+    (in which case the position is closed here directly, no fresh SELL
+    needed - it's already flat at the broker) - callers should stop
+    processing this position for the current tick either way."""
+    if not config.BROKER_STOP_LOSS_ENABLED or not position.stop_loss_order_id:
+        return False
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None, dhan_wrapper.check_if_order_filled, position.stop_loss_order_id
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not check broker stop-loss order %s status - falling through to "
+                          "the normal poll/tick-driven check this tick", symbol, position.stop_loss_order_id)
+        return False
+    if result is None:
+        return False  # still resting, unfired - nothing to do
+    if result.status == OrderStatus.TRADED:
+        final_exit_price = result.fill_price or position.hard_stop_loss
+        logger.info(
+            "%s: broker-side stop-loss order %s ALREADY FILLED (exchange fired it directly, ahead of "
+            "our own poll/tick check) - closing at the real fill price %.2f",
+            symbol, position.stop_loss_order_id, final_exit_price,
+        )
+        await position_store.close_position(symbol, final_exit_price, "MAX_LOSS_HIT")
+        await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.option_trading_symbol)
+        return True
+    # REJECTED/CANCELLED/EXPIRED - the broker-side stop is gone without
+    # firing (e.g. a margin/RMS rejection after placement). The position
+    # is now protected ONLY by the existing poll/tick-driven MAX_LOSS_HIT
+    # check from here on - logged loudly since this is a real, if rare,
+    # loss of the faster backstop this feature exists to provide.
+    logger.warning(
+        "%s: broker-side stop-loss order %s ended as %s without firing - this position now relies "
+        "solely on the regular poll/tick-driven MAX_LOSS_HIT check",
+        symbol, position.stop_loss_order_id, result.status,
+    )
+    return False
+
+
 async def _check_one_position(symbol: str, position: Position) -> None:
     if position.pending_exit_order_id or _exit_on_cooldown(position):
+        return
+
+    if await _check_broker_stop_already_filled(symbol, position):
         return
 
     try:
@@ -709,6 +809,9 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
         symbol, position = match
 
         if position.pending_exit_order_id or _exit_on_cooldown(position):
+            return
+
+        if await _check_broker_stop_already_filled(symbol, position):
             return
 
         await position_store.update_highest_price(symbol, ltp)

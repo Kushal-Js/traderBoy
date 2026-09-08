@@ -88,6 +88,54 @@ LOSS_COOLDOWN_ENABLED = os.getenv("LUXURY_LOSS_COOLDOWN_ENABLED", "true").lower(
 # accumulates, since this is tuned against only 2 days.
 LOSS_COOLDOWN_MINUTES = float(os.getenv("LUXURY_LOSS_COOLDOWN_MINUTES", "20"))
 
+# Repeat-loss same-day block (added 8 Sep 2026, user request straight
+# off a real Chartink-alert backtest of this scan: "I can see that re
+# occurring losses hit at OIL and at many places... after a loss is hit
+# 2 times on a same stock trade on that day, same stock trading should
+# not be allowed for loss based condition only"). Distinct from BOTH
+# existing per-symbol guards above: MAX_DAILY_ENTRIES_PER_SYMBOL is a
+# flat COUNT cap regardless of outcome (wins count too); LOSS_COOLDOWN_
+# MINUTES is a short TIMING gap after the most recent loss (a win in
+# between resets nothing, but doesn't block anything either once the
+# window passes). This one is neither - it's a same-day OUTCOME-COUNTING
+# block: once a symbol has closed on a genuine loss-designated exit
+# (MAX_LOSS_HIT/STOP_LOSS_HIT specifically - "loss based condition[s]",
+# not every trade that happened to close a little negative for some
+# other reason like SUPERTREND_EXIT/TRAILING_SL_HIT) LOSS_REPEAT_BLOCK_
+# COUNT times today, it's done for the SYMBOL for the rest of the day,
+# no more re-entries regardless of how much time has passed. Backed by
+# trade_history.loss_exit_count_today() - the same durable, restart-
+# surviving real_trades log every other daily count/cooldown here reads.
+LOSS_REPEAT_BLOCK_ENABLED = os.getenv("LUXURY_LOSS_REPEAT_BLOCK_ENABLED", "true").lower() == "true"
+LOSS_REPEAT_BLOCK_COUNT = int(os.getenv("LUXURY_LOSS_REPEAT_BLOCK_COUNT", "2"))
+LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
+
+# Broker-side stop-loss order (added 8 Sep 2026, user request: "broker-
+# side stop order that fires instantly regardless of polling interval
+# would be a better approach" - a follow-up to the same backtest that
+# found MAX_LOSS_HIT overshooting its own cap). A real SELL STOP-LOSS
+# MARKET (SL-M) order is placed at Dhan immediately after every entry,
+# triggered at the rupee-equivalent price of current_max_loss_per_trade_
+# rs() (whichever BEFORE/AFTER_CUTOFF value is active at ENTRY time -
+# fixed once at entry, same convention as target_price/hard_stop_loss,
+# deliberately NOT re-tightened if the cutoff passes while the position
+# is still open: the broker order is a WIDER outer backstop at whatever
+# cap applied at entry, while the existing poll/tick-driven MAX_LOSS_HIT
+# check keeps enforcing the CURRENT, possibly-tighter cap in real time
+# either way - so this never makes protection WORSE, only adds a faster
+# floor under it). The exchange's own matching engine fires this the
+# instant price trades through the trigger, independent of our own
+# process being slow, disconnected, or between ticks - see Options/
+# dhan_client.py's place_stop_loss_market_order/check_if_order_filled
+# for the placement/detection mechanics. This is an ADDITIONAL safety
+# net, not a replacement - the existing _exit_reason_for MAX_LOSS_HIT
+# check keeps running exactly as before, so a failure to PLACE the
+# broker order (network error, rejected trigger, etc.) leaves the
+# position exactly as protected as it was before this feature existed,
+# never less. Independent on/off switch, same pattern as every other
+# feature flag in this file.
+BROKER_STOP_LOSS_ENABLED = os.getenv("LUXURY_BROKER_STOP_LOSS_ENABLED", "true").lower() == "true"
+
 # Code default kept at its ORIGINAL value, same convention as Options'
 # own TARGET_PCT/STOP_LOSS_PCT (whose code default is STILL "0.10"/"0.03"
 # even though the actual deployed value moved to 0.25/0.16 purely via

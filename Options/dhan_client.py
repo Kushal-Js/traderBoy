@@ -1225,6 +1225,76 @@ class DhanWrapper:
             )
         return {"order_id": str(order_id), "is_amo": is_amo}
 
+    def place_stop_loss_market_order(
+        self, trading_symbol: str, quantity: int, transaction_type: str, trigger_price: float,
+        tag: Optional[str] = None, product_type: Optional[str] = None,
+    ) -> dict:
+        """Places a real STOP-LOSS MARKET (SL-M) order at the BROKER -
+        added 8 Sep 2026 (user request: "broker-side stop order that fires
+        instantly regardless of polling interval", Luxury's own real-money
+        MAX_LOSS protection). Unlike place_market_order above, this order
+        sits INACTIVE at the exchange until the LTP actually trades through
+        `trigger_price`, at which point Dhan/NSE itself converts it to a
+        market order and fills it - the exchange's own matching engine
+        enforces this, not our own poll/tick-driven _check_one_position/
+        on_price_tick, so it fires even if this process is slow, briefly
+        disconnected, or simply hasn't had a tick land yet.
+
+        `trigger_price` MUST be below the current LTP for a SELL (exiting
+        a long CE/PE) - Dhan/NSE will reject an SL-M whose trigger is on
+        the wrong side of the current price. `price=0` since "M" (market)
+        means no limit price is needed once triggered - matches
+        place_market_order's own price=0 convention.
+
+        Does NOT set after_market_order - this is only ever placed
+        immediately after a real intraday fill during market hours (never
+        pre-market), unlike place_market_order which can legitimately run
+        outside market hours for an AMO entry."""
+        product_type = product_type or config.OPTIONS_PRODUCT
+        logger.info(
+            "Placing STOP-LOSS MARKET order: %s %s x%s trigger=%.2f (product=%s)",
+            transaction_type, trading_symbol, quantity, trigger_price, product_type,
+        )
+        order_id = self.client.order_placement(
+            tradingsymbol=trading_symbol,
+            exchange=config.DEFAULT_EXCHANGE,
+            quantity=quantity,
+            price=0,
+            trigger_price=trigger_price,
+            order_type="STOPMARKET",
+            transaction_type=transaction_type,
+            trade_type=product_type,
+            after_market_order=False,
+            tag=tag,
+        )
+        if not order_id:
+            raise RuntimeError(
+                f"order_placement returned no order id for STOPMARKET {transaction_type} {trading_symbol} "
+                "- check Tradehull's console/log output for the underlying error."
+            )
+        return {"order_id": str(order_id)}
+
+    def check_if_order_filled(self, order_id: str) -> Optional[OrderResult]:
+        """Cheap, non-blocking check for whether `order_id` has ALREADY
+        reached a terminal status - added 8 Sep 2026 alongside the broker-
+        side stop-loss order above, so a symbol's own monitor tick can
+        check "did my resting stop-loss order already fire?" on every
+        tick without burning a REST call each time. Reads ONLY the
+        WebSocket order-update cache (_order_snapshot_from_cache, already
+        populated live by order_update_feed - see that property's own
+        docstring) - returns None immediately if nothing has arrived for
+        this order yet (still resting, unfired). Only once the cache
+        itself shows a terminal status does this make the ONE authoritative
+        REST call (refresh_order_status) to get the real fill price/
+        quantity - the cache's own price/quantity fields are NOT
+        trustworthy (see wait_for_order_result's own docstring for the
+        live bug this exact pattern already fixed once), only its STATUS
+        field is."""
+        cached = self._order_snapshot_from_cache(order_id)
+        if not cached or cached["order_status"] not in OrderStatus.TERMINAL_STATUSES:
+            return None
+        return self.refresh_order_status(order_id)
+
     def wait_for_order_result(
         self, order_id: str, is_amo: bool = False, retries: int = 6, delay: float = 1.0
     ) -> OrderResult:

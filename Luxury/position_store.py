@@ -81,6 +81,23 @@ class Position:
     exit_failure_count: int = 0
     next_exit_retry_at: Optional[datetime] = None
     supertrend_entry_candle_start: Optional[datetime] = None
+    # Added 8 Sep 2026 (user request: "broker-side stop order that fires
+    # instantly regardless of polling interval") - the order_id of a real
+    # SELL STOP-LOSS MARKET order resting at Dhan for this exact position,
+    # placed immediately after entry (see _enter_single_position), or None
+    # if config.BROKER_STOP_LOSS_ENABLED is off or placing it failed (the
+    # position is still fully protected either way by the existing poll/
+    # tick-driven MAX_LOSS_HIT check in _exit_reason_for - this is an
+    # ADDITIONAL, faster backstop, not a replacement). Checked on every
+    # monitor tick (_check_one_position/on_price_tick, via dhan_wrapper.
+    # check_if_order_filled) to detect the broker having ALREADY closed
+    # the position before our own reactive logic got a chance to. Cleared
+    # to None whenever the position closes through ANY path - a normal
+    # reactive exit's own _exit_position already finds and cancels this
+    # exact order first (get_pending_order_id/cancel_order, pre-existing
+    # stale-order-cancel logic, unchanged), so it never lingers pointed
+    # at a position that no longer exists.
+    stop_loss_order_id: Optional[str] = None
 
     @property
     def current_trailing_sl(self) -> float:

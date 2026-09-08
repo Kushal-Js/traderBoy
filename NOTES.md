@@ -4996,6 +4996,116 @@ out of git.
     Rs 28,810 -> Rs 42,016) and the droplet's own `.env` (`LUXURY_MAX_
     LIVE_POSITIONS_CE=2`/`_PE=2`).
 
+98. **Two more real Luxury corrective actions, same day (8 Sep 2026) -
+    a repeat-loss same-day entry block, and a broker-side stop-loss
+    order.** Straight off the P&L backtest of the "longTerm" Chartink
+    scan re-run for Luxury: "I can see that re occurring losses hit at
+    OIL and at many places and loss spiked more than max loss limit per
+    trade also, optimize these issues... and after a loss is hit 2 times
+    on a same stock trade on that day, same stock trading should not be
+    allowed for loss based condition only." First offered a backtest-
+    fidelity fix for the overshoot half (1-min option resolution instead
+    of 5-min, since real production already polls every 2 seconds - see
+    the conversation's own backtest results); user's own follow-up:
+    "I think broker-side stop order that fires instantly regardless of
+    polling interval would be a better approach" - implemented instead.
+
+    **Repeat-loss same-day block** (`trade_history.loss_exit_count_
+    today` + `Luxury/config.py`'s `LOSS_REPEAT_BLOCK_ENABLED`/`_COUNT`/
+    `_EXIT_REASONS` + `Luxury/trading_engine.py`'s own new check in
+    `_process_one_entry`): once a symbol closes on `MAX_LOSS_HIT`/
+    `STOP_LOSS_HIT` (loss-DESIGNATED reasons specifically, per the
+    user's own "loss based condition only" wording - NOT every trade
+    that happened to close a little negative, e.g. a `SUPERTREND_EXIT`
+    or `TRAILING_SL_HIT`) twice today, it's blocked for the rest of the
+    day, full stop - distinct from BOTH existing per-symbol guards
+    (`MAX_DAILY_ENTRIES_PER_SYMBOL` is a flat count cap regardless of
+    outcome; `LOSS_COOLDOWN_MINUTES` is a short timing gap that a win in
+    between effectively doesn't reset but also doesn't extend - this one
+    never expires today once tripped). 4 new tests (unit-level on
+    `loss_exit_count_today`, plus a full real 2-loss-then-blocked-3rd-
+    attempt integration proving a win in between two losses doesn't
+    dilute the count).
+
+    **Broker-side stop-loss order** (`Options/dhan_client.py`'s new
+    `place_stop_loss_market_order`/`check_if_order_filled` + `Luxury/
+    position_store.py`'s new `Position.stop_loss_order_id` field +
+    `Luxury/config.py`'s `BROKER_STOP_LOSS_ENABLED` + `Luxury/trading_
+    engine.py`'s own wiring): `_enter_single_position` now places a REAL
+    SELL STOP-LOSS MARKET (SL-M) order at Dhan immediately after every
+    entry, trigger = entry price minus whichever `current_max_loss_per_
+    trade_rs()` cap is active AT ENTRY TIME (fixed once, same convention
+    as `target_price`/`hard_stop_loss` - deliberately NOT re-tightened
+    if `RISK_THRESHOLD_CUTOFF_TIME` passes while still open: the broker
+    order is a WIDER outer backstop at whatever cap applied at entry,
+    while the EXISTING poll/tick-driven `MAX_LOSS_HIT` check keeps
+    enforcing the current, possibly-tighter cap in real time regardless
+    - this can only ever add protection, never remove any). Dhan/NSE's
+    own matching engine fires this the instant price trades through the
+    trigger - independent of this process being slow, briefly
+    disconnected, or simply between ticks.
+
+    New `_check_broker_stop_already_filled` (checked FIRST in both
+    `_check_one_position` and `on_price_tick`, cheap - reads only the
+    WebSocket order-update cache unless it already shows a terminal
+    status, matching the same cache-then-REST pattern `wait_for_order_
+    result` already established) detects the broker having already
+    closed the position and closes it directly at the REAL fill price
+    (`exit_reason="MAX_LOSS_HIT"`) - no fresh SELL needed, it's already
+    flat. **Genuinely useful discovery while designing this**: no new
+    cancellation code was needed for the OTHER direction (a normal
+    reactive exit like `TARGET_HIT` firing while the broker stop is
+    still resting) - `_exit_position` already has a pre-existing stale-
+    pending-order check (`get_pending_order_id`/`cancel_order`, built
+    26 Aug 2026 for an unrelated incident, BHARATFORG - a SELL order
+    surviving a restart) that finds and cancels ANY outstanding SELL for
+    the same trading_symbol before placing its own, which already
+    covers the resting stop-loss order for free - confirmed via a new
+    integration test (5) proving a real `TARGET_HIT` exit finds and
+    cancels the stop before placing its own SELL, no double-sell race.
+    Placing the broker order is fail-open (a placement failure is
+    logged and swallowed, `stop_loss_order_id` stays `None`) - the
+    position is exactly as protected as it always was via the existing
+    reactive check either way. 7 new tests in `tests/test_luxury_
+    broker_stop_loss.py`.
+
+    **Two real, live incidents found and fixed WHILE building this**
+    (both entirely unrelated to the feature itself - discovered only
+    because a full-suite run happened to precede a real droplet auth
+    failure):
+    - `tests/test_choppy_stocks.py`'s own `install_all_dhan_mocks()`
+      was missing `get_option_ltp`/`get_margin_required`/`get_fund_
+      limits`/`has_open_position_for_underlying` (present in every
+      OTHER test file's own equivalent helper) - unmocked, every real
+      entry attempt in that file fell through to REAL Dhan network
+      calls and REAL, slow PIN+TOTP login retries (confirmed: this test
+      alone took 2+ minutes to run, versus ~1.5s once fixed), which
+      ACTUALLY invalidated the live droplet's own session token once
+      (`GET /funds/buckets` returned a real `Internal Server Error`
+      moments after a routine full-suite regression run) - same "a
+      local script's own fresh PIN+TOTP login can invalidate the live
+      process's own token" mechanism as the MAHABANK phantom-exit
+      incident's own root cause (entry #96). Fixed by adding the 4
+      missing mocks, matching every other file's own pattern.
+    - The new broker-stop-loss feature itself needed the SAME two new
+      Dhan calls mocked everywhere a real Luxury entry gets exercised -
+      found and fixed across 6 test files (`test_cross_strategy_
+      registry.py`, `test_daily_reentry_cap.py`, `test_fund_allocation.py`,
+      `test_fund_allocation_integration.py`, `test_luxury_corrective_
+      actions.py`, `test_luxury_package.py`) whose own `install_all_
+      dhan_mocks()` needed `place_stop_loss_market_order`/`check_if_
+      order_filled` added - same class of gap as the choppy-stocks one
+      above, caught this time by actively grepping for `place_market_
+      order` mocks that would need the sibling method too, rather than
+      waiting for another real auth failure to reveal it.
+
+    Ran the full 33-file suite twice after all fixes (explicitly grepped
+    every run's own output for "Attempting authentication"/"Login
+    failed" to positively confirm zero real Dhan calls anywhere in the
+    suite, not just that tests passed) - all pass, zero real auth
+    attempts. Updated `README.md` (`Options/dhan_client.py`'s own row,
+    `Luxury/trading_engine.py`'s own row), `tests/README.md`.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM

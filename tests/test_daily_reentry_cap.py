@@ -92,6 +92,8 @@ def install_all_dhan_mocks():
         "refresh_supertrend_signal": odc.dhan_wrapper.refresh_supertrend_signal,
         "get_cached_supertrend_candle_start": odc.dhan_wrapper.get_cached_supertrend_candle_start,
         "place_market_order": odc.dhan_wrapper.place_market_order,
+        "place_stop_loss_market_order": odc.dhan_wrapper.place_stop_loss_market_order,
+        "check_if_order_filled": odc.dhan_wrapper.check_if_order_filled,
         "wait_for_order_result": odc.dhan_wrapper.wait_for_order_result,
     }
     odc.dhan_wrapper.get_atm_option = fake_atm_option
@@ -116,6 +118,13 @@ def install_all_dhan_mocks():
         return {"order_id": order_id, "is_amo": False}
 
     odc.dhan_wrapper.place_market_order = fake_place_market_order
+    # Luxury's own _enter_single_position places a real broker-side stop-
+    # loss order (added 8 Sep 2026) right after every entry - unmocked,
+    # this would fall through to a REAL Dhan call, same reasoning as the
+    # funds-check fakes above.
+    odc.dhan_wrapper.place_stop_loss_market_order = lambda trading_symbol, quantity, transaction_type, trigger_price, tag=None, product_type=None: {
+        "order_id": f"FAKE-SL-{trading_symbol}-{time.time_ns()}"}
+    odc.dhan_wrapper.check_if_order_filled = lambda order_id: None
     odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
         order_id=order_id, status=OrderStatus.TRADED, remark="", fill_price=50.0, filled_quantity=500, is_amo=False)
 

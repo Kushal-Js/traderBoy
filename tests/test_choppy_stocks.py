@@ -141,6 +141,10 @@ def fake_atm_option(symbol: str, option_type: str) -> AtmOption:
 def install_all_dhan_mocks():
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
+        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "get_margin_required": odc.dhan_wrapper.get_margin_required,
+        "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
+        "has_open_position_for_underlying": odc.dhan_wrapper.has_open_position_for_underlying,
         "_get_open_fno_positions_once": odc.dhan_wrapper._get_open_fno_positions_once,
         "subscribe_option_price": odc.dhan_wrapper.subscribe_option_price,
         "unsubscribe_option_price": odc.dhan_wrapper.unsubscribe_option_price,
@@ -150,6 +154,21 @@ def install_all_dhan_mocks():
         "wait_for_order_result": odc.dhan_wrapper.wait_for_order_result,
     }
     odc.dhan_wrapper.get_atm_option = fake_atm_option
+    # Found + fixed 8 Sep 2026 - these 4 were MISSING here (unlike every
+    # other test file's own equivalent helper), so the proactive funds
+    # check and the already-open-at-broker check both fell through to
+    # REAL Dhan network calls (and REAL, slow, repeated PIN+TOTP
+    # authentication attempts via _retry) every time this file ran -
+    # confirmed live: this broke the droplet's own real session token
+    # (the same "running local scripts against the same account can
+    # invalidate the live process's own token" mechanism as NOTES.md's
+    # MAHABANK phantom-exit incident), discovered because a full test
+    # suite run happened to immediately precede a real /funds/buckets
+    # Internal Server Error on the live droplet.
+    odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 50.0
+    odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 999.0}
+    odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 100000.0}
+    odc.dhan_wrapper.has_open_position_for_underlying = lambda symbol: False
     odc.dhan_wrapper._get_open_fno_positions_once = lambda: []
     odc.dhan_wrapper.subscribe_option_price = lambda ts: None
     odc.dhan_wrapper.unsubscribe_option_price = lambda ts: None

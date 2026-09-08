@@ -105,6 +105,8 @@ def install_all_dhan_mocks(volumes_sequence=None):
         "get_cached_supertrend_bearish": odc.dhan_wrapper.get_cached_supertrend_bearish,
         "get_cached_supertrend_candle_start": odc.dhan_wrapper.get_cached_supertrend_candle_start,
         "place_market_order": odc.dhan_wrapper.place_market_order,
+        "place_stop_loss_market_order": odc.dhan_wrapper.place_stop_loss_market_order,
+        "check_if_order_filled": odc.dhan_wrapper.check_if_order_filled,
         "wait_for_order_result": odc.dhan_wrapper.wait_for_order_result,
         "_instrument_meta": odc.dhan_wrapper._instrument_meta,
         "_client": odc.dhan_wrapper._client,
@@ -129,6 +131,12 @@ def install_all_dhan_mocks(volumes_sequence=None):
         return {"order_id": order_id, "is_amo": False}
 
     odc.dhan_wrapper.place_market_order = fake_place_market_order
+    # Luxury's own _enter_single_position places a real broker-side stop-
+    # loss order (added 8 Sep 2026) right after every entry - unmocked,
+    # this would fall through to a REAL Dhan call.
+    odc.dhan_wrapper.place_stop_loss_market_order = lambda trading_symbol, quantity, transaction_type, trigger_price, tag=None, product_type=None: {
+        "order_id": f"FAKE-SL-{trading_symbol}-{len(placed_orders)}-{id(object())}"}
+    odc.dhan_wrapper.check_if_order_filled = lambda order_id: None
     odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
         order_id=order_id, status=OrderStatus.TRADED, remark="", fill_price=50.0, filled_quantity=500, is_amo=False)
 
@@ -450,8 +458,157 @@ def test_16_liquidity_guard_disabled_flag_bypasses_the_check():
         lte.config.LIQUIDITY_GUARD_ENABLED = real_enabled
 
 
+# --------------------------------------------------------------------- #
+# 4. Repeat-loss same-day block (added 8 Sep 2026) - trade_history.
+#    loss_exit_count_today + Luxury/trading_engine.py's own check in
+#    _process_one_entry. Found via a real Chartink-alert backtest of the
+#    "longTerm" scan (user's own wording): "re occurring losses hit at
+#    OIL and at many places... after a loss is hit 2 times on a same
+#    stock trade on that day, same stock trading should not be allowed
+#    for loss based condition only."
+# --------------------------------------------------------------------- #
+
+def test_17_loss_exit_count_today_basic():
+    trade_history.append_jsonl("real_trades", {
+        "strategy": "Luxury", "underlying_symbol": "OIL", "exit_reason": "MAX_LOSS_HIT",
+        "closed_at": datetime.now().isoformat(),
+    })
+    trade_history.append_jsonl("real_trades", {
+        "strategy": "Luxury", "underlying_symbol": "OIL", "exit_reason": "MAX_LOSS_HIT",
+        "closed_at": datetime.now().isoformat(),
+    })
+    count = trade_history.loss_exit_count_today("Luxury", "OIL", ("MAX_LOSS_HIT", "STOP_LOSS_HIT"))
+    assert count == 2, count
+    print("17. loss_exit_count_today correctly counts every matching loss-reason exit logged today for the "
+          "given strategy+symbol: PASSED")
+
+
+def test_18_loss_exit_count_today_ignores_non_loss_reasons_and_other_symbols_strategies():
+    trade_history.append_jsonl("real_trades", {
+        "strategy": "Luxury", "underlying_symbol": "DIVISLAB", "exit_reason": "PROFIT_PROTECTION_HIT",
+        "closed_at": datetime.now().isoformat(),
+    })
+    trade_history.append_jsonl("real_trades", {
+        "strategy": "Luxury", "underlying_symbol": "DIVISLAB", "exit_reason": "TARGET_HIT",
+        "closed_at": datetime.now().isoformat(),
+    })
+    trade_history.append_jsonl("real_trades", {
+        "strategy": "Luxury", "underlying_symbol": "DIVISLAB", "exit_reason": "SUPERTREND_EXIT",
+        "closed_at": datetime.now().isoformat(),
+    })
+    trade_history.append_jsonl("real_trades", {
+        "strategy": "Options", "underlying_symbol": "DIVISLAB", "exit_reason": "MAX_LOSS_HIT",
+        "closed_at": datetime.now().isoformat(),
+    })
+    count = trade_history.loss_exit_count_today("Luxury", "DIVISLAB", ("MAX_LOSS_HIT", "STOP_LOSS_HIT"))
+    assert count == 0, \
+        f"profit/target/supertrend exits and a DIFFERENT strategy's own MAX_LOSS_HIT must not count, got {count}"
+    print("18. loss_exit_count_today ignores non-loss exit reasons (profit protection/target/supertrend) and "
+          "a different strategy's own record for the same symbol - 'loss based condition[s]' only, per the "
+          "user's own wording: PASSED")
+
+
+async def test_19_real_second_loss_blocks_third_entry_same_day():
+    store = lps.PositionStore()
+    lte.position_store = store
+    real_cooldown_enabled = lte.config.LOSS_COOLDOWN_ENABLED
+    real_block_enabled, real_block_count = lte.config.LOSS_REPEAT_BLOCK_ENABLED, lte.config.LOSS_REPEAT_BLOCK_COUNT
+    # Cooldown disabled here so ONLY the new repeat-block feature is under
+    # test - otherwise the pre-existing 20-minute cooldown would ALSO
+    # block the immediate retries below, confounding which feature fired.
+    lte.config.LOSS_COOLDOWN_ENABLED = False
+    lte.config.LOSS_REPEAT_BLOCK_ENABLED = True
+    lte.config.LOSS_REPEAT_BLOCK_COUNT = 2
+    restore, placed_orders = install_all_dhan_mocks()
+    try:
+        symbol = "GAIL"
+        entry_1 = await lte._process_one_entry(symbol, "CE")
+        assert entry_1["status"] == "entered", entry_1
+        closed_1 = await store.close_position(symbol, 40.0, "MAX_LOSS_HIT")
+        assert closed_1 is not None
+        await asyncio.sleep(0.3)
+
+        entry_2 = await lte._process_one_entry(symbol, "CE")
+        assert entry_2["status"] == "entered", \
+            f"only ONE prior loss so far - must still enter normally, got {entry_2}"
+        closed_2 = await store.close_position(symbol, 41.0, "MAX_LOSS_HIT")
+        assert closed_2 is not None
+        await asyncio.sleep(0.3)
+
+        placed_orders.clear()
+        entry_3 = await lte._process_one_entry(symbol, "CE")
+        assert entry_3["status"] == "skipped" and entry_3["reason"] == "loss_repeat_block_active", entry_3
+        assert placed_orders == [], f"a repeat-loss-blocked symbol must place ZERO orders, got {placed_orders}"
+
+        placed_orders.clear()
+        other = await lte._process_one_entry("NMDC", "CE")
+        assert other["status"] == "entered", f"a DIFFERENT symbol must be entirely unaffected, got {other}"
+
+        print("19. TWO real same-day MAX_LOSS_HIT losses for the same symbol correctly block a third real "
+              "entry attempt (zero orders placed) for the REST OF THE DAY, while a different symbol is "
+              "entirely unaffected: PASSED")
+    finally:
+        restore()
+        lte.config.LOSS_COOLDOWN_ENABLED = real_cooldown_enabled
+        lte.config.LOSS_REPEAT_BLOCK_ENABLED = real_block_enabled
+        lte.config.LOSS_REPEAT_BLOCK_COUNT = real_block_count
+
+
+async def test_20_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses():
+    store = lps.PositionStore()
+    lte.position_store = store
+    real_cooldown_enabled = lte.config.LOSS_COOLDOWN_ENABLED
+    real_block_enabled, real_block_count = lte.config.LOSS_REPEAT_BLOCK_ENABLED, lte.config.LOSS_REPEAT_BLOCK_COUNT
+    real_daily_cap = lte.config.MAX_DAILY_ENTRIES_PER_SYMBOL
+    lte.config.LOSS_COOLDOWN_ENABLED = False
+    lte.config.LOSS_REPEAT_BLOCK_ENABLED = True
+    lte.config.LOSS_REPEAT_BLOCK_COUNT = 2
+    # This test makes 4 real entry attempts for the SAME symbol - raised
+    # so the pre-existing daily re-entry cap (default 3) doesn't fire
+    # first and mask what's actually under test here.
+    lte.config.MAX_DAILY_ENTRIES_PER_SYMBOL = 10
+    restore, placed_orders = install_all_dhan_mocks()
+    try:
+        symbol = "SAIL"
+        e1 = await lte._process_one_entry(symbol, "CE")
+        assert e1["status"] == "entered", e1
+        await store.close_position(symbol, 30.0, "MAX_LOSS_HIT")
+        await asyncio.sleep(0.3)
+
+        e2 = await lte._process_one_entry(symbol, "CE")
+        assert e2["status"] == "entered", e2
+        await store.close_position(symbol, 60.0, "TARGET_HIT")  # a genuine WIN in between - doesn't reset anything
+        await asyncio.sleep(0.3)
+
+        e3 = await lte._process_one_entry(symbol, "CE")
+        assert e3["status"] == "entered", \
+            f"still only ONE loss-designated exit so far (the win doesn't count either way) - must enter, got {e3}"
+        await store.close_position(symbol, 31.0, "MAX_LOSS_HIT")  # second REAL loss
+        await asyncio.sleep(0.3)
+
+        placed_orders.clear()
+        e4 = await lte._process_one_entry(symbol, "CE")
+        assert e4["status"] == "skipped" and e4["reason"] == "loss_repeat_block_active", \
+            f"2 genuine loss-designated exits today (the win in between doesn't dilute this) must now block, got {e4}"
+
+        # Flag disabled entirely bypasses, even with the same 2 real losses already on record.
+        lte.config.LOSS_REPEAT_BLOCK_ENABLED = False
+        placed_orders.clear()
+        e5 = await lte._process_one_entry(symbol, "CE")
+        assert e5["status"] == "entered", f"disabling the flag must bypass the block entirely, got {e5}"
+
+        print("20. A win between two real losses doesn't reset/dilute the repeat-loss count (still blocks on "
+              "the 2nd genuine loss); LOSS_REPEAT_BLOCK_ENABLED=False cleanly bypasses the check: PASSED")
+    finally:
+        restore()
+        lte.config.LOSS_COOLDOWN_ENABLED = real_cooldown_enabled
+        lte.config.LOSS_REPEAT_BLOCK_ENABLED = real_block_enabled
+        lte.config.LOSS_REPEAT_BLOCK_COUNT = real_block_count
+        lte.config.MAX_DAILY_ENTRIES_PER_SYMBOL = real_daily_cap
+
+
 async def main():
-    print("=== Luxury corrective actions (loss cooldown + liquidity guard) test suite ===\n")
+    print("=== Luxury corrective actions (loss cooldown + liquidity guard + repeat-loss block) test suite ===\n")
     test_1_minutes_since_last_loss_basic()
     test_2_minutes_since_last_loss_ignores_wins()
     test_3_minutes_since_last_loss_isolates_by_strategy_and_symbol()
@@ -468,6 +625,10 @@ async def main():
     test_14_liquidity_guard_fires_when_nothing_else_would_have()
     test_15_price_threshold_exit_still_takes_priority_over_liquidity_guard()
     test_16_liquidity_guard_disabled_flag_bypasses_the_check()
+    test_17_loss_exit_count_today_basic()
+    test_18_loss_exit_count_today_ignores_non_loss_reasons_and_other_symbols_strategies()
+    await test_19_real_second_loss_blocks_third_entry_same_day()
+    await test_20_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses()
     print("\nALL LUXURY CORRECTIVE ACTION CHECKS PASSED")
 
 
