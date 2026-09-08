@@ -4979,6 +4979,23 @@ out of git.
     prioritized - this is a systemic, codebase-wide exposure, not a
     Swing-specific one.
 
+97. **Two more `.env`-only bumps, same day (8 Sep 2026), no code
+    changes**: `FUND_SECONDARY_BUCKET_PCT` raised again 20->25 (user
+    request, right after a "current profit status" check on Luxury's
+    own DIVISLAB trades - more secondary headroom for Options/Futures/
+    Luxury's own higher-margin entries); `LUXURY_MAX_LIVE_POSITIONS_CE`/
+    `_PE` raised 1->2 each (user request, independent pools per type,
+    unchanged for Options/Futures which stay at 1/1) - both fully
+    env-driven already (`Luxury/config.py`), so no new test coverage
+    needed beyond confirming (`tests/test_luxury_package.py`/
+    `test_cross_strategy_registry.py`, both already override this value
+    explicitly rather than relying on the ambient `.env` default) that
+    nothing implicitly assumed the old 1/1 cap. Both deployed with every
+    package confirmed flat beforehand, clean restarts, live-verified via
+    `GET /funds/buckets` (secondary_bucket_pct: 25.0, available jumped
+    Rs 28,810 -> Rs 42,016) and the droplet's own `.env` (`LUXURY_MAX_
+    LIVE_POSITIONS_CE=2`/`_PE=2`).
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM
