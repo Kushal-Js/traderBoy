@@ -4807,6 +4807,100 @@ out of git.
     fixes, all pass. Updated `README.md` (`Swing/config.py`'s own row,
     `Swing/trading_engine.py`'s own row), `tests/README.md`.
 
+94. **`FUND_SECONDARY_BUCKET_PCT` raised 15->20 - user request 8 Sep
+    2026, straight off a real skipped entry**: a SOLARINDS Luxury CE
+    alert needed Rs 38,630 margin, exceeding the 15% secondary bucket's
+    own Rs 20,823 available at the time. `.env` updated (`FUND_PRIMARY_
+    BUCKET_PCT` left at 85, not asked - buckets don't need to sum to
+    100%, see `fund_allocation.py`'s own docstring), deployed + restart-
+    verified (`GET /funds/buckets` confirmed secondary_bucket_pct: 20.0,
+    available jumped Rs 20,823 -> Rs 27,764). **Real regression this
+    surfaced, found by running the full suite**: `tests/test_fund_
+    allocation_integration.py`'s tests 2 and 3 have their own numbers
+    hand-worked against a clean 85/15 split (e.g. "Options+Futures
+    exhaust the shared 15% pool, Luxury's own request then correctly
+    fails") - at the real `.env`'s new 20%, Luxury's identical request no
+    longer exceeded the bigger share, so it wrongly ENTERED instead of
+    being skipped. Same ambient-`.env` lesson as entry #92, on a
+    DIFFERENT config value this time. Fixed: `main()` now explicitly
+    pins `fund_allocation.PRIMARY_BUCKET_PCT`/`SECONDARY_BUCKET_PCT` to
+    85/15 for the whole run - and, less obviously, also pins `fund_
+    allocation.BUCKET_PCTS` itself, since that's a plain dict built ONCE
+    from the two floats at import time (`fund_allocation.py:83`) and
+    does NOT auto-recompute when the two floats are reassigned -
+    `get_bucket_available_funds`/`has_sufficient_bucket_funds` both read
+    `BUCKET_PCTS` directly, not the floats, so pinning only the floats
+    would have silently done nothing.
+
+95. **basket_hedge mode: a standalone PE_HEDGE position no longer counts
+    against `MAX_LIVE_BASKETS` - user request 8 Sep 2026, verbatim
+    intent**: "don't consider individual separate PE open trades after
+    the whole basket trade (Future + PE ATM Option) is exited as
+    max_live_baskets_reached... though this open PE trade should be
+    tracked for exit conditions defined earlier however it won't be
+    counted as basket item. This will allow a new basket order to be
+    placed in parallel based on alerts also." Given right after
+    observing (via `check status of recent alert`) that MAHABANK's own
+    PE_HEDGE wind-down was blocking every other longTerm-scan alert
+    (HAL, SOLARINDS, ...) with `max_live_baskets_reached`, at `MAX_LIVE_
+    BASKETS=1`, for the position's ENTIRE remaining lifecycle - not just
+    while it still held real futures+PE exposure.
+
+    `BasketHedgeStore.reserved_symbols` (`Swing/position_store.py`)
+    changed from `Set[str]` to `Dict[str, str]` (symbol -> "BASKET" |
+    "PE_HEDGE"), splitting two concerns that used to be answered by the
+    same set membership check:
+      - DEDUP (can THIS symbol be entered fresh?) still spans BOTH
+        states - a symbol stays a `reserved_symbols` KEY from the moment
+        it first enters BASKET until its PE_HEDGE phase fully exits back
+        to watching, unchanged from before. A symbol whose own PE hedge
+        is still winding down still can't get a second, overlapping bet
+        on itself.
+      - CAPACITY (`config.MAX_LIVE_BASKETS`) now counts ONLY symbols
+        whose VALUE is currently "BASKET" (`_live_basket_count()`, a new
+        private helper) - a PE_HEDGE entry never counts. `set_pe_hedge()`
+        (the BASKET->PE_HEDGE swap) flips the symbol's own dict value
+        from "BASKET" to "PE_HEDGE" at exactly the moment capacity frees
+        up - the earliest point where a genuinely NEW alert (any other
+        symbol) can win the slot, while the wound-down symbol's own exit
+        monitoring (`_evaluate_pe_hedge_exit_signal` - loss cap/profit
+        lock/bare reversal) continues completely unaffected, since that
+        function was never gated by capacity in the first place.
+      `try_enter`/`remaining_capacity`/`release_symbol`/`exit_to_
+      watching`/`set_basket`/`reconcile_position` all updated for the
+      dict shape (`.add`/`.discard` -> assignment/`.pop`). `snapshot()`
+      gained `reserved_symbols_by_state` (which reserved symbol is in
+      which state - same shape as Options/Futures' own `reserved_
+      symbols_by_type`) and `live_basket_count`, both purely additive -
+      the existing flat `reserved_symbols` list (`sorted(dict)` still
+      just gives the keys) is unchanged for any existing consumer.
+
+    Deliberately scoped to basket_hedge mode ONLY - the user's own
+    description ("the whole basket trade... is exited... this PE ATM
+    trade is taken after") exactly matches basket_hedge's own two-phase
+    BASKET->PE_HEDGE shape and nothing else: plain "basket" mode never
+    holds a standalone PE at all (goes straight to flat), and
+    "sequential" mode never holds BOTH legs together as a "basket" in
+    the first place (it alternates a single FUTURES leg and a single PE
+    leg, looping) - `BasketStore`/`SequentialPositionStore` untouched.
+
+    **Test fallout, found and fixed**: `tests/test_swing_basket_hedge_
+    mode.py`'s own test 2 had a comment ("capacity must stay RESERVED
+    across the basket->hedge swap") that was true before but misleading
+    now - reworded to distinguish "stays a dedup KEY" (still true) from
+    "counts against capacity" (no longer true), plus a new assertion
+    that the swap flips the dict VALUE to "PE_HEDGE". New test 9 added,
+    proving the actual new behavior end to end at `MAX_LIVE_BASKETS=1`:
+    RELIANCE enters (slot full) -> a second entry for ANY symbol is
+    blocked -> RELIANCE swaps to PE_HEDGE (slot freed) -> WIPRO (a
+    DIFFERENT symbol) now enters a genuinely fresh basket in parallel ->
+    RELIANCE itself STILL can't be re-entered (dedup intact) ->
+    `snapshot()`'s new fields both verified. Ran the full 31-file suite
+    twice after, all pass (uncovered no other regressions this time -
+    `reserved_symbols` was already fully encapsulated inside
+    `BasketHedgeStore`, no other module touches it directly). Updated
+    `README.md` (`Swing/position_store.py`'s own row), `tests/README.md`.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM

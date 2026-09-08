@@ -451,17 +451,44 @@ class BasketHedgePosition:
 
 class BasketHedgeStore:
     """See BasketHedgePosition's own docstring for the state shape.
-    Capacity/dedup follow the exact same pattern as BasketStore/
-    SequentialPositionStore above - one symbol occupies one slot for as
-    long as it's under active management in EITHER state, released only
-    when the PE hedge phase exits back to plain watching."""
+
+    `reserved_symbols` is a Dict[str, str] (underlying_symbol -> "BASKET"
+    | "PE_HEDGE"), NOT a plain set - changed 8 Sep 2026 (user request) so
+    DEDUP and CAPACITY can be answered differently:
+      - DEDUP (a symbol already under ANY active management can't be
+        entered fresh) still spans BOTH states - a symbol stays a key in
+        this dict from the moment it first enters BASKET until its
+        PE_HEDGE phase fully exits back to watching, exactly as before.
+      - CAPACITY (config.MAX_LIVE_BASKETS) now counts ONLY symbols
+        CURRENTLY in "BASKET" state (see remaining_capacity/try_enter
+        below) - a standalone PE_HEDGE position (the single leg held
+        after the original futures+PE basket has already been sold) no
+        longer occupies a basket slot at all. User's own reasoning
+        (verbatim intent): "this PE ATM trade is taken after basket
+        order is closed... though this open PE trade should be tracked
+        for exit conditions defined earlier however it won't be counted
+        as basket item" - the PE hedge is a WIND-DOWN position, not a
+        fresh bet, so it shouldn't block a genuinely new basket from a
+        fresh alert. The PE hedge's own exit monitoring (loss cap/profit
+        lock/bare reversal, _evaluate_pe_hedge_exit_signal) is completely
+        unaffected by this - only what counts against MAX_LIVE_BASKETS
+        changed. Net effect: MULTIPLE PE_HEDGE positions can now be
+        winding down in parallel alongside up to MAX_LIVE_BASKETS live
+        BASKET positions, all independently monitored to their own
+        natural exit."""
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self.live_positions: Dict[str, BasketHedgePosition] = {}
-        self.reserved_symbols: Set[str] = set()
+        self.reserved_symbols: Dict[str, str] = {}
         self.closed_today: List[dict] = []
         self._trading_day: date = date.today()
+
+    def _live_basket_count(self) -> int:
+        """Caller must already hold self._lock. Counts only "BASKET"
+        state entries - a PE_HEDGE entry (a wind-down position, see this
+        class's own docstring) never counts against MAX_LIVE_BASKETS."""
+        return sum(1 for state in self.reserved_symbols.values() if state == "BASKET")
 
     async def maybe_reset_for_new_day(self) -> None:
         async with self._lock:
@@ -476,23 +503,29 @@ class BasketHedgeStore:
 
     async def try_enter(self, underlying_symbol: str) -> bool:
         """NONE -> BASKET: claims a fresh capacity slot for a symbol not
-        currently under active management at all."""
+        currently under active management at all (dedup still checks
+        BOTH states - see this class's own docstring), gated only by how
+        many symbols are CURRENTLY in BASKET state (a PE_HEDGE wind-down
+        never counts here)."""
         async with self._lock:
             if underlying_symbol in self.reserved_symbols or underlying_symbol in self.live_positions:
                 return False
-            if len(self.reserved_symbols) >= config.MAX_LIVE_BASKETS:
+            if self._live_basket_count() >= config.MAX_LIVE_BASKETS:
                 return False
-            self.reserved_symbols.add(underlying_symbol)
+            self.reserved_symbols[underlying_symbol] = "BASKET"
             return True
 
     async def release_symbol(self, underlying_symbol: str) -> None:
         async with self._lock:
             if underlying_symbol not in self.live_positions:
-                self.reserved_symbols.discard(underlying_symbol)
+                self.reserved_symbols.pop(underlying_symbol, None)
 
     async def remaining_capacity(self) -> int:
+        """How many FRESH baskets can still be entered right now - a
+        symbol currently in PE_HEDGE state doesn't reduce this (see this
+        class's own docstring)."""
         async with self._lock:
-            return max(0, config.MAX_LIVE_BASKETS - len(self.reserved_symbols))
+            return max(0, config.MAX_LIVE_BASKETS - self._live_basket_count())
 
     async def set_basket(self, underlying_symbol: str, legs: List[Leg]) -> None:
         """Records the BASKET state (the initial entry, or a startup
@@ -503,7 +536,7 @@ class BasketHedgeStore:
             self.live_positions[underlying_symbol] = BasketHedgePosition(
                 underlying_symbol=underlying_symbol, state="BASKET", legs=list(legs),
             )
-            self.reserved_symbols.add(underlying_symbol)
+            self.reserved_symbols[underlying_symbol] = "BASKET"
             for leg in legs:
                 fire_and_forget(record_opened_position("Swing", leg))
             logger.info(
@@ -519,7 +552,7 @@ class BasketHedgeStore:
             if position.underlying_symbol in self.live_positions:
                 return
             self.live_positions[position.underlying_symbol] = position
-            self.reserved_symbols.add(position.underlying_symbol)
+            self.reserved_symbols[position.underlying_symbol] = position.state
             logger.info(
                 "Reconciled existing basket_hedge position: %s state=%s legs=%s",
                 position.underlying_symbol, position.state,
@@ -555,11 +588,16 @@ class BasketHedgeStore:
             return position
 
     async def set_pe_hedge(self, underlying_symbol: str, pe_leg: Leg) -> None:
+        """BASKET -> PE_HEDGE. Flips this symbol's own reserved_symbols
+        entry from "BASKET" to "PE_HEDGE" (still dedup-blocked against a
+        fresh re-entry for the SAME symbol, but no longer counted against
+        MAX_LIVE_BASKETS - see this class's own docstring) - this is the
+        exact moment a basket slot frees up for a genuinely new alert."""
         async with self._lock:
             self.live_positions[underlying_symbol] = BasketHedgePosition(
                 underlying_symbol=underlying_symbol, state="PE_HEDGE", legs=[pe_leg],
             )
-            self.reserved_symbols.add(underlying_symbol)
+            self.reserved_symbols[underlying_symbol] = "PE_HEDGE"
             fire_and_forget(record_opened_position("Swing", pe_leg))
             logger.info(
                 "BasketHedge PE_HEDGE OPENED: %s %s@%.2f",
@@ -581,7 +619,7 @@ class BasketHedgeStore:
             leg.closed_at = datetime.now()
             fire_and_forget(record_closed_trade("Swing", leg))
             self.closed_today.append(self._position_dict(position))
-            self.reserved_symbols.discard(underlying_symbol)
+            self.reserved_symbols.pop(underlying_symbol, None)
             logger.info(
                 "BasketHedge PE_HEDGE CLOSED (back to watching): %s reason=%s exit=%.2f",
                 underlying_symbol, reason, exit_price,
@@ -593,6 +631,14 @@ class BasketHedgeStore:
             return {
                 "live_positions": [self._position_dict(p) for p in self.live_positions.values()],
                 "reserved_symbols": sorted(self.reserved_symbols),
+                # Added 8 Sep 2026 alongside the BASKET-only capacity
+                # change - shows WHICH reserved symbols are actually
+                # counting against MAX_LIVE_BASKETS ("BASKET") vs merely
+                # winding down ("PE_HEDGE", tracked but not capacity-
+                # gating) - same shape as Options/Futures' own
+                # reserved_symbols_by_type.
+                "reserved_symbols_by_state": dict(self.reserved_symbols),
+                "live_basket_count": self._live_basket_count(),
                 "closed_today": list(self.closed_today),
             }
 

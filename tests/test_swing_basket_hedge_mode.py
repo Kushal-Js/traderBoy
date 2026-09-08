@@ -37,10 +37,9 @@ Covers, against the REAL production functions (not reimplemented):
      independently - fires even when the full entry signal (price-
      confirmation gate + 1-min confirm) would NOT have fired, per the
      user's own words.
-  5. Capacity stays RESERVED throughout the BASKET->PE_HEDGE swap and is
-     only RELEASED once the PE hedge itself exits; a second entry
-     attempt for the SAME symbol is rejected mid-flight, a DIFFERENT
-     symbol is unaffected.
+  5. A second entry attempt for a symbol already mid-flight (an open
+     BASKET) is rejected as capacity-full, while a DIFFERENT symbol is
+     unaffected.
   6. Startup reconciliation: a lone FUT -> 1-leg BASKET (the grandfathered
      shape), a lone PE -> PE_HEDGE, and a matched FUT+PE pair -> 2-leg
      BASKET (the normal freshly-entered shape).
@@ -48,6 +47,14 @@ Covers, against the REAL production functions (not reimplemented):
      held (1 or 2, whichever state) and releases capacity, mode-aware.
   8. monitor_loop's own 3-way per-tick dispatch touches exactly one of
      the three tick functions per tick.
+  9. (Added 8 Sep 2026, user request) A standalone PE_HEDGE position
+     stays a `reserved_symbols` KEY throughout (dedup - a fresh re-entry
+     for the SAME symbol is still blocked), but its VALUE flips from
+     "BASKET" to "PE_HEDGE" at the swap, and only "BASKET"-valued
+     entries count against `config.MAX_LIVE_BASKETS` - so a DIFFERENT
+     symbol can now enter a genuinely fresh basket in parallel while an
+     earlier symbol's own PE hedge winds down, at any MAX_LIVE_BASKETS
+     value including 1.
 
 Known gap, documented rather than silently skipped: this pass does NOT
 add a basket_hedge paper-trading variant (paper_engine.py) - scope/time,
@@ -222,7 +229,12 @@ async def test_2_full_cycle_basket_to_pe_hedge_to_loss_cap_exit():
         assert position.state == "PE_HEDGE", position.state
         assert len(position.legs) == 1, position.legs
         assert position.legs[0].option_trading_symbol == pe_symbol
-        assert symbol in store.reserved_symbols, "capacity must stay RESERVED across the basket->hedge swap"
+        assert symbol in store.reserved_symbols, \
+            "the symbol must stay a reserved_symbols KEY across the basket->hedge swap (dedup - a fresh " \
+            "re-entry for this SAME symbol must still be blocked) - see test_9 for proof that this no " \
+            "longer counts against MAX_LIVE_BASKETS itself (added 8 Sep 2026, user request)"
+        assert store.reserved_symbols[symbol] == "PE_HEDGE", \
+            "the swap must flip this symbol's own reserved_symbols VALUE from BASKET to PE_HEDGE"
 
         # --- PE_HEDGE -> NONE (loss-cap exit) ---
         pe_leg = position.legs[0]
@@ -513,6 +525,74 @@ async def test_8_monitor_loop_dispatch_is_3way_isolated():
         ste.config.STRATEGY_MODE = real_mode
 
 
+async def test_9_pe_hedge_does_not_count_against_basket_capacity():
+    """config.MAX_LIVE_BASKETS is now checked against symbols CURRENTLY
+    in BASKET state only (added 8 Sep 2026, user request, verbatim
+    intent: "don't consider individual separate PE open trades after the
+    whole basket trade (Future + PE ATM Option) is exited as
+    max_live_baskets_reached... this open PE trade should be tracked for
+    exit conditions defined earlier however it won't be counted as
+    basket item. This will allow a new basket order to be placed in
+    parallel"). At MAX_LIVE_BASKETS=1: RELIANCE enters and swaps to
+    PE_HEDGE (which frees its own slot even though RELIANCE itself stays
+    dedup-blocked from a FRESH re-entry - capacity-exempt, not
+    unmanaged), and a completely different symbol (WIPRO) can then enter
+    its own fresh basket in parallel - something the OLD reserved_
+    symbols-as-a-plain-set model would have rejected outright as
+    capacity-full."""
+    store = sps.BasketHedgeStore()
+    ste.basket_hedge_store = store
+    real_enabled = ste.config.STRATEGY_ENABLED
+    ste.config.STRATEGY_ENABLED = True
+    real_cap = ste.config.MAX_LIVE_BASKETS
+    ste.config.MAX_LIVE_BASKETS = 1
+    symbol = "RELIANCE"
+    restore, placed_orders = install_all_dhan_mocks(
+        fill_prices=[100.0, 20.0, 110.0, 15.0, 25.0, 200.0, 30.0],
+    )
+    try:
+        result = await ste._enter_basket_hedge_for_stock(symbol)
+        assert result["status"] == "entered", result
+        assert await store.remaining_capacity() == 0, "the one slot must be fully used by RELIANCE's own BASKET"
+
+        # A second BASKET entry (any symbol) is rejected while the one slot is a live BASKET.
+        blocked = await ste._enter_basket_hedge_for_stock("WIPRO")
+        assert blocked["status"] == "skipped" and blocked["reason"] == "duplicate_or_capacity_full", blocked
+
+        position = store.live_positions[symbol]
+        await ste._exit_basket_hedge_to_pe(symbol, position, "SUPERTREND_5MIN_EXIT")
+        position = store.live_positions[symbol]
+        assert position.state == "PE_HEDGE", position.state
+
+        # The slot is free again - RELIANCE's own standalone PE hedge no longer counts.
+        assert await store.remaining_capacity() == 1, \
+            "a standalone PE_HEDGE position must NOT count against MAX_LIVE_BASKETS"
+
+        # A DIFFERENT symbol can now enter a genuinely fresh basket in parallel.
+        result_wipro = await ste._enter_basket_hedge_for_stock("WIPRO")
+        assert result_wipro["status"] == "entered", result_wipro
+        assert store.live_positions["WIPRO"].state == "BASKET"
+
+        # RELIANCE itself stays dedup-blocked (its own PE hedge is still open) - capacity-exempt,
+        # not a free-for-all on the same underlying.
+        dup = await ste._enter_basket_hedge_for_stock(symbol)
+        assert dup["status"] == "skipped" and dup["reason"] == "duplicate_or_capacity_full", dup
+
+        snap = await store.snapshot()
+        assert snap["reserved_symbols_by_state"] == {"RELIANCE": "PE_HEDGE", "WIPRO": "BASKET"}, \
+            snap["reserved_symbols_by_state"]
+        assert snap["live_basket_count"] == 1, snap["live_basket_count"]
+
+        print("9. A standalone PE_HEDGE position no longer counts against MAX_LIVE_BASKETS - a "
+              "different symbol enters a fresh basket in parallel while an earlier symbol's own PE "
+              "hedge winds down, while that earlier symbol itself stays dedup-blocked from a fresh "
+              "re-entry (capacity-exempt, not unmanaged): PASSED")
+    finally:
+        restore()
+        ste.config.STRATEGY_ENABLED = real_enabled
+        ste.config.MAX_LIVE_BASKETS = real_cap
+
+
 async def main():
     print("=== Swing basket_hedge-mode test suite ===\n")
     test_1_config_defaults_to_basket_hedge()
@@ -523,6 +603,7 @@ async def main():
     await test_6_reconciliation_handles_all_three_leg_shapes()
     await test_7_manual_square_off_closes_every_current_leg()
     await test_8_monitor_loop_dispatch_is_3way_isolated()
+    await test_9_pe_hedge_does_not_count_against_basket_capacity()
     print("\nALL SWING BASKET_HEDGE-MODE CHECKS PASSED")
 
 

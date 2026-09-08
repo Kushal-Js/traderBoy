@@ -405,10 +405,33 @@ async def test_4_funds_rejected_stock_is_genuinely_retriable_on_a_later_alert():
 
 async def main():
     print("=== Fund allocation - deep integration test suite ===\n")
-    await test_1_secondary_bucket_protects_primary_share_across_real_packages()
-    await test_2_options_futures_luxury_share_one_secondary_bucket_full_pipeline()
-    await test_3_buckets_are_proportional_shares_of_the_same_shifting_total()
-    await test_4_funds_rejected_stock_is_genuinely_retriable_on_a_later_alert()
+    # Pinned explicitly (not left to the ambient .env value) - tests 2
+    # and 3's own numbers are hand-worked against a clean 85/15 split
+    # (see each one's own comments); the real .env's SECONDARY_BUCKET_PCT
+    # was raised 15->20 on 8 Sep 2026 (user request), which would
+    # otherwise silently change which of these hand-worked scenarios
+    # actually clears the bucket - same ambient-.env lesson as NOTES.md
+    # entry #92.
+    real_primary_pct = fa.PRIMARY_BUCKET_PCT
+    real_secondary_pct = fa.SECONDARY_BUCKET_PCT
+    real_bucket_pcts = dict(fa.BUCKET_PCTS)
+    fa.PRIMARY_BUCKET_PCT = 85.0
+    fa.SECONDARY_BUCKET_PCT = 15.0
+    # BUCKET_PCTS is a plain dict BUILT ONCE from the two floats above at
+    # import time (fund_allocation.py:83) - it does NOT auto-recompute
+    # when PRIMARY_BUCKET_PCT/SECONDARY_BUCKET_PCT are reassigned, and
+    # get_bucket_available_funds/has_sufficient_bucket_funds both read
+    # BUCKET_PCTS directly, not the two floats - so it must be pinned too.
+    fa.BUCKET_PCTS = {"primary": 85.0, "secondary": 15.0}
+    try:
+        await test_1_secondary_bucket_protects_primary_share_across_real_packages()
+        await test_2_options_futures_luxury_share_one_secondary_bucket_full_pipeline()
+        await test_3_buckets_are_proportional_shares_of_the_same_shifting_total()
+        await test_4_funds_rejected_stock_is_genuinely_retriable_on_a_later_alert()
+    finally:
+        fa.PRIMARY_BUCKET_PCT = real_primary_pct
+        fa.SECONDARY_BUCKET_PCT = real_secondary_pct
+        fa.BUCKET_PCTS = real_bucket_pcts
     print("\nALL FUND ALLOCATION INTEGRATION CHECKS PASSED")
 
 
