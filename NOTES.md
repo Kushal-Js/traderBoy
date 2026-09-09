@@ -5292,11 +5292,60 @@ out of git.
     ~Rs.600-750, precisely because the lesson about checking state
     between every order call was already learned and applied.
 
-    `BROKER_STOP_LOSS_ENABLED` remains OFF by default/`.env` pending the
+    `BROKER_STOP_LOSS_ENABLED` remained OFF by default/`.env` pending the
     user's own decision on enabling it for real production entries - the
-    mechanism is now proven correct via real evidence, but "proven
-    correct in a controlled test" and "enabled for live production
-    capital" are treated as two separate decisions, not one.
+    mechanism was proven correct via real evidence, but "proven correct
+    in a controlled test" and "enabled for live production capital" were
+    treated as two separate decisions, not one. **Update, same day**:
+    user reviewed the live evidence and said go - `.env`'s `LUXURY_
+    BROKER_STOP_LOSS_ENABLED` flipped to `true` and deployed, ALONGSIDE
+    a requested bump of `LUXURY_MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF`
+    1200->1300 and `_AFTER_CUTOFF` 1000->1100 (`.env`-only, no code
+    change - both configs already existed). Restart confirmed clean via
+    a direct runtime check of the resolved config values on the droplet
+    (not just trusting the .env file's own contents), zero live
+    positions open at restart time.
+
+101. **`LUXURY_ENTRY_CUTOFF_TIME` request (9 Sep 2026) resolved by
+    REUSING an existing, already-wired-but-dormant mechanism instead of
+    adding a duplicate.** User asked: "do we have some flag for time
+    upto when trades are allowed using Luxury strategy?" - initial
+    answer was WRONG (said no such flag exists) after only grepping for
+    literal keywords like `ENTRY_CUTOFF`/`NO_NEW_ENTRIES`, missing that
+    Luxury already has `config.ENABLE_TRADING_TIME_LIMIT` (default
+    `"false"`) + `config.ALLOWED_TRADING_TIME` (default `"11:30"`) +
+    `trading_engine.is_past_allowed_trading_time()`, genuinely wired
+    into `luxury_main.py`'s real webhook handler (checked BEFORE the
+    daily re-entry cap / loss cooldown / repeat-loss block) - it was
+    just never enabled via `.env`, and Options has the identical pair
+    (copy-pasted into Luxury when the package was created 31 Aug 2026,
+    per that entry's own "same logic and setup as Options" request).
+
+    User then asked for `LUXURY_ENTRY_CUTOFF_TIME` (11 AM, default
+    15:30 if unset) - correctly flagged the overlap with the existing
+    dormant mechanism before building anything, and the user chose to
+    just enable/configure the existing pair rather than add a second,
+    differently-named flag doing the same thing. `.env`: `LUXURY_
+    ENABLE_TRADING_TIME_LIMIT=true`, `LUXURY_ALLOWED_TRADING_TIME=
+    11:00` (code default for the latter stays "11:30", unchanged - only
+    the deployed .env value moved, same convention as every other
+    tunable in this file).
+
+    **Real gap found and closed while verifying this**: despite being
+    real, live, wired-in production logic, `is_past_allowed_trading_
+    time()`'s own REJECTION path had ZERO dedicated test coverage
+    anywhere in the 34-file suite - every existing reference to it
+    (`test_luxury_package.py`, `test_cross_strategy_registry.py`,
+    `test_risk_threshold_cutoff.py`) was either a docstring mention or a
+    time-freeze helper built specifically to AVOID tripping it by
+    accident during unrelated tests, never a test that deliberately
+    exercised the rejection itself. New `tests/test_luxury_allowed_
+    trading_time.py` (3 tests) against the REAL webhook handler: before
+    the cutoff enters normally; at/after the cutoff is IGNORED with
+    `reason="past_allowed_trading_time"`, ZERO orders placed, and the
+    ignored alert durably logged via `record_webhook_alert`; and the
+    flag disabled bypasses the check even well past the cutoff time.
+    Full 34-file suite clean, zero real Dhan auth attempts.
 
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
