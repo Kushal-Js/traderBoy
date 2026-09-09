@@ -56,6 +56,28 @@ def _retry(fn, *args, retries: int = 2, delay: float = 1.5, **kwargs):
     raise last_exc
 
 
+def _round_to_tick(price: float, tick_size: float) -> float:
+    """Rounds `price` to the nearest valid multiple of `tick_size` - added
+    9 Sep 2026 after a real SL-L order was REJECTED by the exchange with
+    "EXCH:16283: The order price is not multiple of the tick size" (a
+    controlled live test placed trigger=3.88/limit=3.76, neither a
+    multiple of COALINDIA's own real Rs.0.05 tick, since we'd only ever
+    rounded to 2 decimal places, not to the actual exchange tick). Unlike
+    a normal MARKET/LIMIT order at a self-chosen price (where being off
+    a paisa or two just risks a slightly worse fill), a stop order's
+    trigger/limit values are COMPUTED (from a rupee-cap formula), so
+    they land on an arbitrary tick-misaligned value far more often than
+    a manually-chosen price would - this rounding step is required, not
+    an edge case. Falls back to plain 2-decimal rounding if tick_size
+    isn't a usable positive number (e.g. a lookup failure) rather than
+    raising - a slightly-off-tick order that still gets REJECTED cleanly
+    by the exchange (as this one was) is a safe failure mode, not a
+    silent one."""
+    if not tick_size or tick_size <= 0:
+        return round(price, 2)
+    return round(round(price / tick_size) * tick_size, 2)
+
+
 def _compute_supertrend(
     highs: list[float], lows: list[float], closes: list[float],
     period: int = 10, multiplier: float = 3.0,
@@ -350,6 +372,13 @@ class DhanWrapper:
             # ATM_Strike_Selection parses this same column the same way
             # (pd.to_datetime(...).dt.date) internally.
             "expiry_date": pd.to_datetime(r["SEM_EXPIRY_DATE"], errors="coerce").date(),
+            # Dhan's own SEM_TICK_SIZE is in PAISE (e.g. 5.0 = Rs.0.05), not
+            # rupees - added 9 Sep 2026 for place_stop_loss_limit_order's
+            # own tick-rounding (see _round_to_tick's docstring for why
+            # this is required, not optional, for a COMPUTED trigger/limit
+            # price). Divided here so every caller gets a rupee value
+            # directly, matching every other price field in this codebase.
+            "tick_size": float(r["SEM_TICK_SIZE"]) / 100.0,
         }
 
     def _instrument_meta_by_security_id(self, security_id: str) -> dict:
@@ -1328,10 +1357,35 @@ class DhanWrapper:
         "required" for STOP_LOSS specifically (only `trigger_price` is
         merely "conditionally required" the way it is for SL-M).
 
+        Both `trigger_price` and `limit_price` are rounded to this
+        contract's own real exchange tick size before submission (added 9
+        Sep 2026, after a controlled live test's computed trigger/limit
+        values got cleanly REJECTED with "EXCH:16283: The order price is
+        not multiple of the tick size" - see _round_to_tick's own
+        docstring for why this is a real, not theoretical, risk for
+        COMPUTED prices specifically).
+
         Does NOT set after_market_order - same reasoning as
         place_stop_loss_market_order above (only ever placed immediately
         after a real intraday fill)."""
         product_type = product_type or config.OPTIONS_PRODUCT
+        try:
+            tick_size = self._instrument_meta(trading_symbol).get("tick_size")
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: could not look up the real tick size before placing the SL-L order - falling "
+                "back to plain 2-decimal rounding, which may still get rejected for a tick-size "
+                "mismatch", trading_symbol,
+            )
+            tick_size = None
+        rounded_trigger = _round_to_tick(trigger_price, tick_size)
+        rounded_limit = _round_to_tick(limit_price, tick_size)
+        if rounded_trigger != trigger_price or rounded_limit != limit_price:
+            logger.info(
+                "%s: rounded SL-L prices to the real tick size (%.4f): trigger %.4f->%.4f, limit %.4f->%.4f",
+                trading_symbol, tick_size or 0.0, trigger_price, rounded_trigger, limit_price, rounded_limit,
+            )
+        trigger_price, limit_price = rounded_trigger, rounded_limit
         logger.info(
             "Placing STOP-LOSS LIMIT order: %s %s x%s trigger=%.2f limit=%.2f (product=%s)",
             transaction_type, trading_symbol, quantity, trigger_price, limit_price, product_type,
