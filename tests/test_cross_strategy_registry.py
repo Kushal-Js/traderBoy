@@ -127,6 +127,7 @@ def install_all_dhan_mocks(entry_delay_seconds: float = 0.0):
         "refresh_supertrend_signal": odc.dhan_wrapper.refresh_supertrend_signal,
         "get_cached_supertrend_candle_start": odc.dhan_wrapper.get_cached_supertrend_candle_start,
         "place_market_order": odc.dhan_wrapper.place_market_order,
+        "place_stop_loss_limit_order": odc.dhan_wrapper.place_stop_loss_limit_order,
         "place_stop_loss_market_order": odc.dhan_wrapper.place_stop_loss_market_order,
         "place_stop_loss_limit_order": odc.dhan_wrapper.place_stop_loss_limit_order,
         "check_if_order_filled": odc.dhan_wrapper.check_if_order_filled,
@@ -153,6 +154,7 @@ def install_all_dhan_mocks(entry_delay_seconds: float = 0.0):
         return {"order_id": f"FAKE-{trading_symbol}-{transaction_type}", "is_amo": False}
 
     odc.dhan_wrapper.place_market_order = fake_place_market_order
+    odc.dhan_wrapper.place_stop_loss_limit_order = lambda trading_symbol, quantity, transaction_type, trigger_price, limit_price, tag=None, product_type=None: {"order_id": f"FAKE-SLL-{trading_symbol}"}
     # Luxury's own _enter_single_position places a real broker-side stop-
     # loss order (added 8 Sep 2026) right after every entry - unmocked,
     # this would fall through to a REAL Dhan order_placement call (and a

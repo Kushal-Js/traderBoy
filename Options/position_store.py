@@ -117,6 +117,22 @@ class Position:
     # trading_engine._supertrend_signal_for), so entering doesn't get
     # immediately reversed by the same breakout candle that triggered it.
     supertrend_entry_candle_start: Optional[datetime] = None
+    # Real broker-side SELL STOP-LOSS LIMIT (SL-L) order resting at Dhan
+    # for this exact position - added 10 Sep 2026, porting Luxury's own
+    # proven-working mechanism (see Luxury/config.py's BROKER_STOP_LOSS_
+    # ENABLED docstring for the full SL-M->SL-L story and NOTES.md entry
+    # #100/#102). None if config.BROKER_STOP_LOSS_ENABLED is off or
+    # placing it failed - the position is still fully protected either
+    # way by the existing poll/tick-driven MAX_LOSS_HIT check in _exit_
+    # reason_for (this is an ADDITIONAL, faster backstop, never a
+    # replacement). Checked on every monitor tick (_check_one_position/
+    # on_price_tick, via dhan_wrapper.check_if_order_filled) to detect
+    # the broker having ALREADY closed the position ahead of our own
+    # reactive logic. Cleared implicitly whenever the position closes
+    # through any path - a normal reactive exit's own _exit_position
+    # already finds and cancels this exact order first (get_pending_
+    # order_id/cancel_order, pre-existing stale-order-cancel logic).
+    stop_loss_order_id: Optional[str] = None
 
     @property
     def current_trailing_sl(self) -> float:

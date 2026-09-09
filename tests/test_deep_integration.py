@@ -94,6 +94,7 @@ def install_all_dhan_mocks():
         "refresh_supertrend_signal": odc.dhan_wrapper.refresh_supertrend_signal,
         "get_cached_supertrend_candle_start": odc.dhan_wrapper.get_cached_supertrend_candle_start,
         "place_market_order": odc.dhan_wrapper.place_market_order,
+        "place_stop_loss_limit_order": odc.dhan_wrapper.place_stop_loss_limit_order,
         "wait_for_order_result": odc.dhan_wrapper.wait_for_order_result,
     }
 
@@ -119,6 +120,7 @@ def install_all_dhan_mocks():
                             fill_price=50.0, filled_quantity=500, is_amo=False)
 
     odc.dhan_wrapper.place_market_order = fake_place_market_order
+    odc.dhan_wrapper.place_stop_loss_limit_order = lambda trading_symbol, quantity, transaction_type, trigger_price, limit_price, tag=None, product_type=None: {"order_id": f"FAKE-SLL-{trading_symbol}"}
     odc.dhan_wrapper.wait_for_order_result = fake_wait_for_order_result
 
     def restore():

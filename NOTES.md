@@ -5347,6 +5347,70 @@ out of git.
     flag disabled bypasses the check even well past the cutoff time.
     Full 34-file suite clean, zero real Dhan auth attempts.
 
+102. **Options brought up to Luxury's own guard-rail set, and the
+    choppy-stocks pre-filter removed from Options - user request 10 Sep
+    2026** (verbatim): "remove Choppy-stocks pre-filter from Options and
+    also make Options have similar rule set and guard rails as Luxury
+    have, add and deploy also." Scoped down first via a clarifying
+    question, since "similar rule set" was ambiguous and this touches
+    live capital: the user chose GUARD RAILS ONLY - none of Options' own
+    position sizing (1/1 concurrent), max-loss caps (Rs.1,200/1,000), or
+    entry-cutoff-time (off) were touched, only the 4 protective
+    mechanisms Luxury has that Options didn't.
+
+    **Removed**: the choppy-stocks pre-filter (`choppy_stocks.is_choppy`
+    checks in both `option_main.py`'s webhook handler and `trading_
+    engine.py`'s own `_process_one_entry` belt-and-suspenders check) -
+    Options' real webhook now ranks/enters every alerted stock
+    unconditionally, matching Luxury's own webhook (which never had this
+    filter). `choppy_stocks.py` itself is kept, not deleted, per this
+    repo's convention - its own standalone read/write/seed functions and
+    the unrelated `GET` inspection endpoint in `main.py` are untouched.
+
+    **Added, ported line-for-line from Luxury's own proven mechanisms**
+    (each package keeps its own copy of `trading_engine.py`, so this was
+    a genuine port, not a shared-code change):
+    - `LOSS_COOLDOWN_ENABLED`/`_MINUTES` (default on, 20 min, Luxury's
+      own tuned value) - `_process_one_entry` now skips a fresh entry
+      into a symbol that stopped Options out within the cooldown window.
+    - `LOSS_REPEAT_BLOCK_ENABLED`/`_COUNT`/`_EXIT_REASONS` (default on,
+      2/day) - blocks a symbol for the rest of the day after 2 genuine
+      loss-designated exits.
+    - `LIQUIDITY_GUARD_ENABLED` (default on) - `_exit_reason_for` now
+      also exits early on a thinly-traded option gone quiet (the shared
+      numeric params `LIQUIDITY_GUARD_ZERO_VOLUME_BARS`/`_REFRESH_
+      SECONDS` already lived in `Options/config.py`, just never had
+      their own on/off gate wired up for this package before).
+    - `BROKER_STOP_LOSS_ENABLED`/`_LIMIT_BUFFER_PCT` (a real SELL SL-L
+      order placed right after every entry) + the matching partial-fill
+      safety fix in `_exit_position` (re-derives real broker quantity
+      after cancelling a stale resting order, before placing a fresh
+      SELL - prevents the exact naked-short risk a genuine SL-L partial
+      fill introduces). `Options/position_store.py`'s `Position` gained
+      the matching `stop_loss_order_id` field. **Kept OFF by default**
+      here specifically (unlike the other three) - the underlying `place_
+      stop_loss_limit_order` mechanism is already proven correct via
+      Luxury's own live tests, but Options' own entry flow calling it is
+      new code that hasn't itself touched a real order yet - same
+      rollout discipline as Luxury's original launch (earn trust via a
+      live test before running against a real entry).
+
+    **Test coverage**: new `tests/test_options_broker_stop_loss.py` (9
+    tests, mirroring `test_luxury_broker_stop_loss.py` exactly) and
+    `tests/test_options_corrective_actions.py` (8 tests, covering only
+    OPTIONS' OWN integration wiring - deliberately does NOT re-test the
+    underlying shared, strategy-agnostic functions like `trade_history.
+    minutes_since_last_loss_today`/`loss_exit_count_today`, already
+    fully covered against Luxury's own strategy tag). `tests/test_
+    choppy_stocks.py`'s own tests 4/5 (which asserted the OLD filtering
+    behavior) were replaced with one new test proving the removal - a
+    choppy-listed stock now reaches ranking and enters normally through
+    the real webhook. Added `place_stop_loss_limit_order` mocks to 6
+    more Options-exercising test files' `install_all_dhan_mocks()`
+    helpers (defensive, same "ambient default could someday flip and
+    cause a real auth leak" reasoning as every prior round of this same
+    fix). Full 36-file suite clean, zero real Dhan auth attempts.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM

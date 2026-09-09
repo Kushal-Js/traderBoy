@@ -27,8 +27,9 @@ from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from trade_history import attribute_open_broker_position, count_opened_today
-import choppy_stocks
+from trade_history import (
+    attribute_open_broker_position, count_opened_today, loss_exit_count_today, minutes_since_last_loss_today,
+)
 import cross_strategy_registry
 import fund_allocation
 
@@ -294,16 +295,6 @@ async def _process_one_entry(symbol: str, option_type: str) -> dict:
     real order for the same stock."""
     loop = asyncio.get_running_loop()
 
-    # Belt-and-suspenders (same reasoning as the already_open check below):
-    # option_main.py's webhook handler already filters choppy stocks out
-    # before ranking, so this should never actually trigger in the normal
-    # webhook path - but any future caller of _process_one_entry that
-    # skips that pre-filter (e.g. a different entry point) still can't
-    # place a real order in a choppy stock. See choppy_stocks.py.
-    if choppy_stocks.is_choppy(symbol):
-        logger.info("%s: skipped - on the manually-maintained choppy-stocks list", symbol)
-        return {"symbol": symbol, "status": "skipped", "reason": "choppy_stock"}
-
     # Daily re-entry cap (user request 1 Sep 2026: "only allow entry into
     # same trade max 3 times a day") - independent of MAX_LIVE_POSITIONS_
     # CE/_PE (that caps how many can be LIVE at once; this caps how many
@@ -321,6 +312,43 @@ async def _process_one_entry(symbol: str, option_type: str) -> dict:
             symbol, entries_today, config.MAX_DAILY_ENTRIES_PER_SYMBOL,
         )
         return {"symbol": symbol, "status": "skipped", "reason": "daily_reentry_cap_reached"}
+
+    # Same-day loss cooldown - ported from Luxury's identical check (see
+    # config.LOSS_COOLDOWN_ENABLED's own docstring for the full
+    # MAHABANK/PHOENIXLTD/GVT&D incidents this was built from, on that
+    # package). Independent of the daily re-entry cap above - that one is
+    # a COUNT limit (at most N times all day); this one is a TIMING limit
+    # (not immediately after a loss on this same symbol).
+    if config.LOSS_COOLDOWN_ENABLED:
+        minutes_since_loss = await loop.run_in_executor(
+            None, minutes_since_last_loss_today, "Options", symbol, datetime.now()
+        )
+        if minutes_since_loss is not None and minutes_since_loss < config.LOSS_COOLDOWN_MINUTES:
+            logger.info(
+                "%s: skipped - stopped out %.1f minute(s) ago today, inside the %s-minute loss cooldown",
+                symbol, minutes_since_loss, config.LOSS_COOLDOWN_MINUTES,
+            )
+            return {"symbol": symbol, "status": "skipped", "reason": "loss_cooldown_active"}
+
+    # Repeat-loss same-day block - ported from Luxury's identical check
+    # (see config.LOSS_REPEAT_BLOCK_ENABLED's own docstring for how this
+    # differs from both guards above). Unlike the timing-based cooldown
+    # just above, this one never expires today once tripped - only a
+    # genuine loss-designated exit reason counts (a symbol that's merely
+    # had several trades, or even several small losing-by-a-hair
+    # TRAILING_SL_HIT exits, is not blocked by this - only real MAX_LOSS_
+    # HIT/STOP_LOSS_HIT hits are).
+    if config.LOSS_REPEAT_BLOCK_ENABLED:
+        loss_count = await loop.run_in_executor(
+            None, loss_exit_count_today, "Options", symbol, config.LOSS_REPEAT_BLOCK_EXIT_REASONS, datetime.now(),
+        )
+        if loss_count >= config.LOSS_REPEAT_BLOCK_COUNT:
+            logger.info(
+                "%s: skipped - already hit a loss-based exit %d time(s) today (limit %d), "
+                "blocked for the rest of the day",
+                symbol, loss_count, config.LOSS_REPEAT_BLOCK_COUNT,
+            )
+            return {"symbol": symbol, "status": "skipped", "reason": "loss_repeat_block_active"}
 
     if not await cross_strategy_registry.try_claim(symbol, "Options"):
         logger.info("%s: skipped - another strategy is currently entering it", symbol)
@@ -558,6 +586,50 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
 
     entry_candle_start = await _capture_supertrend_entry_candle(loop, symbol)
 
+    # Broker-side stop-loss order - ported from Luxury's identical
+    # mechanism (see config.BROKER_STOP_LOSS_ENABLED's own docstring for
+    # the full SL-M->SL-L story and rollout discipline). Placed here,
+    # right after the real fill_price is known, using whichever MAX_LOSS
+    # cutoff value is active RIGHT NOW (same "computed once at entry"
+    # convention as target_price/hard_stop_loss below). A failure to
+    # place this is logged loudly but never blocks the entry itself -
+    # stop_loss_order_id simply stays None, and the position is exactly
+    # as protected as it always was via the existing poll/tick-driven
+    # MAX_LOSS_HIT check.
+    stop_loss_order_id = None
+    if config.BROKER_STOP_LOSS_ENABLED:
+        trigger_price = fill_price - (current_max_loss_per_trade_rs() / quantity)
+        limit_price = trigger_price * (1 - config.BROKER_STOP_LOSS_LIMIT_BUFFER_PCT)
+        try:
+            stop_tag = _gen_tag("SL", symbol)
+            stop_resp = await loop.run_in_executor(
+                None, dhan_wrapper.place_stop_loss_limit_order,
+                atm.trading_symbol, quantity, "SELL", trigger_price, limit_price, stop_tag, config.OPTIONS_PRODUCT,
+            )
+            stop_loss_order_id = stop_resp["order_id"]
+            logger.info(
+                "%s: broker-side SELL stop-loss LIMIT order %s placed for %s, trigger=%.2f limit=%.2f",
+                symbol, stop_loss_order_id, atm.trading_symbol, trigger_price, limit_price,
+            )
+            await position_store.record_order(OrderRecord(
+                order_id=stop_loss_order_id,
+                underlying_symbol=symbol,
+                trading_symbol=atm.trading_symbol,
+                transaction_type="SELL",
+                quantity=quantity,
+                status=OrderStatus.PENDING,
+                is_amo=False,
+                lot_size=atm.lot_size,
+                option_type=atm.option_type,
+            ))
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: could not place the broker-side stop-loss order for %s (trigger would have been "
+                "%.2f, limit %.2f) - proceeding without it, the existing poll/tick-driven MAX_LOSS_HIT "
+                "check still protects this position exactly as before",
+                symbol, atm.trading_symbol, trigger_price, limit_price,
+            )
+
     position = Position(
         underlying_symbol=symbol,
         option_trading_symbol=atm.trading_symbol,
@@ -571,6 +643,7 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
         order_id=order_id,
         product_type=config.OPTIONS_PRODUCT,
         supertrend_entry_candle_start=entry_candle_start,
+        stop_loss_order_id=stop_loss_order_id,
     )
     await position_store.add_position(position)
 
@@ -625,7 +698,25 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
     the broker for this exact contract and cancels it first if found - see
     dhan_wrapper.get_pending_order_id's docstring for why a stale pending
     order surviving a restart can otherwise get a fresh SELL rejected for
-    "insufficient funds" it doesn't actually need."""
+    "insufficient funds" it doesn't actually need.
+
+    Broker-quantity reconciliation after a stale-order cancel (ported
+    from Luxury's identical fix, added there 9 Sep 2026 alongside the
+    SL-L broker stop-loss - see config.BROKER_STOP_LOSS_ENABLED's own
+    docstring): whenever a stale resting SELL order is found and
+    cancelled below, position.quantity gets RE-DERIVED from the broker's
+    own real net quantity before any fresh SELL is placed. A genuine
+    SL-L order can PARTIALLY fill: some quantity sold at the limit
+    price, the remainder left resting. If that remainder is still
+    outstanding when a DIFFERENT exit reason fires through the normal
+    reactive path, blindly placing a fresh SELL for the full stored
+    position.quantity would try to sell MORE than is actually still
+    held - an unintended naked short. Re-checking real broker truth
+    here, every time a stale order is found, closes that gap regardless
+    of which broker-side order type ever gets used for the resting one -
+    every reference to position.quantity below (the fresh SELL's own
+    quantity, its OrderRecord, and the final pnl calc) picks up the
+    corrected value for free since Position is mutated in place."""
     loop = asyncio.get_running_loop()
 
     try:
@@ -649,6 +740,53 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
         except Exception:  # noqa: BLE001
             logger.exception("%s: could not cancel stale SELL order %s - proceeding with a new order anyway",
                               symbol, stale_order_id)
+
+        try:
+            broker_qty = await loop.run_in_executor(
+                None, dhan_wrapper.get_broker_net_quantity, position.option_trading_symbol
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: could not reconcile broker quantity after cancelling stale order %s - proceeding "
+                "with the stored quantity (%d), which WOULD oversell into a naked short if that order "
+                "had actually partially filled", symbol, stale_order_id, position.quantity,
+            )
+            broker_qty = None
+        if broker_qty is not None and broker_qty != position.quantity:
+            if broker_qty == 0:
+                logger.warning(
+                    "%s: broker shows this position already FLAT after cancelling stale order %s - it "
+                    "must have fully filled (e.g. our own broker-side stop-loss) right before/during "
+                    "the cancel race. Reconciling as closed using that order's own real fill price "
+                    "instead of placing a fresh SELL.", symbol, stale_order_id,
+                )
+                try:
+                    stale_result = await loop.run_in_executor(
+                        None, dhan_wrapper.refresh_order_status, stale_order_id
+                    )
+                    final_exit_price = stale_result.fill_price or exit_price
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "%s: could not fetch stale order %s's own fill price - using %.2f instead",
+                        symbol, stale_order_id, exit_price,
+                    )
+                    final_exit_price = exit_price
+                await position_store.close_position(symbol, final_exit_price, reason)
+                await loop.run_in_executor(
+                    None, dhan_wrapper.unsubscribe_option_price, position.option_trading_symbol
+                )
+                return
+            logger.warning(
+                "%s: broker shows only %d qty left (stored position says %d) after cancelling stale "
+                "order %s - a PARTIAL fill happened on that resting order. Selling only the real "
+                "remaining %d qty instead of the stale %d to avoid an unintended naked short. NOTE: "
+                "the pnl logged for this exit covers only this remaining leg, not a blended figure "
+                "across both fills - check /positions' own orders_today (or Dhan's real order record "
+                "for %s) for the earlier partial fill's own price/quantity if an exact total is "
+                "needed.", symbol, broker_qty, position.quantity, stale_order_id, broker_qty,
+                position.quantity, stale_order_id,
+            )
+            position.quantity = broker_qty
 
     if position.exit_failure_count >= 2:
         try:
@@ -826,7 +964,10 @@ def _supertrend_signal_for(position: Position) -> bool:
     return candle_start > entry_candle_start
 
 
-def _exit_reason_for(position: Position, ltp: float, supertrend_against_position: bool = False) -> Optional[str]:
+def _exit_reason_for(
+    position: Position, ltp: float, supertrend_against_position: bool = False,
+    liquidity_guard_triggered: bool = False,
+) -> Optional[str]:
     """Shared target/stop-loss/Supertrend evaluation - used by both the poll
     loop and the event-driven WebSocket tick handler so the two paths can't
     drift apart from each other. supertrend_against_position reflects the
@@ -856,7 +997,15 @@ def _exit_reason_for(position: Position, ltp: float, supertrend_against_position
     percentage-based trailing floor to be breached. highest_price is
     already maintained by the caller (update_highest_price) before this
     runs, so a tick that itself sets a new high never triggers this - only
-    a subsequent tick below an already-recorded peak does."""
+    a subsequent tick below an already-recorded peak does.
+
+    liquidity_guard_triggered (ported from Luxury's identical check, added
+    there 2 Sep 2026 - see config.LIQUIDITY_GUARD_ENABLED's own docstring)
+    is checked LAST, deliberately - an independent, additional early-
+    warning trigger (the option's own contract has gone quiet for several
+    minutes straight), not meant to override a genuine profit-taking exit
+    that already fired first on the exact same tick; it only matters when
+    NONE of the price-threshold checks above have fired yet."""
     loss_rs = (position.entry_price - ltp) * position.quantity
     if loss_rs >= current_max_loss_per_trade_rs():
         return "MAX_LOSS_HIT"
@@ -870,12 +1019,63 @@ def _exit_reason_for(position: Position, ltp: float, supertrend_against_position
         return "TRAILING_SL_HIT" if trailing_sl > position.hard_stop_loss else "STOP_LOSS_HIT"
     if config.ENABLE_SUPERTREND_EXIT and supertrend_against_position:
         return "SUPERTREND_EXIT"
+    if config.LIQUIDITY_GUARD_ENABLED and liquidity_guard_triggered:
+        return "LIQUIDITY_GUARD_ZERO_VOLUME"
     return None
+
+
+async def _check_broker_stop_already_filled(symbol: str, position: Position) -> bool:
+    """Ported from Luxury's identical function - see config.BROKER_STOP_
+    LOSS_ENABLED's own docstring for the full design. Cheap (cache-only
+    unless the order has actually gone terminal - see check_if_order_
+    filled's own docstring) - safe to call on every single monitor tick/
+    price tick for every open position. Returns True if the broker's own
+    stop-loss order had ALREADY filled (in which case the position is
+    closed here directly, no fresh SELL needed - it's already flat at
+    the broker) - callers should stop processing this position for the
+    current tick either way."""
+    if not config.BROKER_STOP_LOSS_ENABLED or not position.stop_loss_order_id:
+        return False
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None, dhan_wrapper.check_if_order_filled, position.stop_loss_order_id
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not check broker stop-loss order %s status - falling through to "
+                          "the normal poll/tick-driven check this tick", symbol, position.stop_loss_order_id)
+        return False
+    if result is None:
+        return False  # still resting, unfired - nothing to do
+    if result.status == OrderStatus.TRADED:
+        final_exit_price = result.fill_price or position.hard_stop_loss
+        logger.info(
+            "%s: broker-side stop-loss order %s ALREADY FILLED (exchange fired it directly, ahead of "
+            "our own poll/tick check) - closing at the real fill price %.2f",
+            symbol, position.stop_loss_order_id, final_exit_price,
+        )
+        await position_store.close_position(symbol, final_exit_price, "MAX_LOSS_HIT")
+        await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.option_trading_symbol)
+        return True
+    # REJECTED/CANCELLED/EXPIRED - the broker-side stop is gone without
+    # firing (e.g. a margin/RMS rejection after placement). The position
+    # is now protected ONLY by the existing poll/tick-driven MAX_LOSS_HIT
+    # check from here on - logged loudly since this is a real, if rare,
+    # loss of the faster backstop this feature exists to provide.
+    logger.warning(
+        "%s: broker-side stop-loss order %s ended as %s without firing - this position now relies "
+        "solely on the regular poll/tick-driven MAX_LOSS_HIT check",
+        symbol, position.stop_loss_order_id, result.status,
+    )
+    return False
 
 
 async def _check_one_position(symbol: str, position: Position) -> None:
     if position.pending_exit_order_id or _exit_on_cooldown(position):
         return  # already has an outstanding exit order, or backing off after a placement failure
+
+    if await _check_broker_stop_already_filled(symbol, position):
+        return
 
     try:
         ltp = await _get_ltp(position.option_trading_symbol)
@@ -896,7 +1096,13 @@ async def _check_one_position(symbol: str, position: Position) -> None:
         await loop.run_in_executor(None, dhan_wrapper.refresh_supertrend_signal, position.underlying_symbol)
         supertrend_against_position = _supertrend_signal_for(position)
 
-    reason = _exit_reason_for(position, ltp, supertrend_against_position)
+    liquidity_guard_triggered = False
+    if config.LIQUIDITY_GUARD_ENABLED:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, dhan_wrapper.refresh_liquidity_signal, position.option_trading_symbol)
+        liquidity_guard_triggered = bool(dhan_wrapper.get_cached_illiquid(position.option_trading_symbol))
+
+    reason = _exit_reason_for(position, ltp, supertrend_against_position, liquidity_guard_triggered)
     if reason and await position_store.try_start_exit(symbol):
         await _exit_position(symbol, position, ltp, reason)
 
@@ -925,14 +1131,20 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
         if position.pending_exit_order_id or _exit_on_cooldown(position):
             return
 
+        if await _check_broker_stop_already_filled(symbol, position):
+            return
+
         await position_store.update_highest_price(symbol, ltp)
 
         # Cache-only read (no I/O) - the poll loop's refresh_supertrend_signal()
         # keeps this warm; a blocking REST call here would stall the event
         # loop on every tick.
         supertrend_against_position = config.ENABLE_SUPERTREND_EXIT and _supertrend_signal_for(position)
+        liquidity_guard_triggered = config.LIQUIDITY_GUARD_ENABLED and bool(
+            dhan_wrapper.get_cached_illiquid(position.option_trading_symbol)
+        )
 
-        reason = _exit_reason_for(position, ltp, supertrend_against_position)
+        reason = _exit_reason_for(position, ltp, supertrend_against_position, liquidity_guard_triggered)
         if reason and await position_store.try_start_exit(symbol):
             await _exit_position(symbol, position, ltp, reason)
     except Exception:  # noqa: BLE001

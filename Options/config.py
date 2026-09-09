@@ -102,6 +102,79 @@ MAX_LIVE_POSITIONS_PE = int(os.getenv("MAX_LIVE_POSITIONS_PE", "2"))
 # per-day counter in position_store.py).
 MAX_DAILY_ENTRIES_PER_SYMBOL = int(os.getenv("MAX_DAILY_ENTRIES_PER_SYMBOL", "3"))
 
+# Same-day loss cooldown - ported from Luxury/config.py's own LOSS_
+# COOLDOWN_ENABLED (added there 2 Sep 2026, ported here 10 Sep 2026 as
+# part of bringing Options up to the same guard-rail set - user request:
+# "make Options have similar rule set and guard rails as Luxury have").
+# Skips a fresh entry into an underlying that stopped THIS strategy out
+# (a real pnl<=0 close) within the last LOSS_COOLDOWN_MINUTES, backed by
+# trade_history.minutes_since_last_loss_today() (the same durable
+# real_trades log record_closed_trade() already writes). Independent of
+# and stacks with MAX_DAILY_ENTRIES_PER_SYMBOL above - that one is about
+# COUNT (at most N times all day, no matter how spaced out), this one is
+# about TIMING (don't immediately chase a loss). 20 minutes is Luxury's
+# own tuned value (backtested against a sweep of 5/10/15/20/25/30/45/60/
+# 90/120 minutes against its real 2-3 Sep trades) - carried over as a
+# reasonable starting point since Options runs the identical entry/exit
+# mechanics, not independently re-tuned against Options' own trade
+# history yet.
+LOSS_COOLDOWN_ENABLED = os.getenv("LOSS_COOLDOWN_ENABLED", "true").lower() == "true"
+LOSS_COOLDOWN_MINUTES = float(os.getenv("LOSS_COOLDOWN_MINUTES", "20"))
+
+# Repeat-loss same-day block - ported from Luxury/config.py's own LOSS_
+# REPEAT_BLOCK_ENABLED (added there 8 Sep 2026, ported here 10 Sep 2026,
+# same "similar rule set and guard rails" request). Distinct from BOTH
+# guards above: MAX_DAILY_ENTRIES_PER_SYMBOL is a flat COUNT cap
+# regardless of outcome (wins count too); LOSS_COOLDOWN_MINUTES is a
+# short TIMING gap after the most recent loss. This one is a same-day
+# OUTCOME-COUNTING block: once a symbol has closed on a genuine loss-
+# designated exit (MAX_LOSS_HIT/STOP_LOSS_HIT specifically, not every
+# trade that happened to close a little negative for some other reason
+# like SUPERTREND_EXIT/TRAILING_SL_HIT) LOSS_REPEAT_BLOCK_COUNT times
+# today, it's done for the SYMBOL for the rest of the day, no more
+# re-entries regardless of how much time has passed. Backed by trade_
+# history.loss_exit_count_today() - the same durable, restart-surviving
+# real_trades log every other daily count/cooldown here reads.
+LOSS_REPEAT_BLOCK_ENABLED = os.getenv("LOSS_REPEAT_BLOCK_ENABLED", "true").lower() == "true"
+LOSS_REPEAT_BLOCK_COUNT = int(os.getenv("LOSS_REPEAT_BLOCK_COUNT", "2"))
+LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
+
+# Real broker-side SELL STOP-LOSS LIMIT (SL-L) order - ported from
+# Luxury/config.py's own BROKER_STOP_LOSS_ENABLED (see that file's own
+# docstring for the full SL-M->SL-L story: NSE bans SL-M for index/stock
+# options exchange-wide since Sep 2021, SL-L is the only broker-side
+# conditional stop still permitted, confirmed working via a controlled
+# live test 9 Sep 2026 - see NOTES.md entries #99/#100). Placed
+# immediately after every entry via the shared Options/dhan_client.py:
+# place_stop_loss_limit_order (used by Luxury too - proven in
+# production there), triggered at the rupee-equivalent price of
+# current_max_loss_per_trade_rs(). Additional, faster backstop on top
+# of the existing poll/tick-driven MAX_LOSS_HIT check - never a
+# replacement, and a placement failure never blocks the entry itself.
+#
+# Kept OFF by default here (unlike LOSS_COOLDOWN/LOSS_REPEAT_BLOCK/
+# LIQUIDITY_GUARD above, which introduce no new order-placement risk) -
+# the underlying SL-L mechanism is already proven correct via Luxury's
+# own live tests, but Options' own entry flow calling it for the first
+# time is new code that hasn't itself been exercised against a real
+# order yet. Same rollout discipline as Luxury's own original launch:
+# earn trust via an actual controlled live test before running against
+# a real production entry, not by assumption.
+BROKER_STOP_LOSS_ENABLED = os.getenv("BROKER_STOP_LOSS_ENABLED", "false").lower() == "true"
+BROKER_STOP_LOSS_LIMIT_BUFFER_PCT = float(os.getenv("BROKER_STOP_LOSS_LIMIT_BUFFER_PCT", "0.03"))
+
+# Liquidity guard master switch - ported from Luxury/config.py's own
+# LIQUIDITY_GUARD_ENABLED (added there 2 Sep 2026 after the real
+# CHOLAFIN MAX_LOSS_HIT overshoot investigation - see that file's own
+# docstring for the full incident/tuning history). The shared numeric
+# parameters (LIQUIDITY_GUARD_ZERO_VOLUME_BARS/_REFRESH_SECONDS) already
+# live below in this same file since dhan_client.refresh_liquidity_
+# signal()/get_cached_illiquid() are shared, global functions - this is
+# just the on/off gate for whether OPTIONS' OWN _exit_reason_for acts on
+# that shared signal, ported 10 Sep 2026 as part of the same "similar
+# guard rails as Luxury" request.
+LIQUIDITY_GUARD_ENABLED = os.getenv("LIQUIDITY_GUARD_ENABLED", "true").lower() == "true"
+
 # /chartink/webhook-papertrade (paper_webhook.py) - a second, independent
 # position pool for evaluating a new Chartink scan before trusting it with
 # real money. Deliberately separate from TOP_N_STOCKS/MAX_LIVE_POSITIONS_CE

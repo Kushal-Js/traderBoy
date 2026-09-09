@@ -248,25 +248,17 @@ async def _handle_chartink_webhook(
             "max_live_positions": cap,
         }
 
-    # Excludes stocks on the manually-maintained choppy list (user request
-    # 31 Aug 2026 - see choppy_stocks.py) BEFORE ranking, not just at entry
-    # time, so a choppy stock's presence in the alert doesn't cost a
-    # genuinely tradeable stock its top-N ranking slot. `stocks` itself
-    # stays untouched (unfiltered) - it's what record_webhook_alert logs
-    # below, an audit trail of what Chartink actually sent, independent of
-    # what the bot chose to act on.
-    choppy_hits = [s for s in stocks if choppy_stocks.is_choppy(s)]
-    candidate_stocks = [s for s in stocks if s not in choppy_hits]
-    if choppy_hits:
-        logger.info("Excluding choppy stock(s) from consideration: %s", choppy_hits)
-    if not candidate_stocks:
-        logger.info("All alerted stocks are choppy - ignoring alert.")
-        _log_alert("ignored", "all_stocks_choppy")
-        return {"status": "ignored", "reason": "all_stocks_choppy", "choppy_stocks_excluded": choppy_hits}
-
+    # Choppy-stocks pre-filter REMOVED (user request 10 Sep 2026, "remove
+    # Choppy-stocks pre-filter from Options... make Options have similar
+    # rule set and guard rails as Luxury have") - `stocks` now goes
+    # straight to ranking unfiltered, matching Luxury's own webhook
+    # handler (which never had this filter). choppy_stocks.py itself is
+    # kept, not deleted, per this repo's own convention - see its own
+    # module docstring if this is ever wanted back for a specific
+    # package.
     loop = asyncio.get_running_loop()
     ranked = await loop.run_in_executor(
-        None, rank_and_pick_top_stocks, candidate_stocks, config.TOP_N_STOCKS, prefer_highest
+        None, rank_and_pick_top_stocks, stocks, config.TOP_N_STOCKS, prefer_highest
     )
 
     if not ranked:
@@ -280,7 +272,6 @@ async def _handle_chartink_webhook(
         "status": "processed",
         "ranked_by_day_change_pct": ranked,
         "entries": results,
-        "choppy_stocks_excluded": choppy_hits,
     }
 
 
