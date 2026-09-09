@@ -5204,6 +5204,100 @@ out of git.
     Full incident writeup: trading-skills'
     `incidents/2026-09-09-luxury-sl-m-orders-fill-as-limit.md`.
 
+100. **RESOLVED, same day (9 Sep 2026): real broker-side stop-loss for
+    options, this time via SL-L (STOP-LOSS LIMIT), confirmed working
+    end-to-end with a real live order.** Direct follow-up to entry #99 -
+    user's own question after reading the SL-M writeup: "why are we
+    placing SLM orders? We can calculate the SL order based on max loss
+    protection limit after a buy order is successfully placed using
+    limit orders only, search online and let me know your findings."
+    Research (Dhan's own support docs + NSE circular history) confirmed:
+    NSE discontinued SL-M for index/stock OPTIONS exchange-wide on 27
+    Sep 2021 (a freak-trade protection rule, applies to every NSE
+    broker) - SL-L is the ONLY broker-side conditional stop the exchange
+    still permits there. Not "just place a plain LIMIT order" (a bare
+    LIMIT SELL below market fills INSTANTLY, which is literally what
+    caused the SL-M bug) - the real mechanism needs the genuine
+    STOP_LOSS order type: `trigger_price` (same rupee-cap calculation as
+    before) + a separate `limit_price` (the worst price willing to be
+    accepted once triggered).
+
+    **New `Options/dhan_client.py:place_stop_loss_limit_order`** -
+    `order_type="STOPLIMIT"` (maps to Tradehull's own `self.Dhan.SL`),
+    `limit_price = trigger_price * (1 - config.BROKER_STOP_LOSS_LIMIT_
+    BUFFER_PCT)` (new config, default 3%). Wired into `Luxury/trading_
+    engine.py`'s `_enter_single_position`, replacing the old SL-M call;
+    the stop order is now also recorded via `position_store.record_
+    order` for observability (SL-M never was).
+
+    **Critical safety addition, found by reasoning about SL-L's own real
+    tradeoff BEFORE it ever ran live**: unlike SL-M's own observed
+    failure mode (either fills fully-instantly or never fires at all), a
+    genuine SL-L order can PARTIALLY fill - some quantity at the limit
+    price, the remainder left resting, if price only briefly touches the
+    limit band. If a DIFFERENT exit reason (e.g. `TARGET_HIT`) then
+    fires through the normal reactive path while that remainder is still
+    outstanding, `_exit_position`'s pre-existing stale-pending-order
+    cancel (built for the unrelated BHARATFORG incident) now ALSO
+    re-derives the REAL broker net quantity via `get_broker_net_
+    quantity` right after the cancel, and sells exactly that instead of
+    blindly trusting the stored `Position.quantity` - closing the exact
+    class of risk (an unintended naked short from overselling) that the
+    SL-M test's own script mistake demonstrated the hard way. Also
+    handles the order having fully filled during the cancel race itself
+    (broker shows 0 qty left) by reconciling as closed using its own
+    real fill price, rather than placing a nonsensical fresh SELL. 2 new
+    tests cover both paths (partial-fill-never-oversells, fully-filled-
+    during-cancel-race), on top of 7 tests covering the same scenarios
+    as the original SL-M suite (rewritten, not just renamed, since the
+    trigger+limit computation itself needed new assertions).
+
+    **A real, live-money bug surfaced by the FIRST controlled test of
+    the new feature, found and fixed same session**: the real SL-L order
+    (COALINDIA PE, trigger=3.88, limit=3.76) was REJECTED outright by
+    the exchange - `"EXCH:16283: The order price is not multiple of the
+    tick size."` Unlike a normal order at a self-chosen price, a stop
+    order's trigger/limit values are COMPUTED from a rupee-cap formula,
+    so they land on an arbitrary tick-misaligned value far more often
+    than not (this is not a rare edge case - it was hit on the very
+    first live attempt). Fixed via new `_round_to_tick()` +
+    `_instrument_meta`'s own new `tick_size` field (Dhan's real
+    `SEM_TICK_SIZE`, in paise, converted to rupees) - both `trigger_
+    price` and `limit_price` are now rounded to the contract's real
+    exchange tick before submission, falling back to plain 2-decimal
+    rounding if the tick lookup itself fails (fail-safe: a slightly-off-
+    tick order that still gets cleanly REJECTED, as this one was, is a
+    safe failure mode, never a silent one). New `tests/test_stop_loss_
+    limit_tick_rounding.py` (5 tests) against the REAL function via a
+    faked Tradehull client (same pattern as `test_wait_for_order_
+    result_price_fix.py`), including the exact real-world failure case.
+
+    **A SECOND controlled live test, after the tick-rounding fix,
+    confirmed SL-L genuinely works as a real resting conditional order**
+    - direct evidence, not an assumption:
+    | field | SL-L (fixed) | SL-M (broken, entry #99) |
+    |---|---|---|
+    | `orderType` | `STOP_LOSS` | `LIMIT` |
+    | `orderStatus` | `PENDING` (resting) | `TRADED` (instant fill) |
+    | `triggerPrice` | `3.85` (preserved) | `0.0` (zeroed) |
+
+    The order sat genuinely inactive at the exchange, was cleanly
+    cancellable (`CANCELLED` status confirmed), and the test position
+    was correctly flat (`netQty=0`) afterward with zero mistakes this
+    time (every order call checked real broker position state before
+    the next one, learning directly from the SL-M test's own naked-short
+    mistake). Total real cost across BOTH controlled SL-L tests (the
+    rejected one + the working one): approximately Rs.150-250 (small,
+    since nothing went wrong) - much cheaper than the SL-M investigation's
+    ~Rs.600-750, precisely because the lesson about checking state
+    between every order call was already learned and applied.
+
+    `BROKER_STOP_LOSS_ENABLED` remains OFF by default/`.env` pending the
+    user's own decision on enabling it for real production entries - the
+    mechanism is now proven correct via real evidence, but "proven
+    correct in a controlled test" and "enabled for live production
+    capital" are treated as two separate decisions, not one.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM
