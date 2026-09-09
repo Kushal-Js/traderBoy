@@ -1249,7 +1249,21 @@ class DhanWrapper:
         Does NOT set after_market_order - this is only ever placed
         immediately after a real intraday fill during market hours (never
         pre-market), unlike place_market_order which can legitimately run
-        outside market hours for an AMO entry."""
+        outside market hours for an AMO entry.
+
+        CONFIRMED UNUSABLE for OPTIONS (9 Sep 2026) - NSE discontinued
+        SL-M orders for index/stock OPTIONS exchange-wide back in Sep
+        2021 (a freak-trade protection measure), across every NSE-
+        registered broker, not just Dhan. Dhan's API doesn't surface a
+        clean rejection for this - it silently lets the order through as
+        something that behaves like an immediately-marketable LIMIT sell,
+        confirmed via real live orders and a controlled live test (see
+        NOTES.md entry #99 / trading-skills' incidents/2026-09-09-luxury-
+        sl-m-orders-fill-as-limit.md). Still valid for FUTURES and EQUITY
+        (the exchange ban is options-only) - kept here for that use (see
+        Swing's own futures broker-stop-loss work). For OPTIONS, use
+        place_stop_loss_limit_order below instead - the only broker-side
+        conditional stop NSE still permits for that segment."""
         product_type = product_type or config.OPTIONS_PRODUCT
         logger.info(
             "Placing STOP-LOSS MARKET order: %s %s x%s trigger=%.2f (product=%s)",
@@ -1270,6 +1284,73 @@ class DhanWrapper:
         if not order_id:
             raise RuntimeError(
                 f"order_placement returned no order id for STOPMARKET {transaction_type} {trading_symbol} "
+                "- check Tradehull's console/log output for the underlying error."
+            )
+        return {"order_id": str(order_id)}
+
+    def place_stop_loss_limit_order(
+        self, trading_symbol: str, quantity: int, transaction_type: str,
+        trigger_price: float, limit_price: float,
+        tag: Optional[str] = None, product_type: Optional[str] = None,
+    ) -> dict:
+        """Places a real STOP-LOSS LIMIT (SL-L) order at the BROKER -
+        added 9 Sep 2026, replacing place_stop_loss_market_order above for
+        OPTIONS specifically, once that was confirmed unusable there (see
+        its own docstring). This is the ONLY broker-side conditional stop
+        NSE still permits for index/stock options - SL-M was banned
+        exchange-wide for that segment in Sep 2021 specifically to stop
+        "freak trade" exploitation of stop orders sitting in thin option
+        order books (a real cited case: a Nifty CE premium spiking
+        Rs.80->Rs.800 in one second wiped out every resting SL-M below
+        it). SL-L exists exactly to bound that risk: TWO prices instead of
+        one - `trigger_price` (where the order activates, same as SL-M)
+        and `limit_price` (the WORST price you're willing to accept once
+        triggered). The order sits inactive until LTP trades through
+        `trigger_price`, then a plain LIMIT SELL at `limit_price`-or-
+        better goes to the exchange - it can only ever fill AT or ABOVE
+        `limit_price`, never below it, no matter how far price keeps
+        falling.
+
+        The real tradeoff, and why this is not a free upgrade over SL-M:
+        if price gaps straight through `limit_price` before the order
+        fills, it can sit UNFILLED while price keeps falling - the exact
+        freak-trade protection working as intended, but it means a
+        genuinely violent gap can leave a position open past its intended
+        cap (where a working SL-M, if the exchange allowed one, would
+        always find SOME fill price). Dhan's own guidance is a wider
+        trigger-to-limit gap for illiquid names, tighter for liquid ones.
+        `limit_price` here is `trigger_price` minus a configurable buffer
+        (see config.BROKER_STOP_LOSS_LIMIT_BUFFER_PCT) - the caller's
+        choice, not fixed here.
+
+        Also unlike SL-M's `price=0` convention, SL-L REQUIRES a non-zero
+        `price` (the limit) - Dhan's own v1 docs list `price` as
+        "required" for STOP_LOSS specifically (only `trigger_price` is
+        merely "conditionally required" the way it is for SL-M).
+
+        Does NOT set after_market_order - same reasoning as
+        place_stop_loss_market_order above (only ever placed immediately
+        after a real intraday fill)."""
+        product_type = product_type or config.OPTIONS_PRODUCT
+        logger.info(
+            "Placing STOP-LOSS LIMIT order: %s %s x%s trigger=%.2f limit=%.2f (product=%s)",
+            transaction_type, trading_symbol, quantity, trigger_price, limit_price, product_type,
+        )
+        order_id = self.client.order_placement(
+            tradingsymbol=trading_symbol,
+            exchange=config.DEFAULT_EXCHANGE,
+            quantity=quantity,
+            price=limit_price,
+            trigger_price=trigger_price,
+            order_type="STOPLIMIT",
+            transaction_type=transaction_type,
+            trade_type=product_type,
+            after_market_order=False,
+            tag=tag,
+        )
+        if not order_id:
+            raise RuntimeError(
+                f"order_placement returned no order id for STOPLIMIT {transaction_type} {trading_symbol} "
                 "- check Tradehull's console/log output for the underlying error."
             )
         return {"order_id": str(order_id)}

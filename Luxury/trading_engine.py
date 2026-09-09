@@ -447,34 +447,47 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
 
     entry_candle_start = await _capture_supertrend_entry_candle(loop, symbol)
 
-    # Broker-side stop-loss order (added 8 Sep 2026) - see config.
-    # BROKER_STOP_LOSS_ENABLED's own docstring. Placed here, right after
-    # the real fill_price is known, using whichever MAX_LOSS cutoff value
-    # is active RIGHT NOW (same "computed once at entry" convention as
-    # target_price/hard_stop_loss above). A failure to place this is
-    # logged loudly but never blocks the entry itself - stop_loss_order_id
-    # simply stays None, and the position is exactly as protected as it
-    # always was via the existing poll/tick-driven MAX_LOSS_HIT check.
+    # Broker-side stop-loss order (added 8 Sep 2026, switched from SL-M to
+    # SL-L on 9 Sep 2026 - see config.BROKER_STOP_LOSS_ENABLED's own
+    # docstring for the full story). Placed here, right after the real
+    # fill_price is known, using whichever MAX_LOSS cutoff value is active
+    # RIGHT NOW (same "computed once at entry" convention as target_price/
+    # hard_stop_loss above). A failure to place this is logged loudly but
+    # never blocks the entry itself - stop_loss_order_id simply stays None,
+    # and the position is exactly as protected as it always was via the
+    # existing poll/tick-driven MAX_LOSS_HIT check.
     stop_loss_order_id = None
     if config.BROKER_STOP_LOSS_ENABLED:
         trigger_price = fill_price - (current_max_loss_per_trade_rs() / quantity)
+        limit_price = trigger_price * (1 - config.BROKER_STOP_LOSS_LIMIT_BUFFER_PCT)
         try:
             stop_tag = _gen_tag("SL", symbol)
             stop_resp = await loop.run_in_executor(
-                None, dhan_wrapper.place_stop_loss_market_order,
-                atm.trading_symbol, quantity, "SELL", trigger_price, stop_tag, config.OPTIONS_PRODUCT,
+                None, dhan_wrapper.place_stop_loss_limit_order,
+                atm.trading_symbol, quantity, "SELL", trigger_price, limit_price, stop_tag, config.OPTIONS_PRODUCT,
             )
             stop_loss_order_id = stop_resp["order_id"]
             logger.info(
-                "%s: broker-side SELL stop-loss order %s placed for %s, trigger=%.2f",
-                symbol, stop_loss_order_id, atm.trading_symbol, trigger_price,
+                "%s: broker-side SELL stop-loss LIMIT order %s placed for %s, trigger=%.2f limit=%.2f",
+                symbol, stop_loss_order_id, atm.trading_symbol, trigger_price, limit_price,
             )
+            await position_store.record_order(OrderRecord(
+                order_id=stop_loss_order_id,
+                underlying_symbol=symbol,
+                trading_symbol=atm.trading_symbol,
+                transaction_type="SELL",
+                quantity=quantity,
+                status=OrderStatus.PENDING,
+                is_amo=False,
+                lot_size=atm.lot_size,
+                option_type=atm.option_type,
+            ))
         except Exception:  # noqa: BLE001
             logger.exception(
                 "%s: could not place the broker-side stop-loss order for %s (trigger would have been "
-                "%.2f) - proceeding without it, the existing poll/tick-driven MAX_LOSS_HIT check still "
-                "protects this position exactly as before",
-                symbol, atm.trading_symbol, trigger_price,
+                "%.2f, limit %.2f) - proceeding without it, the existing poll/tick-driven MAX_LOSS_HIT "
+                "check still protects this position exactly as before",
+                symbol, atm.trading_symbol, trigger_price, limit_price,
             )
 
     position = Position(
@@ -517,7 +530,29 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
 async def _exit_position(symbol: str, position: Position, exit_price: float, reason: str) -> None:
     """See Options/trading_engine.py's _exit_position - identical logic,
     including the broker-reconciliation check after 2+ consecutive exit
-    failures and the stale-pending-order cancel-before-retry check."""
+    failures and the stale-pending-order cancel-before-retry check.
+
+    Broker-quantity reconciliation after a stale-order cancel (added 9
+    Sep 2026, alongside the switch to a real SL-L broker stop-loss order
+    - see config.BROKER_STOP_LOSS_ENABLED's own docstring): whenever a
+    stale resting SELL order is found and cancelled below, position.
+    quantity gets RE-DERIVED from the broker's own real net quantity
+    before any fresh SELL is placed. Unlike the old SL-M order (which,
+    in the one failure mode this codebase ever actually observed, either
+    filled fully-instantly or never fired at all - see NOTES.md entry
+    #99), a genuine SL-L order can PARTIALLY fill: some quantity sold at
+    the limit price, the remainder left resting. If that remainder is
+    still outstanding when a DIFFERENT exit reason fires (e.g.
+    TARGET_HIT) through the normal reactive path, blindly placing a
+    fresh SELL for the full stored position.quantity would try to sell
+    MORE than is actually still held - exactly the kind of unintended
+    naked short caught (and immediately covered) in the controlled live
+    test that led to this feature. Re-checking real broker truth here,
+    every time a stale order is found, closes that gap regardless of
+    which broker-side order type ever gets used for the resting one -
+    every reference to position.quantity below (the fresh SELL's own
+    quantity, its OrderRecord, and the final pnl calc) picks up the
+    corrected value for free since Position is mutated in place."""
     loop = asyncio.get_running_loop()
 
     try:
@@ -541,6 +576,53 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
         except Exception:  # noqa: BLE001
             logger.exception("%s: could not cancel stale SELL order %s - proceeding with a new order anyway",
                               symbol, stale_order_id)
+
+        try:
+            broker_qty = await loop.run_in_executor(
+                None, dhan_wrapper.get_broker_net_quantity, position.option_trading_symbol
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: could not reconcile broker quantity after cancelling stale order %s - proceeding "
+                "with the stored quantity (%d), which WOULD oversell into a naked short if that order "
+                "had actually partially filled", symbol, stale_order_id, position.quantity,
+            )
+            broker_qty = None
+        if broker_qty is not None and broker_qty != position.quantity:
+            if broker_qty == 0:
+                logger.warning(
+                    "%s: broker shows this position already FLAT after cancelling stale order %s - it "
+                    "must have fully filled (e.g. our own broker-side stop-loss) right before/during "
+                    "the cancel race. Reconciling as closed using that order's own real fill price "
+                    "instead of placing a fresh SELL.", symbol, stale_order_id,
+                )
+                try:
+                    stale_result = await loop.run_in_executor(
+                        None, dhan_wrapper.refresh_order_status, stale_order_id
+                    )
+                    final_exit_price = stale_result.fill_price or exit_price
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "%s: could not fetch stale order %s's own fill price - using %.2f instead",
+                        symbol, stale_order_id, exit_price,
+                    )
+                    final_exit_price = exit_price
+                await position_store.close_position(symbol, final_exit_price, reason)
+                await loop.run_in_executor(
+                    None, dhan_wrapper.unsubscribe_option_price, position.option_trading_symbol
+                )
+                return
+            logger.warning(
+                "%s: broker shows only %d qty left (stored position says %d) after cancelling stale "
+                "order %s - a PARTIAL fill happened on that resting order. Selling only the real "
+                "remaining %d qty instead of the stale %d to avoid an unintended naked short. NOTE: "
+                "the pnl logged for this exit covers only this remaining leg, not a blended figure "
+                "across both fills - check /luxury/positions' own orders_today (or Dhan's real order "
+                "record for %s) for the earlier partial fill's own price/quantity if an exact total is "
+                "needed.", symbol, broker_qty, position.quantity, stale_order_id, broker_qty,
+                position.quantity, stale_order_id,
+            )
+            position.quantity = broker_qty
 
     if position.exit_failure_count >= 2:
         try:

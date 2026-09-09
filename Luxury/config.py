@@ -113,55 +113,91 @@ LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
 # Broker-side stop-loss order (added 8 Sep 2026, user request: "broker-
 # side stop order that fires instantly regardless of polling interval
 # would be a better approach" - a follow-up to the same backtest that
-# found MAX_LOSS_HIT overshooting its own cap). Intended design: a real
-# SELL STOP-LOSS MARKET (SL-M) order placed at Dhan immediately after
-# every entry, triggered at the rupee-equivalent price of
-# current_max_loss_per_trade_rs(), firing at the EXCHANGE's own matching
-# engine the instant price trades through the trigger - independent of
-# our own process being slow, disconnected, or between ticks.
+# found MAX_LOSS_HIT overshooting its own cap). A real broker-side
+# conditional order is placed at Dhan immediately after every entry,
+# triggered at the rupee-equivalent price of current_max_loss_per_
+# trade_rs(), so it can fire at the EXCHANGE's own matching engine the
+# instant price trades through the trigger - independent of our own
+# process being slow, disconnected, or between ticks.
 #
-# CONFIRMED BROKEN on this account/segment, 9 Sep 2026 - live-money
-# evidence, not a guess. Every real "STOP_LOSS_MARKET" SELL order placed
-# for an NSE_FNO option (productType=MARGIN) came back from Dhan's own
-# get_order_by_id as orderType="LIMIT", triggerPrice=0.0, and filled
-# INSTANTLY at the prevailing market price - not at the intended
-# trigger. This is exactly what caused Luxury's real COALINDIA/GVT&D/
-# PAYTM entries that morning to be sold within seconds of fill,
-# regardless of actual price movement. Traced the full client call chain
-# (Tradehull.order_placement -> dhanhq.place_order -> DhanHTTP.post) and
-# confirmed the outgoing payload genuinely carried orderType=
-# "STOP_LOSS_MARKET" with the correct trigger - no client-side bug, no
-# mistranslation. Also confirmed the conversion is NOT about price=0 vs
-# price=trigger_price: a controlled live test (buy 1 lot COALINDIA PE,
-# then two real SL-M SELL attempts with trigger deliberately far below
-# LTP, one with price=0 and one with price=trigger_price) had BOTH
-# variants come back orderType="LIMIT" and BOTH fill immediately at
-# ~market price. So this is a genuine Dhan-side behavior for SL-M SELL
-# orders on F&O options with this product type, not something fixable
-# from our side by changing what we send. See NOTES.md and trading-
-# skills' incidents/ for the full writeup.
+# ORIGINAL DESIGN (8 Sep 2026) used a real SELL STOP-LOSS MARKET (SL-M)
+# order - CONFIRMED BROKEN for OPTIONS on 9 Sep 2026, and not fixable
+# from our side: NSE discontinued SL-M orders for index/stock OPTIONS
+# exchange-wide back in Sep 2021 (a freak-trade protection measure,
+# applies to every NSE-registered broker, not just Dhan - see NOTES.md
+# entry #99 / trading-skills' incidents/2026-09-09-luxury-sl-m-orders-
+# fill-as-limit.md for the full live-money investigation, including a
+# controlled live test proving it wasn't about our own price/trigger
+# values). Every real "STOP_LOSS_MARKET" SELL order placed for an
+# NSE_FNO option came back from Dhan's own get_order_by_id as
+# orderType="LIMIT" and filled INSTANTLY at market - exactly what caused
+# Luxury's real COALINDIA/GVT&D/PAYTM entries that morning to be sold
+# within seconds of fill, regardless of actual price movement.
 #
-# Decision (user's own call, 9 Sep 2026): abandon broker-side SL-M for
-# OPTIONS. Code default flipped to "false" (not just .env) so this
-# known-broken/dangerous path can't silently re-enable itself from a
-# fresh .env or test environment. The code/tests for it are kept, not
-# deleted, per this repo's own "never delete, keep it off instead"
-# convention - see tests/test_luxury_broker_stop_loss.py, which already
-# pins BROKER_STOP_LOSS_ENABLED explicitly per-test rather than relying
-# on this default, so flipping it here doesn't affect them.
+# CURRENT DESIGN (9 Sep 2026): a real SELL STOP-LOSS LIMIT (SL-L) order
+# instead - the ONLY broker-side conditional stop NSE still permits for
+# options. TWO prices: `trigger_price` (same rupee-cap calculation as
+# before) and a `limit_price` = trigger_price * (1 -
+# BROKER_STOP_LOSS_LIMIT_BUFFER_PCT) below it (see place_stop_loss_
+# limit_order's own docstring in Options/dhan_client.py for the exact
+# mechanics). Real tradeoff, inherent to SL-L and not a bug: if price
+# gaps straight through limit_price before filling, the order can sit
+# UNFILLED while price keeps falling - the freak-trade protection
+# working as intended, but it means a violent gap can still leave a
+# position open past its cap. The existing poll/tick-driven MAX_LOSS_HIT
+# check (below) keeps running in parallel regardless, so this can only
+# ever ADD protection on top of it, same principle as the original SL-M
+# design - never a replacement.
 #
-# The existing _exit_reason_for MAX_LOSS_HIT check (poll/tick-driven,
-# ~2s worst case via monitor_loop + synchronous on_price_tick on every
-# real market tick) plus LIQUIDITY_GUARD_ENABLED (exits early on a
-# thinly-traded option going quiet, the actual precursor pattern behind
-# the CHOLAFIN-style overshoot-via-gap case this feature was originally
-# meant to backstop) and LOSS_REPEAT_BLOCK_ENABLED remain the real
-# protection stack going forward. NOTE: this is a different F&O
-# instrument (options) than Swing's own uncommitted broker-stop-loss
-# work, which targets FUTURES legs - that has NOT been shown broken by
-# this finding and should be independently verified before trusting it,
+# A genuinely new risk this introduces that SL-M's failure mode never
+# did: SL-L can PARTIALLY fill (some qty at the limit price, remainder
+# still resting) if price only briefly touches the limit band. If a
+# DIFFERENT exit condition (e.g. TARGET_HIT) then fires via the normal
+# reactive path while that remainder is still resting,
+# trading_engine._exit_position's own stale-pending-order cancel (pre-
+# existing, built for the unrelated BHARATFORG incident 26 Aug 2026)
+# now ALSO re-derives the real broker net quantity via get_broker_net_
+# quantity right after cancelling it, and sells exactly that instead of
+# blindly trusting the stored Position.quantity - without this, a
+# partial fill could make the bot try to sell MORE than it actually
+# still holds, risking an accidental naked short (exactly the mistake
+# made, caught, and fixed in the controlled live test above). See that
+# function's own comments for the exact handling, including the fully-
+# filled-during-the-race case (broker shows 0 qty left - reconciled as
+# closed directly, no fresh SELL placed at all).
+#
+# Kept OFF by default (both this flag and BROKER_STOP_LOSS_LIMIT_BUFFER_
+# PCT below) until live-tested and confirmed working end-to-end - a
+# second broker-side stop mechanism failing silently is exactly the
+# failure mode this whole investigation started from, so this one earns
+# trust via an actual controlled live test before ever running against
+# a real production entry, not by assumption. The existing _exit_
+# reason_for MAX_LOSS_HIT check (poll/tick-driven, ~2s worst case via
+# monitor_loop + synchronous on_price_tick on every real market tick)
+# plus LIQUIDITY_GUARD_ENABLED (exits early on a thinly-traded option
+# going quiet - the actual precursor pattern behind the CHOLAFIN-style
+# overshoot-via-gap case this feature exists to backstop) and LOSS_
+# REPEAT_BLOCK_ENABLED remain the baseline protection stack either way.
+# NOTE: this is a different F&O instrument (options) than Swing's own
+# uncommitted broker-stop-loss work, which targets FUTURES legs via the
+# (still valid there) SL-M primitive - that has NOT been shown broken by
+# any of this and should be independently verified before trusting it,
 # not assumed safe or assumed broken either way.
 BROKER_STOP_LOSS_ENABLED = os.getenv("LUXURY_BROKER_STOP_LOSS_ENABLED", "false").lower() == "true"
+
+# The gap between the SL-L order's trigger_price and its limit_price, as
+# a fraction of trigger_price (limit_price = trigger_price * (1 -
+# this)). This is the real dial controlling the SL-L tradeoff described
+# above: too TIGHT (small) and a fast/illiquid move can blow straight
+# through the limit band and leave the order unfilled, exactly the
+# scenario Dhan's own docs warn about; too WIDE (large) and a fill,
+# if it happens, could land meaningfully worse than the intended
+# max-loss cap, weakening the whole point of the order. 0.03 (3%) is a
+# starting value in the same scale as this file's own STOP_LOSS_PCT
+# (0.03) and DYNAMIC_SL_STEP_PCT_CE/_PE (0.07) - not yet tuned against
+# real fill data, since this feature hasn't run live yet (see
+# BROKER_STOP_LOSS_ENABLED's own docstring).
+BROKER_STOP_LOSS_LIMIT_BUFFER_PCT = float(os.getenv("LUXURY_BROKER_STOP_LOSS_LIMIT_BUFFER_PCT", "0.03"))
 
 # Code default kept at its ORIGINAL value, same convention as Options'
 # own TARGET_PCT/STOP_LOSS_PCT (whose code default is STILL "0.10"/"0.03"
