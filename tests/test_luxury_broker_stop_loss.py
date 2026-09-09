@@ -223,6 +223,8 @@ async def test_2_stop_loss_placement_failure_does_not_block_entry():
 async def test_3_broker_stop_already_filled_closes_position_directly():
     store = lps.PositionStore()
     lte.position_store = store
+    real_enabled = lte.config.BROKER_STOP_LOSS_ENABLED
+    lte.config.BROKER_STOP_LOSS_ENABLED = True
     position = Position(
         underlying_symbol="INFY", option_trading_symbol="INFY FAKE EXP CE", option_type="CE",
         quantity=500, lot_size=500, entry_price=40.0, highest_price=40.0,
@@ -262,11 +264,14 @@ async def test_3_broker_stop_already_filled_closes_position_directly():
         odc.dhan_wrapper.check_if_order_filled = real_check
         odc.dhan_wrapper.place_market_order = real_place
         odc.dhan_wrapper.unsubscribe_option_price = real_unsubscribe
+        lte.config.BROKER_STOP_LOSS_ENABLED = real_enabled
 
 
 async def test_4_broker_stop_still_resting_leaves_position_untouched():
     store = lps.PositionStore()
     lte.position_store = store
+    real_enabled = lte.config.BROKER_STOP_LOSS_ENABLED
+    lte.config.BROKER_STOP_LOSS_ENABLED = True
     position = Position(
         underlying_symbol="WIPRO", option_trading_symbol="WIPRO FAKE EXP CE", option_type="CE",
         quantity=500, lot_size=500, entry_price=40.0, highest_price=40.0,
@@ -284,11 +289,14 @@ async def test_4_broker_stop_still_resting_leaves_position_untouched():
               "the position untouched, ready for the normal reactive check: PASSED")
     finally:
         odc.dhan_wrapper.check_if_order_filled = real_check
+        lte.config.BROKER_STOP_LOSS_ENABLED = real_enabled
 
 
 async def test_5_broker_stop_rejected_falls_through_without_crashing():
     store = lps.PositionStore()
     lte.position_store = store
+    real_enabled = lte.config.BROKER_STOP_LOSS_ENABLED
+    lte.config.BROKER_STOP_LOSS_ENABLED = True
     position = Position(
         underlying_symbol="SBIN", option_trading_symbol="SBIN FAKE EXP CE", option_type="CE",
         quantity=500, lot_size=500, entry_price=40.0, highest_price=40.0,
@@ -310,6 +318,7 @@ async def test_5_broker_stop_rejected_falls_through_without_crashing():
               "raising - the position falls through to the pre-existing reactive MAX_LOSS_HIT check: PASSED")
     finally:
         odc.dhan_wrapper.check_if_order_filled = real_check
+        lte.config.BROKER_STOP_LOSS_ENABLED = real_enabled
 
 
 async def test_6_real_target_hit_finds_and_cancels_the_resting_broker_stop():

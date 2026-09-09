@@ -113,28 +113,55 @@ LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
 # Broker-side stop-loss order (added 8 Sep 2026, user request: "broker-
 # side stop order that fires instantly regardless of polling interval
 # would be a better approach" - a follow-up to the same backtest that
-# found MAX_LOSS_HIT overshooting its own cap). A real SELL STOP-LOSS
-# MARKET (SL-M) order is placed at Dhan immediately after every entry,
-# triggered at the rupee-equivalent price of current_max_loss_per_trade_
-# rs() (whichever BEFORE/AFTER_CUTOFF value is active at ENTRY time -
-# fixed once at entry, same convention as target_price/hard_stop_loss,
-# deliberately NOT re-tightened if the cutoff passes while the position
-# is still open: the broker order is a WIDER outer backstop at whatever
-# cap applied at entry, while the existing poll/tick-driven MAX_LOSS_HIT
-# check keeps enforcing the CURRENT, possibly-tighter cap in real time
-# either way - so this never makes protection WORSE, only adds a faster
-# floor under it). The exchange's own matching engine fires this the
-# instant price trades through the trigger, independent of our own
-# process being slow, disconnected, or between ticks - see Options/
-# dhan_client.py's place_stop_loss_market_order/check_if_order_filled
-# for the placement/detection mechanics. This is an ADDITIONAL safety
-# net, not a replacement - the existing _exit_reason_for MAX_LOSS_HIT
-# check keeps running exactly as before, so a failure to PLACE the
-# broker order (network error, rejected trigger, etc.) leaves the
-# position exactly as protected as it was before this feature existed,
-# never less. Independent on/off switch, same pattern as every other
-# feature flag in this file.
-BROKER_STOP_LOSS_ENABLED = os.getenv("LUXURY_BROKER_STOP_LOSS_ENABLED", "true").lower() == "true"
+# found MAX_LOSS_HIT overshooting its own cap). Intended design: a real
+# SELL STOP-LOSS MARKET (SL-M) order placed at Dhan immediately after
+# every entry, triggered at the rupee-equivalent price of
+# current_max_loss_per_trade_rs(), firing at the EXCHANGE's own matching
+# engine the instant price trades through the trigger - independent of
+# our own process being slow, disconnected, or between ticks.
+#
+# CONFIRMED BROKEN on this account/segment, 9 Sep 2026 - live-money
+# evidence, not a guess. Every real "STOP_LOSS_MARKET" SELL order placed
+# for an NSE_FNO option (productType=MARGIN) came back from Dhan's own
+# get_order_by_id as orderType="LIMIT", triggerPrice=0.0, and filled
+# INSTANTLY at the prevailing market price - not at the intended
+# trigger. This is exactly what caused Luxury's real COALINDIA/GVT&D/
+# PAYTM entries that morning to be sold within seconds of fill,
+# regardless of actual price movement. Traced the full client call chain
+# (Tradehull.order_placement -> dhanhq.place_order -> DhanHTTP.post) and
+# confirmed the outgoing payload genuinely carried orderType=
+# "STOP_LOSS_MARKET" with the correct trigger - no client-side bug, no
+# mistranslation. Also confirmed the conversion is NOT about price=0 vs
+# price=trigger_price: a controlled live test (buy 1 lot COALINDIA PE,
+# then two real SL-M SELL attempts with trigger deliberately far below
+# LTP, one with price=0 and one with price=trigger_price) had BOTH
+# variants come back orderType="LIMIT" and BOTH fill immediately at
+# ~market price. So this is a genuine Dhan-side behavior for SL-M SELL
+# orders on F&O options with this product type, not something fixable
+# from our side by changing what we send. See NOTES.md and trading-
+# skills' incidents/ for the full writeup.
+#
+# Decision (user's own call, 9 Sep 2026): abandon broker-side SL-M for
+# OPTIONS. Code default flipped to "false" (not just .env) so this
+# known-broken/dangerous path can't silently re-enable itself from a
+# fresh .env or test environment. The code/tests for it are kept, not
+# deleted, per this repo's own "never delete, keep it off instead"
+# convention - see tests/test_luxury_broker_stop_loss.py, which already
+# pins BROKER_STOP_LOSS_ENABLED explicitly per-test rather than relying
+# on this default, so flipping it here doesn't affect them.
+#
+# The existing _exit_reason_for MAX_LOSS_HIT check (poll/tick-driven,
+# ~2s worst case via monitor_loop + synchronous on_price_tick on every
+# real market tick) plus LIQUIDITY_GUARD_ENABLED (exits early on a
+# thinly-traded option going quiet, the actual precursor pattern behind
+# the CHOLAFIN-style overshoot-via-gap case this feature was originally
+# meant to backstop) and LOSS_REPEAT_BLOCK_ENABLED remain the real
+# protection stack going forward. NOTE: this is a different F&O
+# instrument (options) than Swing's own uncommitted broker-stop-loss
+# work, which targets FUTURES legs - that has NOT been shown broken by
+# this finding and should be independently verified before trusting it,
+# not assumed safe or assumed broken either way.
+BROKER_STOP_LOSS_ENABLED = os.getenv("LUXURY_BROKER_STOP_LOSS_ENABLED", "false").lower() == "true"
 
 # Code default kept at its ORIGINAL value, same convention as Options'
 # own TARGET_PCT/STOP_LOSS_PCT (whose code default is STILL "0.10"/"0.03"

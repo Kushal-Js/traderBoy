@@ -5106,6 +5106,104 @@ out of git.
     attempts. Updated `README.md` (`Options/dhan_client.py`'s own row,
     `Luxury/trading_engine.py`'s own row), `tests/README.md`.
 
+99. **BUG (found live, same day, 9 Sep 2026): Luxury's real broker-side
+    "STOP-LOSS MARKET" orders (entry #98 above) were never actually
+    functioning as conditional stops - Dhan recorded and filled them as
+    ordinary marketable LIMIT sells, closing positions within seconds of
+    entry regardless of real price movement.** User's own diagnosis,
+    live, mid-morning: "orders are getting closed too early without max
+    loss limit ever being hit... I also doubt that a real Stop Loss
+    order is being placed. I think it is a normal Sell order right
+    after a trade is placed." Confirmed via real Dhan `get_order_by_id`
+    records for that morning's actual COALINDIA/GVT&D/PAYTM entries:
+    every "SL" order came back `orderType:"LIMIT"`, `price=<our own
+    computed trigger>`, `triggerPrice:0.0` - exactly a marketable limit
+    sell, not a resting conditional order.
+
+    Immediately disabled in production (`LUXURY_BROKER_STOP_LOSS_
+    ENABLED=false`, deployed) as an emergency mitigation BEFORE
+    continuing root-cause work - the pre-existing poll/tick-driven
+    `MAX_LOSS_HIT` check (unaffected by this bug) remained the only
+    active protection from that point on.
+
+    **Root-cause investigation traced the full client call chain and
+    ruled out a client-side bug conclusively**: `Dhan_Tradehull.
+    Tradehull.order_placement()`'s own `{'STOPMARKET': self.Dhan.SLM}`
+    mapping is correct; `dhanhq`'s own `SLM`/`LIMIT`/`MARKET`/`SL`
+    constants are distinct strings (no collision); `dhanhq.place_order()`
+    builds its payload with `orderType": order_type.upper()` and POSTs
+    it verbatim with zero remapping. Read the FULL source of both
+    `order_placement()` and `place_order()` directly on the droplet's
+    installed package versions (not assumed from memory) - confirmed
+    the outgoing request genuinely carried `orderType:
+    "STOP_LOSS_MARKET"` with the correct trigger price. Official Dhan
+    v2 docs were consulted but inconclusive on this exact point (thin
+    on SL-M specifics, consistent with prior comments elsewhere in this
+    file about Dhan's docs generally).
+
+    **Controlled live empirical test (real money, ~Rs.600-750 all-in
+    cost, done with the user's explicit go-ahead)**: bought 1 lot
+    COALINDIA ATM PE, then placed two real SELL "STOPMARKET" orders with
+    trigger deliberately far below LTP (so neither could realistically
+    fire) - one with `price=0` (production's actual code), one with
+    `price=trigger_price` (the leading hypothesis for a fix, since
+    Dhan's own stop-loss support docs describe SELL SL mechanics as
+    "Market Price > Trigger Price > Order Price", implying a real
+    reference price might be required). **Both variants came back
+    `orderType:"LIMIT"` and both TRADED INSTANTLY at the prevailing
+    market price (~Rs.7.5-7.6), nowhere near the ~Rs.3.6-3.8 trigger** -
+    conclusively ruling out "it's about what we pass for `price`" and
+    confirming this is a genuine Dhan-side behavior for SL-M SELL
+    orders on NSE_FNO options under `productType=MARGIN`, not anything
+    fixable from the client side.
+
+    A real, if minor, mistake surfaced running this test: the test
+    script fired both SELL variants without checking the position was
+    still open in between, so the second SELL (after the first had
+    already closed the long) went out as an unintended naked short -
+    caught and covered immediately (a real BUY to flatten), net cost
+    already included in the ~Rs.600-750 figure above. Own-script bug,
+    not a finding about Dhan's API.
+
+    **Decision (user's own call): abandon broker-side SL-M for OPTIONS
+    entirely rather than keep investigating** - a second test bypassing
+    `Tradehull.order_placement()` and calling `dhanhq.place_order()`
+    directly was considered but skipped once the source-reading above
+    showed it would send an IDENTICAL payload (Tradehull is a thin,
+    unmodified pass-through here), so it would have cost another real
+    trade for zero new information. `Luxury/config.py`'s
+    `BROKER_STOP_LOSS_ENABLED` code DEFAULT flipped from `"true"` to
+    `"false"` (not just `.env` - a confirmed-broken/dangerous feature
+    shouldn't be able to silently re-enable itself from a fresh
+    environment). Code and its 7 tests kept, not deleted, per this
+    repo's own convention - `tests/test_luxury_broker_stop_loss.py`
+    already pinned the flag explicitly per-test rather than relying on
+    the ambient default for tests 1/2/6/7, but tests 3/4/5 didn't and
+    were silently relying on the (now-flipped) default to exercise their
+    real code paths - fixed by pinning all three explicitly too, same
+    pattern as the others. Full suite re-run clean after the fix (all 7
+    Luxury broker-stop-loss tests + corrective-actions + package + deep-
+    integration + fund-allocation suites), zero regressions.
+
+    Going forward, Luxury's real protection stack is the pre-existing
+    poll/tick-driven `MAX_LOSS_HIT` check (event-driven on every real
+    WebSocket tick via `on_price_tick`, plus a 2-second REST-poll
+    fallback via `monitor_loop`) together with `LIQUIDITY_GUARD_ENABLED`
+    (entry #88 - exits early on a thinly-traded option going quiet,
+    which is the actual precursor pattern behind the CHOLAFIN-style
+    overshoot-via-price-gap case broker SL-M was originally meant to
+    backstop) and `LOSS_REPEAT_BLOCK_ENABLED` (entry #98). NOTE: this
+    finding is about OPTIONS specifically - Swing's own uncommitted
+    broker-stop-loss work (9 Sep 2026, PE-leg-disable + broker-stop
+    feature, never deployed - see the "Swing" section elsewhere in this
+    file) targets FUTURES legs, a different instrument type. That has
+    NOT been shown broken by this finding and would need its own
+    independent verification before being trusted, if it's ever
+    revived - not assumed safe, and not assumed broken either.
+
+    Full incident writeup: trading-skills'
+    `incidents/2026-09-09-luxury-sl-m-orders-fill-as-limit.md`.
+
 - **`Futures/` package + `POST /chartink/webhook-futures` (added 25 Aug
   2026), and the `dhan_wrapper.on_price_tick` collision it surfaced.**
   A fifth strategy package, explicitly a PLACEHOLDER by request: buys ATM
