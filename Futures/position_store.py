@@ -79,6 +79,11 @@ class Position:
     exit_failure_count: int = 0
     next_exit_retry_at: Optional[datetime] = None
     supertrend_entry_candle_start: Optional[datetime] = None
+    # Real broker-side SELL STOP-LOSS LIMIT (SL-L) order resting at Dhan for
+    # this position - see Options/position_store.py's identical field.
+    # None unless config.BROKER_STOP_LOSS_ENABLED. Cleared implicitly on any
+    # close path (_exit_position finds + cancels it via its own tracked id).
+    stop_loss_order_id: Optional[str] = None
 
     @property
     def current_trailing_sl(self) -> float:

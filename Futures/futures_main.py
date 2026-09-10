@@ -16,11 +16,15 @@ this package's lifespan *inside* Options' own nesting (after it), the
 same way IndexScalping/CopperOptions already do, so authenticate() and
 start_feed() have already run by the time this package's lifespan starts.
 
-Accepts one Chartink scanner webhook alert endpoint:
-   - POST /chartink/webhook-futures  (bullish scan -> buys ATM CE)
-Only one leg/direction was requested for this package (unlike Options'
-CE+PE pair) - no bearish endpoint exists here.
-  1. Picks the top-N stocks by today's %change from the alert (highest first)
+Accepts two Chartink scanner webhook alert endpoints (mirrors Options'
+CE+PE pair since 10 Sep 2026, "update Futures strategy same as Options"):
+   - POST /chartink/webhook-futures       (bullish scan -> buys ATM CE)
+   - POST /chartink/webhook-futures-sell  (bearish scan -> buys ATM PE)
+Same entry/exit/dedup/capacity machinery + guard rails either way, one
+position pool - only the ATM leg and the ranking direction differ.
+  1. Picks the top-N stocks by today's %change from the alert (highest
+     first for the bullish endpoint, lowest/most negative first for the
+     bearish one)
   2. Buys the ATM option for each, at market price (AMO if placed outside
      market hours)
   3. Runs a background monitor loop that exits a leg on target/stop-loss/
@@ -126,93 +130,78 @@ class ChartinkWebhookPayload(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# Webhook endpoint
+# Webhook endpoints - CE (bullish) + PE (bearish), parameterized exactly
+# like Options/option_main.py's _handle_chartink_webhook (10 Sep 2026,
+# "update Futures strategy same as Options"). Same entry/exit/dedup/
+# capacity machinery either way, one position pool - only the ATM leg and
+# which end of the %change ranking counts as "strongest" differ.
 # --------------------------------------------------------------------------- #
-@router.post("/chartink/webhook-futures")
-async def chartink_webhook_futures(payload: ChartinkWebhookPayload):
-    """Bullish scan - buys ATM CE (placeholder for a real futures contract
-    buy) on the alerted stocks with the highest %change."""
+async def _handle_chartink_webhook(
+    payload: ChartinkWebhookPayload, option_type: str, prefer_highest: bool,
+):
     await position_store.maybe_reset_for_new_day()
     stocks = payload.stock_list()
 
     def _log_alert(status: str, reason: Optional[str] = None) -> None:
-        """Fire-and-forget - see trade_history.py's own docstring for why
-        this MUST go through fire_and_forget (never awaited) in the
-        entry-order-placement path. fire_and_forget (not a bare
-        asyncio.create_task) also holds a strong reference so the task
-        can't be garbage-collected mid-execution."""
         fire_and_forget(record_webhook_alert(
             "Futures", payload.scan_name, payload.alert_name, stocks, status, reason,
         ))
 
     if not is_within_trading_windows():
-        logger.info(
-            "Ignoring alert - outside today's allowed trading windows (%s), not opening new positions.",
-            config.TRADING_WINDOWS,
-        )
+        logger.info("Ignoring alert (%s) - outside today's allowed trading windows (%s).",
+                    option_type, config.TRADING_WINDOWS)
         _log_alert("ignored", "outside_trading_windows")
-        return {
-            "status": "ignored",
-            "reason": "outside_trading_windows",
-            "trading_windows": config.TRADING_WINDOWS,
-        }
+        return {"status": "ignored", "reason": "outside_trading_windows",
+                "trading_windows": config.TRADING_WINDOWS}
 
     if is_past_allowed_trading_time():
-        logger.info(
-            "Ignoring alert - past today's allowed trading cutoff (%s), not opening new positions.",
-            config.ALLOWED_TRADING_TIME,
-        )
+        logger.info("Ignoring alert (%s) - past today's allowed trading cutoff (%s).",
+                    option_type, config.ALLOWED_TRADING_TIME)
         _log_alert("ignored", "past_allowed_trading_time")
-        return {
-            "status": "ignored",
-            "reason": "past_allowed_trading_time",
-            "allowed_trading_time": config.ALLOWED_TRADING_TIME,
-        }
+        return {"status": "ignored", "reason": "past_allowed_trading_time",
+                "allowed_trading_time": config.ALLOWED_TRADING_TIME}
 
     if is_past_square_off_time():
-        logger.info(
-            "Ignoring alert - past today's %s square-off time, not opening new positions.",
-            config.SQUARE_OFF_TIME,
-        )
+        logger.info("Ignoring alert (%s) - past today's %s square-off time.",
+                    option_type, config.SQUARE_OFF_TIME)
         _log_alert("ignored", "past_square_off_time")
-        return {
-            "status": "ignored",
-            "reason": "past_square_off_time",
-            "square_off_time": config.SQUARE_OFF_TIME,
-        }
+        return {"status": "ignored", "reason": "past_square_off_time",
+                "square_off_time": config.SQUARE_OFF_TIME}
 
-    logger.info(
-        "Futures webhook received: scan=%s alert=%s stocks=%s",
-        payload.scan_name, payload.alert_name, stocks,
-    )
+    logger.info("Futures webhook received (%s): scan=%s alert=%s stocks=%s",
+                option_type, payload.scan_name, payload.alert_name, stocks)
 
-    remaining = await position_store.remaining_capacity(config.OPTION_TYPE)
+    cap = config.MAX_LIVE_POSITIONS_CE if option_type == "CE" else config.MAX_LIVE_POSITIONS_PE
+    remaining = await position_store.remaining_capacity(option_type)
     if remaining == 0:
-        logger.info("No capacity left (%s live/in-flight already) - ignoring alert.", config.MAX_LIVE_POSITIONS_CE)
+        logger.info("No %s capacity left (%s live/in-flight already) - ignoring alert.", option_type, cap)
         _log_alert("ignored", "max_live_positions_reached")
-        return {
-            "status": "ignored",
-            "reason": "max_live_positions_reached",
-            "max_live_positions": config.MAX_LIVE_POSITIONS_CE,
-        }
+        return {"status": "ignored", "reason": "max_live_positions_reached",
+                "option_type": option_type, "max_live_positions": cap}
 
     loop = asyncio.get_running_loop()
     ranked = await loop.run_in_executor(
-        None, rank_and_pick_top_stocks, stocks, config.TOP_N_STOCKS, True
+        None, rank_and_pick_top_stocks, stocks, config.TOP_N_STOCKS, prefer_highest
     )
-
     if not ranked:
         _log_alert("no_action", "could_not_rank_any_stock")
         return {"status": "no_action", "reason": "could_not_rank_any_stock"}
 
-    results = await enter_positions_for_stocks(ranked, config.OPTION_TYPE)
+    results = await enter_positions_for_stocks(ranked, option_type)
     _log_alert("processed")
+    return {"status": "processed", "ranked_by_day_change_pct": ranked, "entries": results}
 
-    return {
-        "status": "processed",
-        "ranked_by_day_change_pct": ranked,
-        "entries": results,
-    }
+
+@router.post("/chartink/webhook-futures")
+async def chartink_webhook_futures(payload: ChartinkWebhookPayload):
+    """Bullish scan -> buys ATM CE (placeholder for a real futures buy)."""
+    return await _handle_chartink_webhook(payload, option_type="CE", prefer_highest=True)
+
+
+@router.post("/chartink/webhook-futures-sell")
+async def chartink_webhook_futures_sell(payload: ChartinkWebhookPayload):
+    """Bearish scan -> buys ATM PE. Mirrors Options' /chartink/webhook-sell."""
+    return await _handle_chartink_webhook(payload, option_type="PE", prefer_highest=False)
 
 
 # --------------------------------------------------------------------------- #

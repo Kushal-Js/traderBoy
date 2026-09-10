@@ -59,6 +59,45 @@ MAX_LIVE_POSITIONS_PE = int(os.getenv("FUTURES_MAX_LIVE_POSITIONS_PE", "2"))
 # 1 Sep 2026), same "same underlying, across the whole day" semantics.
 MAX_DAILY_ENTRIES_PER_SYMBOL = int(os.getenv("FUTURES_MAX_DAILY_ENTRIES_PER_SYMBOL", "3"))
 
+# ---------------------------------------------------------------------------
+# Guard rails - ported verbatim from Options/config.py (10 Sep 2026, user
+# request: "update Futures strategy same as Options"). See Options' own
+# comments for the full rationale behind each; these are this package's own
+# independently-tunable copies (FUTURES_-prefixed env).
+# ---------------------------------------------------------------------------
+# Same-day loss cooldown: skip a fresh entry into an underlying this
+# strategy stopped out (real pnl<=0) within the last N minutes.
+LOSS_COOLDOWN_ENABLED = os.getenv("FUTURES_LOSS_COOLDOWN_ENABLED", "true").lower() == "true"
+LOSS_COOLDOWN_MINUTES = float(os.getenv("FUTURES_LOSS_COOLDOWN_MINUTES", "20"))
+
+# Repeat-loss same-day block: once a symbol has closed on MAX_LOSS_HIT/
+# STOP_LOSS_HIT this many times today, it's blocked for the rest of the day.
+LOSS_REPEAT_BLOCK_ENABLED = os.getenv("FUTURES_LOSS_REPEAT_BLOCK_ENABLED", "true").lower() == "true"
+LOSS_REPEAT_BLOCK_COUNT = int(os.getenv("FUTURES_LOSS_REPEAT_BLOCK_COUNT", "2"))
+LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
+
+# Real broker-side SELL STOP-LOSS LIMIT (SL-L) order placed after every
+# entry - an additional faster backstop on top of the poll/tick MAX_LOSS
+# check, never a replacement. Kept OFF by default (same rollout discipline
+# as Options: earn trust via a controlled live test before it runs against
+# a real production entry).
+BROKER_STOP_LOSS_ENABLED = os.getenv("FUTURES_BROKER_STOP_LOSS_ENABLED", "false").lower() == "true"
+BROKER_STOP_LOSS_LIMIT_BUFFER_PCT = float(os.getenv("FUTURES_BROKER_STOP_LOSS_LIMIT_BUFFER_PCT", "0.03"))
+
+# Liquidity guard: on/off gate for whether this package's own
+# _exit_reason_for acts on the shared dhan_client illiquidity signal
+# (the numeric params LIQUIDITY_GUARD_ZERO_VOLUME_BARS/_REFRESH_SECONDS
+# are shared and live in Options/config.py).
+LIQUIDITY_GUARD_ENABLED = os.getenv("FUTURES_LIQUIDITY_GUARD_ENABLED", "true").lower() == "true"
+
+# Profit-protection give-back buffer (default 0.0 = bit-identical to the
+# original zero-tolerance behaviour; net-negative in backtest, left off).
+PROFIT_PROTECTION_GIVEBACK_PCT = float(os.getenv("FUTURES_PROFIT_PROTECTION_GIVEBACK_PCT", "0.0"))
+
+# Only in a docstring in the shared engine copy, but define it so a
+# config.LTP_STALE_AFTER_SECONDS reference can never AttributeError.
+LTP_STALE_AFTER_SECONDS = float(os.getenv("FUTURES_LTP_STALE_AFTER_SECONDS", "5"))
+
 TARGET_PCT = float(os.getenv("FUTURES_TARGET_PCT", "0.25"))
 STOP_LOSS_PCT = float(os.getenv("FUTURES_STOP_LOSS_PCT", "0.16"))
 
