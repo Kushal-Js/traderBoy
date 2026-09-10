@@ -803,7 +803,8 @@ def _exit_reason_for(
     if ltp >= position.target_price:
         return "TARGET_HIT"
     peak_profit_rs = (position.highest_price - position.entry_price) * position.quantity
-    if peak_profit_rs > current_profit_protection_threshold_rs() and ltp < position.highest_price:
+    giveback_floor = position.highest_price * (1 - config.PROFIT_PROTECTION_GIVEBACK_PCT)
+    if peak_profit_rs > current_profit_protection_threshold_rs() and ltp < giveback_floor:
         return "PROFIT_PROTECTION_HIT"
     trailing_sl = position.current_trailing_sl
     if ltp <= trailing_sl:

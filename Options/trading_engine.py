@@ -1015,13 +1015,17 @@ def _exit_reason_for(
     After TARGET_HIT, checks current_profit_protection_threshold_rs() - the
     mirror image on the upside, same before/after-cutoff split. Once the
     position's PEAK unrealized profit ((highest_price - entry_price) *
-    quantity) has exceeded this threshold, exits the moment price is off
-    that peak at all (ltp < highest_price) - deliberately no drawdown
-    tolerance, per the simple version requested, rather than waiting for a
-    percentage-based trailing floor to be breached. highest_price is
-    already maintained by the caller (update_highest_price) before this
-    runs, so a tick that itself sets a new high never triggers this - only
-    a subsequent tick below an already-recorded peak does.
+    quantity) has exceeded this threshold, exits once price has retraced
+    at least config.PROFIT_PROTECTION_GIVEBACK_PCT off that peak
+    (ltp < highest_price * (1 - PROFIT_PROTECTION_GIVEBACK_PCT)). The
+    give-back buffer defaults to 0.0 - bit-identical to the original "exit
+    the moment price is off the peak at all" behaviour - and was added
+    10 Sep 2026 (see config) so a trade that's still trending isn't
+    stopped out on a one-tick wiggle. highest_price is already maintained
+    by the caller (update_highest_price) before this runs, so a tick that
+    itself sets a new high never triggers this - only a later tick far
+    enough below an already-recorded peak does. The percentage trailing/
+    hard SL below still catches a larger reversal independently.
 
     liquidity_guard_triggered (ported from Luxury's identical check, added
     there 2 Sep 2026 - see config.LIQUIDITY_GUARD_ENABLED's own docstring)
@@ -1036,7 +1040,8 @@ def _exit_reason_for(
     if ltp >= position.target_price:
         return "TARGET_HIT"
     peak_profit_rs = (position.highest_price - position.entry_price) * position.quantity
-    if peak_profit_rs > current_profit_protection_threshold_rs() and ltp < position.highest_price:
+    giveback_floor = position.highest_price * (1 - config.PROFIT_PROTECTION_GIVEBACK_PCT)
+    if peak_profit_rs > current_profit_protection_threshold_rs() and ltp < giveback_floor:
         return "PROFIT_PROTECTION_HIT"
     trailing_sl = position.current_trailing_sl
     if ltp <= trailing_sl:

@@ -241,6 +241,19 @@ MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF = float(os.getenv("MAX_LOSS_PER_TRADE_RS_AFTE
 PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF = float(os.getenv("PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF", "1500"))
 PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF = float(os.getenv("PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF", "1000"))
 
+# Give-back buffer for the profit-protection exit (added 10 Sep 2026, user
+# request after OIL: PROFIT_PROTECTION_HIT fired on a 10-paise dip from the
+# peak - zero drawdown tolerance clips a trade that's still trending). Once
+# peak profit has crossed the threshold above, the exit now only fires when
+# price has retraced at least this FRACTION OF THE PEAK PRICE, i.e.
+# ltp < highest_price * (1 - PROFIT_PROTECTION_GIVEBACK_PCT), instead of the
+# old ltp < highest_price. 0.0 (the default) is bit-identical to the old
+# behaviour (highest_price * 1.0 == highest_price); 0.05 = "let it wiggle
+# 5% off the peak before locking in". Independent of the trailing/dynamic
+# SL, which still runs after this and catches a bigger reversal. Tune via
+# backtest against real PROFIT_PROTECTION_HIT trades before raising it.
+PROFIT_PROTECTION_GIVEBACK_PCT = float(os.getenv("PROFIT_PROTECTION_GIVEBACK_PCT", "0.0"))
+
 # The time-of-day boundary the two before/after-cutoff pairs above switch
 # on - user request 31 Aug 2026 ("before 11:30 AM" / "after 11:30").
 # Deliberately its own separate setting from ALLOWED_TRADING_TIME even

@@ -610,6 +610,35 @@ async def test_20_a_win_between_two_losses_does_not_reset_the_count_and_disabled
         lte.config.MAX_DAILY_ENTRIES_PER_SYMBOL = real_daily_cap
 
 
+def test_21_profit_protection_giveback_buffer():
+    """LUXURY_PROFIT_PROTECTION_GIVEBACK_PCT (added 10 Sep 2026 after OIL
+    exited on a ~10-paise dip from the peak): once peak profit has crossed
+    the threshold, the exit only fires once price has retraced at least
+    this fraction off the peak. Default 0.0 == the original zero-tolerance
+    behaviour."""
+    def mk():
+        return Position(
+            underlying_symbol="T", option_trading_symbol="T 29 SEP 100 CALL", option_type="CE",
+            quantity=1000, lot_size=1000, entry_price=10.0, target_price=100.0,
+            highest_price=12.0, hard_stop_loss=1.0, order_id="X", product_type="MARGIN",
+        )  # peak profit (12-10)*1000 = 2000 > the 1500 threshold -> PP armed
+    real = lte.config.PROFIT_PROTECTION_GIVEBACK_PCT
+    try:
+        lte.config.PROFIT_PROTECTION_GIVEBACK_PCT = 0.0
+        assert lte._exit_reason_for(mk(), ltp=11.99) == "PROFIT_PROTECTION_HIT", \
+            "buffer 0.0 must still exit on any dip below the peak (unchanged behaviour)"
+
+        lte.config.PROFIT_PROTECTION_GIVEBACK_PCT = 0.05  # give-back floor = 12.0 * 0.95 = 11.40
+        assert lte._exit_reason_for(mk(), ltp=11.99) is None, \
+            "an 8-paise dip must NOT stop the trade out with a 5% give-back buffer"
+        assert lte._exit_reason_for(mk(), ltp=11.39) == "PROFIT_PROTECTION_HIT", \
+            "a retrace past 5% off the peak still fires PROFIT_PROTECTION_HIT"
+        print("21. LUXURY_PROFIT_PROTECTION_GIVEBACK_PCT: buffer=0 exits on any dip (unchanged); buffer=0.05 "
+              "rides a small wiggle and only locks in once price is >5% off the peak: PASSED")
+    finally:
+        lte.config.PROFIT_PROTECTION_GIVEBACK_PCT = real
+
+
 async def main():
     print("=== Luxury corrective actions (loss cooldown + liquidity guard + repeat-loss block) test suite ===\n")
     test_1_minutes_since_last_loss_basic()
@@ -632,6 +661,7 @@ async def main():
     test_18_loss_exit_count_today_ignores_non_loss_reasons_and_other_symbols_strategies()
     await test_19_real_second_loss_blocks_third_entry_same_day()
     await test_20_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses()
+    test_21_profit_protection_giveback_buffer()
     print("\nALL LUXURY CORRECTIVE ACTION CHECKS PASSED")
 
 

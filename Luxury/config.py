@@ -225,6 +225,13 @@ MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF = float(os.getenv("LUXURY_MAX_LOSS_PER_TRADE_
 PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF = float(os.getenv("LUXURY_PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF", "1500"))
 PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF = float(os.getenv("LUXURY_PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF", "1000"))
 
+# See Options/config.py's PROFIT_PROTECTION_GIVEBACK_PCT - the profit-
+# protection give-back buffer (added 10 Sep 2026 after OIL exited on a
+# 10-paise dip from the peak). Once peak profit crosses the threshold
+# above, the exit only fires when ltp < highest_price * (1 - this pct).
+# 0.0 default = bit-identical to the old zero-tolerance behaviour.
+PROFIT_PROTECTION_GIVEBACK_PCT = float(os.getenv("LUXURY_PROFIT_PROTECTION_GIVEBACK_PCT", "0.0"))
+
 # See Options/config.py's RISK_THRESHOLD_CUTOFF_TIME - this package's own
 # independently-tunable cutoff (defaults to the same "11:30").
 RISK_THRESHOLD_CUTOFF_TIME = os.getenv("LUXURY_RISK_THRESHOLD_CUTOFF_TIME", "11:30")
