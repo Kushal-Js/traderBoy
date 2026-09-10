@@ -1431,21 +1431,20 @@ _supertrend_state_cache: dict[tuple[str, int], tuple[datetime, Optional[Supertre
 
 
 def _fetch_supertrend_state_once(symbol: str, interval_minutes: int) -> Optional[SupertrendState]:
-    """Blocking (REST calls) - always call via run_in_executor. Fetches
-    today's `interval_minutes` candles for `symbol` and computes the
-    Supertrend line (via the shared, pure `_compute_supertrend`), keeping
-    the last TWO fully-closed bars so a genuine crossover can be told
-    apart from an established trend. Returns None if there isn't enough
-    data yet (illiquid symbol, very early in the session, etc.) - callers
-    treat that as "no signal", never as a false crossover."""
+    """Blocking (REST calls) - always call via run_in_executor. Fetches a
+    CONTINUOUS multi-session `interval_minutes` candle series for `symbol`
+    (dhan_wrapper.fetch_continuous_intraday - config.INTRADAY_CONTINUOUS_
+    LOOKBACK_DAYS calendar days through today, not today-only) and computes
+    the Supertrend line via the shared pure `_compute_supertrend`, keeping
+    the last TWO fully-closed bars so a genuine crossover can be told apart
+    from an established trend. The series runs continuously across the
+    overnight gap (like a charting platform), so the Supertrend bands are
+    fully warm from the first bar of today's session - no early-session
+    dead window or unreliable warm-up reads. Returns None only if the fetch
+    genuinely came back with too little data - callers treat that as "no
+    signal", never as a false crossover."""
     security_id = dhan_wrapper._equity_security_id(symbol)
-    today = _now_ist().strftime("%Y-%m-%d")
-    resp = _retry(
-        dhan_wrapper.client.Dhan.intraday_minute_data,
-        security_id=security_id, exchange_segment="NSE_EQ", instrument_type="EQUITY",
-        from_date=today, to_date=today, interval=interval_minutes,
-    )
-    data = resp.get("data") or {}
+    data = dhan_wrapper.fetch_continuous_intraday(security_id, "NSE_EQ", "EQUITY", interval_minutes)
     highs = data.get("high") or []
     lows = data.get("low") or []
     closes = data.get("close") or []
