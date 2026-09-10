@@ -331,6 +331,26 @@ SUPERTREND_INTERVAL_MINUTES = int(os.getenv("SUPERTREND_INTERVAL_MINUTES", "5"))
 # (see NOTES.md bug #5).
 SUPERTREND_REFRESH_SECONDS = int(os.getenv("SUPERTREND_REFRESH_SECONDS", "15"))
 
+# EMA-cross exit signal (added 10 Sep 2026 for Futures - see each package's
+# own ENABLE_EMA_CROSS_EXIT flag). Shared, global computation parameters for
+# dhan_client.refresh_ema_cross_signal(), living here (not per-package) for
+# the same reason SUPERTREND_PERIOD/MULTIPLIER/INTERVAL do - the fetch/compute
+# runs inside the one shared dhan_wrapper, which binds to this config. Only
+# the per-package ENABLE_EMA_CROSS_EXIT toggle is independent. Exit fires
+# when the fast EMA of the 5-min close crosses BELOW the slow EMA (for a CE;
+# the reverse for a PE), on a candle later than the position's entry candle.
+EMA_CROSS_FAST_PERIOD = int(os.getenv("EMA_CROSS_FAST_PERIOD", "9"))
+EMA_CROSS_SLOW_PERIOD = int(os.getenv("EMA_CROSS_SLOW_PERIOD", "12"))
+EMA_CROSS_INTERVAL_MINUTES = int(os.getenv("EMA_CROSS_INTERVAL_MINUTES", "5"))
+EMA_CROSS_REFRESH_SECONDS = int(os.getenv("EMA_CROSS_REFRESH_SECONDS", "15"))
+
+# Per-package on/off for the EMA-cross exit above. Kept in all three option
+# packages so the Options/Futures trading_engine.py copies stay byte-
+# identical; default off, only FUTURES_ENABLE_EMA_CROSS_EXIT is turned on
+# (user request 10 Sep 2026: "add EMA 9 crossed below EMA 12 of 5-min close
+# as an exit for Futures").
+ENABLE_EMA_CROSS_EXIT = os.getenv("ENABLE_EMA_CROSS_EXIT", "false").lower() == "true"
+
 # Liquidity guard (added 2 Sep 2026, user's own corrective-action request
 # after investigating a real CHOLAFIN MAX_LOSS_HIT overshoot 3 Sep 2026 -
 # see Luxury/config.py's own LIQUIDITY_GUARD_ENABLED docstring for the

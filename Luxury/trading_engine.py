@@ -789,10 +789,16 @@ async def _capture_supertrend_entry_candle(loop, underlying_symbol: str) -> Opti
     governed by Options/config.py's values, since refresh_supertrend_signal
     lives in the shared dhan_client.py - see Luxury/config.py's own
     docstring for why those knobs aren't duplicated here."""
-    if not config.ENABLE_SUPERTREND_EXIT:
+    if not config.ENABLE_SUPERTREND_EXIT and not config.ENABLE_EMA_CROSS_EXIT:
         return None
-    await loop.run_in_executor(None, dhan_wrapper.refresh_supertrend_signal, underlying_symbol)
-    return dhan_wrapper.get_cached_supertrend_candle_start(underlying_symbol)
+    if config.ENABLE_SUPERTREND_EXIT:
+        await loop.run_in_executor(None, dhan_wrapper.refresh_supertrend_signal, underlying_symbol)
+    if config.ENABLE_EMA_CROSS_EXIT:
+        await loop.run_in_executor(None, dhan_wrapper.refresh_ema_cross_signal, underlying_symbol)
+    return (
+        dhan_wrapper.get_cached_supertrend_candle_start(underlying_symbol)
+        or dhan_wrapper.get_cached_ema_cross_candle_start(underlying_symbol)
+    )
 
 
 def _supertrend_signal_for(position: Position) -> bool:
@@ -810,9 +816,27 @@ def _supertrend_signal_for(position: Position) -> bool:
     return candle_start > entry_candle_start
 
 
+def _ema_cross_signal_for(position: Position) -> bool:
+    """See Options/trading_engine.py's version - identical logic. Fires only
+    on a genuine fast/slow EMA crossover (against the position's direction)
+    on a fully-closed 5-min candle later than the entry candle."""
+    crossed = dhan_wrapper.get_cached_ema_cross_crossed(position.underlying_symbol)
+    fast_below_slow = dhan_wrapper.get_cached_ema_cross_bearish(position.underlying_symbol)
+    if not crossed or fast_below_slow is None:
+        return False
+    against_position = fast_below_slow if position.option_type == "CE" else (not fast_below_slow)
+    if not against_position:
+        return False
+    candle_start = dhan_wrapper.get_cached_ema_cross_candle_start(position.underlying_symbol)
+    entry_candle_start = position.supertrend_entry_candle_start
+    if candle_start is None or entry_candle_start is None:
+        return True
+    return candle_start > entry_candle_start
+
+
 def _exit_reason_for(
     position: Position, ltp: float, supertrend_against_position: bool = False,
-    liquidity_guard_triggered: bool = False,
+    liquidity_guard_triggered: bool = False, ema_cross_against_position: bool = False,
 ) -> Optional[str]:
     """See Options/trading_engine.py's version - identical logic, including
     the current_max_loss_per_trade_rs() absolute rupee-loss cap checked
@@ -844,6 +868,8 @@ def _exit_reason_for(
         return "TRAILING_SL_HIT" if trailing_sl > position.hard_stop_loss else "STOP_LOSS_HIT"
     if config.ENABLE_SUPERTREND_EXIT and supertrend_against_position:
         return "SUPERTREND_EXIT"
+    if config.ENABLE_EMA_CROSS_EXIT and ema_cross_against_position:
+        return "EMA_CROSS_EXIT"
     if config.LIQUIDITY_GUARD_ENABLED and liquidity_guard_triggered:
         return "LIQUIDITY_GUARD_ZERO_VOLUME"
     return None
@@ -915,13 +941,21 @@ async def _check_one_position(symbol: str, position: Position) -> None:
         await loop.run_in_executor(None, dhan_wrapper.refresh_supertrend_signal, position.underlying_symbol)
         supertrend_against_position = _supertrend_signal_for(position)
 
+    ema_cross_against_position = False
+    if config.ENABLE_EMA_CROSS_EXIT:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, dhan_wrapper.refresh_ema_cross_signal, position.underlying_symbol)
+        ema_cross_against_position = _ema_cross_signal_for(position)
+
     liquidity_guard_triggered = False
     if config.LIQUIDITY_GUARD_ENABLED:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, dhan_wrapper.refresh_liquidity_signal, position.option_trading_symbol)
         liquidity_guard_triggered = bool(dhan_wrapper.get_cached_illiquid(position.option_trading_symbol))
 
-    reason = _exit_reason_for(position, ltp, supertrend_against_position, liquidity_guard_triggered)
+    reason = _exit_reason_for(
+        position, ltp, supertrend_against_position, liquidity_guard_triggered, ema_cross_against_position,
+    )
     if reason and await position_store.try_start_exit(symbol):
         await _exit_position(symbol, position, ltp, reason)
 
@@ -951,11 +985,14 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
 
         await position_store.update_highest_price(symbol, ltp)
         supertrend_against_position = config.ENABLE_SUPERTREND_EXIT and _supertrend_signal_for(position)
+        ema_cross_against_position = config.ENABLE_EMA_CROSS_EXIT and _ema_cross_signal_for(position)
         liquidity_guard_triggered = config.LIQUIDITY_GUARD_ENABLED and bool(
             dhan_wrapper.get_cached_illiquid(position.option_trading_symbol)
         )
 
-        reason = _exit_reason_for(position, ltp, supertrend_against_position, liquidity_guard_triggered)
+        reason = _exit_reason_for(
+            position, ltp, supertrend_against_position, liquidity_guard_triggered, ema_cross_against_position,
+        )
         if reason and await position_store.try_start_exit(symbol):
             await _exit_position(symbol, position, ltp, reason)
     except Exception:  # noqa: BLE001

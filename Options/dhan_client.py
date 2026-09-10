@@ -137,6 +137,23 @@ def _compute_supertrend(
     return supertrend
 
 
+def _compute_ema(values: list[float], period: int) -> list[Optional[float]]:
+    """Standard exponential moving average, SMA-seeded (the convention every
+    mainstream charting platform uses). Returns one value per bar; the first
+    `period - 1` entries are None (the seed lands on index period-1). Pure
+    function - no I/O, cheap to unit-test on its own."""
+    n = len(values)
+    ema: list[Optional[float]] = [None] * n
+    if n < period or period <= 0:
+        return ema
+    k = 2.0 / (period + 1)
+    seed = sum(values[:period]) / period
+    ema[period - 1] = seed
+    for i in range(period, n):
+        ema[i] = values[i] * k + ema[i - 1] * (1 - k)
+    return ema
+
+
 class OrderStatus:
     """Order status values, verbatim from DhanHQ's v2 API docs.
     https://dhanhq.co/docs/v2/orders/"""
@@ -232,6 +249,11 @@ class DhanWrapper:
         # underlying_symbol -> (fetched_at, is_bearish, candle_start) - see
         # refresh_supertrend_signal()/get_cached_supertrend_bearish().
         self._supertrend_cache: dict[str, tuple[datetime, bool, Optional[datetime]]] = {}
+        # underlying_symbol -> (fetched_at, fast_below_slow, crossed_this_candle,
+        # candle_start) - see refresh_ema_cross_signal(). Same cache-then-poll-
+        # refresh shape as _supertrend_cache; used only by packages that turn
+        # config.ENABLE_EMA_CROSS_EXIT on (Futures as of 10 Sep 2026).
+        self._ema_cross_cache: dict[str, tuple[datetime, bool, bool, Optional[datetime]]] = {}
         # option_trading_symbol -> (fetched_at, is_illiquid) - see
         # refresh_liquidity_signal()/get_cached_illiquid() (added 2 Sep
         # 2026, same cache-then-poll-refresh shape as _supertrend_cache
@@ -1007,6 +1029,98 @@ class DhanWrapper:
         entry in the first place."""
         cached = self._supertrend_cache.get(underlying_symbol)
         return cached[2] if cached else None
+
+    # ------------------------------------------------------------------ #
+    # EMA-cross exit signal (added 10 Sep 2026 for Futures - see
+    # config.ENABLE_EMA_CROSS_EXIT). Computed on the UNDERLYING's 5-min
+    # closes, same as Supertrend: EMA(EMA_CROSS_FAST_PERIOD) vs
+    # EMA(EMA_CROSS_SLOW_PERIOD). "crossed_this_candle" is True when the
+    # sign of (fast - slow) flipped between the last two fully-closed
+    # candles - that's the "crossed below/above" edge the exit acts on,
+    # not a plain "fast is under slow" state.
+    # ------------------------------------------------------------------ #
+    def refresh_ema_cross_signal(self, underlying_symbol: str) -> None:
+        """Fetches the underlying's 5-min candles and recomputes the fast/slow
+        EMA relationship on the last fully-closed candle, plus whether a
+        crossover happened on that candle. Cached (see
+        get_cached_ema_cross_*) and only re-fetched every
+        config.EMA_CROSS_REFRESH_SECONDS.
+
+        Blocking (REST) - call via run_in_executor from the poll loop only,
+        never the WebSocket tick path; the poll loop keeps the cache warm
+        enough for the tick path to read synchronously. Same threading /
+        still-forming-candle-drop rules as refresh_supertrend_signal."""
+        cached = self._ema_cross_cache.get(underlying_symbol)
+        if cached and (datetime.now(IST) - cached[0]).total_seconds() < config.EMA_CROSS_REFRESH_SECONDS:
+            return
+        try:
+            security_id = self._equity_security_id(underlying_symbol)
+            today = datetime.now(IST).strftime("%Y-%m-%d")
+            resp = _retry(
+                self.client.Dhan.intraday_minute_data,
+                security_id=security_id,
+                exchange_segment="NSE_EQ",
+                instrument_type="EQUITY",
+                from_date=today,
+                to_date=today,
+                interval=config.EMA_CROSS_INTERVAL_MINUTES,
+            )
+            data = resp.get("data") or {}
+            closes = list(data.get("close") or [])
+            timestamps = list(data.get("timestamp") or [])
+
+            # Drop the still-forming candle if present - only fully-closed
+            # candles drive the signal (identical logic to
+            # refresh_supertrend_signal, kept in lockstep so timestamps[-1]
+            # always matches closes[-1]).
+            if timestamps:
+                last_candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST)
+                if datetime.now(IST) < last_candle_start + timedelta(minutes=config.EMA_CROSS_INTERVAL_MINUTES):
+                    closes, timestamps = closes[:-1], timestamps[:-1]
+
+            slow = config.EMA_CROSS_SLOW_PERIOD
+            # Need at least two computable slow-EMA values to see a crossover
+            # (the seed lands at index slow-1, so slow+1 closes minimum).
+            if len(closes) < slow + 1:
+                logger.info("Not enough %d-min candles yet for %s EMA cross (%d bars)",
+                            config.EMA_CROSS_INTERVAL_MINUTES, underlying_symbol, len(closes))
+                return
+
+            fast_ema = _compute_ema(closes, config.EMA_CROSS_FAST_PERIOD)
+            slow_ema = _compute_ema(closes, slow)
+            if fast_ema[-1] is None or slow_ema[-1] is None or fast_ema[-2] is None or slow_ema[-2] is None:
+                return
+
+            fast_below_slow = fast_ema[-1] < slow_ema[-1]
+            prev_fast_below_slow = fast_ema[-2] < slow_ema[-2]
+            crossed_this_candle = fast_below_slow != prev_fast_below_slow
+            candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST) if timestamps else None
+            self._ema_cross_cache[underlying_symbol] = (
+                datetime.now(IST), fast_below_slow, crossed_this_candle, candle_start,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not refresh EMA cross signal for %s", underlying_symbol)
+
+    def get_cached_ema_cross_bearish(self, underlying_symbol: str) -> Optional[bool]:
+        """Synchronous cache-only read: True if the fast EMA is below the slow
+        EMA on the last fully-closed candle. None = not computed yet - treat
+        as "no exit signal", never force an exit on missing data."""
+        cached = self._ema_cross_cache.get(underlying_symbol)
+        return cached[1] if cached else None
+
+    def get_cached_ema_cross_crossed(self, underlying_symbol: str) -> Optional[bool]:
+        """True if the fast/slow EMA relationship actually FLIPPED on the last
+        fully-closed candle (a genuine crossover edge, not a standing state)."""
+        cached = self._ema_cross_cache.get(underlying_symbol)
+        return cached[2] if cached else None
+
+    def get_cached_ema_cross_candle_start(self, underlying_symbol: str) -> Optional[datetime]:
+        """Start timestamp (IST) of the fully-closed candle the cached EMA
+        signal is based on - used the same way as
+        get_cached_supertrend_candle_start (skip an exit still reading the
+        position's own entry candle)."""
+        cached = self._ema_cross_cache.get(underlying_symbol)
+        return cached[3] if cached else None
 
     # ------------------------------------------------------------------ #
     # Liquidity guard (added 2 Sep 2026, see config.LIQUIDITY_GUARD_

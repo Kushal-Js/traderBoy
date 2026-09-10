@@ -253,6 +253,11 @@ DYNAMIC_SL_STEP_PCT_PE = float(os.getenv("LUXURY_DYNAMIC_SL_STEP_PCT_PE", "0.07"
 DYNAMIC_SL_INCREASE_PCT = float(os.getenv("LUXURY_DYNAMIC_SL_INCREASE_PCT", "0.01"))
 
 ENABLE_SUPERTREND_EXIT = os.getenv("LUXURY_ENABLE_SUPERTREND_EXIT", "true").lower() == "true"
+
+# See Options/config.py's ENABLE_EMA_CROSS_EXIT - per-package toggle for the
+# EMA-cross exit. Kept here so the trading_engine.py copies stay identical;
+# left OFF for Luxury (only Futures runs it).
+ENABLE_EMA_CROSS_EXIT = os.getenv("LUXURY_ENABLE_EMA_CROSS_EXIT", "false").lower() == "true"
 # SUPERTREND_ENTRY_GRACE_MINUTES deliberately doesn't exist - see
 # Options/config.py's identical removal note (user request 27 Aug 2026).
 # The only remaining delay is trading_engine._supertrend_signal_for()

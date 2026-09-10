@@ -40,6 +40,9 @@ Covers, against the REAL production functions (not reimplemented):
   9. PROFIT_PROTECTION_GIVEBACK_PCT rides a small wiggle, locks in past it.
  10. FUTURES_ENABLE_TARGET_EXIT=false suppresses TARGET_HIT only - the
      winner rides on; every other exit condition still fires.
+ 11. EMA_CROSS_EXIT (FUTURES_ENABLE_EMA_CROSS_EXIT=true): fires on a real
+     fast/slow EMA crossover against the position on a post-entry 5-min
+     candle; ignores a standing state, the entry candle, and the flag off.
 
 HOW TO RUN:
     uv run python tests/test_options_corrective_actions.py
@@ -440,6 +443,73 @@ def test_9_profit_protection_giveback_buffer():
         fte.config.PROFIT_PROTECTION_GIVEBACK_PCT = real
 
 
+def test_11_ema_cross_exit_signal_and_wiring():
+    """EMA-cross exit (config.ENABLE_EMA_CROSS_EXIT, deployed ON for Futures,
+    10 Sep 2026): _exit_reason_for returns EMA_CROSS_EXIT when the fast EMA
+    of the underlying's 5-min close has genuinely CROSSED against the
+    position's direction on a post-entry candle - not on a standing state,
+    not on the entry candle, and only when the flag is on."""
+    from Options.dhan_client import _compute_ema
+
+    # pure EMA math sanity - no I/O
+    assert _compute_ema([1.0, 2.0], 9) == [None, None], "no EMA value before `period` samples"
+    flat = _compute_ema([10.0] * 20, 9)
+    assert flat[8] == 10.0 and abs(flat[-1] - 10.0) < 1e-9, "EMA of a flat series equals that value"
+    rising = _compute_ema(list(range(1, 30)), 9)
+    assert rising[-1] < 29 and rising[-1] > rising[-2], "EMA of a rising series lags below spot but trends up"
+
+    entry_candle = datetime(2026, 9, 10, 10, 0, tzinfo=fte.IST)
+    later_candle = datetime(2026, 9, 10, 10, 25, tzinfo=fte.IST)
+
+    def mk(otype="CE"):
+        return Position(
+            underlying_symbol="EMASTOCK", option_trading_symbol=f"EMASTOCK 29 SEP 100 {otype}",
+            option_type=otype, quantity=100, lot_size=100, entry_price=10.0, target_price=99.0,
+            highest_price=10.0, hard_stop_loss=1.0, order_id="X", product_type="MARGIN",
+            supertrend_entry_candle_start=entry_candle,
+        )
+
+    def set_cache(fast_below_slow, crossed, candle_start):
+        odc.dhan_wrapper._ema_cross_cache["EMASTOCK"] = (
+            datetime.now(fte.IST), fast_below_slow, crossed, candle_start,
+        )
+
+    real_flag = fte.config.ENABLE_EMA_CROSS_EXIT
+    try:
+        fte.config.ENABLE_EMA_CROSS_EXIT = True
+
+        # genuine cross-below on a later candle, CE -> exit
+        set_cache(fast_below_slow=True, crossed=True, candle_start=later_candle)
+        assert fte._ema_cross_signal_for(mk("CE")) is True
+        assert fte._exit_reason_for(mk("CE"), ltp=10.0, ema_cross_against_position=True) == "EMA_CROSS_EXIT"
+
+        # fast below slow but NO crossover this candle -> no exit (edge, not state)
+        set_cache(fast_below_slow=True, crossed=False, candle_start=later_candle)
+        assert fte._ema_cross_signal_for(mk("CE")) is False
+
+        # crossover, but the signal is still reading the entry candle -> no exit
+        set_cache(fast_below_slow=True, crossed=True, candle_start=entry_candle)
+        assert fte._ema_cross_signal_for(mk("CE")) is False
+
+        # a cross-BELOW is WITH a PE (long put profits when the underlying falls) -> not against it
+        set_cache(fast_below_slow=True, crossed=True, candle_start=later_candle)
+        assert fte._ema_cross_signal_for(mk("PE")) is False
+        # a cross-ABOVE is the reversal-against a PE
+        set_cache(fast_below_slow=False, crossed=True, candle_start=later_candle)
+        assert fte._ema_cross_signal_for(mk("PE")) is True
+
+        # flag off -> _exit_reason_for never returns EMA_CROSS_EXIT
+        fte.config.ENABLE_EMA_CROSS_EXIT = False
+        assert fte._exit_reason_for(mk("CE"), ltp=10.0, ema_cross_against_position=True) is None
+
+        print("11. EMA_CROSS_EXIT fires on a genuine post-entry cross against the position (CE fast-below / "
+              "PE fast-above), ignores a standing state with no cross, ignores the entry candle, and is "
+              "gated by ENABLE_EMA_CROSS_EXIT: PASSED")
+    finally:
+        fte.config.ENABLE_EMA_CROSS_EXIT = real_flag
+        odc.dhan_wrapper._ema_cross_cache.pop("EMASTOCK", None)
+
+
 async def main():
     print("=== Futures corrective actions (loss cooldown + liquidity guard + repeat-loss block) test suite ===\n")
     await test_1_real_loss_then_immediate_reentry_blocked()
@@ -452,6 +522,7 @@ async def main():
     await test_8_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses()
     test_9_profit_protection_giveback_buffer()
     test_10_target_exit_disabled_flag_suppresses_target_hit()
+    test_11_ema_cross_exit_signal_and_wiring()
     print("\nALL FUTURES CORRECTIVE ACTION CHECKS PASSED")
 
 

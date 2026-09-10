@@ -136,6 +136,16 @@ DYNAMIC_SL_STEP_PCT_PE = float(os.getenv("FUTURES_DYNAMIC_SL_STEP_PCT_PE", "0.09
 DYNAMIC_SL_INCREASE_PCT = float(os.getenv("FUTURES_DYNAMIC_SL_INCREASE_PCT", "0.01"))
 
 ENABLE_SUPERTREND_EXIT = os.getenv("FUTURES_ENABLE_SUPERTREND_EXIT", "true").lower() == "true"
+
+# EMA-cross exit: close a position when the fast EMA of the underlying's
+# 5-min close crosses BELOW the slow EMA (for a CE; the reverse for a PE),
+# on a candle later than the entry candle. See Options/config.py's
+# ENABLE_EMA_CROSS_EXIT and dhan_client.refresh_ema_cross_signal(). The
+# periods/interval (EMA_CROSS_FAST_PERIOD 9 / EMA_CROSS_SLOW_PERIOD 12 /
+# 5-min) are shared, global settings in Options/config.py - only this
+# toggle is per-package. Code default kept "false" for parity; the deployed
+# FUTURES_ENABLE_EMA_CROSS_EXIT=true turns it on (user request 10 Sep 2026).
+ENABLE_EMA_CROSS_EXIT = os.getenv("FUTURES_ENABLE_EMA_CROSS_EXIT", "false").lower() == "true"
 # SUPERTREND_ENTRY_GRACE_MINUTES REMOVED entirely (user request 27 Aug
 # 2026) - see Options/config.py's identical removal note. The only
 # remaining delay is trading_engine._supertrend_signal_for() never acting

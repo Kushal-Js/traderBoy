@@ -271,6 +271,26 @@ def test_5b_target_exit_disabled_flag_suppresses_target_hit_only():
         ote.config.ENABLE_TARGET_EXIT = real
 
 
+def test_5c_ema_cross_exit_off_by_default_for_options():
+    """ENABLE_EMA_CROSS_EXIT ships off for Options (only Futures runs it).
+    With it off, _exit_reason_for never returns EMA_CROSS_EXIT even when the
+    caller passes ema_cross_against_position=True; with it on, it does."""
+    pos = Position(
+        underlying_symbol="EMASTOCK", option_trading_symbol="EMASTOCK 29 SEP 100 CALL",
+        option_type="CE", quantity=100, lot_size=100, entry_price=10.0, target_price=99.0,
+        highest_price=10.0, hard_stop_loss=1.0, order_id="X", product_type="MARGIN",
+    )
+    assert ote.config.ENABLE_EMA_CROSS_EXIT is False, "Options must ship with the EMA-cross exit off"
+    assert ote._exit_reason_for(pos, ltp=10.0, ema_cross_against_position=True) is None
+    real = ote.config.ENABLE_EMA_CROSS_EXIT
+    try:
+        ote.config.ENABLE_EMA_CROSS_EXIT = True
+        assert ote._exit_reason_for(pos, ltp=10.0, ema_cross_against_position=True) == "EMA_CROSS_EXIT"
+        print("5c. EMA-cross exit is off for Options by default and gated by ENABLE_EMA_CROSS_EXIT: PASSED")
+    finally:
+        ote.config.ENABLE_EMA_CROSS_EXIT = real
+
+
 def test_6_liquidity_guard_disabled_flag_bypasses_the_check():
     pos = Position(
         underlying_symbol="CHOLAFIN", option_trading_symbol="CHOLAFIN 29 SEP 1840 CALL",
@@ -427,6 +447,7 @@ async def main():
     test_4_liquidity_guard_fires_when_nothing_else_would_have()
     test_5_price_threshold_exit_still_takes_priority_over_liquidity_guard()
     test_5b_target_exit_disabled_flag_suppresses_target_hit_only()
+    test_5c_ema_cross_exit_off_by_default_for_options()
     test_6_liquidity_guard_disabled_flag_bypasses_the_check()
     await test_7_real_second_loss_blocks_third_entry_same_day()
     await test_8_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses()

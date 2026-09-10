@@ -983,11 +983,22 @@ async def _capture_supertrend_entry_candle(loop, underlying_symbol: str) -> Opti
     supertrend_entry_candle_start - see _supertrend_signal_for(). A fetch
     failure here shouldn't block an entry that's already filled; returning
     None just means the exit check won't have an entry-candle baseline to
-    compare against (treated as "not blocked" - see _supertrend_signal_for)."""
-    if not config.ENABLE_SUPERTREND_EXIT:
+    compare against (treated as "not blocked" - see _supertrend_signal_for).
+
+    Also primes the EMA-cross signal (config.ENABLE_EMA_CROSS_EXIT) and,
+    when Supertrend is off but EMA-cross is on, returns the EMA signal's
+    own candle start as the entry-candle baseline - both read the same
+    5-min candle grid, so either boundary is the same instant."""
+    if not config.ENABLE_SUPERTREND_EXIT and not config.ENABLE_EMA_CROSS_EXIT:
         return None
-    await loop.run_in_executor(None, dhan_wrapper.refresh_supertrend_signal, underlying_symbol)
-    return dhan_wrapper.get_cached_supertrend_candle_start(underlying_symbol)
+    if config.ENABLE_SUPERTREND_EXIT:
+        await loop.run_in_executor(None, dhan_wrapper.refresh_supertrend_signal, underlying_symbol)
+    if config.ENABLE_EMA_CROSS_EXIT:
+        await loop.run_in_executor(None, dhan_wrapper.refresh_ema_cross_signal, underlying_symbol)
+    return (
+        dhan_wrapper.get_cached_supertrend_candle_start(underlying_symbol)
+        or dhan_wrapper.get_cached_ema_cross_candle_start(underlying_symbol)
+    )
 
 
 def _supertrend_signal_for(position: Position) -> bool:
@@ -1027,9 +1038,37 @@ def _supertrend_signal_for(position: Position) -> bool:
     return candle_start > entry_candle_start
 
 
+def _ema_cross_signal_for(position: Position) -> bool:
+    """Cache-only, synchronous mirror of _supertrend_signal_for for the
+    EMA-cross exit (config.ENABLE_EMA_CROSS_EXIT). Fires only when the
+    fast/slow EMA relationship actually CROSSED on the last fully-closed
+    5-min candle (a genuine "EMA 9 crossed below EMA 12" edge, not merely
+    "fast is currently under slow"), that crossover goes against the
+    position's direction, and the candle is later than the one the
+    position was entered on.
+
+    Direction, same reasoning as _supertrend_signal_for: for a CE (long
+    call) a cross to fast-below-slow is the reversal-against-it; for a PE
+    (long put) it's the opposite - a cross to fast-above-slow. The
+    entry-candle skip is kept for the identical reason (don't cut a trade
+    flat on the candle it was entered on)."""
+    crossed = dhan_wrapper.get_cached_ema_cross_crossed(position.underlying_symbol)
+    fast_below_slow = dhan_wrapper.get_cached_ema_cross_bearish(position.underlying_symbol)
+    if not crossed or fast_below_slow is None:
+        return False
+    against_position = fast_below_slow if position.option_type == "CE" else (not fast_below_slow)
+    if not against_position:
+        return False
+    candle_start = dhan_wrapper.get_cached_ema_cross_candle_start(position.underlying_symbol)
+    entry_candle_start = position.supertrend_entry_candle_start
+    if candle_start is None or entry_candle_start is None:
+        return True  # no entry-candle baseline captured - don't block on it
+    return candle_start > entry_candle_start
+
+
 def _exit_reason_for(
     position: Position, ltp: float, supertrend_against_position: bool = False,
-    liquidity_guard_triggered: bool = False,
+    liquidity_guard_triggered: bool = False, ema_cross_against_position: bool = False,
 ) -> Optional[str]:
     """Shared target/stop-loss/Supertrend evaluation - used by both the poll
     loop and the event-driven WebSocket tick handler so the two paths can't
@@ -1077,7 +1116,14 @@ def _exit_reason_for(
     warning trigger (the option's own contract has gone quiet for several
     minutes straight), not meant to override a genuine profit-taking exit
     that already fired first on the exact same tick; it only matters when
-    NONE of the price-threshold checks above have fired yet."""
+    NONE of the price-threshold checks above have fired yet.
+
+    ema_cross_against_position (config.ENABLE_EMA_CROSS_EXIT, off by
+    default, on for Futures) is a second trend-reversal trigger alongside
+    Supertrend - the fast EMA of the underlying's 5-min close crossed
+    against the position's direction (below the slow EMA for a CE). Checked
+    right after SUPERTREND_EXIT and before the liquidity guard. Caller
+    fetches/passes it (see _ema_cross_signal_for)."""
     loss_rs = (position.entry_price - ltp) * position.quantity
     if loss_rs >= current_max_loss_per_trade_rs():
         return "MAX_LOSS_HIT"
@@ -1092,6 +1138,8 @@ def _exit_reason_for(
         return "TRAILING_SL_HIT" if trailing_sl > position.hard_stop_loss else "STOP_LOSS_HIT"
     if config.ENABLE_SUPERTREND_EXIT and supertrend_against_position:
         return "SUPERTREND_EXIT"
+    if config.ENABLE_EMA_CROSS_EXIT and ema_cross_against_position:
+        return "EMA_CROSS_EXIT"
     if config.LIQUIDITY_GUARD_ENABLED and liquidity_guard_triggered:
         return "LIQUIDITY_GUARD_ZERO_VOLUME"
     return None
@@ -1169,13 +1217,23 @@ async def _check_one_position(symbol: str, position: Position) -> None:
         await loop.run_in_executor(None, dhan_wrapper.refresh_supertrend_signal, position.underlying_symbol)
         supertrend_against_position = _supertrend_signal_for(position)
 
+    ema_cross_against_position = False
+    if config.ENABLE_EMA_CROSS_EXIT:
+        loop = asyncio.get_running_loop()
+        # Same rules as the Supertrend refresh above: blocking REST, cached
+        # internally, poll-loop only (keeps the cache warm for the tick path).
+        await loop.run_in_executor(None, dhan_wrapper.refresh_ema_cross_signal, position.underlying_symbol)
+        ema_cross_against_position = _ema_cross_signal_for(position)
+
     liquidity_guard_triggered = False
     if config.LIQUIDITY_GUARD_ENABLED:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, dhan_wrapper.refresh_liquidity_signal, position.option_trading_symbol)
         liquidity_guard_triggered = bool(dhan_wrapper.get_cached_illiquid(position.option_trading_symbol))
 
-    reason = _exit_reason_for(position, ltp, supertrend_against_position, liquidity_guard_triggered)
+    reason = _exit_reason_for(
+        position, ltp, supertrend_against_position, liquidity_guard_triggered, ema_cross_against_position,
+    )
     if reason and await position_store.try_start_exit(symbol):
         await _exit_position(symbol, position, ltp, reason)
 
@@ -1213,11 +1271,14 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
         # keeps this warm; a blocking REST call here would stall the event
         # loop on every tick.
         supertrend_against_position = config.ENABLE_SUPERTREND_EXIT and _supertrend_signal_for(position)
+        ema_cross_against_position = config.ENABLE_EMA_CROSS_EXIT and _ema_cross_signal_for(position)
         liquidity_guard_triggered = config.LIQUIDITY_GUARD_ENABLED and bool(
             dhan_wrapper.get_cached_illiquid(position.option_trading_symbol)
         )
 
-        reason = _exit_reason_for(position, ltp, supertrend_against_position, liquidity_guard_triggered)
+        reason = _exit_reason_for(
+            position, ltp, supertrend_against_position, liquidity_guard_triggered, ema_cross_against_position,
+        )
         if reason and await position_store.try_start_exit(symbol):
             await _exit_position(symbol, position, ltp, reason)
     except Exception:  # noqa: BLE001
