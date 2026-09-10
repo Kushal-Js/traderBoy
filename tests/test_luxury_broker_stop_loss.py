@@ -534,6 +534,58 @@ async def test_9_stop_fully_filled_during_cancel_race_reconciles_without_a_fresh
         lte.config.BROKER_STOP_LOSS_ENABLED = real_enabled
 
 
+async def test_10_sl_l_still_cancelled_when_the_order_book_scan_misses_it():
+    """Regression for OIL, 10 Sep 2026: a PROFIT_PROTECTION_HIT exit fired
+    13 seconds after entry, get_pending_order_id returned None (the SL-L
+    was too new for Dhan's order-book scan to surface), the position
+    closed via a fresh SELL, and the broker-side SL-L was left resting
+    with no position behind it - a naked short waiting for its trigger.
+
+    _exit_position must now fall back to Position.stop_loss_order_id and
+    cancel the SL-L anyway, even though the scan finds nothing."""
+    store = lps.PositionStore()
+    lte.position_store = store
+    real_enabled = lte.config.BROKER_STOP_LOSS_ENABLED
+    lte.config.BROKER_STOP_LOSS_ENABLED = True
+    restore, placed_orders, stop_loss_calls = install_all_dhan_mocks(
+        stop_loss_order_id_factory=lambda: "OID-RESTING-SL",
+        broker_net_quantity=500,  # nothing filled - the SL-L is genuinely just resting
+    )
+    cancelled_order_ids = []
+    real_get_pending = odc.dhan_wrapper.get_pending_order_id
+    real_cancel = odc.dhan_wrapper.cancel_order
+    try:
+        entry = await lte._process_one_entry("BAJFINANCE", "CE")
+        assert entry["status"] == "entered", entry
+        position = store.live_positions["BAJFINANCE"]
+        assert position.stop_loss_order_id == "OID-RESTING-SL"
+
+        # The order-book scan finds NOTHING (this is the OIL failure mode -
+        # install_all_dhan_mocks already defaults get_pending_order_id to
+        # return None; we keep it that way here on purpose).
+        odc.dhan_wrapper.cancel_order = lambda order_id: cancelled_order_ids.append(order_id)
+
+        assert await store.try_start_exit("BAJFINANCE")
+        await lte._exit_position("BAJFINANCE", position, 60.0, "PROFIT_PROTECTION_HIT")
+
+        assert cancelled_order_ids == ["OID-RESTING-SL"], (
+            "the SL-L must be cancelled via Position.stop_loss_order_id even though the order-book "
+            f"scan returned nothing, got {cancelled_order_ids}"
+        )
+        assert placed_orders[-1]["quantity"] == 500, placed_orders[-1]
+        assert "BAJFINANCE" not in store.live_positions
+        closed = store.closed_positions_today[0]
+        assert closed.exit_reason == "PROFIT_PROTECTION_HIT", closed.exit_reason
+        print("10. A fast exit whose order-book scan misses the seconds-old SL-L still cancels it via "
+              "the id tracked on the Position - no orphaned resting stop / naked short (OIL 10 Sep "
+              "2026 regression): PASSED")
+    finally:
+        restore()
+        odc.dhan_wrapper.get_pending_order_id = real_get_pending
+        odc.dhan_wrapper.cancel_order = real_cancel
+        lte.config.BROKER_STOP_LOSS_ENABLED = real_enabled
+
+
 async def main():
     print("=== Luxury broker-side stop-loss order test suite ===\n")
     await test_1_real_entry_places_broker_stop_with_correct_trigger_and_limit()
@@ -545,6 +597,7 @@ async def main():
     await test_7_disabled_flag_never_places_the_broker_stop()
     await test_8_partial_fill_on_resting_stop_never_oversells()
     await test_9_stop_fully_filled_during_cancel_race_reconciles_without_a_fresh_sell()
+    await test_10_sl_l_still_cancelled_when_the_order_book_scan_misses_it()
     print("\nALL LUXURY BROKER STOP-LOSS CHECKS PASSED")
 
 

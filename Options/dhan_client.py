@@ -1190,14 +1190,21 @@ class DhanWrapper:
         just being closed. This matches Dhan's own documented guidance
         ("check if you have any pending order - your margin is blocked for
         your pending order... cancel that order") - see NOTES.md's
-        design-decision entry for the sources."""
+        design-decision entry for the sources.
+
+        TRIGGER_PENDING is in the status filter so a still-resting broker-
+        side SL-L stop order (it sits in that status until its trigger
+        fires) is matched here too. Even so, this scan can miss an order
+        that is only seconds old (Dhan OMS lag - OIL, 10 Sep 2026), so a
+        caller that already holds a specific id (Position.stop_loss_order_
+        id) must prefer that over relying on this scan alone."""
         resp = self.client.Dhan.get_order_list()
         if resp.get("status") != "success":
             raise RuntimeError(f"get_order_list failed: {resp.get('remarks')}")
         for order in (resp.get("data") or []):
             if (order.get("tradingSymbol") == trading_symbol
                     and order.get("transactionType") == transaction_type
-                    and order.get("orderStatus") in ("TRANSIT", "PENDING", "PART_TRADED")):
+                    and order.get("orderStatus") in ("TRANSIT", "PENDING", "PART_TRADED", "TRIGGER_PENDING")):
                 return order.get("orderId")
         return None
 

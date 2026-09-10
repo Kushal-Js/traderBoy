@@ -729,10 +729,29 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             "proceeding anyway", symbol,
         )
         stale_order_id = None
+
+    # get_pending_order_id scans the broker order book by symbol + status,
+    # so it can MISS an order that's only seconds old (Dhan OMS lag) or one
+    # sitting in a status the scan doesn't list. That is exactly how a
+    # broker-side SL-L was orphaned on Luxury for OIL on 10 Sep 2026: the
+    # position hit PROFIT_PROTECTION_HIT 13 seconds after entry, this scan
+    # returned None, the position closed via a fresh SELL, and the SL-L was
+    # left resting at the broker with no position behind it - a naked short
+    # waiting for its trigger. Options shares this exact code, so it would
+    # do the same once BROKER_STOP_LOSS_ENABLED is turned on here. We hold
+    # the SL-L's real order_id on the Position, so fall back to it: the
+    # cancel + get_broker_net_quantity reconciliation below then handle
+    # every case (still resting -> just cancelled; already fired -> broker
+    # flat -> close at its own fill price; partial fill -> sell only the
+    # real remainder).
+    if not stale_order_id and config.BROKER_STOP_LOSS_ENABLED and position.stop_loss_order_id:
+        stale_order_id = position.stop_loss_order_id
+
     if stale_order_id:
         logger.warning(
-            "%s: found an already-outstanding SELL order %s for %s (likely surviving a restart) - "
-            "cancelling it before placing a fresh exit order.",
+            "%s: found an already-outstanding SELL order %s for %s (a stale order surviving a "
+            "restart, or this position's own broker-side SL-L) - cancelling it before placing a "
+            "fresh exit order.",
             symbol, stale_order_id, position.option_trading_symbol,
         )
         try:
