@@ -529,8 +529,10 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
 # --------------------------------------------------------------------------- #
 async def _exit_position(symbol: str, position: Position, exit_price: float, reason: str) -> None:
     """See Options/trading_engine.py's _exit_position - identical logic,
-    including the broker-reconciliation check after 2+ consecutive exit
-    failures and the stale-pending-order cancel-before-retry check.
+    including the broker-reconciliation check after ANY prior exit failure
+    (exit_failure_count >= 1, tightened from >= 2 on 10 Sep 2026 - see
+    Options' docstring for the TECHM naked-short incident) and the
+    stale-pending-order cancel-before-retry check.
 
     Broker-quantity reconciliation after a stale-order cancel (added 9
     Sep 2026, alongside the switch to a real SL-L broker stop-loss order
@@ -641,7 +643,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             )
             position.quantity = broker_qty
 
-    if position.exit_failure_count >= 2:
+    if position.exit_failure_count >= 1:
         try:
             broker_qty = await loop.run_in_executor(
                 None, dhan_wrapper.get_broker_net_quantity, position.option_trading_symbol
@@ -654,8 +656,8 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             broker_qty = None
         if broker_qty == 0:
             logger.warning(
-                "%s: broker shows this position already flat after %d consecutive exit failures - "
-                "reconciling locally as closed instead of retrying.",
+                "%s: broker shows this position already flat after %d exit failure(s) - reconciling "
+                "locally as closed instead of retrying (a retry here would sell into a naked short).",
                 symbol, position.exit_failure_count,
             )
             mark_price = exit_price or position.highest_price

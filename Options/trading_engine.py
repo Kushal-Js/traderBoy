@@ -681,16 +681,21 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
     non-empty pending_exit_order_id and refuse every future attempt,
     including from /square-off-now.
 
-    After 2+ consecutive exit failures (record_exit_failure's own backoff
-    already spaces these out - see NOTES.md's design-decision entry),
-    reconciles with the broker BEFORE attempting another SELL: if this
-    exact contract is already flat there (closed manually, by another
-    process, or a stuck rejection that actually resolved), closes it
-    locally instead of retrying - avoiding a doomed order-placement API
-    call (and the small risk of an unintended fresh short if the broker's
-    state ever diverged) in favor of one cheap position check. Only
-    engages past the 2-failure threshold so a single transient rejection
-    still retries exactly as before.
+    After ANY prior exit failure (exit_failure_count >= 1; record_exit_
+    failure's own backoff already spaces these out - see NOTES.md's
+    design-decision entry), reconciles with the broker BEFORE attempting
+    another SELL: if this exact contract is already flat there (closed
+    manually, by another process, or a stuck rejection that actually
+    resolved), closes it locally instead of retrying - avoiding a doomed
+    order-placement API call AND the unintended fresh short if the broker's
+    state diverged. Tightened from ">= 2" to ">= 1" on 10 Sep 2026 after
+    TECHM: a MAX_LOSS exit was RMS-rejected for margin (attempt 1), the
+    position was then sold manually, and the attempt-2 retry - still under
+    the old 2-failure threshold - filled into a real -600 naked short. One
+    extra get_broker_net_quantity call on the retry path is a negligible
+    cost for closing that gap; a genuinely transient failure (position
+    still open at the broker) just sees broker_qty == position.quantity
+    and retries exactly as before.
 
     Before EVERY placement attempt (not gated by exit_failure_count, since
     the scenario this guards against can happen on the very first
@@ -807,7 +812,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             )
             position.quantity = broker_qty
 
-    if position.exit_failure_count >= 2:
+    if position.exit_failure_count >= 1:
         try:
             broker_qty = await loop.run_in_executor(
                 None, dhan_wrapper.get_broker_net_quantity, position.option_trading_symbol
@@ -820,8 +825,8 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             broker_qty = None  # unknown - fall through to a normal retry rather than guess
         if broker_qty == 0:
             logger.warning(
-                "%s: broker shows this position already flat after %d consecutive exit failures - "
-                "reconciling locally as closed instead of retrying.",
+                "%s: broker shows this position already flat after %d exit failure(s) - reconciling "
+                "locally as closed instead of retrying (a retry here would sell into a naked short).",
                 symbol, position.exit_failure_count,
             )
             mark_price = exit_price or position.highest_price

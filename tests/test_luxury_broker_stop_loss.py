@@ -586,6 +586,44 @@ async def test_10_sl_l_still_cancelled_when_the_order_book_scan_misses_it():
         lte.config.BROKER_STOP_LOSS_ENABLED = real_enabled
 
 
+async def test_11_rejected_exit_rechecks_broker_on_the_first_failure():
+    """Regression for TECHM, 10 Sep 2026: a MAX_LOSS exit was RMS-rejected
+    for margin (failure 1), the position was then sold manually, and the
+    attempt-2 retry - still under the old exit_failure_count >= 2 broker-
+    recheck threshold - filled a fresh SELL into a real -600 naked short.
+    With the threshold at >= 1, a retry after ANY prior failure first
+    checks the broker's net quantity; a flat broker reconciles the
+    position closed with NO fresh SELL."""
+    store = lps.PositionStore()
+    lte.position_store = store
+    restore, placed_orders, stop_loss_calls = install_all_dhan_mocks(broker_net_quantity=0)
+    try:
+        position = Position(
+            underlying_symbol="TATAMOTORS", option_trading_symbol="TATAMOTORS FAKE EXP CE",
+            option_type="CE", quantity=600, lot_size=600, entry_price=42.4, highest_price=44.5,
+            target_price=53.0, hard_stop_loss=35.6, order_id="OID-ENTRY", product_type="MARGIN",
+        )
+        position.exit_failure_count = 1  # one prior RMS-rejected exit
+        store.live_positions["TATAMOTORS"] = position
+
+        assert await store.try_start_exit("TATAMOTORS")
+        orders_before = len(placed_orders)
+        await lte._exit_position("TATAMOTORS", position, 40.25, "MAX_LOSS_HIT")
+
+        assert len(placed_orders) == orders_before, (
+            f"a retry after a failure must NOT place a fresh SELL when the broker shows 0 qty - "
+            f"that is the naked short. got {placed_orders}"
+        )
+        assert "TATAMOTORS" not in store.live_positions
+        closed = store.closed_positions_today[0]
+        assert closed.exit_reason == "RECONCILED_ALREADY_FLAT", closed.exit_reason
+        print("11. After even ONE failed exit, the retry re-checks broker net qty first - a flat "
+              "broker reconciles the position closed with ZERO fresh SELL, no naked short (TECHM "
+              "10 Sep 2026 regression): PASSED")
+    finally:
+        restore()
+
+
 async def main():
     print("=== Luxury broker-side stop-loss order test suite ===\n")
     await test_1_real_entry_places_broker_stop_with_correct_trigger_and_limit()
@@ -598,6 +636,7 @@ async def main():
     await test_8_partial_fill_on_resting_stop_never_oversells()
     await test_9_stop_fully_filled_during_cancel_race_reconciles_without_a_fresh_sell()
     await test_10_sl_l_still_cancelled_when_the_order_book_scan_misses_it()
+    await test_11_rejected_exit_rechecks_broker_on_the_first_failure()
     print("\nALL LUXURY BROKER STOP-LOSS CHECKS PASSED")
 
 
