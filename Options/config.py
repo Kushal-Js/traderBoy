@@ -186,6 +186,17 @@ PAPERTRADE_MAX_POSITIONS = int(os.getenv("PAPERTRADE_MAX_POSITIONS", "2"))
 TARGET_PCT = float(os.getenv("TARGET_PCT", "0.10"))          # +10% target
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.03"))    # -3% hard stop loss
 
+# Master switch for the fixed +TARGET_PCT profit exit in _exit_reason_for().
+# Default on = original behaviour. When off, a winning position is no longer
+# closed the instant it reaches entry * (1 + TARGET_PCT); it rides until
+# PROFIT_PROTECTION_HIT (peak-profit give-back), the trailing/dynamic/hard
+# SL, SUPERTREND_EXIT, the liquidity guard, or the EOD square-off take it
+# instead. target_price is still computed and stored (reconciliation/display
+# use it) - this only stops it being an exit trigger. Introduced 10 Sep 2026
+# for Futures (FUTURES_ENABLE_TARGET_EXIT=false) to let futures winners run;
+# Options and Luxury keep it on.
+ENABLE_TARGET_EXIT = os.getenv("ENABLE_TARGET_EXIT", "true").lower() == "true"
+
 # Absolute per-trade rupee-loss cap, independent of STOP_LOSS_PCT above - a
 # large-quantity position can still lose more than this in rupee terms
 # before its percentage stop-loss fires (e.g. a low-premium, high-lot-size

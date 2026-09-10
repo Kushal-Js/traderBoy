@@ -101,6 +101,15 @@ LTP_STALE_AFTER_SECONDS = float(os.getenv("FUTURES_LTP_STALE_AFTER_SECONDS", "5"
 TARGET_PCT = float(os.getenv("FUTURES_TARGET_PCT", "0.25"))
 STOP_LOSS_PCT = float(os.getenv("FUTURES_STOP_LOSS_PCT", "0.16"))
 
+# See Options/config.py's ENABLE_TARGET_EXIT - master switch for the fixed
+# +TARGET_PCT profit exit in _exit_reason_for(). This package's own
+# independently-tunable copy. Code default kept "true" for parity; the
+# deployed FUTURES_ENABLE_TARGET_EXIT=false turns it OFF (user request
+# 10 Sep 2026: "disable TARGET_HIT for Futures, rest to remain same") so a
+# winning futures position rides on to PROFIT_PROTECTION_HIT / trailing SL /
+# SUPERTREND / EOD instead of being capped at entry * 1.25.
+ENABLE_TARGET_EXIT = os.getenv("FUTURES_ENABLE_TARGET_EXIT", "true").lower() == "true"
+
 # See Options/config.py's MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF/_AFTER_CUTOFF -
 # identical rationale, this package's own independently-tunable pair. Split
 # from a single flat value into before/after-cutoff the same way and same

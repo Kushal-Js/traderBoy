@@ -1051,6 +1051,11 @@ def _exit_reason_for(
     config.RISK_THRESHOLD_CUTOFF_TIME (user request 31 Aug 2026) - see
     current_max_loss_per_trade_rs()'s own docstring.
 
+    The fixed +TARGET_PCT exit is gated by config.ENABLE_TARGET_EXIT
+    (default on). With it off (Futures, 10 Sep 2026) a winner is never
+    closed just for touching target_price - it rides on to the checks
+    below instead. target_price is still stored/used for display.
+
     After TARGET_HIT, checks current_profit_protection_threshold_rs() - the
     mirror image on the upside, same before/after-cutoff split. Once the
     position's PEAK unrealized profit ((highest_price - entry_price) *
@@ -1076,7 +1081,7 @@ def _exit_reason_for(
     loss_rs = (position.entry_price - ltp) * position.quantity
     if loss_rs >= current_max_loss_per_trade_rs():
         return "MAX_LOSS_HIT"
-    if ltp >= position.target_price:
+    if config.ENABLE_TARGET_EXIT and ltp >= position.target_price:
         return "TARGET_HIT"
     peak_profit_rs = (position.highest_price - position.entry_price) * position.quantity
     giveback_floor = position.highest_price * (1 - config.PROFIT_PROTECTION_GIVEBACK_PCT)

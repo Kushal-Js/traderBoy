@@ -833,7 +833,7 @@ def _exit_reason_for(
     loss_rs = (position.entry_price - ltp) * position.quantity
     if loss_rs >= current_max_loss_per_trade_rs():
         return "MAX_LOSS_HIT"
-    if ltp >= position.target_price:
+    if config.ENABLE_TARGET_EXIT and ltp >= position.target_price:
         return "TARGET_HIT"
     peak_profit_rs = (position.highest_price - position.entry_price) * position.quantity
     giveback_floor = position.highest_price * (1 - config.PROFIT_PROTECTION_GIVEBACK_PCT)

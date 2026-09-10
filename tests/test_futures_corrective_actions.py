@@ -37,6 +37,9 @@ Covers, against the REAL production functions (not reimplemented):
      unaffected.
   8. A win between two real losses doesn't reset/dilute the repeat-loss
      count; LOSS_REPEAT_BLOCK_ENABLED=False cleanly bypasses the check.
+  9. PROFIT_PROTECTION_GIVEBACK_PCT rides a small wiggle, locks in past it.
+ 10. FUTURES_ENABLE_TARGET_EXIT=false suppresses TARGET_HIT only - the
+     winner rides on; every other exit condition still fires.
 
 HOW TO RUN:
     uv run python tests/test_options_corrective_actions.py
@@ -230,10 +233,63 @@ def test_5_price_threshold_exit_still_takes_priority_over_liquidity_guard():
         option_type="CE", quantity=100, lot_size=100, entry_price=10.0, target_price=12.0,
         highest_price=10.0, hard_stop_loss=1.0, order_id="X", product_type="MARGIN",
     )
-    reason = fte._exit_reason_for(pos, ltp=12.5, supertrend_against_position=False, liquidity_guard_triggered=True)
-    assert reason == "TARGET_HIT", reason
-    print("5. A genuine price-threshold exit (e.g. TARGET_HIT) still takes priority over the liquidity guard "
-          "when both happen to be true on the same tick: PASSED")
+    real = fte.config.ENABLE_TARGET_EXIT
+    fte.config.ENABLE_TARGET_EXIT = True  # this test is specifically about the fixed target
+    try:
+        reason = fte._exit_reason_for(pos, ltp=12.5, supertrend_against_position=False, liquidity_guard_triggered=True)
+        assert reason == "TARGET_HIT", reason
+        print("5. A genuine price-threshold exit (e.g. TARGET_HIT) still takes priority over the liquidity guard "
+              "when both happen to be true on the same tick: PASSED")
+    finally:
+        fte.config.ENABLE_TARGET_EXIT = real
+
+
+def test_10_target_exit_disabled_flag_suppresses_target_hit():
+    """FUTURES_ENABLE_TARGET_EXIT=false (user request 10 Sep 2026: "disable
+    TARGET_HIT for Futures, rest to remain same"): a position at/above its
+    target_price is NOT closed for TARGET_HIT. Every other exit condition is
+    untouched - MAX_LOSS_HIT, PROFIT_PROTECTION_HIT, the trailing/hard SL,
+    SUPERTREND_EXIT and the liquidity guard all still fire exactly as before."""
+    real = fte.config.ENABLE_TARGET_EXIT
+    try:
+        fte.config.ENABLE_TARGET_EXIT = False
+
+        # Well past target, no other condition met -> rides on, no exit.
+        riding = Position(
+            underlying_symbol="RUNNER", option_trading_symbol="RUNNER 29 SEP 100 CALL",
+            option_type="CE", quantity=100, lot_size=100, entry_price=10.0, target_price=12.0,
+            highest_price=13.0, hard_stop_loss=1.0, order_id="X", product_type="MARGIN",
+        )  # peak profit (13-10)*100 = 300, well under the 1500 PP threshold
+        assert fte._exit_reason_for(riding, ltp=13.0) is None, \
+            "with the flag off, touching/exceeding target_price must NOT trigger an exit"
+
+        # Same position, flag back on -> TARGET_HIT fires, proving that's the only thing suppressed.
+        fte.config.ENABLE_TARGET_EXIT = True
+        assert fte._exit_reason_for(riding, ltp=13.0) == "TARGET_HIT"
+
+        # Flag off must not weaken the loss side: a real MAX_LOSS still exits.
+        fte.config.ENABLE_TARGET_EXIT = False
+        losing = Position(
+            underlying_symbol="LOSER", option_trading_symbol="LOSER 29 SEP 100 CALL",
+            option_type="CE", quantity=1000, lot_size=1000, entry_price=10.0, target_price=12.0,
+            highest_price=10.0, hard_stop_loss=8.4, order_id="X", product_type="MARGIN",
+        )
+        assert fte._exit_reason_for(losing, ltp=8.0) == "MAX_LOSS_HIT", \
+            "disabling the target exit must not affect the loss-side checks"
+
+        # And PROFIT_PROTECTION still catches a genuine give-back from a real peak.
+        protected = Position(
+            underlying_symbol="PEAKER", option_trading_symbol="PEAKER 29 SEP 100 CALL",
+            option_type="CE", quantity=1000, lot_size=1000, entry_price=10.0, target_price=12.0,
+            highest_price=12.0, hard_stop_loss=1.0, order_id="X", product_type="MARGIN",
+        )  # peak profit (12-10)*1000 = 2000 > 1500 threshold
+        assert fte._exit_reason_for(protected, ltp=11.99) == "PROFIT_PROTECTION_HIT", \
+            "PROFIT_PROTECTION_HIT is now the primary profit-taking exit and must still fire"
+
+        print("10. FUTURES_ENABLE_TARGET_EXIT=false suppresses TARGET_HIT only - a winner rides past target, "
+              "while MAX_LOSS_HIT / PROFIT_PROTECTION_HIT / SL all still fire: PASSED")
+    finally:
+        fte.config.ENABLE_TARGET_EXIT = real
 
 
 def test_6_liquidity_guard_disabled_flag_bypasses_the_check():
@@ -395,6 +451,7 @@ async def main():
     await test_7_real_second_loss_blocks_third_entry_same_day()
     await test_8_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses()
     test_9_profit_protection_giveback_buffer()
+    test_10_target_exit_disabled_flag_suppresses_target_hit()
     print("\nALL FUTURES CORRECTIVE ACTION CHECKS PASSED")
 
 

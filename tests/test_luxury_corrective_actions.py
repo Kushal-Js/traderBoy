@@ -439,10 +439,15 @@ def test_15_price_threshold_exit_still_takes_priority_over_liquidity_guard():
     )
     # TARGET_HIT (ltp >= 12.0) AND liquidity_guard both true at once -
     # TARGET_HIT must win (checked first).
-    reason = lte._exit_reason_for(pos, ltp=12.5, supertrend_against_position=False, liquidity_guard_triggered=True)
-    assert reason == "TARGET_HIT", reason
-    print("15. A genuine price-threshold exit (e.g. TARGET_HIT) still takes priority over the liquidity guard "
-          "when both happen to be true on the same tick: PASSED")
+    real = lte.config.ENABLE_TARGET_EXIT
+    lte.config.ENABLE_TARGET_EXIT = True  # Luxury keeps the fixed target on; only Futures turns it off
+    try:
+        reason = lte._exit_reason_for(pos, ltp=12.5, supertrend_against_position=False, liquidity_guard_triggered=True)
+        assert reason == "TARGET_HIT", reason
+        print("15. A genuine price-threshold exit (e.g. TARGET_HIT) still takes priority over the liquidity guard "
+              "when both happen to be true on the same tick: PASSED")
+    finally:
+        lte.config.ENABLE_TARGET_EXIT = real
 
 
 def test_16_liquidity_guard_disabled_flag_bypasses_the_check():

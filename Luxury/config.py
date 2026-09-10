@@ -213,6 +213,11 @@ BROKER_STOP_LOSS_LIMIT_BUFFER_PCT = float(os.getenv("LUXURY_BROKER_STOP_LOSS_LIM
 TARGET_PCT = float(os.getenv("LUXURY_TARGET_PCT", "0.10"))
 STOP_LOSS_PCT = float(os.getenv("LUXURY_STOP_LOSS_PCT", "0.03"))
 
+# See Options/config.py's ENABLE_TARGET_EXIT - master switch for the fixed
+# +TARGET_PCT profit exit. This package's own independently-tunable copy;
+# left ON (Luxury keeps the fixed target, only Futures turns it off).
+ENABLE_TARGET_EXIT = os.getenv("LUXURY_ENABLE_TARGET_EXIT", "true").lower() == "true"
+
 # See Options/config.py's MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF/_AFTER_CUTOFF -
 # identical rationale, this package's own independently-tunable pair,
 # defaulted to the same values Options currently runs with.

@@ -230,10 +230,45 @@ def test_5_price_threshold_exit_still_takes_priority_over_liquidity_guard():
         option_type="CE", quantity=100, lot_size=100, entry_price=10.0, target_price=12.0,
         highest_price=10.0, hard_stop_loss=1.0, order_id="X", product_type="MARGIN",
     )
-    reason = ote._exit_reason_for(pos, ltp=12.5, supertrend_against_position=False, liquidity_guard_triggered=True)
-    assert reason == "TARGET_HIT", reason
-    print("5. A genuine price-threshold exit (e.g. TARGET_HIT) still takes priority over the liquidity guard "
-          "when both happen to be true on the same tick: PASSED")
+    real = ote.config.ENABLE_TARGET_EXIT
+    ote.config.ENABLE_TARGET_EXIT = True  # this test is specifically about the fixed target
+    try:
+        reason = ote._exit_reason_for(pos, ltp=12.5, supertrend_against_position=False, liquidity_guard_triggered=True)
+        assert reason == "TARGET_HIT", reason
+        print("5. A genuine price-threshold exit (e.g. TARGET_HIT) still takes priority over the liquidity guard "
+              "when both happen to be true on the same tick: PASSED")
+    finally:
+        ote.config.ENABLE_TARGET_EXIT = real
+
+
+def test_5b_target_exit_disabled_flag_suppresses_target_hit_only():
+    """ENABLE_TARGET_EXIT (default on for Options; deployed off for Futures,
+    10 Sep 2026). Off -> a position at/above target_price is not closed for
+    TARGET_HIT, but MAX_LOSS_HIT / PROFIT_PROTECTION_HIT / SL are untouched."""
+    real = ote.config.ENABLE_TARGET_EXIT
+    try:
+        ote.config.ENABLE_TARGET_EXIT = False
+        riding = Position(
+            underlying_symbol="RUNNER", option_trading_symbol="RUNNER 29 SEP 100 CALL",
+            option_type="CE", quantity=100, lot_size=100, entry_price=10.0, target_price=12.0,
+            highest_price=13.0, hard_stop_loss=1.0, order_id="X", product_type="MARGIN",
+        )
+        assert ote._exit_reason_for(riding, ltp=13.0) is None, \
+            "flag off: exceeding target_price must not trigger an exit"
+        ote.config.ENABLE_TARGET_EXIT = True
+        assert ote._exit_reason_for(riding, ltp=13.0) == "TARGET_HIT"
+
+        ote.config.ENABLE_TARGET_EXIT = False
+        losing = Position(
+            underlying_symbol="LOSER", option_trading_symbol="LOSER 29 SEP 100 CALL",
+            option_type="CE", quantity=1000, lot_size=1000, entry_price=10.0, target_price=12.0,
+            highest_price=10.0, hard_stop_loss=8.4, order_id="X", product_type="MARGIN",
+        )
+        assert ote._exit_reason_for(losing, ltp=8.0) == "MAX_LOSS_HIT", \
+            "disabling the target exit must not affect the loss-side checks"
+        print("5b. ENABLE_TARGET_EXIT=False suppresses TARGET_HIT only; MAX_LOSS_HIT still fires: PASSED")
+    finally:
+        ote.config.ENABLE_TARGET_EXIT = real
 
 
 def test_6_liquidity_guard_disabled_flag_bypasses_the_check():
@@ -391,6 +426,7 @@ async def main():
     await test_3_loss_cooldown_disabled_flag_bypasses_the_check()
     test_4_liquidity_guard_fires_when_nothing_else_would_have()
     test_5_price_threshold_exit_still_takes_priority_over_liquidity_guard()
+    test_5b_target_exit_disabled_flag_suppresses_target_hit_only()
     test_6_liquidity_guard_disabled_flag_bypasses_the_check()
     await test_7_real_second_loss_blocks_third_entry_same_day()
     await test_8_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses()
