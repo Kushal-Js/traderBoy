@@ -137,12 +137,12 @@ def _fetch_index_daily(security_id: str) -> dict:
     return resp.get("data") or {}
 
 
-def _fetch_index_intraday(security_id: str, date_str: str, interval: int) -> dict:
-    resp = dhan_wrapper.client.Dhan.intraday_minute_data(
-        security_id=security_id, exchange_segment="IDX_I", instrument_type="INDEX",
-        from_date=date_str, to_date=date_str, interval=interval,
-    )
-    return resp.get("data") or {}
+def _fetch_index_intraday(security_id: str, interval: int) -> dict:
+    """Continuous multi-session series (see
+    dhan_wrapper.fetch_continuous_intraday) so the Supertrend bands are
+    fully warm from the first bar of today's session, not seeded fresh each
+    day."""
+    return dhan_wrapper.fetch_continuous_intraday(security_id, "IDX_I", "INDEX", interval)
 
 
 def _lot_size_for(trading_symbol: str) -> Optional[int]:
@@ -253,9 +253,9 @@ async def _poll_one_index(loop: asyncio.AbstractEventLoop, state: IndexState) ->
 
     try:
         candles_5m = await loop.run_in_executor(
-            None, _fetch_index_intraday, state.security_id, today.isoformat(), 5)
+            None, _fetch_index_intraday, state.security_id, 5)
         candles_1m = await loop.run_in_executor(
-            None, _fetch_index_intraday, state.security_id, today.isoformat(), 1)
+            None, _fetch_index_intraday, state.security_id, 1)
     except Exception:  # noqa: BLE001
         logger.exception("%s: index candle fetch failed", state.underlying)
         return

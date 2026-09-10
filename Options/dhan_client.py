@@ -935,6 +935,41 @@ class DhanWrapper:
         return response.get("data") or {}
 
     # ------------------------------------------------------------------ #
+    # Continuous intraday candle fetch - the single place every intraday
+    # indicator in the codebase gets its bars from (added 10 Sep 2026).
+    # ------------------------------------------------------------------ #
+    def fetch_continuous_intraday(
+        self, security_id: str, exchange_segment: str, instrument_type: str, interval_minutes: int,
+    ) -> dict:
+        """Intraday candles spanning the last
+        config.INTRADAY_CONTINUOUS_LOOKBACK_DAYS calendar days THROUGH today -
+        one continuous multi-session series, not today-only. Every recursive
+        indicator computed on it (Supertrend / EMA / RSI / ATR) is therefore
+        fully warm from the very first bar of today's session, with no
+        daily-reset warm-up lag - the way a charting platform's intraday
+        indicators run. Dhan's intraday_minute_data returns a continuous
+        series across sessions (verified: a 7-day 1-min request spans ~5
+        trading days with no synthetic overnight bars).
+
+        Returns the raw resp["data"] dict (open/high/low/close/volume/
+        timestamp lists), or {} on failure - callers apply their own
+        still-forming-last-candle drop and minimum-length checks. Wrapped in
+        _retry for Dhan's intermittent rate-limit failures on back-to-back
+        market-data calls."""
+        from_date = (datetime.now(IST) - timedelta(days=config.INTRADAY_CONTINUOUS_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+        to_date = datetime.now(IST).strftime("%Y-%m-%d")
+        resp = _retry(
+            self.client.Dhan.intraday_minute_data,
+            security_id=security_id,
+            exchange_segment=exchange_segment,
+            instrument_type=instrument_type,
+            from_date=from_date,
+            to_date=to_date,
+            interval=interval_minutes,
+        )
+        return (resp.get("data") or {}) if isinstance(resp, dict) else {}
+
+    # ------------------------------------------------------------------ #
     # Supertrend exit signal (computed on the underlying stock, not the
     # option's own premium - see config.ENABLE_SUPERTREND_EXIT)
     # ------------------------------------------------------------------ #
@@ -943,6 +978,12 @@ class DhanWrapper:
         last fully-closed candle's close is below the 5-min Supertrend - a
         trend-reversal exit signal. Cached (see get_cached_supertrend_bearish)
         and only re-fetched every config.SUPERTREND_REFRESH_SECONDS.
+
+        Candles come from fetch_continuous_intraday - a continuous
+        multi-session series - so the Supertrend line/bands are fully warm
+        from the first bar of today's session, no early-morning dead window
+        or unreliable "reads bearish on everything" warm-up period (which is
+        what a today-only fetch used to cause until ~10:10 IST).
 
         Blocking (REST call) - call via run_in_executor from async code, and
         only from the poll loop, not from the WebSocket tick path (which
@@ -954,17 +995,9 @@ class DhanWrapper:
             return
         try:
             security_id = self._equity_security_id(underlying_symbol)
-            today = datetime.now(IST).strftime("%Y-%m-%d")
-            resp = _retry(
-                self.client.Dhan.intraday_minute_data,
-                security_id=security_id,
-                exchange_segment="NSE_EQ",
-                instrument_type="EQUITY",
-                from_date=today,
-                to_date=today,
-                interval=config.SUPERTREND_INTERVAL_MINUTES,
+            data = self.fetch_continuous_intraday(
+                security_id, "NSE_EQ", "EQUITY", config.SUPERTREND_INTERVAL_MINUTES,
             )
-            data = resp.get("data") or {}
             highs = data.get("high") or []
             lows = data.get("low") or []
             closes = data.get("close") or []
@@ -1035,12 +1068,11 @@ class DhanWrapper:
     # config.ENABLE_EMA_CROSS_EXIT). Computed on the UNDERLYING's 5-min
     # closes: EMA(EMA_CROSS_FAST_PERIOD) vs EMA(EMA_CROSS_SLOW_PERIOD).
     # "crossed_this_candle" is True when the sign of (fast - slow) flipped
-    # between the last two fully-closed candles of the same session - that's
-    # the "crossed below/above" edge the exit acts on, not a plain "fast is
-    # under slow" state. Unlike the Supertrend signal, this fetches several
-    # prior sessions' candles too (config.EMA_CROSS_WARMUP_LOOKBACK_DAYS) so
-    # both EMAs are fully warm from the first candle of the day - no dead
-    # window early in the morning entry window.
+    # between the last two fully-closed candles - that's the "crossed
+    # below/above" edge the exit acts on, not a plain "fast is under slow"
+    # state. Candles come from fetch_continuous_intraday (a continuous
+    # multi-session series), so both EMAs are fully warm from the first bar
+    # of the day.
     # ------------------------------------------------------------------ #
     def refresh_ema_cross_signal(self, underlying_symbol: str) -> None:
         """Fetches the underlying's 5-min candles and recomputes the fast/slow
@@ -1058,28 +1090,18 @@ class DhanWrapper:
             return
         try:
             security_id = self._equity_security_id(underlying_symbol)
-            now_ist = datetime.now(IST)
-            # Fetch several PRIOR trading sessions of 5-min candles as well as
-            # today's, not just today's - an EMA is recursive, so seeding it
-            # only from today's candles leaves it unusable until ~13 candles
-            # (period+1) have closed, i.e. no EMA-cross exit at all until
-            # ~10:20 IST for anything in the morning entry window. Pulling
-            # config.EMA_CROSS_WARMUP_LOOKBACK_DAYS of history makes both EMAs
-            # fully warm from the first candle of today's session, so a real
-            # cross after entry is caught immediately whenever it happens (the
-            # only remaining wait is for the 5-min candle it happens in to
-            # actually close - inherent to "EMA of the 5-min CLOSE").
-            from_date = (now_ist - timedelta(days=config.EMA_CROSS_WARMUP_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
-            resp = _retry(
-                self.client.Dhan.intraday_minute_data,
-                security_id=security_id,
-                exchange_segment="NSE_EQ",
-                instrument_type="EQUITY",
-                from_date=from_date,
-                to_date=now_ist.strftime("%Y-%m-%d"),
-                interval=config.EMA_CROSS_INTERVAL_MINUTES,
+            # Continuous multi-session series (fetch_continuous_intraday) so
+            # both EMAs are fully warm from the first bar of today's session -
+            # a today-only fetch left them unusable until ~13 candles had
+            # closed (~10:20 IST). The series runs across the overnight gap
+            # exactly like a charting platform's, so a crossover on today's
+            # first bar (vs the prior session's last) is a real crossover and
+            # is treated as one - the caller's entry-candle skip
+            # (_ema_cross_signal_for) is what stops a brand-new intraday
+            # entry being whipsawed on its own entry bar.
+            data = self.fetch_continuous_intraday(
+                security_id, "NSE_EQ", "EQUITY", config.EMA_CROSS_INTERVAL_MINUTES,
             )
-            data = resp.get("data") or {}
             closes = list(data.get("close") or [])
             timestamps = list(data.get("timestamp") or [])
 
@@ -1105,18 +1127,7 @@ class DhanWrapper:
 
             fast_below_slow = fast_ema[-1] < slow_ema[-1]
             prev_fast_below_slow = fast_ema[-2] < slow_ema[-2]
-            # A genuine crossover needs the two candles being compared to be
-            # consecutive bars of the SAME session - otherwise the very first
-            # candle of the day would compare against the prior day's close
-            # and could fire an exit on an overnight gap. Both the multi-day
-            # fetch above and this guard together mean: fully-warm EMAs, and
-            # the earliest a cross can register today is the 2nd closed candle
-            # (~09:25 IST), vs ~10:20 before.
-            same_session = (
-                datetime.fromtimestamp(timestamps[-1], tz=IST).date()
-                == datetime.fromtimestamp(timestamps[-2], tz=IST).date()
-            )
-            crossed_this_candle = same_session and (fast_below_slow != prev_fast_below_slow)
+            crossed_this_candle = fast_below_slow != prev_fast_below_slow
             candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST) if timestamps else None
             self._ema_cross_cache[underlying_symbol] = (
                 datetime.now(IST), fast_below_slow, crossed_this_candle, candle_start,
@@ -1154,9 +1165,9 @@ class DhanWrapper:
     # option_trading_symbol.
     # ------------------------------------------------------------------ #
     def refresh_liquidity_signal(self, option_trading_symbol: str) -> None:
-        """Fetches the OPTION's own 1-min candles for today and checks
-        whether the last config.LIQUIDITY_GUARD_ZERO_VOLUME_BARS fully-
-        closed bars ALL show exactly zero traded volume - a thinly-traded
+        """Fetches the OPTION's own 1-min candles (continuous multi-session
+        series) and checks whether the last config.LIQUIDITY_GUARD_ZERO_
+        VOLUME_BARS fully-closed bars ALL show exactly zero traded volume - a thinly-traded
         contract going quiet for several minutes straight, the precursor
         pattern behind an un-catchable price gap (confirmed live via a
         real 1-min replay of the CHOLAFIN MAX_LOSS_HIT overshoot, 3 Sep
@@ -1172,17 +1183,13 @@ class DhanWrapper:
             return
         try:
             security_id = self._instrument_meta(option_trading_symbol)["security_id"]
-            today = datetime.now(IST).strftime("%Y-%m-%d")
-            resp = _retry(
-                self.client.Dhan.intraday_minute_data,
-                security_id=security_id,
-                exchange_segment="NSE_FNO",
-                instrument_type="OPTSTK",
-                from_date=today,
-                to_date=today,
-                interval=1,
-            )
-            data = resp.get("data") or {}
+            # Continuous multi-session 1-min series (fetch_continuous_intraday)
+            # rather than today-only: the "last N bars all zero volume" check
+            # can then fire in the first N minutes of the session too, using
+            # the prior session's tail - a contract that stopped trading
+            # yesterday afternoon and still isn't trading at today's open is
+            # exactly the quiet-then-gap pattern this guard exists to catch.
+            data = self.fetch_continuous_intraday(security_id, "NSE_FNO", "OPTSTK", 1)
             volumes = data.get("volume") or []
             timestamps = data.get("timestamp") or []
             n = config.LIQUIDITY_GUARD_ZERO_VOLUME_BARS

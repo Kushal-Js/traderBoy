@@ -231,18 +231,18 @@ def _fetch_daily_ohlc(symbol: str, lookback_days: int) -> dict:
     return resp.get("data") or {}
 
 
-def _fetch_intraday(symbol: str, date_str: str, interval: int) -> dict:
+def _fetch_intraday(symbol: str, interval: int) -> dict:
+    """Continuous multi-session series (see
+    dhan_wrapper.fetch_continuous_intraday) - indicators (Supertrend, RSI,
+    ATR) are fully warm from the first bar of today's session rather than
+    reseeded each morning."""
     df = dhan_wrapper.instruments()
     row = df[(df["SEM_TRADING_SYMBOL"] == symbol) & (df["SEM_EXM_EXCH_ID"] == "NSE")
              & (df["SEM_INSTRUMENT_NAME"] == "EQUITY")]
     if row.empty:
         raise ValueError(f"No equity instrument found for {symbol!r}")
     security_id = str(int(row.iloc[0]["SEM_SMST_SECURITY_ID"]))
-    resp = dhan_wrapper.client.Dhan.intraday_minute_data(
-        security_id=security_id, exchange_segment="NSE_EQ", instrument_type="EQUITY",
-        from_date=date_str, to_date=date_str, interval=interval,
-    )
-    return resp.get("data") or {}
+    return dhan_wrapper.fetch_continuous_intraday(security_id, "NSE_EQ", "EQUITY", interval)
 
 
 # --------------------------------------------------------------------- #
@@ -469,8 +469,8 @@ async def _check_watchlist_for_entries(loop: asyncio.AbstractEventLoop, now: dat
         if symbol in _open_positions:
             continue
         try:
-            c5d = await loop.run_in_executor(None, _fetch_intraday, symbol, today.isoformat(), 5)
-            c1d = await loop.run_in_executor(None, _fetch_intraday, symbol, today.isoformat(), 1)
+            c5d = await loop.run_in_executor(None, _fetch_intraday, symbol, 5)
+            c1d = await loop.run_in_executor(None, _fetch_intraday, symbol, 1)
         except Exception:  # noqa: BLE001
             logger.exception("%s: intraday candle fetch failed", symbol)
             continue

@@ -343,11 +343,21 @@ EMA_CROSS_FAST_PERIOD = int(os.getenv("EMA_CROSS_FAST_PERIOD", "9"))
 EMA_CROSS_SLOW_PERIOD = int(os.getenv("EMA_CROSS_SLOW_PERIOD", "12"))
 EMA_CROSS_INTERVAL_MINUTES = int(os.getenv("EMA_CROSS_INTERVAL_MINUTES", "5"))
 EMA_CROSS_REFRESH_SECONDS = int(os.getenv("EMA_CROSS_REFRESH_SECONDS", "15"))
-# Calendar-day lookback for warming the EMAs off prior sessions' 5-min
-# candles so the cross signal is live from the first candle of today's
-# session (not ~1h in). 5 calendar days comfortably covers 3+ trading
-# sessions = 200+ five-min bars, far more than EMA_CROSS_SLOW_PERIOD needs.
-EMA_CROSS_WARMUP_LOOKBACK_DAYS = int(os.getenv("EMA_CROSS_WARMUP_LOOKBACK_DAYS", "5"))
+
+# ---------------------------------------------------------------------------
+# Continuous intraday history (added 10 Sep 2026, user request: "no lag
+# across ALL strategies - calculations run continuously across sessions,
+# not with a fresh day start like a charting platform"). Every intraday
+# indicator fetch (Supertrend, EMA cross, the liquidity guard, Swing's
+# intraday Supertrend, the paper engines) pulls this many CALENDAR days of
+# history THROUGH today rather than today-only, so recursive indicators
+# (Supertrend/EMA/RSI/ATR) are fully seeded from the first bar of the
+# session instead of needing ~an hour of fresh candles to warm up. Read by
+# dhan_wrapper.fetch_continuous_intraday(), which every fetch site now
+# routes through. 7 calendar days always covers >=4 trading sessions even
+# across a long weekend - hundreds of 5-min / thousands of 1-min bars,
+# far more than any period-10..14 indicator needs to be stable.
+INTRADAY_CONTINUOUS_LOOKBACK_DAYS = int(os.getenv("INTRADAY_CONTINUOUS_LOOKBACK_DAYS", "7"))
 
 # Per-package on/off for the EMA-cross exit above. Kept in all three option
 # packages so the Options/Futures trading_engine.py copies stay byte-

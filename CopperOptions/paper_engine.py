@@ -143,12 +143,12 @@ def _fetch_future_daily(security_id: str) -> dict:
 
 
 def _fetch_future_5min(security_id: str) -> dict:
-    today_str = datetime.now(IST).strftime("%Y-%m-%d")
-    resp = dhan_wrapper.client.Dhan.intraday_minute_data(
-        security_id=security_id, exchange_segment="MCX_COMM", instrument_type="FUTCOM",
-        from_date=today_str, to_date=today_str, interval=config.SUPERTREND_INTERVAL_MINUTES,
+    """Continuous multi-session series (see
+    dhan_wrapper.fetch_continuous_intraday) so the Supertrend bands are
+    fully warm from the first bar of today's session, not reseeded daily."""
+    return dhan_wrapper.fetch_continuous_intraday(
+        security_id, "MCX_COMM", "FUTCOM", config.SUPERTREND_INTERVAL_MINUTES,
     )
-    return resp.get("data") or {}
 
 
 def _resolve_option_row(option_type: str, future_price: float):
