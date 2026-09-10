@@ -169,7 +169,7 @@ FUNDS_CHECK_ENABLED = os.getenv("FUTURES_FUNDS_CHECK_ENABLED", "true").lower() =
 
 # See Options/config.py's identical OPTIONS_PRODUCT for the full rationale -
 # "MARGIN" is Tradehull's code for NRML/carry-forward, not "NRML" itself.
-OPTIONS_PRODUCT = os.getenv("FUTURES_OPTIONS_PRODUCT", "MIS")  # rename to reflect futures once real contracts replace the placeholder
+OPTIONS_PRODUCT = os.getenv("FUTURES_OPTIONS_PRODUCT", "MARGIN")  # MARGIN = NRML; code default hardened from "MIS" 10 Sep 2026 so a dropped .env line can't re-enable leveraged intraday. rename to reflect futures once real contracts replace the placeholder
 
 MARKET_TZ = "Asia/Kolkata"
 SQUARE_OFF_TIME = os.getenv("FUTURES_SQUARE_OFF_TIME", "15:15")

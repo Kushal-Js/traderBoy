@@ -457,7 +457,12 @@ FUNDS_CHECK_ENABLED = os.getenv("FUNDS_CHECK_ENABLED", "true").lower() == "true"
 # shut - a position is exposed to the full overnight gap with zero
 # automated response). "NRML" itself is NOT a value Tradehull accepts here -
 # its order_placement() only recognizes MIS/MARGIN/MTF/CO/BO/CNC.
-OPTIONS_PRODUCT = os.getenv("OPTIONS_PRODUCT", "MIS")
+# Code default is "MARGIN" (= NRML): the deployed .env has always set
+# MARGIN, and a config slip that dropped that line must NOT silently fall
+# back to leveraged intraday MIS (user request 10 Sep 2026: "NRML across
+# all strategies"). Set OPTIONS_PRODUCT=MIS explicitly to go back to
+# intraday.
+OPTIONS_PRODUCT = os.getenv("OPTIONS_PRODUCT", "MARGIN")
 
 DEFAULT_EXCHANGE = "NFO"  # Dhan-Tradehull's exchange code for NSE F&O
 
