@@ -1033,11 +1033,14 @@ class DhanWrapper:
     # ------------------------------------------------------------------ #
     # EMA-cross exit signal (added 10 Sep 2026 for Futures - see
     # config.ENABLE_EMA_CROSS_EXIT). Computed on the UNDERLYING's 5-min
-    # closes, same as Supertrend: EMA(EMA_CROSS_FAST_PERIOD) vs
-    # EMA(EMA_CROSS_SLOW_PERIOD). "crossed_this_candle" is True when the
-    # sign of (fast - slow) flipped between the last two fully-closed
-    # candles - that's the "crossed below/above" edge the exit acts on,
-    # not a plain "fast is under slow" state.
+    # closes: EMA(EMA_CROSS_FAST_PERIOD) vs EMA(EMA_CROSS_SLOW_PERIOD).
+    # "crossed_this_candle" is True when the sign of (fast - slow) flipped
+    # between the last two fully-closed candles of the same session - that's
+    # the "crossed below/above" edge the exit acts on, not a plain "fast is
+    # under slow" state. Unlike the Supertrend signal, this fetches several
+    # prior sessions' candles too (config.EMA_CROSS_WARMUP_LOOKBACK_DAYS) so
+    # both EMAs are fully warm from the first candle of the day - no dead
+    # window early in the morning entry window.
     # ------------------------------------------------------------------ #
     def refresh_ema_cross_signal(self, underlying_symbol: str) -> None:
         """Fetches the underlying's 5-min candles and recomputes the fast/slow
@@ -1055,14 +1058,25 @@ class DhanWrapper:
             return
         try:
             security_id = self._equity_security_id(underlying_symbol)
-            today = datetime.now(IST).strftime("%Y-%m-%d")
+            now_ist = datetime.now(IST)
+            # Fetch several PRIOR trading sessions of 5-min candles as well as
+            # today's, not just today's - an EMA is recursive, so seeding it
+            # only from today's candles leaves it unusable until ~13 candles
+            # (period+1) have closed, i.e. no EMA-cross exit at all until
+            # ~10:20 IST for anything in the morning entry window. Pulling
+            # config.EMA_CROSS_WARMUP_LOOKBACK_DAYS of history makes both EMAs
+            # fully warm from the first candle of today's session, so a real
+            # cross after entry is caught immediately whenever it happens (the
+            # only remaining wait is for the 5-min candle it happens in to
+            # actually close - inherent to "EMA of the 5-min CLOSE").
+            from_date = (now_ist - timedelta(days=config.EMA_CROSS_WARMUP_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
             resp = _retry(
                 self.client.Dhan.intraday_minute_data,
                 security_id=security_id,
                 exchange_segment="NSE_EQ",
                 instrument_type="EQUITY",
-                from_date=today,
-                to_date=today,
+                from_date=from_date,
+                to_date=now_ist.strftime("%Y-%m-%d"),
                 interval=config.EMA_CROSS_INTERVAL_MINUTES,
             )
             data = resp.get("data") or {}
@@ -1079,9 +1093,7 @@ class DhanWrapper:
                     closes, timestamps = closes[:-1], timestamps[:-1]
 
             slow = config.EMA_CROSS_SLOW_PERIOD
-            # Need at least two computable slow-EMA values to see a crossover
-            # (the seed lands at index slow-1, so slow+1 closes minimum).
-            if len(closes) < slow + 1:
+            if len(closes) < slow + 2:
                 logger.info("Not enough %d-min candles yet for %s EMA cross (%d bars)",
                             config.EMA_CROSS_INTERVAL_MINUTES, underlying_symbol, len(closes))
                 return
@@ -1093,7 +1105,18 @@ class DhanWrapper:
 
             fast_below_slow = fast_ema[-1] < slow_ema[-1]
             prev_fast_below_slow = fast_ema[-2] < slow_ema[-2]
-            crossed_this_candle = fast_below_slow != prev_fast_below_slow
+            # A genuine crossover needs the two candles being compared to be
+            # consecutive bars of the SAME session - otherwise the very first
+            # candle of the day would compare against the prior day's close
+            # and could fire an exit on an overnight gap. Both the multi-day
+            # fetch above and this guard together mean: fully-warm EMAs, and
+            # the earliest a cross can register today is the 2nd closed candle
+            # (~09:25 IST), vs ~10:20 before.
+            same_session = (
+                datetime.fromtimestamp(timestamps[-1], tz=IST).date()
+                == datetime.fromtimestamp(timestamps[-2], tz=IST).date()
+            )
+            crossed_this_candle = same_session and (fast_below_slow != prev_fast_below_slow)
             candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST) if timestamps else None
             self._ema_cross_cache[underlying_symbol] = (
                 datetime.now(IST), fast_below_slow, crossed_this_candle, candle_start,

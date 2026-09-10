@@ -343,6 +343,11 @@ EMA_CROSS_FAST_PERIOD = int(os.getenv("EMA_CROSS_FAST_PERIOD", "9"))
 EMA_CROSS_SLOW_PERIOD = int(os.getenv("EMA_CROSS_SLOW_PERIOD", "12"))
 EMA_CROSS_INTERVAL_MINUTES = int(os.getenv("EMA_CROSS_INTERVAL_MINUTES", "5"))
 EMA_CROSS_REFRESH_SECONDS = int(os.getenv("EMA_CROSS_REFRESH_SECONDS", "15"))
+# Calendar-day lookback for warming the EMAs off prior sessions' 5-min
+# candles so the cross signal is live from the first candle of today's
+# session (not ~1h in). 5 calendar days comfortably covers 3+ trading
+# sessions = 200+ five-min bars, far more than EMA_CROSS_SLOW_PERIOD needs.
+EMA_CROSS_WARMUP_LOOKBACK_DAYS = int(os.getenv("EMA_CROSS_WARMUP_LOOKBACK_DAYS", "5"))
 
 # Per-package on/off for the EMA-cross exit above. Kept in all three option
 # packages so the Options/Futures trading_engine.py copies stay byte-

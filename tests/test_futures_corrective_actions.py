@@ -43,6 +43,9 @@ Covers, against the REAL production functions (not reimplemented):
  11. EMA_CROSS_EXIT (FUTURES_ENABLE_EMA_CROSS_EXIT=true): fires on a real
      fast/slow EMA crossover against the position on a post-entry 5-min
      candle; ignores a standing state, the entry candle, and the flag off.
+ 12. refresh_ema_cross_signal warms the EMAs off a multi-day candle fetch
+     (signal live from the session's 2nd bar, not ~1h in) and never treats
+     an overnight EMA flip as a crossover.
 
 HOW TO RUN:
     uv run python tests/test_options_corrective_actions.py
@@ -510,6 +513,73 @@ def test_11_ema_cross_exit_signal_and_wiring():
         odc.dhan_wrapper._ema_cross_cache.pop("EMASTOCK", None)
 
 
+def test_12_ema_cross_refresh_warms_off_prior_sessions_and_gates_overnight_gaps():
+    """refresh_ema_cross_signal fetches EMA_CROSS_WARMUP_LOOKBACK_DAYS of
+    prior 5-min candles so both EMAs are warm from the first bar of today -
+    and a "crossover" only counts when the two candles compared are in the
+    SAME session (no exit fired on an overnight gap)."""
+    import types
+    from datetime import timezone
+    IST = fte.IST
+    w = odc.dhan_wrapper
+
+    def bars(day, closes, start_min=0):
+        """5-min bars for `day`, first at 09:15 IST + start_min."""
+        start = datetime(day.year, day.month, day.day, 9, 15, tzinfo=IST) + timedelta(minutes=start_min)
+        ts = [int((start + timedelta(minutes=5 * i)).timestamp()) for i in range(len(closes))]
+        return [float(c) for c in closes], ts
+
+    saved = (w._client, w._equity_security_id, dict(w._ema_cross_cache))
+    real_lb = odc.config.EMA_CROSS_WARMUP_LOOKBACK_DAYS
+    try:
+        w._equity_security_id = lambda sym: "SECID"
+        captured = {}
+
+        yest = datetime.now(IST).date() - timedelta(days=1)
+        today = datetime.now(IST).date()
+
+        def make_client(closes, ts):
+            def intraday_minute_data(security_id, exchange_segment, instrument_type, from_date, to_date, interval):
+                captured["from_date"] = from_date
+                return {"data": {"close": closes, "timestamp": ts}}
+            return types.SimpleNamespace(Dhan=types.SimpleNamespace(intraday_minute_data=intraday_minute_data))
+
+        # Prior session climbs steadily (fast EMA sits above slow). Today holds
+        # near that level for a few bars, then the LAST closed bar drops hard
+        # enough to flip fast under slow -> a genuine same-session cross-below.
+        y_close, y_ts = bars(yest, list(range(100, 130)))               # 100..129
+        t_close, t_ts = bars(today, [129, 129, 129, 60])                # flip lands on bar 4
+        w._ema_cross_cache.clear()
+        w._client = make_client(y_close + t_close, y_ts + t_ts)
+        w.refresh_ema_cross_signal("EMATEST")
+
+        assert captured["from_date"] == (
+            datetime.now(IST) - timedelta(days=odc.config.EMA_CROSS_WARMUP_LOOKBACK_DAYS)
+        ).strftime("%Y-%m-%d"), "must request a multi-day lookback, not just today"
+        assert w.get_cached_ema_cross_bearish("EMATEST") is True, "fast EMA should be below slow after the drop"
+        assert w.get_cached_ema_cross_crossed("EMATEST") is True, "a real same-session cross-below must register"
+        cs = w.get_cached_ema_cross_candle_start("EMATEST")
+        assert cs.date() == today, "signal reads today's candle"
+
+        # Only ONE bar today: the last two closed bars span the overnight
+        # boundary, so a flip there must NOT count as a crossover.
+        t_close1, t_ts1 = bars(today, [60])
+        w._ema_cross_cache.clear()
+        w._client = make_client(y_close + t_close1, y_ts + t_ts1)
+        w.refresh_ema_cross_signal("EMATEST")
+        assert w.get_cached_ema_cross_bearish("EMATEST") is True, "EMA relationship did flip overnight..."
+        assert w.get_cached_ema_cross_crossed("EMATEST") is False, \
+            "...but a flip across the overnight gap (only 1 bar today) must NOT count as a crossover"
+
+        print("12. refresh_ema_cross_signal: warms EMAs off a multi-day fetch (cross live from ~09:25, not "
+              "~10:20) and never treats an overnight EMA flip as a crossover: PASSED")
+    finally:
+        w._client, w._equity_security_id, _cache = saved
+        w._ema_cross_cache.clear()
+        w._ema_cross_cache.update(_cache)
+        odc.config.EMA_CROSS_WARMUP_LOOKBACK_DAYS = real_lb
+
+
 async def main():
     print("=== Futures corrective actions (loss cooldown + liquidity guard + repeat-loss block) test suite ===\n")
     await test_1_real_loss_then_immediate_reentry_blocked()
@@ -523,6 +593,7 @@ async def main():
     test_9_profit_protection_giveback_buffer()
     test_10_target_exit_disabled_flag_suppresses_target_hit()
     test_11_ema_cross_exit_signal_and_wiring()
+    test_12_ema_cross_refresh_warms_off_prior_sessions_and_gates_overnight_gaps()
     print("\nALL FUTURES CORRECTIVE ACTION CHECKS PASSED")
 
 
