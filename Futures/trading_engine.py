@@ -44,7 +44,7 @@ import random
 import re
 import string
 import time
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -151,10 +151,43 @@ def is_past_square_off_time() -> bool:
 
 def is_past_allowed_trading_time() -> bool:
     """See Options/trading_engine.py's identical function - same rationale,
-    this package's own config.ENABLE_TRADING_TIME_LIMIT / ALLOWED_TRADING_TIME."""
+    this package's own config.ENABLE_TRADING_TIME_LIMIT / ALLOWED_TRADING_TIME.
+    Superseded by config.ENABLE_TRADING_WINDOWS when the multi-window
+    schedule is on (short-circuits to False)."""
+    if config.ENABLE_TRADING_WINDOWS:
+        return False
     if not config.ENABLE_TRADING_TIME_LIMIT:
         return False
     return _now_ist() >= _parse_hhmm_today(config.ALLOWED_TRADING_TIME)
+
+
+def _parse_trading_windows(spec: str) -> list[tuple[dt_time, dt_time]]:
+    """See Options/trading_engine.py's identical parser - fail-closed on a
+    malformed spec (empty list -> no window matches -> no new entries)."""
+    windows: list[tuple[dt_time, dt_time]] = []
+    for chunk in (spec or "").split(","):
+        chunk = chunk.strip()
+        if not chunk or "-" not in chunk:
+            continue
+        try:
+            start_s, end_s = chunk.split("-", 1)
+            sh, sm = (int(x) for x in start_s.strip().split(":"))
+            eh, em = (int(x) for x in end_s.strip().split(":"))
+            windows.append((dt_time(sh, sm), dt_time(eh, em)))
+        except (ValueError, TypeError):
+            logger.warning("Ignoring malformed trading-window chunk %r in %r", chunk, spec)
+    return windows
+
+
+def is_within_trading_windows(now: Optional[datetime] = None) -> bool:
+    """See Options/trading_engine.py's identical function - True if
+    config.ENABLE_TRADING_WINDOWS is off, or the current IST time is inside
+    one of config.TRADING_WINDOWS (start inclusive, end exclusive). Only
+    gates NEW entries."""
+    if not config.ENABLE_TRADING_WINDOWS:
+        return True
+    t = (now or _now_ist()).time()
+    return any(start <= t < end for start, end in _parse_trading_windows(config.TRADING_WINDOWS))
 
 
 def _is_before_risk_threshold_cutoff() -> bool:

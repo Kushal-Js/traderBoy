@@ -257,8 +257,14 @@ async def test_2_options_futures_luxury_share_one_secondary_bucket_full_pipeline
     lm.position_store = luxury_store
     lte.position_store = luxury_store
 
+    _time_gates_saved = [(cfg, cfg.ENABLE_TRADING_TIME_LIMIT, cfg.ENABLE_TRADING_WINDOWS)
+                         for cfg in (ote.config, fte.config, lte.config)]
     for cfg in (ote.config, fte.config, lte.config):
         cfg.MAX_LIVE_POSITIONS_CE = 5
+        # this test doesn't freeze the clock and asserts entries proceed - pin
+        # both entry-time gates OFF so it doesn't break when run after 11:00 IST
+        cfg.ENABLE_TRADING_TIME_LIMIT = False
+        cfg.ENABLE_TRADING_WINDOWS = False
 
     # Account balance starts at 100,000 -> secondary bucket = 15,000.
     # Each entry's own proactive check requires 6,000 margin (the
@@ -327,6 +333,8 @@ async def test_2_options_futures_luxury_share_one_secondary_bucket_full_pipeline
         om.rank_and_pick_top_stocks = real_options_rank
         fm.rank_and_pick_top_stocks = real_futures_rank
         lm.rank_and_pick_top_stocks = real_luxury_rank
+        for cfg, tl, tw in _time_gates_saved:
+            cfg.ENABLE_TRADING_TIME_LIMIT, cfg.ENABLE_TRADING_WINDOWS = tl, tw
 
 
 async def test_3_buckets_are_proportional_shares_of_the_same_shifting_total():

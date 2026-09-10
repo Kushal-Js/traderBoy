@@ -66,6 +66,7 @@ from .trading_engine import (
     enter_positions_for_stocks,
     is_past_allowed_trading_time,
     is_past_square_off_time,
+    is_within_trading_windows,
     monitor_loop,
     on_price_tick,
     rank_and_pick_top_stocks,
@@ -200,9 +201,25 @@ async def _handle_chartink_webhook(
             "Options", payload.scan_name, payload.alert_name, stocks, status, reason,
         ))
 
+    if not is_within_trading_windows():
+        # Multi-window schedule (config.ENABLE_TRADING_WINDOWS /
+        # TRADING_WINDOWS). Only gates NEW entries - open positions keep
+        # full exit monitoring regardless.
+        logger.info(
+            "Ignoring alert (%s) - outside today's allowed trading windows (%s), not opening new positions.",
+            option_type, config.TRADING_WINDOWS,
+        )
+        _log_alert("ignored", "outside_trading_windows")
+        return {
+            "status": "ignored",
+            "reason": "outside_trading_windows",
+            "trading_windows": config.TRADING_WINDOWS,
+        }
+
     if is_past_allowed_trading_time():
         # Only gates NEW entries, and only when config.ENABLE_TRADING_TIME_LIMIT
-        # is on - existing open positions keep full exit monitoring
+        # is on (and config.ENABLE_TRADING_WINDOWS is off - windows supersede
+        # this) - existing open positions keep full exit monitoring
         # regardless. See NOTES.md's design-decision entry.
         logger.info(
             "Ignoring alert (%s) - past today's allowed trading cutoff (%s), not opening new positions.",

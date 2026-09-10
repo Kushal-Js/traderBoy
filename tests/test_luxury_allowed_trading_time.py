@@ -134,6 +134,8 @@ async def test_1_before_cutoff_entry_proceeds_normally():
 
     real_enabled = lte.config.ENABLE_TRADING_TIME_LIMIT
     real_cutoff = lte.config.ALLOWED_TRADING_TIME
+    real_windows = lte.config.ENABLE_TRADING_WINDOWS
+    lte.config.ENABLE_TRADING_WINDOWS = False  # this suite tests the SINGLE cutoff; windows would supersede it
     lte.config.ENABLE_TRADING_TIME_LIMIT = True
     lte.config.ALLOWED_TRADING_TIME = "11:00"
     real_rank = lm.rank_and_pick_top_stocks
@@ -158,6 +160,7 @@ async def test_1_before_cutoff_entry_proceeds_normally():
         lm.rank_and_pick_top_stocks = real_rank
         lte.config.ENABLE_TRADING_TIME_LIMIT = real_enabled
         lte.config.ALLOWED_TRADING_TIME = real_cutoff
+        lte.config.ENABLE_TRADING_WINDOWS = real_windows
 
 
 async def test_2_after_cutoff_entry_ignored_zero_orders():
@@ -168,6 +171,8 @@ async def test_2_after_cutoff_entry_ignored_zero_orders():
 
     real_enabled = lte.config.ENABLE_TRADING_TIME_LIMIT
     real_cutoff = lte.config.ALLOWED_TRADING_TIME
+    real_windows = lte.config.ENABLE_TRADING_WINDOWS
+    lte.config.ENABLE_TRADING_WINDOWS = False  # this suite tests the SINGLE cutoff; windows would supersede it
     lte.config.ENABLE_TRADING_TIME_LIMIT = True
     lte.config.ALLOWED_TRADING_TIME = "11:00"
     real_rank = lm.rank_and_pick_top_stocks
@@ -206,6 +211,7 @@ async def test_2_after_cutoff_entry_ignored_zero_orders():
         lm.rank_and_pick_top_stocks = real_rank
         lte.config.ENABLE_TRADING_TIME_LIMIT = real_enabled
         lte.config.ALLOWED_TRADING_TIME = real_cutoff
+        lte.config.ENABLE_TRADING_WINDOWS = real_windows
 
 
 async def test_3_disabled_flag_bypasses_even_past_cutoff():
@@ -216,6 +222,8 @@ async def test_3_disabled_flag_bypasses_even_past_cutoff():
 
     real_enabled = lte.config.ENABLE_TRADING_TIME_LIMIT
     real_cutoff = lte.config.ALLOWED_TRADING_TIME
+    real_windows = lte.config.ENABLE_TRADING_WINDOWS
+    lte.config.ENABLE_TRADING_WINDOWS = False  # this suite tests the SINGLE cutoff; windows would supersede it
     lte.config.ENABLE_TRADING_TIME_LIMIT = False
     lte.config.ALLOWED_TRADING_TIME = "11:00"
     real_rank = lm.rank_and_pick_top_stocks
@@ -240,6 +248,7 @@ async def test_3_disabled_flag_bypasses_even_past_cutoff():
         lm.rank_and_pick_top_stocks = real_rank
         lte.config.ENABLE_TRADING_TIME_LIMIT = real_enabled
         lte.config.ALLOWED_TRADING_TIME = real_cutoff
+        lte.config.ENABLE_TRADING_WINDOWS = real_windows
 
 
 async def main():

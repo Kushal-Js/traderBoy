@@ -316,6 +316,13 @@ FRIDAY_SQUARE_OFF_TIME = os.getenv("LUXURY_FRIDAY_SQUARE_OFF_TIME", "15:20")
 ENABLE_TRADING_TIME_LIMIT = os.getenv("LUXURY_ENABLE_TRADING_TIME_LIMIT", "false").lower() == "true"
 ALLOWED_TRADING_TIME = os.getenv("LUXURY_ALLOWED_TRADING_TIME", "11:30")
 
+# See Options/config.py's ENABLE_TRADING_WINDOWS / TRADING_WINDOWS - the
+# multi-window entry schedule (added 10 Sep 2026). Supersedes the single-
+# cutoff pair above when on. Only gates NEW entries; SQUARE_OFF_TIME still
+# force-closes at 15:15 regardless.
+ENABLE_TRADING_WINDOWS = os.getenv("LUXURY_ENABLE_TRADING_WINDOWS", "false").lower() == "true"
+TRADING_WINDOWS = os.getenv("LUXURY_TRADING_WINDOWS", "09:15-11:00,14:00-15:28")
+
 # See Options/config.py's MONITOR_INTERVAL_SECONDS - LTP_STALE_AFTER_SECONDS
 # lives only in Options/config.py since it governs the one shared
 # dhan_client LTP cache all packages read from - no separate Luxury copy

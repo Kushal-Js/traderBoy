@@ -464,6 +464,20 @@ FRIDAY_SQUARE_OFF_TIME = os.getenv("FRIDAY_SQUARE_OFF_TIME", "15:20")
 # only gates new entries (see option_main.py's webhook handler).
 ENABLE_TRADING_TIME_LIMIT = os.getenv("ENABLE_TRADING_TIME_LIMIT", "false").lower() == "true"
 ALLOWED_TRADING_TIME = os.getenv("ALLOWED_TRADING_TIME", "11:30")
+
+# Multi-window trading schedule (added 10 Sep 2026, user request: "trading
+# only allowed within 09:15-11:00 and 14:00-15:28"). When ENABLE_TRADING_
+# WINDOWS is on, a new entry is refused unless the current IST time falls
+# inside one of the TRADING_WINDOWS ranges. This SUPERSEDES the single-
+# cutoff ENABLE_TRADING_TIME_LIMIT / ALLOWED_TRADING_TIME above - when
+# windows are on, is_past_allowed_trading_time() short-circuits to False so
+# the two mechanisms can't fight. Only gates NEW entries; open positions
+# keep full exit monitoring, and SQUARE_OFF_TIME (15:15) still force-closes
+# regardless - so the practical upper bound is 15:15 even if a window ends
+# later. Format: comma-separated "HH:MM-HH:MM" ranges, start inclusive /
+# end exclusive. Parsed by trading_engine._parse_trading_windows().
+ENABLE_TRADING_WINDOWS = os.getenv("ENABLE_TRADING_WINDOWS", "false").lower() == "true"
+TRADING_WINDOWS = os.getenv("TRADING_WINDOWS", "09:15-11:00,14:00-15:28")
 MARKET_CLOSE_TIME = "15:30"
 
 # Lowered 5->2 (user request 27 Aug 2026) for a tighter fallback-heartbeat

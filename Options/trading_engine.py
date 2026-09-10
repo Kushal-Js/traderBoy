@@ -23,7 +23,7 @@ import random
 import re
 import string
 import time
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -93,10 +93,49 @@ def is_past_allowed_trading_time() -> bool:
     flag is off, this always returns False - new entries are allowed all
     day up to market hours/SQUARE_OFF_TIME, same as before this feature
     existed. Existing open positions are unaffected either way - this only
-    gates new entries, not exit monitoring."""
+    gates new entries, not exit monitoring.
+
+    Superseded by config.ENABLE_TRADING_WINDOWS: when the multi-window
+    schedule is on, that check (is_within_trading_windows) is the sole
+    authority on entry timing and this one short-circuits to False."""
+    if config.ENABLE_TRADING_WINDOWS:
+        return False
     if not config.ENABLE_TRADING_TIME_LIMIT:
         return False
     return _now_ist() >= _parse_hhmm_today(config.ALLOWED_TRADING_TIME)
+
+
+def _parse_trading_windows(spec: str) -> list[tuple[dt_time, dt_time]]:
+    """"HH:MM-HH:MM,HH:MM-HH:MM" -> [(time, time), ...]. Silently skips a
+    malformed chunk rather than raising - a bad window entry must never
+    take the whole webhook path down; the worst case of an unparseable
+    spec is an empty list, i.e. no window ever matches (fail CLOSED - no
+    new entries - which is the safe direction for an entry gate)."""
+    windows: list[tuple[dt_time, dt_time]] = []
+    for chunk in (spec or "").split(","):
+        chunk = chunk.strip()
+        if not chunk or "-" not in chunk:
+            continue
+        try:
+            start_s, end_s = chunk.split("-", 1)
+            sh, sm = (int(x) for x in start_s.strip().split(":"))
+            eh, em = (int(x) for x in end_s.strip().split(":"))
+            windows.append((dt_time(sh, sm), dt_time(eh, em)))
+        except (ValueError, TypeError):
+            logger.warning("Ignoring malformed trading-window chunk %r in %r", chunk, spec)
+    return windows
+
+
+def is_within_trading_windows(now: Optional[datetime] = None) -> bool:
+    """True if config.ENABLE_TRADING_WINDOWS is off (no restriction), or if
+    the current IST time falls inside one of config.TRADING_WINDOWS. Each
+    window is [start, end) - start inclusive, end exclusive. Only gates
+    NEW entries (called from the webhook handlers); open positions keep
+    full exit monitoring regardless."""
+    if not config.ENABLE_TRADING_WINDOWS:
+        return True
+    t = (now or _now_ist()).time()
+    return any(start <= t < end for start, end in _parse_trading_windows(config.TRADING_WINDOWS))
 
 
 def _is_before_risk_threshold_cutoff() -> bool:

@@ -49,6 +49,7 @@ from .trading_engine import (
     enter_positions_for_stocks,
     is_past_allowed_trading_time,
     is_past_square_off_time,
+    is_within_trading_windows,
     monitor_loop,
     on_price_tick,
     rank_and_pick_top_stocks,
@@ -143,6 +144,18 @@ async def chartink_webhook_futures(payload: ChartinkWebhookPayload):
         fire_and_forget(record_webhook_alert(
             "Futures", payload.scan_name, payload.alert_name, stocks, status, reason,
         ))
+
+    if not is_within_trading_windows():
+        logger.info(
+            "Ignoring alert - outside today's allowed trading windows (%s), not opening new positions.",
+            config.TRADING_WINDOWS,
+        )
+        _log_alert("ignored", "outside_trading_windows")
+        return {
+            "status": "ignored",
+            "reason": "outside_trading_windows",
+            "trading_windows": config.TRADING_WINDOWS,
+        }
 
     if is_past_allowed_trading_time():
         logger.info(
