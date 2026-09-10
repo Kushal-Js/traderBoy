@@ -117,6 +117,29 @@ def _option(security_id):
     return _min_data(security_id, "NSE_FNO", "OPTSTK", OPTION_TF, 4)
 
 
+def real_trades_today() -> dict[str, dict]:
+    """{underlying_symbol: its FIRST closed real trade today} across the
+    shadow strategies. For a symbol the bot actually traded we use the
+    REAL entry/exit/pnl (known) instead of re-simulating - the simulator
+    can pick a different ATM strike or a candle price that diverges from
+    the real fill (OIL, 10 Sep: sim tracked the 510 CE @ 16.50 candle and
+    lost, the bot really traded the 505 CE @ 14.40 fill and made +2,030)."""
+    p = HISTORY / f"{_today_iso()}_real_trades.log"
+    out: dict[str, dict] = {}
+    if not p.exists():
+        return out
+    for line in p.read_text().splitlines():
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        if r.get("strategy") not in SHADOW_STRATEGIES or r.get("exit_price") is None:
+            continue
+        s = (r.get("underlying_symbol") or "").strip().upper()
+        if s and (s not in out or r["opened_at"] < out[s]["opened_at"]):
+            out[s] = r
+    return out
+
+
 def first_alerts_today() -> dict[str, str]:
     p = HISTORY / f"{_today_iso()}_webhook_alerts.log"
     out: dict[str, str] = {}
@@ -178,6 +201,7 @@ def _idx_at_or_after(ts, target):
 
 def open_new_shadows(st):
     alerts = first_alerts_today()
+    real = real_trades_today()
     now_ts = datetime.now(IST).timestamp()
     seen = set(st["open"]) | {x["symbol"] for x in st["closed"]}
     for sym, alert_iso in sorted(alerts.items(), key=lambda kv: kv[1]):
@@ -186,6 +210,26 @@ def open_new_shadows(st):
         alert_dt = datetime.fromisoformat(alert_iso)
         if alert_dt.timestamp() > now_ts:
             continue
+
+        # If the bot ACTUALLY traded this symbol today, record its real
+        # outcome (known) rather than re-simulating a possibly-different
+        # strike / candle entry.
+        if sym in real:
+            rt = real[sym]
+            pnl = rt.get("pnl")
+            if pnl is None and rt.get("exit_price") is not None and rt.get("entry_price") is not None:
+                pnl = (rt["exit_price"] - rt["entry_price"]) * rt["quantity"]
+            st["closed"].append({
+                "symbol": sym, "alert_dt": alert_iso, "source": "real",
+                "trading_symbol": rt.get("option_trading_symbol"),
+                "entry_price": round(rt["entry_price"], 2), "exit_price": round(rt["exit_price"], 2),
+                "quantity": rt["quantity"], "highest": round(rt["exit_price"], 2),
+                "exit_reason": f"REAL/{rt.get('exit_reason')}", "exit_dt": rt.get("closed_at"),
+                "pnl": round(pnl or 0, 2), "status": "closed",
+            })
+            print(f"  = REAL {sym:<12} {rt.get('exit_reason'):<20} pnl={pnl or 0:+.0f}  (bot actually traded this)")
+            continue
+
         und = _underlying(sym)
         if not und["cl"]:
             print(f"  {sym}: skip - no underlying data (rate-limited? retries next run)")
@@ -206,7 +250,8 @@ def open_new_shadows(st):
             continue
         qty = ce["lot_size"] * c.QUANTITY_LOTS
         st["open"][sym] = {
-            "symbol": sym, "alert_dt": alert_iso, "trading_symbol": ce["trading_symbol"],
+            "symbol": sym, "alert_dt": alert_iso, "source": "shadow",
+            "trading_symbol": ce["trading_symbol"],
             "security_id": ce["security_id"], "strike": ce["strike"], "lot_size": ce["lot_size"],
             "entry_price": round(entry, 2), "quantity": qty, "highest": round(entry, 2),
             "entry_underlying_ts": und["ts"][ui], "opened_eval_at": datetime.now(IST).isoformat(),
@@ -286,21 +331,25 @@ def report(st):
     realized = sum(x.get("pnl", 0) for x in closed)
     unreal = sum(x.get("unrealized_pnl", 0) for x in opn.values())
     wins = [x for x in closed if x.get("pnl", 0) > 0]
+    real_pnl = sum(x.get("pnl", 0) for x in closed if x.get("source") == "real")
+    n_real = sum(1 for x in closed if x.get("source") == "real")
+    sim_pnl = realized - real_pnl + unreal
     line = (f"{datetime.now(IST).strftime('%Y-%m-%d %H:%M')} | {len(closed)} closed "
             f"({len(wins)}W/{len(closed) - len(wins)}L) realized={realized:+.0f} | "
-            f"{len(opn)} open unrealized={unreal:+.0f} | NET={realized + unreal:+.0f}")
+            f"{len(opn)} open unrealized={unreal:+.0f} | NET={realized + unreal:+.0f} "
+            f"[real-traded {n_real}: {real_pnl:+.0f} | missed/simulated: {sim_pnl:+.0f}]")
     print("\n" + line)
     with (HISTORY / f"{_today_iso()}_shadow_pnl.log").open("a") as f:
         f.write(line + "\n")
     if closed or opn:
-        print(f"\n{'sym':<13}{'alert':>6}{'entry':>9}{'now/exit':>10}{'qty':>7}  {'reason':<22}{'pnl':>9}")
+        print(f"\n{'sym':<13}{'alert':>6}{'src':>7}{'entry':>9}{'now/exit':>10}{'qty':>7}  {'reason':<22}{'pnl':>9}")
         for x in sorted(closed, key=lambda z: z.get("alert_dt", "")):
             print(f"{x['symbol']:<13}{datetime.fromisoformat(x['alert_dt']).strftime('%H:%M'):>6}"
-                  f"{x['entry_price']:>9.2f}{x['exit_price']:>10.2f}{x['quantity']:>7}  "
+                  f"{x.get('source', 'shadow'):>7}{x['entry_price']:>9.2f}{x['exit_price']:>10.2f}{x['quantity']:>7}  "
                   f"{x['exit_reason']:<22}{x['pnl']:>+9.0f}")
         for x in sorted(opn.values(), key=lambda z: z.get("alert_dt", "")):
             print(f"{x['symbol']:<13}{datetime.fromisoformat(x['alert_dt']).strftime('%H:%M'):>6}"
-                  f"{x['entry_price']:>9.2f}{x.get('mark_price', x['entry_price']):>10.2f}{x['quantity']:>7}  "
+                  f"{x.get('source', 'shadow'):>7}{x['entry_price']:>9.2f}{x.get('mark_price', x['entry_price']):>10.2f}{x['quantity']:>7}  "
                   f"{'(open)':<22}{x.get('unrealized_pnl', 0):>+9.0f}")
 
 
