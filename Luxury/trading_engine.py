@@ -851,7 +851,10 @@ def _exit_reason_for(
     the current_max_loss_per_trade_rs() absolute rupee-loss cap checked
     first and the current_profit_protection_threshold_rs() rupee profit-
     lock checked after TARGET_HIT - both split into a before/after-
-    config.RISK_THRESHOLD_CUTOFF_TIME pair.
+    config.RISK_THRESHOLD_CUTOFF_TIME pair. MAX_LOSS_HIT itself is
+    additionally gated by config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF
+    (added 11 Sep 2026, default False - never fires before the cutoff at
+    all unless turned back on); nothing else here is affected by it.
 
     liquidity_guard_triggered (added 2 Sep 2026, this package only so
     far - see config.LIQUIDITY_GUARD_ENABLED's own docstring) is checked
@@ -864,7 +867,8 @@ def _exit_reason_for(
     price was still roughly flat (nowhere near any threshold) when the
     illiquidity was already visible, several minutes before the gap."""
     loss_rs = (position.entry_price - ltp) * position.quantity
-    if loss_rs >= current_max_loss_per_trade_rs():
+    if (config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF or not _is_before_risk_threshold_cutoff()) \
+            and loss_rs >= current_max_loss_per_trade_rs():
         return "MAX_LOSS_HIT"
     if config.ENABLE_TARGET_EXIT and ltp >= position.target_price:
         return "TARGET_HIT"

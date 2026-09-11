@@ -119,6 +119,12 @@ ENABLE_TARGET_EXIT = os.getenv("FUTURES_ENABLE_TARGET_EXIT", "true").lower() == 
 MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF = float(os.getenv("FUTURES_MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF", "1200"))
 MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF = float(os.getenv("FUTURES_MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF", "1000"))
 
+# See Options/config.py's ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF comment (11
+# Sep 2026) for the full rationale - this package's own independently-
+# tunable switch. Default False = MAX_LOSS_HIT never fires before
+# RISK_THRESHOLD_CUTOFF_TIME; every other exit is unaffected.
+ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF = os.getenv("FUTURES_ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF", "false").lower() == "true"
+
 # See Options/config.py's PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF/
 # _AFTER_CUTOFF - identical rationale, this package's own independently-
 # tunable pair.

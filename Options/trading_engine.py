@@ -1098,6 +1098,16 @@ def _exit_reason_for(
     config.RISK_THRESHOLD_CUTOFF_TIME (user request 31 Aug 2026) - see
     current_max_loss_per_trade_rs()'s own docstring.
 
+    MAX_LOSS_HIT is additionally gated by config.ENABLE_MAX_LOSS_HIT_
+    BEFORE_CUTOFF (added 11 Sep 2026, default False, see its own
+    docstring): before RISK_THRESHOLD_CUTOFF_TIME, this exit never fires
+    at all (any loss amount) unless that flag is explicitly turned back
+    on - the idea being the more volatile first part of the session
+    should be governed by trend-reversal signals (SUPERTREND_EXIT/
+    EMA_CROSS_EXIT below) rather than a hard rupee cap. From the cutoff
+    onward this check is unconditional again, same as always. Nothing
+    else in this function is affected by that flag.
+
     The fixed +TARGET_PCT exit is gated by config.ENABLE_TARGET_EXIT
     (default on). With it off (Futures, 10 Sep 2026) a winner is never
     closed just for touching target_price - it rides on to the checks
@@ -1133,7 +1143,8 @@ def _exit_reason_for(
     right after SUPERTREND_EXIT and before the liquidity guard. Caller
     fetches/passes it (see _ema_cross_signal_for)."""
     loss_rs = (position.entry_price - ltp) * position.quantity
-    if loss_rs >= current_max_loss_per_trade_rs():
+    if (config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF or not _is_before_risk_threshold_cutoff()) \
+            and loss_rs >= current_max_loss_per_trade_rs():
         return "MAX_LOSS_HIT"
     if config.ENABLE_TARGET_EXIT and ltp >= position.target_price:
         return "TARGET_HIT"

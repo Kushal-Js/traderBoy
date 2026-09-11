@@ -612,6 +612,34 @@ def test_16_profit_protection_giveback_buffer():
         lte.config.PROFIT_PROTECTION_GIVEBACK_PCT = real
 
 
+def test_17_ema_cross_exit_gated_by_its_own_flag():
+    """LUXURY_ENABLE_EMA_CROSS_EXIT turned on in production 11 Sep 2026
+    (user request: "add exit conditions as below: EMA 9 of 5 min close
+    crossed below EMA 12 of 5 min close or 5 min close crossed below 5
+    min supertrend" for Options/Futures/Luxury). The underlying signal
+    computation (dhan_client.py's refresh_ema_cross_signal) is already
+    fully tested against Futures' own tag in tests/test_futures_
+    corrective_actions.py (tests 11-12) - this only proves LUXURY's own
+    _exit_reason_for wiring: off means the crossed-against-position
+    signal is ignored, on means it fires EMA_CROSS_EXIT."""
+    pos = Position(
+        underlying_symbol="EMASTOCK", option_trading_symbol="EMASTOCK 29 SEP 100 CALL",
+        option_type="CE", quantity=100, lot_size=100, entry_price=10.0, target_price=99.0,
+        highest_price=10.0, hard_stop_loss=1.0, order_id="X", product_type="MARGIN",
+    )
+    real = lte.config.ENABLE_EMA_CROSS_EXIT
+    try:
+        lte.config.ENABLE_EMA_CROSS_EXIT = False
+        assert lte._exit_reason_for(pos, ltp=10.0, ema_cross_against_position=True) is None, \
+            "flag off must ignore even a genuine crossed-against-position signal"
+        lte.config.ENABLE_EMA_CROSS_EXIT = True
+        assert lte._exit_reason_for(pos, ltp=10.0, ema_cross_against_position=True) == "EMA_CROSS_EXIT"
+        print("17. Luxury's EMA-cross exit is correctly gated by ENABLE_EMA_CROSS_EXIT - ignored off, "
+              "fires EMA_CROSS_EXIT on: PASSED")
+    finally:
+        lte.config.ENABLE_EMA_CROSS_EXIT = real
+
+
 async def main():
     print("=== Luxury corrective actions (RSI loss-reentry block + liquidity guard + repeat-loss block) test suite ===\n")
     await test_1_real_loss_plus_rsi_condition_blocks_reentry_other_symbol_unaffected()
@@ -630,6 +658,7 @@ async def main():
     await test_14_real_second_loss_blocks_third_entry_same_day()
     await test_15_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses()
     test_16_profit_protection_giveback_buffer()
+    test_17_ema_cross_exit_gated_by_its_own_flag()
     print("\nALL LUXURY CORRECTIVE ACTION CHECKS PASSED")
 
 

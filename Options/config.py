@@ -250,6 +250,29 @@ ENABLE_TARGET_EXIT = os.getenv("ENABLE_TARGET_EXIT", "true").lower() == "true"
 MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF = float(os.getenv("MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF", "1200"))
 MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF = float(os.getenv("MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF", "1000"))
 
+# Master on/off switch for the MAX_LOSS_HIT exit specifically BEFORE
+# RISK_THRESHOLD_CUTOFF_TIME (added 11 Sep 2026, user request: "disable
+# MAX_LOSS_HIT for before 11:30 and add exit conditions as below: EMA 9
+# of 5 min close crossed below EMA 12 of 5 min close or 5 min close
+# crossed below 5 min supertrend" - i.e. rely on trend-reversal exits
+# (Supertrend/EMA-cross below) rather than a hard rupee cap during the
+# more volatile first part of the session, and only start enforcing
+# MAX_LOSS_HIT from the cutoff onward). Default False = the requested
+# behavior (no MAX_LOSS_HIT before cutoff at all, at any loss amount);
+# set True to restore the original always-on behavior. Only this ONE
+# exit is affected - TARGET_HIT/PROFIT_PROTECTION_HIT/the percentage
+# TRAILING_SL_HIT-STOP_LOSS_HIT/SUPERTREND_EXIT/EMA_CROSS_EXIT/
+# LIQUIDITY_GUARD all still apply before cutoff exactly as before. Note
+# this genuinely widens the morning downside on a single trade: with
+# this off, the effective floor before cutoff becomes whatever the
+# percentage stop-loss (STOP_LOSS_PCT, dynamic-SL-adjusted) or a trend-
+# reversal signal catches first - which, on a large-quantity/low-premium
+# position, can be a materially bigger rupee loss than the
+# MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF cap this replaces. See
+# trading_engine._exit_reason_for()'s own comment for exactly where this
+# is checked.
+ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF = os.getenv("ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF", "false").lower() == "true"
+
 # Absolute per-trade rupee profit-protection threshold, added 26 Aug 2026 by
 # user request - the mirror image of MAX_LOSS_PER_TRADE_RS above, but on the
 # upside. Once a trade's PEAK unrealized profit ((highest_price -
