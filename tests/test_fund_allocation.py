@@ -106,6 +106,12 @@ def install_dhan_mocks(available_balance=100000.0, margin_per_leg=999.0, fund_li
         "unsubscribe_option_price": odc.dhan_wrapper.unsubscribe_option_price,
         "refresh_supertrend_signal": odc.dhan_wrapper.refresh_supertrend_signal,
         "get_cached_supertrend_candle_start": odc.dhan_wrapper.get_cached_supertrend_candle_start,
+        "refresh_ema_cross_signal": odc.dhan_wrapper.refresh_ema_cross_signal,
+        "get_cached_ema_cross_candle_start": odc.dhan_wrapper.get_cached_ema_cross_candle_start,
+        "is_rsi_loss_reentry_blocked": odc.dhan_wrapper.is_rsi_loss_reentry_blocked,
+        "get_cached_rsi": odc.dhan_wrapper.get_cached_rsi,
+        "get_cached_prev_rsi": odc.dhan_wrapper.get_cached_prev_rsi,
+        "rsi_loss_reentry_reason": odc.dhan_wrapper.rsi_loss_reentry_reason,
         "place_market_order": odc.dhan_wrapper.place_market_order,
         "place_stop_loss_limit_order": odc.dhan_wrapper.place_stop_loss_limit_order,
         "place_stop_loss_market_order": odc.dhan_wrapper.place_stop_loss_market_order,
@@ -121,6 +127,13 @@ def install_dhan_mocks(available_balance=100000.0, margin_per_leg=999.0, fund_li
     odc.dhan_wrapper.subscribe_option_price = lambda ts: None
     odc.dhan_wrapper.unsubscribe_option_price = lambda ts: None
     odc.dhan_wrapper.refresh_supertrend_signal = lambda sym: None
+    odc.dhan_wrapper.get_cached_supertrend_candle_start = lambda sym: None
+    odc.dhan_wrapper.refresh_ema_cross_signal = lambda sym: None
+    odc.dhan_wrapper.get_cached_ema_cross_candle_start = lambda sym: None
+    odc.dhan_wrapper.is_rsi_loss_reentry_blocked = lambda sym: False
+    odc.dhan_wrapper.get_cached_rsi = lambda sym: None
+    odc.dhan_wrapper.get_cached_prev_rsi = lambda sym: None
+    odc.dhan_wrapper.rsi_loss_reentry_reason = lambda sym: None
     odc.dhan_wrapper.get_cached_supertrend_candle_start = lambda sym: None
 
     if fund_limits_sequence is not None:
