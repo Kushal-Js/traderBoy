@@ -76,10 +76,15 @@ def _freeze_time(module, dt: datetime):
 
 
 def test_1_lookup_functions_switch_at_the_cutoff():
+    """1200->1500 (user request 11 Sep 2026, alongside re-enabling
+    ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF after the disable-before-11:30
+    experiment - see that flag's own docstring) - pinned to the current
+    deployed value, same convention as every other "pinned" test in this
+    suite when a live constant changes."""
     for label, module in (("Options", ote), ("Futures", fte)):
         restore = _freeze_time(module, BEFORE_CUTOFF)
         try:
-            assert module.current_max_loss_per_trade_rs() == 1200, label
+            assert module.current_max_loss_per_trade_rs() == 1500, label
             assert module.current_profit_protection_threshold_rs() == 1500, label
         finally:
             restore()
@@ -91,7 +96,7 @@ def test_1_lookup_functions_switch_at_the_cutoff():
         finally:
             restore()
     print("1. current_max_loss_per_trade_rs()/current_profit_protection_threshold_rs() "
-          "return 1200/1500 before 11:30 and 1000/1000 after, for both Options and Futures: PASSED")
+          "return 1500/1500 before 11:30 and 1000/1000 after, for both Options and Futures: PASSED")
 
 
 def test_2_exact_boundary_instant_counts_as_after():
@@ -168,14 +173,15 @@ def test_3_exit_reason_for_uses_the_correct_cap_on_each_side():
         real_enabled = module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF
         module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF = True
         # MAX_LOSS_HIT: loss of Rs 1100 (entry 2000, ltp 900) -> under the
-        # 1200 morning cap (no trip) but over the 1000 afternoon cap (trips).
+        # (looser) BEFORE-cutoff cap (1500, no trip) but over the 1000/1100
+        # AFTER-cutoff cap (trips).
         pos = make_position()
         ltp = pos.entry_price - 1100.0  # loss_rs = (2000 - 900) * 1 = 1100
 
         restore = _freeze_time(module, BEFORE_CUTOFF)
         try:
             assert module._exit_reason_for(pos, ltp) is None, \
-                f"{label}: a Rs 1100 loss must NOT trip any exit before 11:30 (max-loss cap is 1200)"
+                f"{label}: a Rs 1100 loss must NOT trip any exit before 11:30 (max-loss cap is 1500)"
         finally:
             restore()
 
@@ -221,21 +227,28 @@ def test_3_exit_reason_for_uses_the_correct_cap_on_each_side():
 # --------------------------------------------------------------------- #
 
 def test_4_max_loss_hit_disabled_before_cutoff_regardless_of_loss_size():
-    """Default (False): unlike test_3 above, this isn't about which
-    threshold value applies - a HUGE loss (Rs 50,000, dwarfing even the
-    old 1200/1300 morning cap) must still produce no exit before the
-    cutoff, and the moment the clock crosses into the afternoon, the
-    exact same position fires MAX_LOSS_HIT normally."""
+    """The code default ships False (see Options/config.py's own
+    docstring) - deployed live as True as of 11 Sep 2026 (re-enabled at
+    a looser Rs 1500 before-cutoff cap, after the fully-disabled
+    experiment cost more than it saved against real trades - see
+    trading-skills' capacity-and-ranking.md). This test explicitly
+    forces the flag OFF (save/restore) rather than assuming it's the
+    ambient value, so it stays meaningful regardless of what's currently
+    deployed: unlike test_3 above, this isn't about which threshold
+    value applies - a HUGE loss (Rs 50,000, dwarfing even the loosest
+    before-cutoff cap ever used) must still produce no exit before the
+    cutoff when the flag is off, and the moment the clock crosses into
+    the afternoon, the exact same position fires MAX_LOSS_HIT normally."""
     for label, module, make_position in ALL_MAKE_POSITION:
-        assert module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF is False, \
-            f"{label}: this feature must ship OFF by default"
+        real_enabled = module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF
+        module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF = False
         pos = make_position()
         ltp = pos.entry_price - 50_000.0  # a loss no morning cap has ever been anywhere close to
 
         restore = _freeze_time(module, BEFORE_CUTOFF)
         try:
             assert module._exit_reason_for(pos, ltp) is None, \
-                f"{label}: MAX_LOSS_HIT must not fire before the cutoff AT ALL, any loss size, by default"
+                f"{label}: MAX_LOSS_HIT must not fire before the cutoff AT ALL, any loss size, when the flag is off"
         finally:
             restore()
 
@@ -245,7 +258,8 @@ def test_4_max_loss_hit_disabled_before_cutoff_regardless_of_loss_size():
                 f"{label}: the SAME position must trip MAX_LOSS_HIT normally once past the cutoff"
         finally:
             restore()
-    print("4. ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF=False (the default) suppresses MAX_LOSS_HIT before "
+            module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF = real_enabled
+    print("4. ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF=False suppresses MAX_LOSS_HIT before "
           "the cutoff regardless of loss size, for Options/Futures/Luxury, while firing normally "
           "the instant the clock crosses into the afternoon: PASSED")
 
@@ -271,14 +285,17 @@ def test_6_disable_is_scoped_to_max_loss_hit_only():
     """The percentage stop-loss (STOP_LOSS_PCT/dynamic-SL) must still
     catch a large enough loss before the cutoff even with MAX_LOSS_HIT
     disabled - this feature narrows WHICH exit fires, it doesn't remove
-    downside protection altogether."""
+    downside protection altogether. Flag forced off explicitly (see
+    test_4's own docstring for why - not assumed from whatever's
+    currently deployed)."""
     for label, module, make_position in ALL_MAKE_POSITION:
-        assert module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF is False, f"{label}: default must be off"
+        real_enabled = module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF
+        module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF = False
         # hard_stop_loss set close to entry (unlike the other tests' -1e6
         # placeholder) so a modest drop trips the percentage stop - but
         # kept small enough in RUPEE terms (qty=1) that it would NEVER
-        # have tripped even the old 1200/1300 MAX_LOSS_HIT cap on its own,
-        # isolating this as a TRAILING_SL_HIT/STOP_LOSS_HIT, not a
+        # have tripped even the loosest MAX_LOSS_HIT cap ever used on its
+        # own, isolating this as a TRAILING_SL_HIT/STOP_LOSS_HIT, not a
         # coincidental MAX_LOSS_HIT.
         pos = make_position(hard_stop_loss=1990.0)  # 10 rupees below entry (2000)
         ltp = 1985.0  # loss_rs = 15 - far below any MAX_LOSS_HIT cap, but below hard_stop_loss
@@ -289,6 +306,7 @@ def test_6_disable_is_scoped_to_max_loss_hit_only():
                 f"{label}: the percentage stop-loss must still fire before the cutoff, got {reason}"
         finally:
             restore()
+            module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF = real_enabled
     print("6. The MAX_LOSS_HIT-before-cutoff disable is scoped to that ONE exit - the percentage "
           "stop-loss still fires normally before the cutoff, for Options/Futures/Luxury: PASSED")
 

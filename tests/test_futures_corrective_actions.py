@@ -114,6 +114,8 @@ def install_all_dhan_mocks():
         "refresh_supertrend_signal": odc.dhan_wrapper.refresh_supertrend_signal,
         "get_cached_supertrend_bearish": odc.dhan_wrapper.get_cached_supertrend_bearish,
         "get_cached_supertrend_candle_start": odc.dhan_wrapper.get_cached_supertrend_candle_start,
+        "refresh_ema_cross_signal": odc.dhan_wrapper.refresh_ema_cross_signal,
+        "get_cached_ema_cross_candle_start": odc.dhan_wrapper.get_cached_ema_cross_candle_start,
         "is_rsi_loss_reentry_blocked": odc.dhan_wrapper.is_rsi_loss_reentry_blocked,
         "get_cached_rsi": odc.dhan_wrapper.get_cached_rsi,
         "get_cached_prev_rsi": odc.dhan_wrapper.get_cached_prev_rsi,
@@ -134,6 +136,8 @@ def install_all_dhan_mocks():
     odc.dhan_wrapper.refresh_supertrend_signal = lambda underlying_symbol: None
     odc.dhan_wrapper.get_cached_supertrend_bearish = lambda underlying_symbol: None
     odc.dhan_wrapper.get_cached_supertrend_candle_start = lambda underlying_symbol: None
+    odc.dhan_wrapper.refresh_ema_cross_signal = lambda underlying_symbol: None
+    odc.dhan_wrapper.get_cached_ema_cross_candle_start = lambda underlying_symbol: None
     odc.dhan_wrapper.is_rsi_loss_reentry_blocked = lambda underlying_symbol: False
     odc.dhan_wrapper.get_cached_rsi = lambda underlying_symbol: None
     odc.dhan_wrapper.get_cached_prev_rsi = lambda underlying_symbol: None

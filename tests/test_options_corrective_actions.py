@@ -111,6 +111,8 @@ def install_all_dhan_mocks():
         "refresh_supertrend_signal": odc.dhan_wrapper.refresh_supertrend_signal,
         "get_cached_supertrend_bearish": odc.dhan_wrapper.get_cached_supertrend_bearish,
         "get_cached_supertrend_candle_start": odc.dhan_wrapper.get_cached_supertrend_candle_start,
+        "refresh_ema_cross_signal": odc.dhan_wrapper.refresh_ema_cross_signal,
+        "get_cached_ema_cross_candle_start": odc.dhan_wrapper.get_cached_ema_cross_candle_start,
         "is_rsi_loss_reentry_blocked": odc.dhan_wrapper.is_rsi_loss_reentry_blocked,
         "get_cached_rsi": odc.dhan_wrapper.get_cached_rsi,
         "get_cached_prev_rsi": odc.dhan_wrapper.get_cached_prev_rsi,
@@ -131,6 +133,8 @@ def install_all_dhan_mocks():
     odc.dhan_wrapper.refresh_supertrend_signal = lambda underlying_symbol: None
     odc.dhan_wrapper.get_cached_supertrend_bearish = lambda underlying_symbol: None
     odc.dhan_wrapper.get_cached_supertrend_candle_start = lambda underlying_symbol: None
+    odc.dhan_wrapper.refresh_ema_cross_signal = lambda underlying_symbol: None
+    odc.dhan_wrapper.get_cached_ema_cross_candle_start = lambda underlying_symbol: None
     # Default: never blocks (tests that specifically exercise the RSI-loss-
     # reentry wiring override this to a controlled verdict; every other
     # test in this file never wants a real network call here).
@@ -320,22 +324,27 @@ def test_5b_target_exit_disabled_flag_suppresses_target_hit_only():
         ote.config.ENABLE_TARGET_EXIT = real
 
 
-def test_5c_ema_cross_exit_off_by_default_for_options():
-    """ENABLE_EMA_CROSS_EXIT ships off for Options (only Futures runs it).
-    With it off, _exit_reason_for never returns EMA_CROSS_EXIT even when the
-    caller passes ema_cross_against_position=True; with it on, it does."""
+def test_5c_ema_cross_exit_gated_by_its_own_flag():
+    """ENABLE_EMA_CROSS_EXIT ships off in code (Options/config.py's own
+    default) - turned on in production 11 Sep 2026 alongside Luxury (was
+    Futures-only before that). Flag forced explicitly both ways here
+    (save/restore) rather than assumed from whatever's currently
+    deployed, so this stays meaningful regardless: off must ignore even
+    a genuine crossed-against-position signal, on must fire EMA_CROSS_EXIT."""
     pos = Position(
         underlying_symbol="EMASTOCK", option_trading_symbol="EMASTOCK 29 SEP 100 CALL",
         option_type="CE", quantity=100, lot_size=100, entry_price=10.0, target_price=99.0,
         highest_price=10.0, hard_stop_loss=1.0, order_id="X", product_type="MARGIN",
     )
-    assert ote.config.ENABLE_EMA_CROSS_EXIT is False, "Options must ship with the EMA-cross exit off"
-    assert ote._exit_reason_for(pos, ltp=10.0, ema_cross_against_position=True) is None
     real = ote.config.ENABLE_EMA_CROSS_EXIT
     try:
+        ote.config.ENABLE_EMA_CROSS_EXIT = False
+        assert ote._exit_reason_for(pos, ltp=10.0, ema_cross_against_position=True) is None, \
+            "flag off must ignore even a genuine crossed-against-position signal"
         ote.config.ENABLE_EMA_CROSS_EXIT = True
         assert ote._exit_reason_for(pos, ltp=10.0, ema_cross_against_position=True) == "EMA_CROSS_EXIT"
-        print("5c. EMA-cross exit is off for Options by default and gated by ENABLE_EMA_CROSS_EXIT: PASSED")
+        print("5c. Options' EMA-cross exit is correctly gated by ENABLE_EMA_CROSS_EXIT - ignored off, "
+              "fires EMA_CROSS_EXIT on: PASSED")
     finally:
         ote.config.ENABLE_EMA_CROSS_EXIT = real
 
@@ -497,7 +506,7 @@ async def main():
     test_4_liquidity_guard_fires_when_nothing_else_would_have()
     test_5_price_threshold_exit_still_takes_priority_over_liquidity_guard()
     test_5b_target_exit_disabled_flag_suppresses_target_hit_only()
-    test_5c_ema_cross_exit_off_by_default_for_options()
+    test_5c_ema_cross_exit_gated_by_its_own_flag()
     test_6_liquidity_guard_disabled_flag_bypasses_the_check()
     await test_7_real_second_loss_blocks_third_entry_same_day()
     await test_8_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses()

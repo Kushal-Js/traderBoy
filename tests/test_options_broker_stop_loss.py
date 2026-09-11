@@ -118,6 +118,12 @@ def install_all_dhan_mocks(stop_loss_order_id_factory=None, fail_stop_loss_place
         "refresh_supertrend_signal": odc.dhan_wrapper.refresh_supertrend_signal,
         "get_cached_supertrend_bearish": odc.dhan_wrapper.get_cached_supertrend_bearish,
         "get_cached_supertrend_candle_start": odc.dhan_wrapper.get_cached_supertrend_candle_start,
+        "refresh_ema_cross_signal": odc.dhan_wrapper.refresh_ema_cross_signal,
+        "get_cached_ema_cross_candle_start": odc.dhan_wrapper.get_cached_ema_cross_candle_start,
+        "is_rsi_loss_reentry_blocked": odc.dhan_wrapper.is_rsi_loss_reentry_blocked,
+        "get_cached_rsi": odc.dhan_wrapper.get_cached_rsi,
+        "get_cached_prev_rsi": odc.dhan_wrapper.get_cached_prev_rsi,
+        "rsi_loss_reentry_reason": odc.dhan_wrapper.rsi_loss_reentry_reason,
         "place_market_order": odc.dhan_wrapper.place_market_order,
         "place_stop_loss_limit_order": odc.dhan_wrapper.place_stop_loss_limit_order,
         "check_if_order_filled": odc.dhan_wrapper.check_if_order_filled,
@@ -138,6 +144,12 @@ def install_all_dhan_mocks(stop_loss_order_id_factory=None, fail_stop_loss_place
     odc.dhan_wrapper.refresh_supertrend_signal = lambda sym: None
     odc.dhan_wrapper.get_cached_supertrend_bearish = lambda sym: None
     odc.dhan_wrapper.get_cached_supertrend_candle_start = lambda sym: None
+    odc.dhan_wrapper.refresh_ema_cross_signal = lambda sym: None
+    odc.dhan_wrapper.get_cached_ema_cross_candle_start = lambda sym: None
+    odc.dhan_wrapper.is_rsi_loss_reentry_blocked = lambda sym: False
+    odc.dhan_wrapper.get_cached_rsi = lambda sym: None
+    odc.dhan_wrapper.get_cached_prev_rsi = lambda sym: None
+    odc.dhan_wrapper.rsi_loss_reentry_reason = lambda sym: None
     odc.dhan_wrapper.refresh_order_status = lambda order_id, is_amo=False: OrderResult(
         order_id=order_id, status=OrderStatus.TRADED, remark="", fill_price=45.0, filled_quantity=500, is_amo=False)
 
