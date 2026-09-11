@@ -99,6 +99,30 @@ def test_1_lookup_functions_switch_at_the_cutoff():
           "return 1500/1500 before 11:30 and 1000/1000 after, for both Options and Futures: PASSED")
 
 
+def test_1b_luxury_max_loss_pinned_to_its_own_wider_cap():
+    """Luxury's MAX_LOSS_HIT cap was raised to 4500/2100 (11 Sep 2026, user
+    request - Luxury only, Options/Futures unchanged at 1500/1000) - a
+    separate pinned check since Luxury now genuinely diverges from the
+    other two packages, not just its own independently-configured copy of
+    the same number. PROFIT_PROTECTION_THRESHOLD_RS is untouched by this
+    change, still 1500/1000 same as the others."""
+    restore = _freeze_time(lte, BEFORE_CUTOFF)
+    try:
+        assert lte.current_max_loss_per_trade_rs() == 4500, "Luxury"
+        assert lte.current_profit_protection_threshold_rs() == 1500, "Luxury"
+    finally:
+        restore()
+
+    restore = _freeze_time(lte, AFTER_CUTOFF)
+    try:
+        assert lte.current_max_loss_per_trade_rs() == 2100, "Luxury"
+        assert lte.current_profit_protection_threshold_rs() == 1000, "Luxury"
+    finally:
+        restore()
+    print("1b. Luxury's own current_max_loss_per_trade_rs() returns 4500 before 11:30 and 2100 "
+          "after (Options/Futures unaffected, still 1500/1000): PASSED")
+
+
 def test_2_exact_boundary_instant_counts_as_after():
     """Matches this codebase's own established convention elsewhere
     (is_past_square_off_time, is_past_allowed_trading_time - both use
@@ -157,38 +181,47 @@ ALL_MAKE_POSITION = (
 
 
 def test_3_exit_reason_for_uses_the_correct_cap_on_each_side():
-    """quantity=1 so 1 rupee of LTP movement = Rs 1 of P&L, making the
-    1200/1000/1500/1000 boundaries easy to straddle exactly. hard_stop_loss/
-    target_price are pushed far away on every position here so only the
-    MAX_LOSS_HIT/PROFIT_PROTECTION_HIT checks under test can possibly fire -
-    isolating them from TARGET_HIT/TRAILING_SL_HIT/STOP_LOSS_HIT, which
-    have their own dedicated coverage in test_deep_integration.py.
+    """quantity=1 so 1 rupee of LTP movement = Rs 1 of P&L. The MAX_LOSS_HIT
+    straddle loss is computed from each module's OWN before/after cap
+    (rather than a single hardcoded number) since Luxury now runs a
+    genuinely different pair (4500/2100) from Options/Futures (1500/1000,
+    11 Sep 2026) - this keeps the test meaningful regardless of any one
+    package's own independently-tuned values, present or future.
+    hard_stop_loss/target_price are pushed far away on every position
+    here so only the MAX_LOSS_HIT/PROFIT_PROTECTION_HIT checks under test
+    can possibly fire - isolating them from TARGET_HIT/TRAILING_SL_HIT/
+    STOP_LOSS_HIT, which have their own dedicated coverage in
+    test_deep_integration.py.
 
     ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF is forced True here - this test is
-    specifically about the BEFORE/AFTER threshold VALUES (1200 vs 1000),
-    which only matters when MAX_LOSS_HIT is actually allowed to fire
-    before the cutoff at all; the NEW default (False, disabled entirely
-    before the cutoff) has its own dedicated tests 4-6 below."""
+    specifically about the BEFORE/AFTER threshold VALUES, which only
+    matters when MAX_LOSS_HIT is actually allowed to fire before the
+    cutoff at all; the NEW default (False, disabled entirely before the
+    cutoff) has its own dedicated tests 4-6 below."""
     for label, module, make_position in ALL_MAKE_POSITION:
         real_enabled = module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF
         module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF = True
-        # MAX_LOSS_HIT: loss of Rs 1100 (entry 2000, ltp 900) -> under the
-        # (looser) BEFORE-cutoff cap (1500, no trip) but over the 1000/1100
-        # AFTER-cutoff cap (trips).
+        # MAX_LOSS_HIT: a loss strictly between this module's own AFTER cap
+        # (tighter) and BEFORE cap (looser) - must NOT trip before 11:30,
+        # MUST trip after. Options/Futures: (1000, 1500) -> 1250. Luxury:
+        # (2100, 4500) -> 3300.
+        before_cap = module.config.MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF
+        after_cap = module.config.MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF
+        straddle_loss = after_cap + (before_cap - after_cap) / 2
         pos = make_position()
-        ltp = pos.entry_price - 1100.0  # loss_rs = (2000 - 900) * 1 = 1100
+        ltp = pos.entry_price - straddle_loss
 
         restore = _freeze_time(module, BEFORE_CUTOFF)
         try:
             assert module._exit_reason_for(pos, ltp) is None, \
-                f"{label}: a Rs 1100 loss must NOT trip any exit before 11:30 (max-loss cap is 1500)"
+                f"{label}: a Rs {straddle_loss:.0f} loss must NOT trip any exit before 11:30 (max-loss cap is {before_cap:.0f})"
         finally:
             restore()
 
         restore = _freeze_time(module, AFTER_CUTOFF)
         try:
             assert module._exit_reason_for(pos, ltp) == "MAX_LOSS_HIT", \
-                f"{label}: a Rs 1100 loss MUST trip MAX_LOSS_HIT after 11:30 (cap is 1000)"
+                f"{label}: a Rs {straddle_loss:.0f} loss MUST trip MAX_LOSS_HIT after 11:30 (cap is {after_cap:.0f})"
         finally:
             restore()
 
@@ -314,6 +347,7 @@ def test_6_disable_is_scoped_to_max_loss_hit_only():
 def main():
     print("=== Risk-threshold time-of-day cutoff test suite ===\n")
     test_1_lookup_functions_switch_at_the_cutoff()
+    test_1b_luxury_max_loss_pinned_to_its_own_wider_cap()
     test_2_exact_boundary_instant_counts_as_after()
     test_3_exit_reason_for_uses_the_correct_cap_on_each_side()
     test_4_max_loss_hit_disabled_before_cutoff_regardless_of_loss_size()
