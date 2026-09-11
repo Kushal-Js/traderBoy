@@ -53,7 +53,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from trade_history import (
-    attribute_open_broker_position, count_opened_today, loss_exit_count_today, minutes_since_last_loss_today,
+    attribute_open_broker_position, count_opened_today, loss_exit_count_today,
 )
 import cross_strategy_registry
 import fund_allocation
@@ -279,21 +279,30 @@ async def _process_one_entry(symbol: str, option_type: str) -> dict:
         )
         return {"symbol": symbol, "status": "skipped", "reason": "daily_reentry_cap_reached"}
 
-    # Same-day loss cooldown (added 2 Sep 2026) - see config.LOSS_COOLDOWN_
-    # ENABLED's own docstring for the MAHABANK/PHOENIXLTD/GVT&D incidents
-    # this was built from. Independent of the daily re-entry cap above -
-    # that one is a COUNT limit (at most N times all day); this one is a
-    # TIMING limit (not immediately after a loss on this same symbol).
-    if config.LOSS_COOLDOWN_ENABLED:
-        minutes_since_loss = await loop.run_in_executor(
-            None, minutes_since_last_loss_today, "Luxury", symbol, datetime.now()
+    # Same-day RSI-gated loss re-entry block - REPLACES the old time-based
+    # loss cooldown (see config.ENABLE_RSI_LOSS_REENTRY_BLOCK's own
+    # docstring for why: a fixed-minutes wait doesn't know whether the
+    # stock has actually recovered). Only even LOOKS at RSI if this
+    # symbol has genuinely hit a MAX_LOSS_HIT today for THIS strategy -
+    # a clean symbol never pays the extra RSI fetch. Evaluated fresh on
+    # every entry attempt (not latched for the rest of the day): once
+    # RSI is neither overbought nor still falling, the same symbol is
+    # allowed back in the same day.
+    if config.ENABLE_RSI_LOSS_REENTRY_BLOCK:
+        loss_hits_today = await loop.run_in_executor(
+            None, loss_exit_count_today, "Luxury", symbol, ("MAX_LOSS_HIT",), datetime.now(),
         )
-        if minutes_since_loss is not None and minutes_since_loss < config.LOSS_COOLDOWN_MINUTES:
-            logger.info(
-                "%s: skipped - stopped out %.1f minute(s) ago today, inside the %s-minute loss cooldown",
-                symbol, minutes_since_loss, config.LOSS_COOLDOWN_MINUTES,
-            )
-            return {"symbol": symbol, "status": "skipped", "reason": "loss_cooldown_active"}
+        if loss_hits_today >= 1:
+            blocked = await loop.run_in_executor(None, dhan_wrapper.is_rsi_loss_reentry_blocked, symbol)
+            if blocked:
+                rsi, prev_rsi = dhan_wrapper.get_cached_rsi(symbol), dhan_wrapper.get_cached_prev_rsi(symbol)
+                reason = dhan_wrapper.rsi_loss_reentry_reason(symbol)
+                logger.info(
+                    "%s: skipped - MAX_LOSS_HIT already hit today and RSI=%.1f is %s (prev=%.1f) - "
+                    "not re-entering until it recovers",
+                    symbol, rsi, reason, prev_rsi,
+                )
+                return {"symbol": symbol, "status": "skipped", "reason": "rsi_loss_reentry_block_active"}
 
     # Repeat-loss same-day block (added 8 Sep 2026) - see config.LOSS_
     # REPEAT_BLOCK_ENABLED's own docstring for how this differs from both

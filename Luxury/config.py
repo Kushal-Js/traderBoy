@@ -58,35 +58,18 @@ MAX_LIVE_POSITIONS_PE = int(os.getenv("LUXURY_MAX_LIVE_POSITIONS_PE", "2"))
 # 1 Sep 2026), same "same underlying, across the whole day" semantics.
 MAX_DAILY_ENTRIES_PER_SYMBOL = int(os.getenv("LUXURY_MAX_DAILY_ENTRIES_PER_SYMBOL", "3"))
 
-# Same-day loss cooldown (added 2 Sep 2026, user's own corrective-action
-# request after investigating 2-3 Sep real trades: MAHABANK/PHOENIXLTD/
-# GVT&D each got re-entered multiple times the same day right after
-# stopping out, and the re-entries mostly lost again too - MAHABANK went
-# 0-for-3 that way, -Rs.2,600 total). Skips a fresh entry into an
-# underlying that stopped THIS strategy out (a real pnl<=0 close) within
-# the last LOSS_COOLDOWN_MINUTES, backed by trade_history.
-# minutes_since_last_loss_today() (the SAME durable real_trades log
-# record_closed_trade() already writes, same "survives a restart"
-# reasoning MAX_DAILY_ENTRIES_PER_SYMBOL's own cap already relies on).
-# Independent of and stacks with the daily re-entry cap above - this one
-# is about TIMING (don't immediately chase a loss), that one is about
-# COUNT (at most N times all day, no matter how spaced out).
-LOSS_COOLDOWN_ENABLED = os.getenv("LUXURY_LOSS_COOLDOWN_ENABLED", "true").lower() == "true"
-# 20 minutes - CORRECTED after backtesting a sweep of cooldown lengths
-# against all 37 real Luxury trades from 2-3 Sep 2026. The original
-# guess (30 min) actually backtests NET NEGATIVE (-Rs.367): it blocks
-# BOTH of MAHABANK's/RVNL's genuine repeat-losses AND a GVT&D re-entry
-# that went on to hit PROFIT_PROTECTION_HIT for +Rs.1,512 - a real
-# false positive. At 20 minutes, only the two genuine back-to-back
-# losses get blocked (MAHABANK's second attempt launched barely a
-# minute after its first loss closed; RVNL similarly close) while the
-# GVT&D win survives untouched (its own gap before re-entering was
-# just past 20 minutes) - net backtested effect: +Rs.1,146, the best of
-# every length tested (5/10/15/20/25/30/45/60/90/120 minutes all
-# swept). Full sweep table in NOTES.md's corrective-action entry for
-# this feature - worth re-validating as more real trade data
-# accumulates, since this is tuned against only 2 days.
-LOSS_COOLDOWN_MINUTES = float(os.getenv("LUXURY_LOSS_COOLDOWN_MINUTES", "20"))
+# Same-day RSI-gated loss re-entry block - REPLACED the old time-based
+# LOSS_COOLDOWN_ENABLED/LOSS_COOLDOWN_MINUTES pair that used to live here
+# (originally added 2 Sep 2026 after MAHABANK/PHOENIXLTD/GVT&D re-entry
+# incidents, tuned to 20 minutes via a backtest sweep - both retired 11
+# Sep 2026). See Options/config.py's own "Same-day RSI-gated loss
+# re-entry block" comment for the full replacement rationale (a real
+# INDUSTOWER alert got skipped 1 minute short of the old 20-minute
+# window, regardless of whether the stock had actually recovered). The
+# RSI computation itself (period/interval/overbought threshold) is
+# shared - always reads Options.config, same as SUPERTREND_PERIOD does;
+# this is just this package's own independently-tunable on/off switch.
+ENABLE_RSI_LOSS_REENTRY_BLOCK = os.getenv("LUXURY_ENABLE_RSI_LOSS_REENTRY_BLOCK", "true").lower() == "true"
 
 # Repeat-loss same-day block (added 8 Sep 2026, user request straight
 # off a real Chartink-alert backtest of this scan: "I can see that re

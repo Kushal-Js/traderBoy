@@ -1,15 +1,25 @@
 """
-Tests for two corrective actions added to Luxury on 2 Sep 2026, after the
-user asked for a deeper look at "why didn't returns improve" across real
-2-3 Sep trades and requested these two specific fixes ("Implement 1 and 2
-items, back test them with last 2 days trading data also, deploy it
-then"):
+Tests for corrective actions added to Luxury: the same-day RSI-gated loss
+re-entry block, the liquidity guard, and the repeat-loss same-day block.
 
-  1. Same-day LOSS COOLDOWN on entry (trade_history.minutes_since_last_
-     loss_today + Luxury/trading_engine.py's own check in
-     _process_one_entry) - found investigating real trades: MAHABANK
-     went 0-for-3 same-day re-entries (-Rs.2,600), PHOENIXLTD's third
-     same-day re-entry lost more than its first two wins combined.
+The time-based LOSS_COOLDOWN_ENABLED/LOSS_COOLDOWN_MINUTES mechanism this
+file used to test (and trade_history.minutes_since_last_loss_today, the
+pure function it was built on) was REMOVED on 11 Sep 2026 (user request:
+"Remove this cooldown period logic from everywhere and all strategies,
+instead create another global common function which checks if RSI of 5
+min candle is greater than number 88 or if RSI of current candle is
+lesser than previous 5 min candle (means RSI is falling), then don't
+take a trade for that stock in same day if MAX_LOSS_HIT is already hit
+earlier for that day") after a real INDUSTOWER alert was skipped 1
+minute short of its 20-minute window regardless of whether the stock had
+recovered. See Options/config.py's "Same-day RSI-gated loss re-entry
+block" comment and Options/dhan_client.py's refresh_rsi_signal/
+is_rsi_loss_reentry_blocked for the replacement mechanism - its own RSI
+computation correctness (overbought/falling detection, continuous-
+candle fetch) is covered by tests/test_rsi_loss_reentry_block.py, so
+this file mocks is_rsi_loss_reentry_blocked directly to test only
+LUXURY'S OWN _process_one_entry wiring.
+
   2. LIQUIDITY GUARD on exit (Options/dhan_client.py's refresh_
      liquidity_signal/get_cached_illiquid + Luxury/trading_engine.py's
      own _exit_reason_for) - found investigating a real CHOLAFIN
@@ -22,28 +32,35 @@ then"):
      independent of (and checked AFTER) every price-threshold check.
 
 Covers, against the REAL production functions (not reimplemented):
-  1. trade_history.minutes_since_last_loss_today - correct minutes-
-     elapsed math, isolates by strategy AND by symbol, ignores a WINNING
-     trade (only losses start the cooldown clock), returns None (never a
-     fabricated 0) when there's no loss today or the log doesn't exist.
-  2. Full real integration: a real _process_one_entry loss (via a real
-     enter->exit cycle hitting MAX_LOSS_HIT) correctly blocks an
-     immediate real re-entry attempt for the SAME symbol with
-     loss_cooldown_active and places NO order, while a DIFFERENT symbol
-     is unaffected and a cooldown-expired retry (mocking `datetime.now`
-     forward) succeeds normally.
-  3. dhan_client.refresh_liquidity_signal/get_cached_illiquid - correct
-     zero-volume-streak detection (only ALL-zero over the trailing N
-     bars counts, one nonzero bar anywhere in the window means liquid),
-     drops a still-forming last candle the same way refresh_supertrend_
-     signal does, and fails safe (None / not-illiquid) on a fetch error
-     or too little history.
-  4. _exit_reason_for's own ordering - liquidity_guard fires when
+  1. A real MAX_LOSS_HIT loss + an RSI condition (mocked True) correctly
+     blocks an immediate real re-entry attempt for the SAME symbol (zero
+     orders placed), while a DIFFERENT symbol with no loss today is
+     entirely unaffected (RSI is never even consulted for it).
+  2. Once RSI recovers (mocked False) the SAME DAY, the same symbol
+     re-enters normally even though it lost earlier today - proves this
+     is a re-checkable condition, not a permanent same-day block.
+  3. ENABLE_RSI_LOSS_REENTRY_BLOCK=False cleanly bypasses the check even
+     with a real loss on record and RSI mocked as still blocking.
+  4-8. dhan_client.refresh_liquidity_signal/get_cached_illiquid -
+     correct zero-volume-streak detection (only ALL-zero over the
+     trailing N bars counts, one nonzero bar anywhere in the window
+     means liquid), drops a still-forming last candle the same way
+     refresh_supertrend_signal does, and fails safe (None / not-
+     illiquid) on a fetch error or too little history.
+  9-11. _exit_reason_for's own ordering - liquidity_guard fires when
      nothing else would have (the CHOLAFIN scenario: price still near
-     entry, no other threshold close), and a genuine price-threshold
-     exit (e.g. TARGET_HIT) still takes priority when both conditions
-     happen to be true on the same tick.
-  5. Both features' own config flags disable them cleanly.
+     entry, no other threshold close), a genuine price-threshold exit
+     (e.g. TARGET_HIT) still takes priority when both conditions happen
+     to be true on the same tick, and the flag disables it cleanly.
+  12-13. trade_history.loss_exit_count_today - correctly counts every
+     matching loss-reason exit today for a strategy+symbol, and ignores
+     non-loss exit reasons / a different strategy's own record.
+  14-15. Full real integration: TWO real same-day MAX_LOSS_HIT losses
+     for the same symbol correctly block a third real entry attempt for
+     the REST OF THE DAY via LOSS_REPEAT_BLOCK_ENABLED, a different
+     symbol is unaffected, a win in between doesn't reset/dilute the
+     count, and the flag disables it cleanly.
+  16. PROFIT_PROTECTION_GIVEBACK_PCT rides a small wiggle, locks in past it.
 
 HOW TO RUN:
     uv run python tests/test_luxury_corrective_actions.py
@@ -104,6 +121,10 @@ def install_all_dhan_mocks(volumes_sequence=None):
         "refresh_supertrend_signal": odc.dhan_wrapper.refresh_supertrend_signal,
         "get_cached_supertrend_bearish": odc.dhan_wrapper.get_cached_supertrend_bearish,
         "get_cached_supertrend_candle_start": odc.dhan_wrapper.get_cached_supertrend_candle_start,
+        "is_rsi_loss_reentry_blocked": odc.dhan_wrapper.is_rsi_loss_reentry_blocked,
+        "get_cached_rsi": odc.dhan_wrapper.get_cached_rsi,
+        "get_cached_prev_rsi": odc.dhan_wrapper.get_cached_prev_rsi,
+        "rsi_loss_reentry_reason": odc.dhan_wrapper.rsi_loss_reentry_reason,
         "place_market_order": odc.dhan_wrapper.place_market_order,
         "place_stop_loss_market_order": odc.dhan_wrapper.place_stop_loss_market_order,
         "place_stop_loss_limit_order": odc.dhan_wrapper.place_stop_loss_limit_order,
@@ -123,6 +144,10 @@ def install_all_dhan_mocks(volumes_sequence=None):
     odc.dhan_wrapper.refresh_supertrend_signal = lambda underlying_symbol: None
     odc.dhan_wrapper.get_cached_supertrend_bearish = lambda underlying_symbol: None
     odc.dhan_wrapper.get_cached_supertrend_candle_start = lambda underlying_symbol: None
+    odc.dhan_wrapper.is_rsi_loss_reentry_blocked = lambda underlying_symbol: False
+    odc.dhan_wrapper.get_cached_rsi = lambda underlying_symbol: None
+    odc.dhan_wrapper.get_cached_prev_rsi = lambda underlying_symbol: None
+    odc.dhan_wrapper.rsi_loss_reentry_reason = lambda underlying_symbol: None
 
     placed_orders = []
 
@@ -178,157 +203,99 @@ def _make_candle_response(timestamps, volumes):
 
 
 # --------------------------------------------------------------------- #
-# 1. trade_history.minutes_since_last_loss_today - pure logic
+# 1. Same-day RSI-gated loss re-entry block - Luxury's own
+#    _process_one_entry wiring (replaces the old time-based cooldown)
 # --------------------------------------------------------------------- #
 
-def test_1_minutes_since_last_loss_basic():
-    now = datetime.now()
-    trade_history.append_jsonl("real_trades", {
-        "strategy": "Luxury", "underlying_symbol": "MAHABANK", "pnl": -500.0,
-        "closed_at": (now - timedelta(minutes=12)).isoformat(),
-    })
-    minutes = trade_history.minutes_since_last_loss_today("Luxury", "MAHABANK", now)
-    assert minutes is not None
-    assert 11.9 <= minutes <= 12.1, minutes
-    print("1. minutes_since_last_loss_today correctly computes elapsed minutes since a real logged loss: PASSED")
-
-
-def test_2_minutes_since_last_loss_ignores_wins():
-    now = datetime.now()
-    trade_history.append_jsonl("real_trades", {
-        "strategy": "Luxury", "underlying_symbol": "RVNL", "pnl": +800.0,
-        "closed_at": (now - timedelta(minutes=2)).isoformat(),
-    })
-    assert trade_history.minutes_since_last_loss_today("Luxury", "RVNL", now) is None, \
-        "a WINNING trade must never start the loss-cooldown clock"
-    print("2. A winning trade never starts the loss-cooldown clock (only pnl<=0 counts): PASSED")
-
-
-def test_3_minutes_since_last_loss_isolates_by_strategy_and_symbol():
-    now = datetime.now()
-    trade_history.append_jsonl("real_trades", {
-        "strategy": "Luxury", "underlying_symbol": "GVT&D", "pnl": -300.0,
-        "closed_at": (now - timedelta(minutes=5)).isoformat(),
-    })
-    trade_history.append_jsonl("real_trades", {
-        "strategy": "Options", "underlying_symbol": "GVT&D", "pnl": -300.0,
-        "closed_at": (now - timedelta(minutes=1)).isoformat(),
-    })
-    assert trade_history.minutes_since_last_loss_today("Futures", "GVT&D", now) is None, \
-        "a different strategy's own loss on the same symbol must not leak across"
-    minutes = trade_history.minutes_since_last_loss_today("Luxury", "GVT&D", now)
-    assert minutes is not None and 4.9 <= minutes <= 5.1, minutes
-    print("3. Loss lookback correctly isolates by BOTH strategy and underlying_symbol: PASSED")
-
-
-def test_4_minutes_since_last_loss_uses_the_most_recent_of_several():
-    now = datetime.now()
-    for mins_ago in (40, 25, 8):
-        trade_history.append_jsonl("real_trades", {
-            "strategy": "Luxury", "underlying_symbol": "PHOENIXLTD", "pnl": -100.0,
-            "closed_at": (now - timedelta(minutes=mins_ago)).isoformat(),
-        })
-    minutes = trade_history.minutes_since_last_loss_today("Luxury", "PHOENIXLTD", now)
-    assert minutes is not None and 7.9 <= minutes <= 8.1, minutes
-    print("4. With multiple losses today, the MOST RECENT one is what the cooldown measures from: PASSED")
-
-
-def test_5_minutes_since_last_loss_none_when_no_log_or_no_loss_today():
-    now = datetime.now()
-    assert trade_history.minutes_since_last_loss_today("Luxury", "NEVERTRADED", now) is None
-    print("5. No trades at all for a symbol correctly returns None, not a crash or a fabricated 0: PASSED")
-
-
-# --------------------------------------------------------------------- #
-# 2. Full real integration: loss cooldown blocks an immediate re-entry
-# --------------------------------------------------------------------- #
-
-async def test_6_real_loss_then_immediate_reentry_blocked():
+async def test_1_real_loss_plus_rsi_condition_blocks_reentry_other_symbol_unaffected():
     store = lps.PositionStore()
     lte.position_store = store
-    real_enabled, real_minutes = lte.config.LOSS_COOLDOWN_ENABLED, lte.config.LOSS_COOLDOWN_MINUTES
-    lte.config.LOSS_COOLDOWN_ENABLED = True
-    lte.config.LOSS_COOLDOWN_MINUTES = 30
+    real_enabled = lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = True
     restore, placed_orders = install_all_dhan_mocks()
+    odc.dhan_wrapper.is_rsi_loss_reentry_blocked = lambda underlying_symbol: True
+    odc.dhan_wrapper.get_cached_rsi = lambda underlying_symbol: 91.5
+    odc.dhan_wrapper.get_cached_prev_rsi = lambda underlying_symbol: 93.0
+    odc.dhan_wrapper.rsi_loss_reentry_reason = lambda underlying_symbol: "overbought"
     try:
-        # Uses a symbol not touched by tests 1-5 (which share this same
+        # Uses a symbol not touched by later tests (which share this same
         # scratch trade_history.HISTORY_DIR) - avoids a stale loss record
-        # from an earlier test's own log write making this look
-        # cooled-down before the real entry below even happens.
+        # from an earlier test's own log write confounding this one.
         entry = await lte._process_one_entry("COALINDIA", "CE")
         assert entry["status"] == "entered", entry
 
-        # Real exit through the real production function - close_position
-        # itself fire-and-forgets record_closed_trade (must not be awaited
-        # while its own lock is held, per that function's own docstring) -
-        # a brief sleep lets that background task actually land before we
-        # check trade_history, same pattern used elsewhere in this repo's
-        # own test suite for the identical fire-and-forget shape.
         closed = await store.close_position("COALINDIA", 40.0, "MAX_LOSS_HIT")
         assert closed is not None and closed.exit_price == 40.0
         await asyncio.sleep(0.3)
 
         placed_orders.clear()
         retry = await lte._process_one_entry("COALINDIA", "CE")
-        assert retry["status"] == "skipped" and retry["reason"] == "loss_cooldown_active", retry
-        assert placed_orders == [], f"a cooling-down symbol must place ZERO orders, got {placed_orders}"
+        assert retry["status"] == "skipped" and retry["reason"] == "rsi_loss_reentry_block_active", retry
+        assert placed_orders == [], f"an RSI-blocked symbol must place ZERO orders, got {placed_orders}"
 
         placed_orders.clear()
         other = await lte._process_one_entry("RVNL", "CE")
         assert other["status"] == "entered", f"a DIFFERENT symbol must be entirely unaffected, got {other}"
 
-        print("6. A real MAX_LOSS_HIT loss correctly blocks an immediate real re-entry attempt for the SAME "
-              "symbol (zero orders placed), while a different symbol is entirely unaffected: PASSED")
+        print("1. A real MAX_LOSS_HIT loss + an RSI condition correctly blocks an immediate real re-entry "
+              "attempt for the SAME symbol (zero orders placed), while a different symbol with no loss "
+              "today is entirely unaffected: PASSED")
     finally:
         restore()
-        lte.config.LOSS_COOLDOWN_ENABLED, lte.config.LOSS_COOLDOWN_MINUTES = real_enabled, real_minutes
+        lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_enabled
 
 
-async def test_7_reentry_succeeds_once_cooldown_expires():
+async def test_2_reentry_succeeds_once_rsi_recovers_same_day():
     store = lps.PositionStore()
     lte.position_store = store
-    real_enabled, real_minutes = lte.config.LOSS_COOLDOWN_ENABLED, lte.config.LOSS_COOLDOWN_MINUTES
-    lte.config.LOSS_COOLDOWN_ENABLED = True
-    lte.config.LOSS_COOLDOWN_MINUTES = 30
+    real_enabled = lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = True
     restore, placed_orders = install_all_dhan_mocks()
+    odc.dhan_wrapper.is_rsi_loss_reentry_blocked = lambda underlying_symbol: False
     try:
         trade_history.append_jsonl("real_trades", {
             "strategy": "Luxury", "underlying_symbol": "KFINTECH", "pnl": -900.0,
-            "closed_at": (datetime.now() - timedelta(minutes=45)).isoformat(),
+            "exit_reason": "MAX_LOSS_HIT", "closed_at": (datetime.now() - timedelta(minutes=2)).isoformat(),
         })
         result = await lte._process_one_entry("KFINTECH", "CE")
         assert result["status"] == "entered", \
-            f"a loss from 45 minutes ago (past the 30-minute cooldown) must not block re-entry, got {result}"
-        print("7. Once the configured cooldown window has genuinely elapsed, the same symbol re-enters normally: PASSED")
+            f"once RSI is no longer overbought/falling, the SAME symbol must re-enter normally " \
+            f"the SAME day, even though it lost minutes ago - this is a condition, not a timer, got {result}"
+        print("2. Once RSI recovers (neither overbought nor falling) the SAME day, the same symbol "
+              "re-enters normally even though it lost earlier today - a re-checkable condition, "
+              "not a permanent same-day block: PASSED")
     finally:
         restore()
-        lte.config.LOSS_COOLDOWN_ENABLED, lte.config.LOSS_COOLDOWN_MINUTES = real_enabled, real_minutes
+        lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_enabled
 
 
-async def test_8_loss_cooldown_disabled_flag_bypasses_the_check():
+async def test_3_rsi_loss_reentry_disabled_flag_bypasses_the_check():
     store = lps.PositionStore()
     lte.position_store = store
-    real_enabled = lte.config.LOSS_COOLDOWN_ENABLED
-    lte.config.LOSS_COOLDOWN_ENABLED = False
+    real_enabled = lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
     restore, placed_orders = install_all_dhan_mocks()
+    odc.dhan_wrapper.is_rsi_loss_reentry_blocked = lambda underlying_symbol: True
     try:
         trade_history.append_jsonl("real_trades", {
             "strategy": "Luxury", "underlying_symbol": "NBCC", "pnl": -50.0,
-            "closed_at": datetime.now().isoformat(),
+            "exit_reason": "MAX_LOSS_HIT", "closed_at": datetime.now().isoformat(),
         })
         result = await lte._process_one_entry("NBCC", "CE")
-        assert result["status"] == "entered", f"disabling the flag must bypass the cooldown entirely, got {result}"
-        print("8. LOSS_COOLDOWN_ENABLED=False cleanly bypasses the check even seconds after a real loss: PASSED")
+        assert result["status"] == "entered", \
+            f"disabling the flag must bypass the RSI-loss-reentry check entirely, got {result}"
+        print("3. ENABLE_RSI_LOSS_REENTRY_BLOCK=False cleanly bypasses the check even with a real loss "
+              "on record and RSI mocked as still blocking: PASSED")
     finally:
         restore()
-        lte.config.LOSS_COOLDOWN_ENABLED = real_enabled
+        lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_enabled
 
 
 # --------------------------------------------------------------------- #
-# 3. dhan_client.refresh_liquidity_signal / get_cached_illiquid
+# 2. dhan_client.refresh_liquidity_signal / get_cached_illiquid
 # --------------------------------------------------------------------- #
 
-def test_9_liquidity_signal_detects_sustained_zero_volume():
+def test_4_liquidity_signal_detects_sustained_zero_volume():
     now_ts = int(datetime.now().timestamp())
     # 5 completed bars, oldest to newest, all zero volume, plus a
     # still-forming 6th bar (timestamp = now, must be dropped).
@@ -341,13 +308,13 @@ def test_9_liquidity_signal_detects_sustained_zero_volume():
         odc.dhan_wrapper._liquidity_cache.clear()
         odc.dhan_wrapper.refresh_liquidity_signal("TESTOPT 29 SEP 100 CALL")
         assert odc.dhan_wrapper.get_cached_illiquid("TESTOPT 29 SEP 100 CALL") is True
-        print("9. Sustained zero volume over the last N completed bars is correctly flagged illiquid: PASSED")
+        print("4. Sustained zero volume over the last N completed bars is correctly flagged illiquid: PASSED")
     finally:
         restore()
         odc.config.LIQUIDITY_GUARD_ZERO_VOLUME_BARS = real_bars
 
 
-def test_10_liquidity_signal_one_nonzero_bar_means_liquid():
+def test_5_liquidity_signal_one_nonzero_bar_means_liquid():
     now_ts = int(datetime.now().timestamp())
     timestamps = [now_ts - 300, now_ts - 240, now_ts - 180, now_ts - 120, now_ts - 60, now_ts]
     volumes = [0, 0, 500, 0, 0, 0]  # one real trade in the middle of the window
@@ -359,13 +326,13 @@ def test_10_liquidity_signal_one_nonzero_bar_means_liquid():
         odc.dhan_wrapper.refresh_liquidity_signal("TESTOPT 29 SEP 100 CALL")
         assert odc.dhan_wrapper.get_cached_illiquid("TESTOPT 29 SEP 100 CALL") is False, \
             "any nonzero-volume bar within the trailing window must count as liquid, not illiquid"
-        print("10. A single nonzero-volume bar anywhere in the trailing window correctly reads as liquid: PASSED")
+        print("5. A single nonzero-volume bar anywhere in the trailing window correctly reads as liquid: PASSED")
     finally:
         restore()
         odc.config.LIQUIDITY_GUARD_ZERO_VOLUME_BARS = real_bars
 
 
-def test_11_liquidity_signal_drops_still_forming_candle():
+def test_6_liquidity_signal_drops_still_forming_candle():
     now_ts = int(datetime.now().timestamp())
     # Only the LAST bar (still forming, timestamp=now) has volume - if it
     # were wrongly included as "completed", the zero-streak count would
@@ -381,13 +348,13 @@ def test_11_liquidity_signal_drops_still_forming_candle():
         odc.dhan_wrapper.refresh_liquidity_signal("TESTOPT 29 SEP 100 CALL")
         # 4 completed bars after dropping the still-forming one, all zero -> illiquid.
         assert odc.dhan_wrapper.get_cached_illiquid("TESTOPT 29 SEP 100 CALL") is True
-        print("11. The still-forming last candle is correctly dropped before judging the zero-volume streak: PASSED")
+        print("6. The still-forming last candle is correctly dropped before judging the zero-volume streak: PASSED")
     finally:
         restore()
         odc.config.LIQUIDITY_GUARD_ZERO_VOLUME_BARS = real_bars
 
 
-def test_12_liquidity_signal_not_enough_bars_fails_safe():
+def test_7_liquidity_signal_not_enough_bars_fails_safe():
     now_ts = int(datetime.now().timestamp())
     timestamps = [now_ts - 60, now_ts]
     volumes = [0, 0]
@@ -399,23 +366,23 @@ def test_12_liquidity_signal_not_enough_bars_fails_safe():
         odc.dhan_wrapper.refresh_liquidity_signal("TESTOPT 29 SEP 100 CALL")
         assert odc.dhan_wrapper.get_cached_illiquid("TESTOPT 29 SEP 100 CALL") is False, \
             "too little history (fewer completed bars than the required streak) must fail safe, not guess illiquid"
-        print("12. Fewer completed bars than the required streak length fails safe (not illiquid), never guesses: PASSED")
+        print("7. Fewer completed bars than the required streak length fails safe (not illiquid), never guesses: PASSED")
     finally:
         restore()
         odc.config.LIQUIDITY_GUARD_ZERO_VOLUME_BARS = real_bars
 
 
-def test_13_liquidity_signal_none_before_first_refresh():
+def test_8_liquidity_signal_none_before_first_refresh():
     odc.dhan_wrapper._liquidity_cache.clear()
     assert odc.dhan_wrapper.get_cached_illiquid("NEVERSEEN 29 SEP 1 CALL") is None
-    print("13. An option never yet refreshed correctly reads as None (no signal yet), never a guessed True/False: PASSED")
+    print("8. An option never yet refreshed correctly reads as None (no signal yet), never a guessed True/False: PASSED")
 
 
 # --------------------------------------------------------------------- #
-# 4. _exit_reason_for's own ordering
+# 3. _exit_reason_for's own ordering
 # --------------------------------------------------------------------- #
 
-def test_14_liquidity_guard_fires_when_nothing_else_would_have():
+def test_9_liquidity_guard_fires_when_nothing_else_would_have():
     # Price basically flat (well inside every price threshold) - the
     # exact CHOLAFIN shape: nothing else fires, only the liquidity guard.
     # hard_stop_loss set well below ltp so current_trailing_sl (a
@@ -427,11 +394,11 @@ def test_14_liquidity_guard_fires_when_nothing_else_would_have():
     )
     reason = lte._exit_reason_for(pos, ltp=56.25, supertrend_against_position=False, liquidity_guard_triggered=True)
     assert reason == "LIQUIDITY_GUARD_ZERO_VOLUME", reason
-    print("14. The liquidity guard correctly fires on its own when no price threshold is anywhere close, "
+    print("9. The liquidity guard correctly fires on its own when no price threshold is anywhere close, "
           "the exact real CHOLAFIN shape (price ~flat, contract gone quiet): PASSED")
 
 
-def test_15_price_threshold_exit_still_takes_priority_over_liquidity_guard():
+def test_10_price_threshold_exit_still_takes_priority_over_liquidity_guard():
     pos = Position(
         underlying_symbol="TESTSTOCK", option_trading_symbol="TESTSTOCK 29 SEP 100 CALL",
         option_type="CE", quantity=100, lot_size=100, entry_price=10.0, target_price=12.0,
@@ -444,13 +411,13 @@ def test_15_price_threshold_exit_still_takes_priority_over_liquidity_guard():
     try:
         reason = lte._exit_reason_for(pos, ltp=12.5, supertrend_against_position=False, liquidity_guard_triggered=True)
         assert reason == "TARGET_HIT", reason
-        print("15. A genuine price-threshold exit (e.g. TARGET_HIT) still takes priority over the liquidity guard "
+        print("10. A genuine price-threshold exit (e.g. TARGET_HIT) still takes priority over the liquidity guard "
               "when both happen to be true on the same tick: PASSED")
     finally:
         lte.config.ENABLE_TARGET_EXIT = real
 
 
-def test_16_liquidity_guard_disabled_flag_bypasses_the_check():
+def test_11_liquidity_guard_disabled_flag_bypasses_the_check():
     pos = Position(
         underlying_symbol="CHOLAFIN", option_trading_symbol="CHOLAFIN 29 SEP 1840 CALL",
         option_type="CE", quantity=625, lot_size=625, entry_price=56.35, target_price=100.0,
@@ -461,7 +428,7 @@ def test_16_liquidity_guard_disabled_flag_bypasses_the_check():
     try:
         reason = lte._exit_reason_for(pos, ltp=56.25, supertrend_against_position=False, liquidity_guard_triggered=True)
         assert reason is None, f"disabling the flag must suppress the exit even when the signal itself fired, got {reason}"
-        print("16. LIQUIDITY_GUARD_ENABLED=False cleanly suppresses the exit even when the underlying signal fired: PASSED")
+        print("11. LIQUIDITY_GUARD_ENABLED=False cleanly suppresses the exit even when the underlying signal fired: PASSED")
     finally:
         lte.config.LIQUIDITY_GUARD_ENABLED = real_enabled
 
@@ -476,7 +443,7 @@ def test_16_liquidity_guard_disabled_flag_bypasses_the_check():
 #    for loss based condition only."
 # --------------------------------------------------------------------- #
 
-def test_17_loss_exit_count_today_basic():
+def test_12_loss_exit_count_today_basic():
     trade_history.append_jsonl("real_trades", {
         "strategy": "Luxury", "underlying_symbol": "OIL", "exit_reason": "MAX_LOSS_HIT",
         "closed_at": datetime.now().isoformat(),
@@ -487,11 +454,11 @@ def test_17_loss_exit_count_today_basic():
     })
     count = trade_history.loss_exit_count_today("Luxury", "OIL", ("MAX_LOSS_HIT", "STOP_LOSS_HIT"))
     assert count == 2, count
-    print("17. loss_exit_count_today correctly counts every matching loss-reason exit logged today for the "
+    print("12. loss_exit_count_today correctly counts every matching loss-reason exit logged today for the "
           "given strategy+symbol: PASSED")
 
 
-def test_18_loss_exit_count_today_ignores_non_loss_reasons_and_other_symbols_strategies():
+def test_13_loss_exit_count_today_ignores_non_loss_reasons_and_other_symbols_strategies():
     trade_history.append_jsonl("real_trades", {
         "strategy": "Luxury", "underlying_symbol": "DIVISLAB", "exit_reason": "PROFIT_PROTECTION_HIT",
         "closed_at": datetime.now().isoformat(),
@@ -511,20 +478,21 @@ def test_18_loss_exit_count_today_ignores_non_loss_reasons_and_other_symbols_str
     count = trade_history.loss_exit_count_today("Luxury", "DIVISLAB", ("MAX_LOSS_HIT", "STOP_LOSS_HIT"))
     assert count == 0, \
         f"profit/target/supertrend exits and a DIFFERENT strategy's own MAX_LOSS_HIT must not count, got {count}"
-    print("18. loss_exit_count_today ignores non-loss exit reasons (profit protection/target/supertrend) and "
+    print("13. loss_exit_count_today ignores non-loss exit reasons (profit protection/target/supertrend) and "
           "a different strategy's own record for the same symbol - 'loss based condition[s]' only, per the "
           "user's own wording: PASSED")
 
 
-async def test_19_real_second_loss_blocks_third_entry_same_day():
+async def test_14_real_second_loss_blocks_third_entry_same_day():
     store = lps.PositionStore()
     lte.position_store = store
-    real_cooldown_enabled = lte.config.LOSS_COOLDOWN_ENABLED
+    real_rsi_block_enabled = lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
     real_block_enabled, real_block_count = lte.config.LOSS_REPEAT_BLOCK_ENABLED, lte.config.LOSS_REPEAT_BLOCK_COUNT
-    # Cooldown disabled here so ONLY the new repeat-block feature is under
-    # test - otherwise the pre-existing 20-minute cooldown would ALSO
-    # block the immediate retries below, confounding which feature fired.
-    lte.config.LOSS_COOLDOWN_ENABLED = False
+    # RSI-loss-reentry disabled here so ONLY the repeat-block feature is
+    # under test - otherwise it would ALSO block the immediate retries
+    # below (both fire on the same MAX_LOSS_HIT), confounding which
+    # feature fired.
+    lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
     lte.config.LOSS_REPEAT_BLOCK_ENABLED = True
     lte.config.LOSS_REPEAT_BLOCK_COUNT = 2
     restore, placed_orders = install_all_dhan_mocks()
@@ -552,23 +520,23 @@ async def test_19_real_second_loss_blocks_third_entry_same_day():
         other = await lte._process_one_entry("NMDC", "CE")
         assert other["status"] == "entered", f"a DIFFERENT symbol must be entirely unaffected, got {other}"
 
-        print("19. TWO real same-day MAX_LOSS_HIT losses for the same symbol correctly block a third real "
+        print("14. TWO real same-day MAX_LOSS_HIT losses for the same symbol correctly block a third real "
               "entry attempt (zero orders placed) for the REST OF THE DAY, while a different symbol is "
               "entirely unaffected: PASSED")
     finally:
         restore()
-        lte.config.LOSS_COOLDOWN_ENABLED = real_cooldown_enabled
+        lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_rsi_block_enabled
         lte.config.LOSS_REPEAT_BLOCK_ENABLED = real_block_enabled
         lte.config.LOSS_REPEAT_BLOCK_COUNT = real_block_count
 
 
-async def test_20_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses():
+async def test_15_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses():
     store = lps.PositionStore()
     lte.position_store = store
-    real_cooldown_enabled = lte.config.LOSS_COOLDOWN_ENABLED
+    real_rsi_block_enabled = lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
     real_block_enabled, real_block_count = lte.config.LOSS_REPEAT_BLOCK_ENABLED, lte.config.LOSS_REPEAT_BLOCK_COUNT
     real_daily_cap = lte.config.MAX_DAILY_ENTRIES_PER_SYMBOL
-    lte.config.LOSS_COOLDOWN_ENABLED = False
+    lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
     lte.config.LOSS_REPEAT_BLOCK_ENABLED = True
     lte.config.LOSS_REPEAT_BLOCK_COUNT = 2
     # This test makes 4 real entry attempts for the SAME symbol - raised
@@ -605,17 +573,17 @@ async def test_20_a_win_between_two_losses_does_not_reset_the_count_and_disabled
         e5 = await lte._process_one_entry(symbol, "CE")
         assert e5["status"] == "entered", f"disabling the flag must bypass the block entirely, got {e5}"
 
-        print("20. A win between two real losses doesn't reset/dilute the repeat-loss count (still blocks on "
+        print("15. A win between two real losses doesn't reset/dilute the repeat-loss count (still blocks on "
               "the 2nd genuine loss); LOSS_REPEAT_BLOCK_ENABLED=False cleanly bypasses the check: PASSED")
     finally:
         restore()
-        lte.config.LOSS_COOLDOWN_ENABLED = real_cooldown_enabled
+        lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_rsi_block_enabled
         lte.config.LOSS_REPEAT_BLOCK_ENABLED = real_block_enabled
         lte.config.LOSS_REPEAT_BLOCK_COUNT = real_block_count
         lte.config.MAX_DAILY_ENTRIES_PER_SYMBOL = real_daily_cap
 
 
-def test_21_profit_protection_giveback_buffer():
+def test_16_profit_protection_giveback_buffer():
     """LUXURY_PROFIT_PROTECTION_GIVEBACK_PCT (added 10 Sep 2026 after OIL
     exited on a ~10-paise dip from the peak): once peak profit has crossed
     the threshold, the exit only fires once price has retraced at least
@@ -638,35 +606,30 @@ def test_21_profit_protection_giveback_buffer():
             "an 8-paise dip must NOT stop the trade out with a 5% give-back buffer"
         assert lte._exit_reason_for(mk(), ltp=11.39) == "PROFIT_PROTECTION_HIT", \
             "a retrace past 5% off the peak still fires PROFIT_PROTECTION_HIT"
-        print("21. LUXURY_PROFIT_PROTECTION_GIVEBACK_PCT: buffer=0 exits on any dip (unchanged); buffer=0.05 "
+        print("16. LUXURY_PROFIT_PROTECTION_GIVEBACK_PCT: buffer=0 exits on any dip (unchanged); buffer=0.05 "
               "rides a small wiggle and only locks in once price is >5% off the peak: PASSED")
     finally:
         lte.config.PROFIT_PROTECTION_GIVEBACK_PCT = real
 
 
 async def main():
-    print("=== Luxury corrective actions (loss cooldown + liquidity guard + repeat-loss block) test suite ===\n")
-    test_1_minutes_since_last_loss_basic()
-    test_2_minutes_since_last_loss_ignores_wins()
-    test_3_minutes_since_last_loss_isolates_by_strategy_and_symbol()
-    test_4_minutes_since_last_loss_uses_the_most_recent_of_several()
-    test_5_minutes_since_last_loss_none_when_no_log_or_no_loss_today()
-    await test_6_real_loss_then_immediate_reentry_blocked()
-    await test_7_reentry_succeeds_once_cooldown_expires()
-    await test_8_loss_cooldown_disabled_flag_bypasses_the_check()
-    test_9_liquidity_signal_detects_sustained_zero_volume()
-    test_10_liquidity_signal_one_nonzero_bar_means_liquid()
-    test_11_liquidity_signal_drops_still_forming_candle()
-    test_12_liquidity_signal_not_enough_bars_fails_safe()
-    test_13_liquidity_signal_none_before_first_refresh()
-    test_14_liquidity_guard_fires_when_nothing_else_would_have()
-    test_15_price_threshold_exit_still_takes_priority_over_liquidity_guard()
-    test_16_liquidity_guard_disabled_flag_bypasses_the_check()
-    test_17_loss_exit_count_today_basic()
-    test_18_loss_exit_count_today_ignores_non_loss_reasons_and_other_symbols_strategies()
-    await test_19_real_second_loss_blocks_third_entry_same_day()
-    await test_20_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses()
-    test_21_profit_protection_giveback_buffer()
+    print("=== Luxury corrective actions (RSI loss-reentry block + liquidity guard + repeat-loss block) test suite ===\n")
+    await test_1_real_loss_plus_rsi_condition_blocks_reentry_other_symbol_unaffected()
+    await test_2_reentry_succeeds_once_rsi_recovers_same_day()
+    await test_3_rsi_loss_reentry_disabled_flag_bypasses_the_check()
+    test_4_liquidity_signal_detects_sustained_zero_volume()
+    test_5_liquidity_signal_one_nonzero_bar_means_liquid()
+    test_6_liquidity_signal_drops_still_forming_candle()
+    test_7_liquidity_signal_not_enough_bars_fails_safe()
+    test_8_liquidity_signal_none_before_first_refresh()
+    test_9_liquidity_guard_fires_when_nothing_else_would_have()
+    test_10_price_threshold_exit_still_takes_priority_over_liquidity_guard()
+    test_11_liquidity_guard_disabled_flag_bypasses_the_check()
+    test_12_loss_exit_count_today_basic()
+    test_13_loss_exit_count_today_ignores_non_loss_reasons_and_other_symbols_strategies()
+    await test_14_real_second_loss_blocks_third_entry_same_day()
+    await test_15_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses()
+    test_16_profit_protection_giveback_buffer()
     print("\nALL LUXURY CORRECTIVE ACTION CHECKS PASSED")
 
 

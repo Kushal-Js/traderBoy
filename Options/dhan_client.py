@@ -154,6 +154,34 @@ def _compute_ema(values: list[float], period: int) -> list[Optional[float]]:
     return ema
 
 
+def _compute_rsi(closes: list[float], period: int) -> list[Optional[float]]:
+    """Standard RSI(period), Wilder smoothing - same formula as IndexScalping/
+    CopperOptions' own identical helper (kept as its own copy there per this
+    repo's per-package independence convention for PAPER strategies), but
+    this is the ONE shared implementation used by the real-money entry
+    guard (see refresh_rsi_signal below) - a single computation consumed by
+    Options/Futures/Luxury, the same reasoning _compute_supertrend/
+    _compute_ema above already follow. Returns one value per bar; the
+    first `period` entries are None (the seed lands on index period). Pure
+    function - no I/O, cheap to unit-test on its own."""
+    n = len(closes)
+    rsi: list[Optional[float]] = [None] * n
+    if n < period + 1:
+        return rsi
+    deltas = [closes[i] - closes[i - 1] for i in range(1, n)]
+    gains = [max(d, 0.0) for d in deltas]
+    losses = [max(-d, 0.0) for d in deltas]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    rsi[period] = 100.0 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss)
+    for i in range(period + 1, n):
+        gain, loss = gains[i - 1], losses[i - 1]
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+        rsi[i] = 100.0 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss)
+    return rsi
+
+
 class OrderStatus:
     """Order status values, verbatim from DhanHQ's v2 API docs.
     https://dhanhq.co/docs/v2/orders/"""
@@ -254,6 +282,13 @@ class DhanWrapper:
         # refresh shape as _supertrend_cache; used only by packages that turn
         # config.ENABLE_EMA_CROSS_EXIT on (Futures as of 10 Sep 2026).
         self._ema_cross_cache: dict[str, tuple[datetime, bool, bool, Optional[datetime]]] = {}
+        # underlying_symbol -> (fetched_at, current_rsi, prev_rsi, candle_start) -
+        # see refresh_rsi_signal()/get_cached_rsi(). Same cache-then-poll-
+        # refresh shape as _supertrend_cache/_ema_cross_cache above; used by
+        # the same-day RSI-gated loss re-entry block (config.ENABLE_RSI_
+        # LOSS_REENTRY_BLOCK), which replaced the old time-based LOSS_
+        # COOLDOWN mechanism on 11 Sep 2026 (user request).
+        self._rsi_cache: dict[str, tuple[datetime, Optional[float], Optional[float], Optional[datetime]]] = {}
         # option_trading_symbol -> (fetched_at, is_illiquid) - see
         # refresh_liquidity_signal()/get_cached_illiquid() (added 2 Sep
         # 2026, same cache-then-poll-refresh shape as _supertrend_cache
@@ -1161,6 +1196,118 @@ class DhanWrapper:
         position's own entry candle)."""
         cached = self._ema_cross_cache.get(underlying_symbol)
         return cached[3] if cached else None
+
+    # ------------------------------------------------------------------ #
+    # Same-day RSI-gated loss re-entry block (added 11 Sep 2026, replacing
+    # the old time-based LOSS_COOLDOWN_ENABLED/LOSS_COOLDOWN_MINUTES -
+    # user request: "Remove this cooldown period logic from everywhere and
+    # all strategies, instead create another global common function which
+    # checks if RSI of 5 min candle is greater than number 88 or if RSI of
+    # current candle is lesser than previous 5 min candle (means RSI is
+    # falling), then don't take a trade for that stock in same day if
+    # MAX_LOSS_HIT is already hit earlier for that day". One shared
+    # computation (like Supertrend/EMA-cross above), consumed identically
+    # by each package's own trading_engine.py, which combines this purely
+    # market-data signal with its own trade_history.loss_exit_count_today
+    # check - see Options/trading_engine.py's _process_one_entry for the
+    # combined gate.
+    # ------------------------------------------------------------------ #
+    def refresh_rsi_signal(self, underlying_symbol: str) -> None:
+        """Fetches the underlying's 5-min candles (continuous multi-session
+        series - see fetch_continuous_intraday) and recomputes RSI(config.
+        RSI_LOSS_REENTRY_PERIOD), caching the current and previous fully-
+        closed candle's RSI value. Cached (see get_cached_rsi/get_cached_
+        prev_rsi) and only re-fetched every config.RSI_LOSS_REENTRY_
+        REFRESH_SECONDS - same cache-then-poll-refresh shape as
+        refresh_supertrend_signal.
+
+        Blocking (REST call) - call via run_in_executor from async code,
+        same calling convention as refresh_supertrend_signal/refresh_ema_
+        cross_signal."""
+        cached = self._rsi_cache.get(underlying_symbol)
+        if cached and (datetime.now(IST) - cached[0]).total_seconds() < config.RSI_LOSS_REENTRY_REFRESH_SECONDS:
+            return
+        try:
+            security_id = self._equity_security_id(underlying_symbol)
+            data = self.fetch_continuous_intraday(
+                security_id, "NSE_EQ", "EQUITY", config.RSI_LOSS_REENTRY_INTERVAL_MINUTES,
+            )
+            closes = data.get("close") or []
+            timestamps = data.get("timestamp") or []
+            period = config.RSI_LOSS_REENTRY_PERIOD
+            # Drop a still-forming last candle, same reasoning as
+            # refresh_supertrend_signal - only a fully-closed candle's
+            # close should drive this signal.
+            if timestamps:
+                last_candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST)
+                if datetime.now(IST) < last_candle_start + timedelta(minutes=config.RSI_LOSS_REENTRY_INTERVAL_MINUTES):
+                    closes, timestamps = closes[:-1], timestamps[:-1]
+            # Need period+1 closes for the first RSI value, plus one more
+            # confirmed bar so both a "current" and "previous" RSI exist.
+            if len(closes) < period + 2:
+                logger.info("Not enough %d-min candles yet for %s RSI (%d bars)",
+                            config.RSI_LOSS_REENTRY_INTERVAL_MINUTES, underlying_symbol, len(closes))
+                return
+            rsi = _compute_rsi(closes, period)
+            current_rsi, prev_rsi = rsi[-1], rsi[-2]
+            candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST) if timestamps else None
+            self._rsi_cache[underlying_symbol] = (datetime.now(IST), current_rsi, prev_rsi, candle_start)
+        except Exception:  # noqa: BLE001
+            logger.exception("RSI refresh failed for %s - keeping the last cached value, if any.", underlying_symbol)
+
+    def get_cached_rsi(self, underlying_symbol: str) -> Optional[float]:
+        """Synchronous cache-only read: RSI on the last fully-closed candle.
+        None = not computed yet - treat as "don't block on missing data",
+        same fail-open philosophy as every other cached signal here."""
+        cached = self._rsi_cache.get(underlying_symbol)
+        return cached[1] if cached else None
+
+    def get_cached_prev_rsi(self, underlying_symbol: str) -> Optional[float]:
+        """RSI on the candle immediately before the last fully-closed one -
+        used to detect "RSI is falling" (current < previous)."""
+        cached = self._rsi_cache.get(underlying_symbol)
+        return cached[2] if cached else None
+
+    def is_rsi_loss_reentry_blocked(self, underlying_symbol: str) -> bool:
+        """Refreshes and evaluates the full RSI condition in one call - True
+        if the current RSI is overbought (> config.RSI_LOSS_REENTRY_
+        OVERBOUGHT) OR falling (current < previous confirmed candle's RSI).
+        Always reads the threshold from Options.config regardless of which
+        package calls this, same as every other shared signal here - keeps
+        Futures/Luxury's own trading_engine.py from needing their own copy
+        of RSI_LOSS_REENTRY_OVERBOUGHT/INTERVAL_MINUTES (they only need
+        their own ENABLE_RSI_LOSS_REENTRY_BLOCK on/off switch).
+
+        Fails OPEN (returns False, i.e. "don't block") when RSI isn't
+        computed yet (not enough candles) - a data gap must never itself
+        be the reason a stock stays blocked, same philosophy as every
+        other cached signal in this class."""
+        self.refresh_rsi_signal(underlying_symbol)
+        rsi = self.get_cached_rsi(underlying_symbol)
+        prev_rsi = self.get_cached_prev_rsi(underlying_symbol)
+        if rsi is None or prev_rsi is None:
+            return False
+        return rsi > config.RSI_LOSS_REENTRY_OVERBOUGHT or rsi < prev_rsi
+
+    def rsi_loss_reentry_reason(self, underlying_symbol: str) -> Optional[str]:
+        """"overbought" or "falling" - whichever condition is_rsi_loss_
+        reentry_blocked's True verdict was based on, for callers' log
+        messages only (Futures/Luxury's own trading_engine.py don't carry
+        their own copy of RSI_LOSS_REENTRY_OVERBOUGHT - this keeps that
+        threshold fully encapsulated here, same as the block decision
+        itself). Reads the SAME cached values is_rsi_loss_reentry_blocked
+        just populated - call this right after it, not standalone (no
+        fresh refresh here). None if neither condition holds or data is
+        missing."""
+        rsi = self.get_cached_rsi(underlying_symbol)
+        prev_rsi = self.get_cached_prev_rsi(underlying_symbol)
+        if rsi is None or prev_rsi is None:
+            return None
+        if rsi > config.RSI_LOSS_REENTRY_OVERBOUGHT:
+            return "overbought"
+        if rsi < prev_rsi:
+            return "falling"
+        return None
 
     # ------------------------------------------------------------------ #
     # Nifty50 open gap-down / sharp-fall CE cool-off (see config.py's own

@@ -160,8 +160,8 @@ def test_4_no_today_only_intraday_fetch_remains_in_any_strategy():
                 offenders.append(f"{mod.__name__}.{fn} does not call fetch_continuous_intraday")
             if "intraday_minute_data" in src:
                 offenders.append(f"{mod.__name__}.{fn} still calls intraday_minute_data directly")
-    # dhan_client's own three signal refreshers
-    for fn in ["refresh_supertrend_signal", "refresh_ema_cross_signal", "refresh_liquidity_signal"]:
+    # dhan_client's own signal refreshers
+    for fn in ["refresh_supertrend_signal", "refresh_ema_cross_signal", "refresh_liquidity_signal", "refresh_rsi_signal"]:
         src = inspect.getsource(getattr(odc.DhanWrapper, fn))
         if "fetch_continuous_intraday" not in src:
             offenders.append(f"dhan_client.{fn} does not call fetch_continuous_intraday")

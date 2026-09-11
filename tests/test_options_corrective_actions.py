@@ -1,30 +1,49 @@
 """
 Tests for Options' own wiring of three corrective actions ported from
 Luxury on 10 Sep 2026 (user request: "make Options have similar rule
-set and guard rails as Luxury have, add and deploy also"): same-day
-loss cooldown, the liquidity guard, and the repeat-loss same-day block.
+set and guard rails as Luxury have, add and deploy also"): the same-day
+RSI-gated loss re-entry block, the liquidity guard, and the repeat-loss
+same-day block.
 
-The underlying shared mechanisms (trade_history.minutes_since_last_
-loss_today, trade_history.loss_exit_count_today, dhan_client.
-refresh_liquidity_signal/get_cached_illiquid) are already fully tested
-against Luxury's own strategy tag in tests/test_luxury_corrective_
-actions.py - those are pure, strategy-agnostic functions, so this file
-does NOT re-test their internal logic (that would just be duplicate
-coverage of the identical code path under a different string constant).
-What IS new and needs its own coverage is OPTIONS' OWN integration
-wiring - _process_one_entry's loss-cooldown/repeat-block checks and
-_exit_reason_for's liquidity_guard_triggered parameter - since each
-package keeps its own copy of trading_engine.py, so a wiring mistake in
-one package's own copy wouldn't be caught by the other's tests.
+The time-based LOSS_COOLDOWN_ENABLED/LOSS_COOLDOWN_MINUTES mechanism
+this file used to test was REMOVED on 11 Sep 2026 (user request: "Remove
+this cooldown period logic from everywhere and all strategies, instead
+create another global common function which checks if RSI...") after a
+real INDUSTOWER alert was skipped 1 minute short of its 20-minute
+window regardless of whether the stock had recovered. See Options/
+config.py's "Same-day RSI-gated loss re-entry block" comment and
+Options/dhan_client.py's refresh_rsi_signal/is_rsi_loss_reentry_blocked
+for the replacement mechanism - its own RSI computation correctness
+(overbought/falling detection, continuous-candle fetch) is covered by
+tests/test_rsi_loss_reentry_block.py, so THIS file only tests OPTIONS'
+OWN _process_one_entry wiring (does it only look at RSI after a real
+loss, does it respect the flag, is the effect a re-checkable condition
+rather than a permanent block) by mocking is_rsi_loss_reentry_blocked
+directly to a controlled verdict.
+
+The other underlying shared mechanisms (trade_history.loss_exit_count_
+today, dhan_client.refresh_liquidity_signal/get_cached_illiquid) are
+already fully tested against Luxury's own strategy tag in tests/
+test_luxury_corrective_actions.py - those are pure, strategy-agnostic
+functions, so this file does NOT re-test their internal logic (that
+would just be duplicate coverage of the identical code path under a
+different string constant). What IS new and needs its own coverage is
+OPTIONS' OWN integration wiring - _process_one_entry's RSI-loss-reentry/
+repeat-block checks and _exit_reason_for's liquidity_guard_triggered
+parameter - since each package keeps its own copy of trading_engine.py,
+so a wiring mistake in one package's own copy wouldn't be caught by the
+other's tests.
 
 Covers, against the REAL production functions (not reimplemented):
-  1. A real MAX_LOSS_HIT loss correctly blocks an immediate real
-     re-entry attempt for the SAME symbol (zero orders placed) via
-     LOSS_COOLDOWN_ENABLED, while a different symbol is unaffected.
-  2. Once the configured cooldown window has genuinely elapsed, the
-     same symbol re-enters normally.
-  3. LOSS_COOLDOWN_ENABLED=False cleanly bypasses the check even
-     seconds after a real loss.
+  1. A real MAX_LOSS_HIT loss + an RSI condition (mocked True) correctly
+     blocks an immediate real re-entry attempt for the SAME symbol (zero
+     orders placed), while a DIFFERENT symbol with no loss today is
+     entirely unaffected (RSI is never even consulted for it).
+  2. Once RSI recovers (mocked False) the SAME DAY, the same symbol
+     re-enters normally even though it lost earlier today - proves this
+     is a re-checkable condition, not a permanent same-day block.
+  3. ENABLE_RSI_LOSS_REENTRY_BLOCK=False cleanly bypasses the check even
+     with a real loss on record and RSI mocked as still blocking.
   4. The liquidity guard correctly fires on its own when no price
      threshold is anywhere close (the CHOLAFIN shape).
   5. A genuine price-threshold exit (e.g. TARGET_HIT) still takes
@@ -92,6 +111,10 @@ def install_all_dhan_mocks():
         "refresh_supertrend_signal": odc.dhan_wrapper.refresh_supertrend_signal,
         "get_cached_supertrend_bearish": odc.dhan_wrapper.get_cached_supertrend_bearish,
         "get_cached_supertrend_candle_start": odc.dhan_wrapper.get_cached_supertrend_candle_start,
+        "is_rsi_loss_reentry_blocked": odc.dhan_wrapper.is_rsi_loss_reentry_blocked,
+        "get_cached_rsi": odc.dhan_wrapper.get_cached_rsi,
+        "get_cached_prev_rsi": odc.dhan_wrapper.get_cached_prev_rsi,
+        "rsi_loss_reentry_reason": odc.dhan_wrapper.rsi_loss_reentry_reason,
         "place_market_order": odc.dhan_wrapper.place_market_order,
         "place_stop_loss_limit_order": odc.dhan_wrapper.place_stop_loss_limit_order,
         "check_if_order_filled": odc.dhan_wrapper.check_if_order_filled,
@@ -108,6 +131,13 @@ def install_all_dhan_mocks():
     odc.dhan_wrapper.refresh_supertrend_signal = lambda underlying_symbol: None
     odc.dhan_wrapper.get_cached_supertrend_bearish = lambda underlying_symbol: None
     odc.dhan_wrapper.get_cached_supertrend_candle_start = lambda underlying_symbol: None
+    # Default: never blocks (tests that specifically exercise the RSI-loss-
+    # reentry wiring override this to a controlled verdict; every other
+    # test in this file never wants a real network call here).
+    odc.dhan_wrapper.is_rsi_loss_reentry_blocked = lambda underlying_symbol: False
+    odc.dhan_wrapper.get_cached_rsi = lambda underlying_symbol: None
+    odc.dhan_wrapper.get_cached_prev_rsi = lambda underlying_symbol: None
+    odc.dhan_wrapper.rsi_loss_reentry_reason = lambda underlying_symbol: None
 
     placed_orders = []
 
@@ -134,16 +164,22 @@ def install_all_dhan_mocks():
 
 
 # --------------------------------------------------------------------- #
-# 1. Same-day loss cooldown - Options' own _process_one_entry wiring
+# 1. Same-day RSI-gated loss re-entry block - Options' own
+#    _process_one_entry wiring (replaces the old time-based cooldown)
 # --------------------------------------------------------------------- #
 
-async def test_1_real_loss_then_immediate_reentry_blocked():
+async def test_1_real_loss_plus_rsi_condition_blocks_reentry_other_symbol_unaffected():
     store = ops.PositionStore()
     ote.position_store = store
-    real_enabled, real_minutes = ote.config.LOSS_COOLDOWN_ENABLED, ote.config.LOSS_COOLDOWN_MINUTES
-    ote.config.LOSS_COOLDOWN_ENABLED = True
-    ote.config.LOSS_COOLDOWN_MINUTES = 30
+    real_enabled = ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = True
     restore, placed_orders = install_all_dhan_mocks()
+    # RSI condition mocked as "still blocking" (overbought/falling) - the
+    # underlying RSI math itself is covered by test_rsi_loss_reentry_block.py.
+    odc.dhan_wrapper.is_rsi_loss_reentry_blocked = lambda underlying_symbol: True
+    odc.dhan_wrapper.get_cached_rsi = lambda underlying_symbol: 91.5
+    odc.dhan_wrapper.get_cached_prev_rsi = lambda underlying_symbol: 93.0
+    odc.dhan_wrapper.rsi_loss_reentry_reason = lambda underlying_symbol: "overbought"
     try:
         entry = await ote._process_one_entry("COALINDIA", "CE")
         assert entry["status"] == "entered", entry
@@ -154,58 +190,71 @@ async def test_1_real_loss_then_immediate_reentry_blocked():
 
         placed_orders.clear()
         retry = await ote._process_one_entry("COALINDIA", "CE")
-        assert retry["status"] == "skipped" and retry["reason"] == "loss_cooldown_active", retry
-        assert placed_orders == [], f"a cooling-down symbol must place ZERO orders, got {placed_orders}"
+        assert retry["status"] == "skipped" and retry["reason"] == "rsi_loss_reentry_block_active", retry
+        assert placed_orders == [], f"an RSI-blocked symbol must place ZERO orders, got {placed_orders}"
 
+        # A DIFFERENT symbol with NO loss today must be entirely
+        # unaffected - RSI is never even consulted for it (loss_hits_
+        # today short-circuits before is_rsi_loss_reentry_blocked runs),
+        # even though the mock above would say "blocked" if it were asked.
         placed_orders.clear()
         other = await ote._process_one_entry("RVNL", "CE")
         assert other["status"] == "entered", f"a DIFFERENT symbol must be entirely unaffected, got {other}"
 
-        print("1. A real MAX_LOSS_HIT loss correctly blocks an immediate real re-entry attempt for the SAME "
-              "symbol (zero orders placed), while a different symbol is entirely unaffected: PASSED")
+        print("1. A real MAX_LOSS_HIT loss + an RSI condition correctly blocks an immediate real re-entry "
+              "attempt for the SAME symbol (zero orders placed), while a different symbol with no loss "
+              "today is entirely unaffected: PASSED")
     finally:
         restore()
-        ote.config.LOSS_COOLDOWN_ENABLED, ote.config.LOSS_COOLDOWN_MINUTES = real_enabled, real_minutes
+        ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_enabled
 
 
-async def test_2_reentry_succeeds_once_cooldown_expires():
+async def test_2_reentry_succeeds_once_rsi_recovers_same_day():
     store = ops.PositionStore()
     ote.position_store = store
-    real_enabled, real_minutes = ote.config.LOSS_COOLDOWN_ENABLED, ote.config.LOSS_COOLDOWN_MINUTES
-    ote.config.LOSS_COOLDOWN_ENABLED = True
-    ote.config.LOSS_COOLDOWN_MINUTES = 30
+    real_enabled = ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = True
     restore, placed_orders = install_all_dhan_mocks()
+    # RSI condition mocked as "recovered" (neither overbought nor falling).
+    odc.dhan_wrapper.is_rsi_loss_reentry_blocked = lambda underlying_symbol: False
     try:
         trade_history.append_jsonl("real_trades", {
             "strategy": "Options", "underlying_symbol": "KFINTECH", "pnl": -900.0,
-            "closed_at": (datetime.now() - timedelta(minutes=45)).isoformat(),
+            "exit_reason": "MAX_LOSS_HIT", "closed_at": (datetime.now() - timedelta(minutes=2)).isoformat(),
         })
         result = await ote._process_one_entry("KFINTECH", "CE")
         assert result["status"] == "entered", \
-            f"a loss from 45 minutes ago (past the 30-minute cooldown) must not block re-entry, got {result}"
-        print("2. Once the configured cooldown window has genuinely elapsed, the same symbol re-enters normally: PASSED")
+            f"once RSI is no longer overbought/falling, the SAME symbol must re-enter normally " \
+            f"the SAME day, even though it lost minutes ago - this is a condition, not a timer, got {result}"
+        print("2. Once RSI recovers (neither overbought nor falling) the SAME day, the same symbol "
+              "re-enters normally even though it lost earlier today - a re-checkable condition, "
+              "not a permanent same-day block: PASSED")
     finally:
         restore()
-        ote.config.LOSS_COOLDOWN_ENABLED, ote.config.LOSS_COOLDOWN_MINUTES = real_enabled, real_minutes
+        ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_enabled
 
 
-async def test_3_loss_cooldown_disabled_flag_bypasses_the_check():
+async def test_3_rsi_loss_reentry_disabled_flag_bypasses_the_check():
     store = ops.PositionStore()
     ote.position_store = store
-    real_enabled = ote.config.LOSS_COOLDOWN_ENABLED
-    ote.config.LOSS_COOLDOWN_ENABLED = False
+    real_enabled = ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
     restore, placed_orders = install_all_dhan_mocks()
+    # Even mocked as "still blocking" - the flag being off must never even ask.
+    odc.dhan_wrapper.is_rsi_loss_reentry_blocked = lambda underlying_symbol: True
     try:
         trade_history.append_jsonl("real_trades", {
             "strategy": "Options", "underlying_symbol": "NBCC", "pnl": -50.0,
-            "closed_at": datetime.now().isoformat(),
+            "exit_reason": "MAX_LOSS_HIT", "closed_at": datetime.now().isoformat(),
         })
         result = await ote._process_one_entry("NBCC", "CE")
-        assert result["status"] == "entered", f"disabling the flag must bypass the cooldown entirely, got {result}"
-        print("3. LOSS_COOLDOWN_ENABLED=False cleanly bypasses the check even seconds after a real loss: PASSED")
+        assert result["status"] == "entered", \
+            f"disabling the flag must bypass the RSI-loss-reentry check entirely, got {result}"
+        print("3. ENABLE_RSI_LOSS_REENTRY_BLOCK=False cleanly bypasses the check even with a real loss "
+              "on record and RSI mocked as still blocking: PASSED")
     finally:
         restore()
-        ote.config.LOSS_COOLDOWN_ENABLED = real_enabled
+        ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_enabled
 
 
 # --------------------------------------------------------------------- #
@@ -314,12 +363,13 @@ def test_6_liquidity_guard_disabled_flag_bypasses_the_check():
 async def test_7_real_second_loss_blocks_third_entry_same_day():
     store = ops.PositionStore()
     ote.position_store = store
-    real_cooldown_enabled = ote.config.LOSS_COOLDOWN_ENABLED
+    real_rsi_block_enabled = ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
     real_block_enabled, real_block_count = ote.config.LOSS_REPEAT_BLOCK_ENABLED, ote.config.LOSS_REPEAT_BLOCK_COUNT
-    # Cooldown disabled here so ONLY the repeat-block feature is under
-    # test - otherwise the pre-existing 20-minute cooldown would ALSO
-    # block the immediate retries below, confounding which feature fired.
-    ote.config.LOSS_COOLDOWN_ENABLED = False
+    # RSI-loss-reentry disabled here so ONLY the repeat-block feature is
+    # under test - otherwise it would ALSO block the immediate retries
+    # below (both fire on the same MAX_LOSS_HIT), confounding which
+    # feature fired.
+    ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
     ote.config.LOSS_REPEAT_BLOCK_ENABLED = True
     ote.config.LOSS_REPEAT_BLOCK_COUNT = 2
     restore, placed_orders = install_all_dhan_mocks()
@@ -352,7 +402,7 @@ async def test_7_real_second_loss_blocks_third_entry_same_day():
               "entirely unaffected: PASSED")
     finally:
         restore()
-        ote.config.LOSS_COOLDOWN_ENABLED = real_cooldown_enabled
+        ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_rsi_block_enabled
         ote.config.LOSS_REPEAT_BLOCK_ENABLED = real_block_enabled
         ote.config.LOSS_REPEAT_BLOCK_COUNT = real_block_count
 
@@ -360,10 +410,10 @@ async def test_7_real_second_loss_blocks_third_entry_same_day():
 async def test_8_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses():
     store = ops.PositionStore()
     ote.position_store = store
-    real_cooldown_enabled = ote.config.LOSS_COOLDOWN_ENABLED
+    real_rsi_block_enabled = ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
     real_block_enabled, real_block_count = ote.config.LOSS_REPEAT_BLOCK_ENABLED, ote.config.LOSS_REPEAT_BLOCK_COUNT
     real_daily_cap = ote.config.MAX_DAILY_ENTRIES_PER_SYMBOL
-    ote.config.LOSS_COOLDOWN_ENABLED = False
+    ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
     ote.config.LOSS_REPEAT_BLOCK_ENABLED = True
     ote.config.LOSS_REPEAT_BLOCK_COUNT = 2
     # This test makes 4 real entry attempts for the SAME symbol - raised
@@ -404,7 +454,7 @@ async def test_8_a_win_between_two_losses_does_not_reset_the_count_and_disabled_
               "the 2nd genuine loss); LOSS_REPEAT_BLOCK_ENABLED=False cleanly bypasses the check: PASSED")
     finally:
         restore()
-        ote.config.LOSS_COOLDOWN_ENABLED = real_cooldown_enabled
+        ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_rsi_block_enabled
         ote.config.LOSS_REPEAT_BLOCK_ENABLED = real_block_enabled
         ote.config.LOSS_REPEAT_BLOCK_COUNT = real_block_count
         ote.config.MAX_DAILY_ENTRIES_PER_SYMBOL = real_daily_cap
@@ -440,10 +490,10 @@ def test_9_profit_protection_giveback_buffer():
 
 
 async def main():
-    print("=== Options corrective actions (loss cooldown + liquidity guard + repeat-loss block) test suite ===\n")
-    await test_1_real_loss_then_immediate_reentry_blocked()
-    await test_2_reentry_succeeds_once_cooldown_expires()
-    await test_3_loss_cooldown_disabled_flag_bypasses_the_check()
+    print("=== Options corrective actions (RSI loss-reentry block + liquidity guard + repeat-loss block) test suite ===\n")
+    await test_1_real_loss_plus_rsi_condition_blocks_reentry_other_symbol_unaffected()
+    await test_2_reentry_succeeds_once_rsi_recovers_same_day()
+    await test_3_rsi_loss_reentry_disabled_flag_bypasses_the_check()
     test_4_liquidity_guard_fires_when_nothing_else_would_have()
     test_5_price_threshold_exit_still_takes_priority_over_liquidity_guard()
     test_5b_target_exit_disabled_flag_suppresses_target_hit_only()

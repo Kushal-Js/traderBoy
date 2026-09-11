@@ -102,32 +102,50 @@ MAX_LIVE_POSITIONS_PE = int(os.getenv("MAX_LIVE_POSITIONS_PE", "2"))
 # per-day counter in position_store.py).
 MAX_DAILY_ENTRIES_PER_SYMBOL = int(os.getenv("MAX_DAILY_ENTRIES_PER_SYMBOL", "3"))
 
-# Same-day loss cooldown - ported from Luxury/config.py's own LOSS_
-# COOLDOWN_ENABLED (added there 2 Sep 2026, ported here 10 Sep 2026 as
-# part of bringing Options up to the same guard-rail set - user request:
-# "make Options have similar rule set and guard rails as Luxury have").
-# Skips a fresh entry into an underlying that stopped THIS strategy out
-# (a real pnl<=0 close) within the last LOSS_COOLDOWN_MINUTES, backed by
-# trade_history.minutes_since_last_loss_today() (the same durable
-# real_trades log record_closed_trade() already writes). Independent of
-# and stacks with MAX_DAILY_ENTRIES_PER_SYMBOL above - that one is about
-# COUNT (at most N times all day, no matter how spaced out), this one is
-# about TIMING (don't immediately chase a loss). 20 minutes is Luxury's
-# own tuned value (backtested against a sweep of 5/10/15/20/25/30/45/60/
-# 90/120 minutes against its real 2-3 Sep trades) - carried over as a
-# reasonable starting point since Options runs the identical entry/exit
-# mechanics, not independently re-tuned against Options' own trade
-# history yet.
-LOSS_COOLDOWN_ENABLED = os.getenv("LOSS_COOLDOWN_ENABLED", "true").lower() == "true"
-LOSS_COOLDOWN_MINUTES = float(os.getenv("LOSS_COOLDOWN_MINUTES", "20"))
+# Same-day RSI-gated loss re-entry block (added 11 Sep 2026, REPLACING
+# the old time-based LOSS_COOLDOWN_ENABLED/LOSS_COOLDOWN_MINUTES pair
+# that used to live here - user request: "Remove this cooldown period
+# logic from everywhere and all strategies, instead create another
+# global common function which checks if RSI of 5 min candle is greater
+# than number 88 or if RSI of current candle is lesser than previous 5
+# min candle (means RSI is falling), then don't take a trade for that
+# stock in same day if MAX_LOSS_HIT is already hit earlier for that
+# day." The trigger for a fixed-minutes wait was found to be too blunt
+# in practice - a real INDUSTOWER alert on 11 Sep 2026 was skipped at the
+# 19-minute mark of a 20-minute cooldown, one minute short, regardless of
+# whether the stock had actually recovered. This checks the ACTUAL
+# market state instead of a clock: RSI(RSI_LOSS_REENTRY_PERIOD) on
+# RSI_LOSS_REENTRY_INTERVAL_MINUTES-min candles, evaluated fresh at every
+# new entry attempt (not latched once and held for the rest of the day) -
+# if the stock already stopped THIS strategy out today via MAX_LOSS_HIT
+# (trade_history.loss_exit_count_today, same durable real_trades log as
+# before) AND its RSI is either overbought (> RSI_LOSS_REENTRY_OVERBOUGHT)
+# or still falling (current 5-min RSI < the previous 5-min RSI), the
+# stock hasn't shown genuine recovery yet, so the re-entry is skipped;
+# once RSI is neither overbought nor falling, it's allowed through again
+# the same day. See Options/dhan_client.py's refresh_rsi_signal/
+# get_cached_rsi for the shared computation (one implementation, used by
+# Options/Futures/Luxury alike, same as Supertrend/EMA-cross above) and
+# Options/trading_engine.py's _process_one_entry for where the two
+# pieces (loss-today + RSI condition) are combined.
+RSI_LOSS_REENTRY_PERIOD = int(os.getenv("RSI_LOSS_REENTRY_PERIOD", "14"))
+RSI_LOSS_REENTRY_INTERVAL_MINUTES = int(os.getenv("RSI_LOSS_REENTRY_INTERVAL_MINUTES", "5"))
+RSI_LOSS_REENTRY_OVERBOUGHT = float(os.getenv("RSI_LOSS_REENTRY_OVERBOUGHT", "88"))
+RSI_LOSS_REENTRY_REFRESH_SECONDS = int(os.getenv("RSI_LOSS_REENTRY_REFRESH_SECONDS", "15"))
+
+# Per-package on/off switch (Options' own copy - unprefixed, matching this
+# package's other flags). Futures/Luxury have their own FUTURES_/LUXURY_
+# prefixed copies in their own config.py, all defaulting to "true".
+ENABLE_RSI_LOSS_REENTRY_BLOCK = os.getenv("ENABLE_RSI_LOSS_REENTRY_BLOCK", "true").lower() == "true"
 
 # Repeat-loss same-day block - ported from Luxury/config.py's own LOSS_
 # REPEAT_BLOCK_ENABLED (added there 8 Sep 2026, ported here 10 Sep 2026,
-# same "similar rule set and guard rails" request). Distinct from BOTH
+# same "similar rule set and guard rails" request). Distinct from both
 # guards above: MAX_DAILY_ENTRIES_PER_SYMBOL is a flat COUNT cap
-# regardless of outcome (wins count too); LOSS_COOLDOWN_MINUTES is a
-# short TIMING gap after the most recent loss. This one is a same-day
-# OUTCOME-COUNTING block: once a symbol has closed on a genuine loss-
+# regardless of outcome (wins count too); ENABLE_RSI_LOSS_REENTRY_BLOCK
+# is a CONDITION gate re-checked on every attempt (RSI recovering re-
+# opens the symbol the same day). This one is a same-day OUTCOME-COUNTING
+# block: once a symbol has closed on a genuine loss-
 # designated exit (MAX_LOSS_HIT/STOP_LOSS_HIT specifically, not every
 # trade that happened to close a little negative for some other reason
 # like SUPERTREND_EXIT/TRAILING_SL_HIT) LOSS_REPEAT_BLOCK_COUNT times

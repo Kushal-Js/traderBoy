@@ -65,10 +65,12 @@ MAX_DAILY_ENTRIES_PER_SYMBOL = int(os.getenv("FUTURES_MAX_DAILY_ENTRIES_PER_SYMB
 # comments for the full rationale behind each; these are this package's own
 # independently-tunable copies (FUTURES_-prefixed env).
 # ---------------------------------------------------------------------------
-# Same-day loss cooldown: skip a fresh entry into an underlying this
-# strategy stopped out (real pnl<=0) within the last N minutes.
-LOSS_COOLDOWN_ENABLED = os.getenv("FUTURES_LOSS_COOLDOWN_ENABLED", "true").lower() == "true"
-LOSS_COOLDOWN_MINUTES = float(os.getenv("FUTURES_LOSS_COOLDOWN_MINUTES", "20"))
+# Same-day RSI-gated loss re-entry block - see Options/config.py's own
+# "Same-day RSI-gated loss re-entry block" comment (11 Sep 2026) for the
+# full rationale; this package's own independently-tunable on/off switch.
+# The RSI computation itself (period/interval/overbought threshold) is
+# shared - always reads Options.config, same as SUPERTREND_PERIOD does.
+ENABLE_RSI_LOSS_REENTRY_BLOCK = os.getenv("FUTURES_ENABLE_RSI_LOSS_REENTRY_BLOCK", "true").lower() == "true"
 
 # Repeat-loss same-day block: once a symbol has closed on MAX_LOSS_HIT/
 # STOP_LOSS_HIT this many times today, it's blocked for the rest of the day.
