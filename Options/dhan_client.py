@@ -302,6 +302,10 @@ class DhanWrapper:
         # dict-of-symbols like the caches above since Nifty is a single
         # market-wide fact shared by every strategy/symbol.
         self._nifty_open_condition_cache: Optional[dict] = None
+        # (fetched_at, is_recovering) - see is_nifty_recovering(). Separate
+        # from the cache above since this one refreshes repeatedly through
+        # the morning (config.NIFTY_RECOVERY_REFRESH_SECONDS), not once.
+        self._nifty_recovery_cache: Optional[tuple[datetime, bool]] = None
         # Observability: proves (or disproves) whether the WebSocket caches
         # are actually being used instead of REST, rather than assuming it.
         self.stats = {
@@ -1321,12 +1325,13 @@ class DhanWrapper:
     # IndexScalping/config.py's INDEX_SECURITY_ID["NIFTY"] already uses.
 
     def evaluate_nifty_open_condition(self, now: Optional[datetime] = None) -> dict:
-        """Computed ONCE per trading day - a one-shot judgment "at the
-        open", not a running re-evaluation - by whichever CE webhook alert
-        is first to ask, then cached for the rest of the day so a later
-        recovery doesn't retroactively cancel the cool-off (the user's own
-        framing: "wait for 10 mins ... otherwise proceed as normal", a
-        decision made once at open, not re-litigated every tick).
+        """The GAP/FALL judgment itself is computed ONCE per trading day -
+        "did Nifty gap down or open falling", a one-shot fact about the
+        open - by whichever CE webhook alert is first to ask, then cached
+        for the rest of the day. What callers DO with that fact is not
+        one-shot, though: should_delay_ce_entry() re-checks live whether
+        Nifty has recovered yet (is_nifty_recovering) every time it's
+        called, so the actual hold length isn't decided here.
 
         Reads Nifty50's own continuous multi-session 1-min series (see
         fetch_continuous_intraday) to get:
@@ -1384,6 +1389,20 @@ class DhanWrapper:
         sharp_falling = fall_pct >= config.GAP_DOWN_SHARP_FALL_PCT
         delay_ce = gap_down or sharp_falling
 
+        # SCALED minimum delay - only the actual gap-down magnitude scales
+        # it (a sharp-fall-only trigger has no comparable "gap size", so it
+        # always gets the plain base minutes). See config.py's own comment
+        # block for the formula and the real gap-down day it's tuned from.
+        if gap_down:
+            excess_points = max(0.0, abs(gap_points) - config.GAP_DOWN_THRESHOLD_POINTS)
+            scaled_minutes = min(
+                config.GAP_DOWN_MAX_DELAY_MINUTES,
+                config.GAP_DOWN_CE_DELAY_MINUTES
+                + config.GAP_DOWN_EXTRA_DELAY_MINUTES_PER_100_POINTS * (excess_points / 100.0),
+            )
+        else:
+            scaled_minutes = min(config.GAP_DOWN_MAX_DELAY_MINUTES, config.GAP_DOWN_CE_DELAY_MINUTES)
+
         market_open_dt = datetime.combine(today, dtime.fromisoformat(config.MARKET_OPEN_TIME), tzinfo=IST)
         result = {
             "date": today, "evaluated": True,
@@ -1391,14 +1410,19 @@ class DhanWrapper:
             "gap_points": round(gap_points, 2), "gap_down": gap_down,
             "fall_pct": round(fall_pct * 100, 3), "sharp_falling": sharp_falling,
             "delay_ce": delay_ce,
-            "delay_until": (market_open_dt + timedelta(minutes=config.GAP_DOWN_CE_DELAY_MINUTES)) if delay_ce else None,
+            "scaled_delay_minutes": round(scaled_minutes, 1) if delay_ce else None,
+            "delay_until": (market_open_dt + timedelta(minutes=scaled_minutes)) if delay_ce else None,
+            "hard_cap_until": (market_open_dt + timedelta(minutes=config.GAP_DOWN_MAX_DELAY_MINUTES)) if delay_ce else None,
         }
         self._nifty_open_condition_cache = result
         if delay_ce:
             logger.warning(
                 "Nifty50 open condition: gap=%.1f pts (open=%.2f prev_close=%.2f) fall=%.2f%% from open "
-                "-> CE entries delayed until %s",
-                gap_points, today_open, prev_close, fall_pct * 100, result["delay_until"].strftime("%H:%M"),
+                "-> CE entries delayed at least until %s (scaled %.1f min)%s, hard cap %s",
+                gap_points, today_open, prev_close, fall_pct * 100,
+                result["delay_until"].strftime("%H:%M"), scaled_minutes,
+                " + wait for Nifty to turn green" if config.ENABLE_NIFTY_RECOVERY_GATE else "",
+                result["hard_cap_until"].strftime("%H:%M"),
             )
         else:
             logger.info(
@@ -1408,17 +1432,65 @@ class DhanWrapper:
             )
         return result
 
+    def is_nifty_recovering(self, today_open: float, now: Optional[datetime] = None) -> bool:
+        """True if Nifty50's still-forming daily candle has turned GREEN -
+        its latest close back at or above `today_open` - the "wait until
+        it starts recovering" half of the gap-down cool-off (see should_
+        delay_ce_entry). Re-fetched at most every config.NIFTY_RECOVERY_
+        REFRESH_SECONDS (this gets polled on every CE webhook alert while
+        a delay is pending, unlike evaluate_nifty_open_condition's
+        once-a-day cache).
+
+        Fails OPEN (returns True, i.e. "treat as recovered, don't extend
+        the delay on this") on a fetch failure - a data hiccup must never
+        itself be the reason CE stays blocked, same philosophy as every
+        other signal in this class."""
+        now = now or datetime.now(IST)
+        cached = self._nifty_recovery_cache
+        if cached and (now - cached[0]).total_seconds() < config.NIFTY_RECOVERY_REFRESH_SECONDS:
+            return cached[1]
+        try:
+            data = self.fetch_continuous_intraday(self.NIFTY_SECURITY_ID, "IDX_I", "INDEX", 1)
+        except Exception:  # noqa: BLE001
+            logger.exception("Nifty recovery check: intraday fetch failed - treating as recovered (fail open).")
+            return True
+
+        timestamps = data.get("timestamp") or []
+        closes = data.get("close") or []
+        today = now.date()
+        today_closes = [c for t, c in zip(timestamps, closes) if datetime.fromtimestamp(t, tz=IST).date() == today]
+        if not today_closes or not today_open:
+            return True
+
+        recovering = today_closes[-1] >= today_open
+        self._nifty_recovery_cache = (now, recovering)
+        return recovering
+
     def should_delay_ce_entry(self, now: Optional[datetime] = None) -> bool:
         """Generic, strategy-agnostic gate for use at every CE webhook entry
-        point (Options/Futures/Luxury): True if Nifty50's open condition
-        (see evaluate_nifty_open_condition) called for a delay AND we're
-        still inside that cool-off window. PE entries must never call this
-        - a falling Nifty is exactly when a PE-buying alert should act."""
+        point (Options/Futures/Luxury): True while Nifty50's open condition
+        (see evaluate_nifty_open_condition) called for a delay AND we
+        haven't cleared it yet. Clearing requires BOTH:
+          1. Past the scaled minimum delay (result["delay_until"]) - a
+             bigger gap always waits at least proportionally longer,
+             regardless of how fast price bounces right after open.
+          2. If config.ENABLE_NIFTY_RECOVERY_GATE is on, Nifty's own daily
+             candle has turned green (is_nifty_recovering) - otherwise
+             the delay keeps extending, capped at result["hard_cap_until"]
+             (past that, CE always resumes regardless of Nifty's color).
+        PE entries must never call this - a falling Nifty is exactly when
+        a PE-buying alert should act."""
         now = now or datetime.now(IST)
         result = self.evaluate_nifty_open_condition(now)
         if not result.get("delay_ce") or result.get("delay_until") is None:
             return False
-        return now < result["delay_until"]
+        if now >= result["hard_cap_until"]:
+            return False
+        if now < result["delay_until"]:
+            return True
+        if not config.ENABLE_NIFTY_RECOVERY_GATE:
+            return False
+        return not self.is_nifty_recovering(result["today_open"], now)
 
     # ------------------------------------------------------------------ #
     # Liquidity guard (added 2 Sep 2026, see config.LIQUIDITY_GUARD_

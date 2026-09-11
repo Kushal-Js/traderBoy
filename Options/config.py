@@ -553,36 +553,87 @@ MARKET_CLOSE_TIME = "15:30"
 # Nifty50 open gap-down / sharp-fall CE cool-off (added 11 Sep 2026, user
 # request: "evaluate if Nifty50 has a Gap Down opening of more than 100
 # points or is sharp falling when market open, then wait for 10 mins
-# before placing any CE orders"). This is a single market-wide fact (is
-# the index falling right now), not a per-strategy one, so the actual
-# computation - dhan_wrapper.evaluate_nifty_open_condition() /
-# should_delay_ce_entry() in dhan_client.py - is shared: it always reads
-# these three params from Options.config regardless of which package
-# (Options/Futures/Luxury) calls it, exactly like SUPERTREND_PERIOD above
-# already does for the shared Supertrend signal. Each package still gets
-# its own ENABLE_GAP_DOWN_CE_DELAY on/off switch in its own config.py so
-# it can be disabled independently if it turns out to cost more good
-# entries than it saves.
+# before placing any CE orders"; SCALED + recovery-gated 11 Sep 2026,
+# after a real -207.5 point gap-down day showed a flat 10-minute wait is
+# nowhere near enough on a big gap - Nifty stayed red (below today's own
+# open) until 10:03 IST, 48 minutes in, and 6 of the 7 real CE entries
+# taken before it turned green that day lost: "look at scaling the delay
+# to the gap size or until Nifty50 daily candle starts showing
+# recovering (turning green from red)..."). This is a single market-wide
+# fact (is the index falling right now), not a per-strategy one, so the
+# actual computation - dhan_wrapper.evaluate_nifty_open_condition() /
+# is_nifty_recovering() / should_delay_ce_entry() in dhan_client.py - is
+# shared: it always reads these params from Options.config regardless of
+# which package (Options/Futures/Luxury) calls it, exactly like
+# SUPERTREND_PERIOD above already does for the shared Supertrend signal.
+# Each package still gets its own ENABLE_GAP_DOWN_CE_DELAY on/off switch
+# in its own config.py so it can be disabled independently if it turns
+# out to cost more good entries than it saves.
 #
-# Evaluated ONCE per day, at whichever webhook alert is the first to ask
-# (a one-shot judgment "at the open", not a running re-evaluation) and
-# cached for the rest of the day:
+# The open condition itself is evaluated ONCE per day, at whichever
+# webhook alert is the first to ask (a one-shot judgment "at the open"),
+# and cached for the rest of the day:
 #   gap_points  = today's first 1-min bar's open - yesterday's last close
 #   gap_down    = gap_points <= -GAP_DOWN_THRESHOLD_POINTS
 #   fall_pct    = (today's open - latest close so far) / today's open
 #   sharp_fall  = fall_pct >= GAP_DOWN_SHARP_FALL_PCT
-# If either is true, CE entries (PE is never affected - a falling Nifty
-# is exactly when a PE-buying alert would want to act) are refused until
-# GAP_DOWN_CE_DELAY_MINUTES after MARKET_OPEN_TIME; PE and every other
-# gate is untouched.
+# If either fires, CE entries are held back for AT LEAST a MINIMUM delay
+# that SCALES with how big the gap actually is (a -110 point gap and a
+# -400 point gap don't deserve the same wait):
+#   scaled_minutes = min(GAP_DOWN_MAX_DELAY_MINUTES, GAP_DOWN_CE_DELAY_
+#                         MINUTES + GAP_DOWN_EXTRA_DELAY_MINUTES_PER_
+#                         100_POINTS * max(0, |gap_points| -
+#                         GAP_DOWN_THRESHOLD_POINTS) / 100)
+# (a sharp-fall-only trigger, with no comparable "gap size" to scale on,
+# always uses the plain GAP_DOWN_CE_DELAY_MINUTES base). PAST that
+# minimum, if ENABLE_NIFTY_RECOVERY_GATE is on, the hold EXTENDS until
+# Nifty's own still-forming daily candle has turned green - its latest
+# close back at or above TODAY's OPEN (is_nifty_recovering()) - the
+# "wait for the bleeding to actually stop" half of the user's request,
+# not just a clock. GAP_DOWN_MAX_DELAY_MINUTES is a hard safety ceiling
+# on the WHOLE mechanism (scaled minimum + recovery wait combined) - past
+# it, CE always resumes regardless of Nifty's own color, so a market that
+# genuinely never recovers intraday can't silently disable CE all day.
+# PE is never affected by any of this - a falling Nifty is exactly when
+# a PE-buying alert should be allowed to act; every other gate (capacity,
+# trading windows, ...) is untouched either way.
 GAP_DOWN_THRESHOLD_POINTS = float(os.getenv("GAP_DOWN_THRESHOLD_POINTS", "100"))
 GAP_DOWN_SHARP_FALL_PCT = float(os.getenv("GAP_DOWN_SHARP_FALL_PCT", "0.003"))  # 0.3%
 GAP_DOWN_CE_DELAY_MINUTES = int(os.getenv("GAP_DOWN_CE_DELAY_MINUTES", "10"))
+# Extra minutes added per additional 100 Nifty points the gap runs past
+# GAP_DOWN_THRESHOLD_POINTS - e.g. with the defaults, today's real -207.5
+# point gap (107.5 points past the 100-point threshold) would scale to
+# 10 + 5*(107.5/100) = 15.4 minutes, before the recovery gate below even
+# gets a say.
+GAP_DOWN_EXTRA_DELAY_MINUTES_PER_100_POINTS = float(
+    os.getenv("GAP_DOWN_EXTRA_DELAY_MINUTES_PER_100_POINTS", "5")
+)
+# Hard ceiling on the combined scaled-minimum + recovery-wait delay - past
+# this, CE always resumes for the day regardless of Nifty's own color.
+# 120 (2 hours) is deliberately generous: on the one real gap-down day
+# this was built from, actual recovery (10:03 IST, 48 minutes after
+# open) landed well inside it - this cap exists as a safety backstop
+# against a persistently-red session, not as the expected binding case.
+GAP_DOWN_MAX_DELAY_MINUTES = int(os.getenv("GAP_DOWN_MAX_DELAY_MINUTES", "120"))
+# How often is_nifty_recovering() is allowed to re-fetch Nifty's latest
+# price once the scaled minimum has elapsed - avoids a REST call on
+# every single webhook alert while the recovery check is pending.
+NIFTY_RECOVERY_REFRESH_SECONDS = int(os.getenv("NIFTY_RECOVERY_REFRESH_SECONDS", "30"))
 
-# Per-package on/off switch (Options' own copy - unprefixed, matching this
-# package's other flags). Futures/Luxury have their own FUTURES_/LUXURY_
-# prefixed copies in their own config.py, all defaulting to "true".
+# Per-package on/off switch (Options' own copy - unprefixed, matching
+# this package's other flags). Futures/Luxury have their own FUTURES_/
+# LUXURY_ prefixed copies in their own config.py, all defaulting to
+# "true" - this is the one each package independently decides whether to
+# honor at all.
 ENABLE_GAP_DOWN_CE_DELAY = os.getenv("ENABLE_GAP_DOWN_CE_DELAY", "true").lower() == "true"
+
+# NOT per-package - this tunes the shared mechanism's own internal
+# behavior (like GAP_DOWN_THRESHOLD_POINTS above), read directly by
+# dhan_client.py's should_delay_ce_entry() regardless of which package
+# called it. Off falls back to just the scaled minimum delay above (no
+# recovery-wait extension), if that turns out to hold CE back for too
+# long in practice.
+ENABLE_NIFTY_RECOVERY_GATE = os.getenv("ENABLE_NIFTY_RECOVERY_GATE", "true").lower() == "true"
 
 # Lowered 5->2 (user request 27 Aug 2026) for a tighter fallback-heartbeat
 # check on live positions. Doesn't scale REST call volume on its own -

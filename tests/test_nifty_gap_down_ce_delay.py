@@ -2,15 +2,21 @@
 Tests for the Nifty50 open gap-down / sharp-fall CE cool-off (added 11
 Sep 2026, user request: "evaluate if Nifty50 has a Gap Down opening of
 more than 100 points or is sharp falling when market open, then wait for
-10 mins before placing any CE orders otherwise proceed as normal").
+10 mins before placing any CE orders otherwise proceed as normal";
+SCALED + recovery-gated later the same day, after a real -207.5 point
+gap-down showed a flat 10-minute wait wasn't enough - Nifty stayed red
+until 10:03 IST, 48 minutes in, and 6 of 7 real CE entries taken before
+it turned green that day lost: "look at scaling the delay to the gap
+size or until Nifty50 daily candle starts showing recovering (turning
+green from red)...").
 
 This is a single shared, market-wide computation - dhan_client.py's
-DhanWrapper.evaluate_nifty_open_condition()/should_delay_ce_entry() -
-consumed identically by Options/Futures/Luxury's own webhook handlers,
-same pattern as refresh_supertrend_signal already being one shared
-computation gated per-package by each package's own ENABLE_* flag. See
-Options/config.py's "Nifty50 open gap-down / sharp-fall CE cool-off"
-comment block for the full design rationale.
+DhanWrapper.evaluate_nifty_open_condition()/is_nifty_recovering()/
+should_delay_ce_entry() - consumed identically by Options/Futures/
+Luxury's own webhook handlers, same pattern as refresh_supertrend_signal
+already being one shared computation gated per-package by each package's
+own ENABLE_* flag. See Options/config.py's "Nifty50 open gap-down /
+sharp-fall CE cool-off" comment block for the full design rationale.
 
 Covers:
   1. A >100-point gap-down at today's open alone triggers delay_ce.
@@ -25,7 +31,17 @@ Covers:
      False at/after it.
   6. A fetch failure fails OPEN (never blocks CE entries) and is not
      cached, so a later good fetch can still be judged.
-  7. Against the REAL production webhook handler (Options.option_main):
+  7. The scaled minimum delay matches the documented formula, against
+     the REAL -207.5 point gap-down day it was built from.
+  8. An extreme gap's scaled delay is clamped at GAP_DOWN_MAX_DELAY_MINUTES.
+  9-10. is_nifty_recovering reads the latest close against today's own
+     open (red below, green at/above) and fails open on a fetch failure.
+  11. should_delay_ce_entry extends the hold PAST the scaled minimum
+     while Nifty is still printing red (hasn't turned green yet).
+  12. should_delay_ce_entry releases once Nifty turns green, or once
+     past the hard cap regardless of color, or with the recovery gate
+     disabled entirely (falls back to the plain scaled minimum).
+  13. Against the REAL production webhook handler (Options.option_main):
      a CE alert during an active cool-off is ignored with
      reason="nifty_gap_down_ce_delay" and zero orders placed; a PE alert
      during the SAME cool-off proceeds completely normally (PE is never
@@ -224,6 +240,188 @@ def test_6_fetch_failure_fails_open_and_is_not_cached():
 
 
 # --------------------------------------------------------------------------- #
+# Scaled minimum delay + Nifty-recovery gate (added 11 Sep 2026, after a
+# real -207.5 point gap-down day showed the flat 10-minute wait wasn't
+# enough - Nifty stayed red until 10:03 IST, 48 minutes in, and 6 of the
+# 7 real CE entries taken before it turned green that day lost).
+# --------------------------------------------------------------------------- #
+def _with_config(**overrides):
+    """Temporarily overrides ocfg attributes, returns a restore fn."""
+    saved = {k: getattr(ocfg, k) for k in overrides}
+    for k, v in overrides.items():
+        setattr(ocfg, k, v)
+
+    def restore():
+        for k, v in saved.items():
+            setattr(ocfg, k, v)
+    return restore
+
+
+def test_7_scaled_delay_matches_the_documented_formula():
+    _reset_cache()
+    restore_cfg = _with_config(GAP_DOWN_THRESHOLD_POINTS=100.0, GAP_DOWN_CE_DELAY_MINUTES=10,
+                                GAP_DOWN_EXTRA_DELAY_MINUTES_PER_100_POINTS=5.0, GAP_DOWN_MAX_DELAY_MINUTES=120)
+    # -207.5 points: 107.5 points past the threshold -> 10 + 5*(107.5/100) = 15.375 min,
+    # the exact real gap-down day this feature was built from.
+    restore = _install_nifty_series(23477.8, [(23270.3, 23270.3)])
+    try:
+        result = W.evaluate_nifty_open_condition()
+        assert result["gap_points"] == -207.5, result
+        # scaled_delay_minutes is rounded to 1 decimal for readability/logging.
+        assert result["scaled_delay_minutes"] == 15.4, result
+        market_open = datetime(result["date"].year, result["date"].month, result["date"].day,
+                                9, 15, tzinfo=IST)
+        expected_delay_until = market_open + timedelta(minutes=15.375)  # the exact, unrounded value
+        assert abs((result["delay_until"] - expected_delay_until).total_seconds()) < 1, \
+            f"expected ~{expected_delay_until}, got {result['delay_until']}"
+        print("7. The scaled minimum delay matches the documented formula on the real -207.5 point "
+              "gap-down day this feature was built from (10 + 5*1.075 = 15.375 min): PASSED")
+    finally:
+        restore()
+        restore_cfg()
+        _reset_cache()
+
+
+def test_8_scaled_delay_is_capped_at_the_max():
+    _reset_cache()
+    restore_cfg = _with_config(GAP_DOWN_THRESHOLD_POINTS=100.0, GAP_DOWN_CE_DELAY_MINUTES=10,
+                                GAP_DOWN_EXTRA_DELAY_MINUTES_PER_100_POINTS=5.0, GAP_DOWN_MAX_DELAY_MINUTES=30)
+    # A huge -2000 point gap would scale to 10 + 5*19 = 105 min uncapped -
+    # must clamp to the 30-minute MAX configured here.
+    restore = _install_nifty_series(25000.0, [(23000.0, 23000.0)])
+    try:
+        result = W.evaluate_nifty_open_condition()
+        assert result["scaled_delay_minutes"] == 30.0, result
+        print("8. An extreme gap's scaled minimum delay is clamped at GAP_DOWN_MAX_DELAY_MINUTES: PASSED")
+    finally:
+        restore()
+        restore_cfg()
+        _reset_cache()
+
+
+def test_9_is_nifty_recovering_reads_latest_close_vs_todays_open():
+    _reset_cache()
+    restore = _install_nifty_series(25000.0, [(24880.0, 24870.0), (24880.0, 24850.0)])
+    try:
+        result = W.evaluate_nifty_open_condition()
+        W._nifty_recovery_cache = None
+        assert W.is_nifty_recovering(result["today_open"]) is False, \
+            "latest close (24850) below today's own open (24880) must read as still RED"
+    finally:
+        restore()
+
+    restore2 = _install_nifty_series(25000.0, [(24880.0, 24870.0), (24880.0, 24895.0)])
+    try:
+        result = W.evaluate_nifty_open_condition()  # still cached from above, today_open unchanged
+        W._nifty_recovery_cache = None
+        assert W.is_nifty_recovering(result["today_open"]) is True, \
+            "latest close (24895) at/above today's own open (24880) must read as GREEN"
+        print("9. is_nifty_recovering correctly reads the latest close against today's own open "
+              "(red when below, green when at/above): PASSED")
+    finally:
+        restore2()
+        _reset_cache()
+        W._nifty_recovery_cache = None
+
+
+def test_10_is_nifty_recovering_fails_open_on_fetch_failure():
+    saved_client = W._client
+    W._nifty_recovery_cache = None
+
+    def boom(**kw):
+        raise RuntimeError("DH-904 rate limit")
+
+    W._client = types.SimpleNamespace(Dhan=types.SimpleNamespace(intraday_minute_data=boom))
+    try:
+        assert W.is_nifty_recovering(24880.0) is True, \
+            "a fetch failure must fail open (treat as recovered, never extend the delay on missing data)"
+        print("10. is_nifty_recovering fails open (treats as recovered) on a fetch failure: PASSED")
+    finally:
+        W._client = saved_client
+        W._nifty_recovery_cache = None
+
+
+def test_11_should_delay_ce_entry_extends_past_the_minimum_while_nifty_stays_red():
+    _reset_cache()
+    W._nifty_recovery_cache = None
+    restore_cfg = _with_config(GAP_DOWN_THRESHOLD_POINTS=100.0, GAP_DOWN_CE_DELAY_MINUTES=10,
+                                GAP_DOWN_EXTRA_DELAY_MINUTES_PER_100_POINTS=0.0, GAP_DOWN_MAX_DELAY_MINUTES=120,
+                                ENABLE_NIFTY_RECOVERY_GATE=True, NIFTY_RECOVERY_REFRESH_SECONDS=0)
+    # today_open=24880, still printing BELOW it (24850) well past the plain
+    # 10-minute minimum - the real 11 Sep 2026 shape (Nifty stayed red until
+    # 10:03 IST, 48 minutes after a 09:15 open).
+    restore = _install_nifty_series(25000.0, [(24880.0, 24880.0), (24880.0, 24850.0)])
+    try:
+        result = W.evaluate_nifty_open_condition()
+        past_minimum_still_red = result["delay_until"] + timedelta(minutes=20)
+        assert past_minimum_still_red < result["hard_cap_until"]
+        assert W.should_delay_ce_entry(now=past_minimum_still_red) is True, \
+            "20 minutes past the scaled minimum, with Nifty still printing below today's open, must still delay"
+        print("11. should_delay_ce_entry extends the hold past the scaled minimum while Nifty stays "
+              "red (hasn't turned green yet): PASSED")
+    finally:
+        restore()
+        restore_cfg()
+        _reset_cache()
+        W._nifty_recovery_cache = None
+
+
+def test_12_should_delay_ce_entry_releases_once_green_or_past_the_hard_cap_or_gate_disabled():
+    _reset_cache()
+    W._nifty_recovery_cache = None
+    restore_cfg = _with_config(GAP_DOWN_THRESHOLD_POINTS=100.0, GAP_DOWN_CE_DELAY_MINUTES=10,
+                                GAP_DOWN_EXTRA_DELAY_MINUTES_PER_100_POINTS=0.0, GAP_DOWN_MAX_DELAY_MINUTES=120,
+                                ENABLE_NIFTY_RECOVERY_GATE=True, NIFTY_RECOVERY_REFRESH_SECONDS=0)
+    # (a) Nifty has turned GREEN (latest close 24885 >= today's open 24880) -
+    # past the minimum, this must release even though it's nowhere near the hard cap.
+    restore = _install_nifty_series(25000.0, [(24880.0, 24880.0), (24880.0, 24885.0)])
+    try:
+        result = W.evaluate_nifty_open_condition()
+        past_minimum = result["delay_until"] + timedelta(minutes=1)
+        assert W.should_delay_ce_entry(now=past_minimum) is False, \
+            "Nifty back at/above today's own open past the minimum must release the hold"
+        print("12a. should_delay_ce_entry releases once Nifty turns green (latest close >= today's open), "
+              "well before the hard cap: PASSED")
+    finally:
+        restore()
+        W._nifty_recovery_cache = None
+
+    # (b) Nifty is STILL red, but we're past the hard cap - must release
+    # anyway (the safety ceiling always wins).
+    _reset_cache()
+    restore2 = _install_nifty_series(25000.0, [(24880.0, 24880.0), (24880.0, 24850.0)])
+    try:
+        result = W.evaluate_nifty_open_condition()
+        past_hard_cap = result["hard_cap_until"] + timedelta(minutes=1)
+        assert W.should_delay_ce_entry(now=past_hard_cap) is False, \
+            "past the hard cap, CE must resume regardless of Nifty's own color"
+        print("12b. should_delay_ce_entry releases past GAP_DOWN_MAX_DELAY_MINUTES regardless of "
+              "whether Nifty has actually recovered (safety ceiling): PASSED")
+    finally:
+        restore2()
+        W._nifty_recovery_cache = None
+
+    # (c) ENABLE_NIFTY_RECOVERY_GATE=False - falls back to releasing right
+    # at the scaled minimum, even with Nifty still red.
+    _reset_cache()
+    restore_gate = _with_config(ENABLE_NIFTY_RECOVERY_GATE=False)
+    restore3 = _install_nifty_series(25000.0, [(24880.0, 24880.0), (24880.0, 24850.0)])
+    try:
+        result = W.evaluate_nifty_open_condition()
+        past_minimum = result["delay_until"] + timedelta(seconds=1)
+        assert W.should_delay_ce_entry(now=past_minimum) is False, \
+            "with the recovery gate disabled, the plain scaled minimum alone must release the hold"
+        print("12c. ENABLE_NIFTY_RECOVERY_GATE=False falls back to the plain scaled minimum delay, "
+              "releasing even while Nifty is still red: PASSED")
+    finally:
+        restore3()
+        restore_gate()
+        restore_cfg()
+        _reset_cache()
+        W._nifty_recovery_cache = None
+
+
+# --------------------------------------------------------------------------- #
 # Integration: the REAL Options webhook handler
 # --------------------------------------------------------------------------- #
 def fake_atm_option(symbol: str, option_type: str) -> AtmOption:
@@ -275,7 +473,7 @@ def fake_ranked(stocks, top_n, prefer_highest):
     return [(s, float(i)) for i, s in enumerate(stocks[:top_n if top_n > 0 else len(stocks)])]
 
 
-async def test_7_real_ce_alert_ignored_during_cooloff_pe_unaffected_flag_bypasses():
+async def test_13_real_ce_alert_ignored_during_cooloff_pe_unaffected_flag_bypasses():
     """Wiring test for the webhook handler itself - does it call and honor
     should_delay_ce_entry() for CE only, gated by ENABLE_GAP_DOWN_CE_DELAY?
     The gap/sharp-fall MATH is already fully covered by tests 1-6 above, so
@@ -326,7 +524,7 @@ async def test_7_real_ce_alert_ignored_during_cooloff_pe_unaffected_flag_bypasse
         alerts = trade_history.read_all_webhook_alerts("Options")
         matches = [a for a in alerts if a["reason"] == "nifty_gap_down_ce_delay"]
         assert len(matches) == 1 and matches[0]["status"] == "ignored", alerts
-        print("7a. A real CE alert during an active Nifty gap-down cool-off is ignored with "
+        print("13a. A real CE alert during an active Nifty gap-down cool-off is ignored with "
               "reason='nifty_gap_down_ce_delay', zero orders placed, durably logged: PASSED")
 
         # PE must be completely unaffected by the very same active cool-off.
@@ -339,7 +537,7 @@ async def test_7_real_ce_alert_ignored_during_cooloff_pe_unaffected_flag_bypasse
         assert result["status"] == "processed", result
         assert result["entries"][0]["status"] == "entered", result["entries"]
         assert "TCS" in store.live_positions
-        print("7b. A real PE alert during the SAME active cool-off proceeds completely normally "
+        print("13b. A real PE alert during the SAME active cool-off proceeds completely normally "
               "(PE is never gated by this): PASSED")
 
         # Flag off must bypass the check even with the cool-off still active.
@@ -353,7 +551,7 @@ async def test_7_real_ce_alert_ignored_during_cooloff_pe_unaffected_flag_bypasse
         assert result["status"] == "processed", result
         assert result["entries"][0]["status"] == "entered", result["entries"]
         assert "SBIN" in store.live_positions
-        print("7c. ENABLE_GAP_DOWN_CE_DELAY=False cleanly bypasses the check even while the "
+        print("13c. ENABLE_GAP_DOWN_CE_DELAY=False cleanly bypasses the check even while the "
               "underlying condition would otherwise delay CE: PASSED")
     finally:
         odc.dhan_wrapper.place_market_order = real_place
@@ -372,7 +570,13 @@ async def main():
     test_4_evaluated_once_per_day_and_cached()
     test_5_should_delay_ce_entry_respects_the_delay_window()
     test_6_fetch_failure_fails_open_and_is_not_cached()
-    await test_7_real_ce_alert_ignored_during_cooloff_pe_unaffected_flag_bypasses()
+    test_7_scaled_delay_matches_the_documented_formula()
+    test_8_scaled_delay_is_capped_at_the_max()
+    test_9_is_nifty_recovering_reads_latest_close_vs_todays_open()
+    test_10_is_nifty_recovering_fails_open_on_fetch_failure()
+    test_11_should_delay_ce_entry_extends_past_the_minimum_while_nifty_stays_red()
+    test_12_should_delay_ce_entry_releases_once_green_or_past_the_hard_cap_or_gate_disabled()
+    await test_13_real_ce_alert_ignored_during_cooloff_pe_unaffected_flag_bypasses()
     print("\nALL NIFTY GAP-DOWN CE-DELAY CHECKS PASSED")
 
 
