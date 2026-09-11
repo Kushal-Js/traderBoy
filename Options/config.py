@@ -531,6 +531,41 @@ ENABLE_TRADING_WINDOWS = os.getenv("ENABLE_TRADING_WINDOWS", "false").lower() ==
 TRADING_WINDOWS = os.getenv("TRADING_WINDOWS", "09:15-11:00,14:00-15:28")
 MARKET_CLOSE_TIME = "15:30"
 
+# ---------------------------------------------------------------------------
+# Nifty50 open gap-down / sharp-fall CE cool-off (added 11 Sep 2026, user
+# request: "evaluate if Nifty50 has a Gap Down opening of more than 100
+# points or is sharp falling when market open, then wait for 10 mins
+# before placing any CE orders"). This is a single market-wide fact (is
+# the index falling right now), not a per-strategy one, so the actual
+# computation - dhan_wrapper.evaluate_nifty_open_condition() /
+# should_delay_ce_entry() in dhan_client.py - is shared: it always reads
+# these three params from Options.config regardless of which package
+# (Options/Futures/Luxury) calls it, exactly like SUPERTREND_PERIOD above
+# already does for the shared Supertrend signal. Each package still gets
+# its own ENABLE_GAP_DOWN_CE_DELAY on/off switch in its own config.py so
+# it can be disabled independently if it turns out to cost more good
+# entries than it saves.
+#
+# Evaluated ONCE per day, at whichever webhook alert is the first to ask
+# (a one-shot judgment "at the open", not a running re-evaluation) and
+# cached for the rest of the day:
+#   gap_points  = today's first 1-min bar's open - yesterday's last close
+#   gap_down    = gap_points <= -GAP_DOWN_THRESHOLD_POINTS
+#   fall_pct    = (today's open - latest close so far) / today's open
+#   sharp_fall  = fall_pct >= GAP_DOWN_SHARP_FALL_PCT
+# If either is true, CE entries (PE is never affected - a falling Nifty
+# is exactly when a PE-buying alert would want to act) are refused until
+# GAP_DOWN_CE_DELAY_MINUTES after MARKET_OPEN_TIME; PE and every other
+# gate is untouched.
+GAP_DOWN_THRESHOLD_POINTS = float(os.getenv("GAP_DOWN_THRESHOLD_POINTS", "100"))
+GAP_DOWN_SHARP_FALL_PCT = float(os.getenv("GAP_DOWN_SHARP_FALL_PCT", "0.003"))  # 0.3%
+GAP_DOWN_CE_DELAY_MINUTES = int(os.getenv("GAP_DOWN_CE_DELAY_MINUTES", "10"))
+
+# Per-package on/off switch (Options' own copy - unprefixed, matching this
+# package's other flags). Futures/Luxury have their own FUTURES_/LUXURY_
+# prefixed copies in their own config.py, all defaulting to "true".
+ENABLE_GAP_DOWN_CE_DELAY = os.getenv("ENABLE_GAP_DOWN_CE_DELAY", "true").lower() == "true"
+
 # Lowered 5->2 (user request 27 Aug 2026) for a tighter fallback-heartbeat
 # check on live positions. Doesn't scale REST call volume on its own -
 # refresh_supertrend_signal has its own independent SUPERTREND_REFRESH_SECONDS

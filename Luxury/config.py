@@ -333,6 +333,13 @@ ALLOWED_TRADING_TIME = os.getenv("LUXURY_ALLOWED_TRADING_TIME", "11:30")
 ENABLE_TRADING_WINDOWS = os.getenv("LUXURY_ENABLE_TRADING_WINDOWS", "false").lower() == "true"
 TRADING_WINDOWS = os.getenv("LUXURY_TRADING_WINDOWS", "09:15-11:00,14:00-15:28")
 
+# See Options/config.py's "Nifty50 open gap-down / sharp-fall CE cool-off"
+# block - the actual gap/fall computation is shared (always reads
+# GAP_DOWN_THRESHOLD_POINTS/GAP_DOWN_SHARP_FALL_PCT/GAP_DOWN_CE_DELAY_MINUTES
+# from Options.config, one market-wide fact). This is just this package's
+# own independently-tunable on/off switch for honoring it.
+ENABLE_GAP_DOWN_CE_DELAY = os.getenv("LUXURY_ENABLE_GAP_DOWN_CE_DELAY", "true").lower() == "true"
+
 # See Options/config.py's MONITOR_INTERVAL_SECONDS - LTP_STALE_AFTER_SECONDS
 # lives only in Options/config.py since it governs the one shared
 # dhan_client LTP cache all packages read from - no separate Luxury copy

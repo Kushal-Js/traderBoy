@@ -21,7 +21,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
@@ -261,6 +261,12 @@ class DhanWrapper:
         # underlying since liquidity is a property of the specific
         # contract being held, not the underlying stock).
         self._liquidity_cache: dict[str, tuple[datetime, bool]] = {}
+        # Nifty50 open gap-down/sharp-fall cool-off - see evaluate_nifty_
+        # open_condition()/should_delay_ce_entry(). One dict, computed at
+        # most once per calendar date (keyed by result["date"]), not a
+        # dict-of-symbols like the caches above since Nifty is a single
+        # market-wide fact shared by every strategy/symbol.
+        self._nifty_open_condition_cache: Optional[dict] = None
         # Observability: proves (or disproves) whether the WebSocket caches
         # are actually being used instead of REST, rather than assuming it.
         self.stats = {
@@ -1155,6 +1161,117 @@ class DhanWrapper:
         position's own entry candle)."""
         cached = self._ema_cross_cache.get(underlying_symbol)
         return cached[3] if cached else None
+
+    # ------------------------------------------------------------------ #
+    # Nifty50 open gap-down / sharp-fall CE cool-off (see config.py's own
+    # "Nifty50 open gap-down / sharp-fall CE cool-off" comment block for
+    # the full rationale). One market-wide fact, computed here ONCE and
+    # shared by every strategy - same reasoning as refresh_supertrend_
+    # signal always reading Options.config regardless of caller. Only ever
+    # gates CE entries (see should_delay_ce_entry); PE is untouched.
+    # ------------------------------------------------------------------ #
+    NIFTY_SECURITY_ID = "13"  # NSE index (spot), IDX_I segment - same ID
+    # IndexScalping/config.py's INDEX_SECURITY_ID["NIFTY"] already uses.
+
+    def evaluate_nifty_open_condition(self, now: Optional[datetime] = None) -> dict:
+        """Computed ONCE per trading day - a one-shot judgment "at the
+        open", not a running re-evaluation - by whichever CE webhook alert
+        is first to ask, then cached for the rest of the day so a later
+        recovery doesn't retroactively cancel the cool-off (the user's own
+        framing: "wait for 10 mins ... otherwise proceed as normal", a
+        decision made once at open, not re-litigated every tick).
+
+        Reads Nifty50's own continuous multi-session 1-min series (see
+        fetch_continuous_intraday) to get:
+          - prev_close: yesterday's last confirmed close
+          - today_open: today's first bar's open
+          - latest_close: the most recent confirmed close so far today
+        and from those:
+          - gap_points = today_open - prev_close;
+            gap_down = gap_points <= -config.GAP_DOWN_THRESHOLD_POINTS
+          - fall_pct = (today_open - latest_close) / today_open;
+            sharp_falling = fall_pct >= config.GAP_DOWN_SHARP_FALL_PCT
+
+        Returns a dict; "evaluated" is False (and nothing is cached yet,
+        so the next call retries) if the fetch failed or today's series
+        doesn't have at least one confirmed bar yet - fails OPEN (never
+        blocks CE entries on missing data)."""
+        now = now or datetime.now(IST)
+        today = now.date()
+        cached = self._nifty_open_condition_cache
+        if cached is not None and cached["date"] == today:
+            return cached
+
+        not_yet = {"date": today, "evaluated": False, "delay_ce": False, "delay_until": None}
+        try:
+            data = self.fetch_continuous_intraday(self.NIFTY_SECURITY_ID, "IDX_I", "INDEX", 1)
+        except Exception:  # noqa: BLE001
+            logger.exception("Nifty open-gap check: intraday fetch failed - not blocking CE entries on this.")
+            return not_yet
+
+        timestamps = data.get("timestamp") or []
+        opens = data.get("open") or []
+        closes = data.get("close") or []
+        if not timestamps or not opens or not closes:
+            return not_yet
+
+        bars = list(zip(timestamps, opens, closes))
+        today_bars = [b for b in bars if datetime.fromtimestamp(b[0], tz=IST).date() == today]
+        prior_bars = [b for b in bars if datetime.fromtimestamp(b[0], tz=IST).date() < today]
+        # A still-forming last bar is fine to use here (unlike an exit
+        # signal, we only need SOME confirmed print for today, and using
+        # the freshest one makes the sharp-fall read more current, not
+        # less accurate).
+        if not today_bars or not prior_bars:
+            return not_yet
+
+        prev_close = prior_bars[-1][2]
+        today_open = today_bars[0][1]
+        latest_close = today_bars[-1][2]
+        if not today_open or not prev_close:
+            return not_yet
+
+        gap_points = today_open - prev_close
+        gap_down = gap_points <= -config.GAP_DOWN_THRESHOLD_POINTS
+        fall_pct = (today_open - latest_close) / today_open
+        sharp_falling = fall_pct >= config.GAP_DOWN_SHARP_FALL_PCT
+        delay_ce = gap_down or sharp_falling
+
+        market_open_dt = datetime.combine(today, dtime.fromisoformat(config.MARKET_OPEN_TIME), tzinfo=IST)
+        result = {
+            "date": today, "evaluated": True,
+            "prev_close": prev_close, "today_open": today_open, "latest_close": latest_close,
+            "gap_points": round(gap_points, 2), "gap_down": gap_down,
+            "fall_pct": round(fall_pct * 100, 3), "sharp_falling": sharp_falling,
+            "delay_ce": delay_ce,
+            "delay_until": (market_open_dt + timedelta(minutes=config.GAP_DOWN_CE_DELAY_MINUTES)) if delay_ce else None,
+        }
+        self._nifty_open_condition_cache = result
+        if delay_ce:
+            logger.warning(
+                "Nifty50 open condition: gap=%.1f pts (open=%.2f prev_close=%.2f) fall=%.2f%% from open "
+                "-> CE entries delayed until %s",
+                gap_points, today_open, prev_close, fall_pct * 100, result["delay_until"].strftime("%H:%M"),
+            )
+        else:
+            logger.info(
+                "Nifty50 open condition: gap=%.1f pts (open=%.2f prev_close=%.2f) fall=%.2f%% from open "
+                "-> no CE delay",
+                gap_points, today_open, prev_close, fall_pct * 100,
+            )
+        return result
+
+    def should_delay_ce_entry(self, now: Optional[datetime] = None) -> bool:
+        """Generic, strategy-agnostic gate for use at every CE webhook entry
+        point (Options/Futures/Luxury): True if Nifty50's open condition
+        (see evaluate_nifty_open_condition) called for a delay AND we're
+        still inside that cool-off window. PE entries must never call this
+        - a falling Nifty is exactly when a PE-buying alert should act."""
+        now = now or datetime.now(IST)
+        result = self.evaluate_nifty_open_condition(now)
+        if not result.get("delay_ce") or result.get("delay_until") is None:
+            return False
+        return now < result["delay_until"]
 
     # ------------------------------------------------------------------ #
     # Liquidity guard (added 2 Sep 2026, see config.LIQUIDITY_GUARD_

@@ -206,6 +206,22 @@ async def _handle_chartink_webhook(
         option_type, payload.scan_name, payload.alert_name, stocks,
     )
 
+    if option_type == "CE" and config.ENABLE_GAP_DOWN_CE_DELAY and dhan_wrapper.should_delay_ce_entry():
+        # See Options/dhan_client.py's evaluate_nifty_open_condition/
+        # should_delay_ce_entry - shared, market-wide check. PE untouched.
+        cond = dhan_wrapper.evaluate_nifty_open_condition()
+        logger.info(
+            "Ignoring CE alert - Nifty50 gap-down/sharp-fall cool-off active until %s "
+            "(gap=%.1f pts, fall=%.2f%% from open).",
+            cond["delay_until"].strftime("%H:%M"), cond["gap_points"], cond["fall_pct"],
+        )
+        _log_alert("ignored", "nifty_gap_down_ce_delay")
+        return {
+            "status": "ignored",
+            "reason": "nifty_gap_down_ce_delay",
+            "nifty_open_condition": {k: v for k, v in cond.items() if k != "date"},
+        }
+
     cap = config.MAX_LIVE_POSITIONS_CE if option_type == "CE" else config.MAX_LIVE_POSITIONS_PE
     remaining = await position_store.remaining_capacity(option_type)
     if remaining == 0:
