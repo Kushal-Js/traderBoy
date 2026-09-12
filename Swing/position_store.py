@@ -57,15 +57,35 @@ class Position:
     basket_type: str               # "FUTURES" | "OPTIONS" | "EQUITY" - snapshot of config.BASKET_TYPE at entry
     regime: str                    # "BULLISH" | "BEARISH" | "UNKNOWN" (UNKNOWN only for a broker-reconciled position)
     instrument_side: str           # "LONG" | "SHORT" - the actual broker-side direction; every direction-sensitive expression reads THIS, never basket_type/regime directly
-    exchange_segment: str          # "NSE_FNO" | "NSE_EQ" - drives every broker call's routing (get_broker_net_quantity, order placement)
+    exchange_segment: str          # "NSE_FNO" | "NSE_EQ" | "MCX_COMM" - drives every broker call's routing (get_broker_net_quantity, order placement)
     product_type: str              # MARGIN | CNC - must match whatever the position was actually opened under, same reasoning as every other package's Position.product_type
-    quantity: int
+    quantity: int                  # the REAL ORDER quantity (what actually gets sent to place_market_order/place_mcx_market_order) - see pnl_multiplier below for why this is NOT always the same number
     lot_size: Optional[int]        # None for equity
     entry_price: float
     best_price: float              # replaces "highest_price" - the most FAVORABLE price seen: highest for LONG, lowest for SHORT (see unrealized_pnl_rs/target_price_for below)
     target_price: float
     hard_stop_loss: float
     order_id: str
+    # The quantity used ONLY for rupee-denominated math (unrealized_pnl_rs,
+    # broker_stop_trigger_and_limit) - added 12 Sep 2026, Swing v2's Copper
+    # (MCX) options support. For every NSE-underlying position (futures/
+    # options/equity) this is IDENTICAL to `quantity` - Dhan's own
+    # instrument-master lot_size already IS the real per-unit economic
+    # multiplier for NSE. For an MCX commodity it is NOT: Dhan's real
+    # order-quantity convention for MCX is "number of lots" (SEM_LOT_UNITS
+    # already correctly reports 1 for Copper, confirmed via a live margin-
+    # calculator spike - quantity=1 priced a real ~2,500kg lot's actual
+    # margin), so `quantity` for a Copper position stays a tiny number
+    # like 1, while `pnl_multiplier` carries the REAL 2,500kg-equivalent
+    # rupee-per-point exposure (Swing/config.py's MCX_PNL_MULTIPLIERS).
+    # Every call site that computes a rupee P&L or a rupee-cap-derived
+    # broker-stop price MUST use pnl_multiplier, never quantity directly -
+    # see Swing/trading_engine.py's entry/exit code. DELIBERATELY NO
+    # DEFAULT - every construction site must pass this explicitly (equal
+    # to `quantity` for a normal NSE position), so a new call site can
+    # never silently end up with an unset/zero multiplier that would make
+    # every rupee-threshold exit check permanently fail to fire.
+    pnl_multiplier: int
     resolved_option_type: Optional[str] = None  # real "CE"/"PE" when basket_type=="OPTIONS", else None - see the option_type property below
     opened_at: datetime = field(default_factory=datetime.now)
     status: str = "OPEN"

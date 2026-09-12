@@ -421,11 +421,21 @@ class DhanWrapper:
         this for symbols we just got directly from Tradehull (e.g.
         ATM_Strike_Selection's return) where there's no better key to match
         on; prefer _instrument_meta_by_security_id() whenever a security_id
-        is already available (e.g. from a broker position record)."""
+        is already available (e.g. from a broker position record).
+
+        Exchange filter widened NSE-only -> NSE-or-MCX (12 Sep 2026, Swing
+        v2's Copper support) - Tradehull's own ATM_Strike_Selection ALREADY
+        natively resolves a valid MCX OPTFUT SEM_CUSTOM_SYMBOL for a
+        commodity underlying (it has its own commodity_step_dict branch);
+        this function was the only thing rejecting the row it hands back.
+        NSE and MCX trading/custom symbol strings look nothing alike in
+        practice (e.g. "RELIANCE-Aug2026-..." vs "COPPER-23Sep2026-..."),
+        so widening this is not expected to introduce cross-exchange
+        ambiguity for any symbol actually in use."""
         df = self.instruments()
         row = df[
             ((df["SEM_TRADING_SYMBOL"] == trading_symbol) | (df["SEM_CUSTOM_SYMBOL"] == trading_symbol))
-            & (df["SEM_EXM_EXCH_ID"] == "NSE")
+            & (df["SEM_EXM_EXCH_ID"].isin(["NSE", "MCX"]))
         ]
         if row.empty:
             raise ValueError(f"No instrument found for trading_symbol {trading_symbol}")
@@ -445,6 +455,13 @@ class DhanWrapper:
             # this is required, not optional, for a COMPUTED trigger/limit
             # price). Divided here so every caller gets a rupee value
             # directly, matching every other price field in this codebase.
+            # NOT verified for an MCX row specifically (12 Sep 2026) - the
+            # /100 convention is only confirmed against NSE instruments so
+            # far. Harmless today since Swing's BROKER_STOP_LOSS_ENABLED
+            # stays off for Copper in this first rollout (place_mcx_stop_
+            # loss_limit_order, the only caller that would use this for an
+            # MCX row, isn't wired into any live entry path yet) - verify
+            # this against a real MCX tick before ever turning that on.
             "tick_size": float(r["SEM_TICK_SIZE"]) / 100.0,
         }
 
@@ -859,6 +876,71 @@ class DhanWrapper:
         if expiry_index >= len(matches):
             expiry_index = len(matches) - 1
         row = matches.iloc[expiry_index]
+        return FuturesContract(
+            trading_symbol=str(row["SEM_CUSTOM_SYMBOL"]),
+            security_id=str(int(row["SEM_SMST_SECURITY_ID"])),
+            lot_size=int(float(row["SEM_LOT_UNITS"])),
+            expiry_date=pd.to_datetime(row["SEM_EXPIRY_DATE"], errors="coerce").date(),
+        )
+
+    def get_mcx_futures_contract(self, underlying_symbol: str) -> FuturesContract:
+        """MCX commodity counterpart to get_futures_contract (added 12 Sep
+        2026, Swing v2's Copper support) - a SIBLING function, not a
+        parameterization of the NSE one, so the existing NSE path stays
+        byte-identical (same convention as place_equity_market_order vs
+        place_market_order elsewhere in this file). Resolves the FUTCOM
+        contract for underlying_symbol, rolling forward the same way
+        get_futures_contract does if the nearest one expires today or has
+        fewer than config.MCX_MIN_DAYS_TO_EXPIRY days left - ported from
+        the now-deleted CopperOptions/paper_engine.py's _resolve_expiry_
+        cycle (that package never placed a real order, so this reuses its
+        proven READ-ONLY resolution logic only).
+
+        Used as the regime/Supertrend signal reference for an MCX symbol
+        (there's no continuous "spot" for a commodity, only its futures
+        contract) - see Swing/signals.py. NOT used to open a real futures
+        position: Swing only trades Copper via BASKET_TYPE=="options" for
+        now (explicit user scope restriction, 12 Sep 2026) - see
+        Swing/trading_engine.py's enter_position_for_stock."""
+        contract = _retry(self._get_mcx_futures_contract_once, underlying_symbol, 0)
+        if contract.expiry_date == datetime.now(IST).date():
+            logger.info(
+                "%s: nearest MCX futures contract (%s) expires today - rolling to next cycle instead",
+                underlying_symbol, contract.trading_symbol,
+            )
+            rolled = _retry(self._get_mcx_futures_contract_once, underlying_symbol, 1)
+            if rolled.expiry_date != contract.expiry_date:
+                return rolled
+            logger.warning(
+                "%s: rolled-forward MCX futures contract (%s) still expires today - no further cycle listed yet",
+                underlying_symbol, rolled.trading_symbol,
+            )
+        return contract
+
+    def _get_mcx_futures_contract_once(self, underlying_symbol: str, expiry_index: int = 0) -> FuturesContract:
+        from Swing import config as swing_config  # local import - avoids a
+        # module-level dependency from this shared file onto a specific
+        # strategy package, same reasoning as any other cross-package
+        # config read in this codebase being kept local to the function
+        # that actually needs it.
+        df = self.instruments()
+        futs = df[
+            (df["SEM_EXM_EXCH_ID"] == "MCX")
+            & (df["SEM_INSTRUMENT_NAME"] == "FUTCOM")
+            & (df["SEM_TRADING_SYMBOL"].str.startswith(underlying_symbol + "-"))
+        ]
+        if futs.empty:
+            raise ValueError(f"No MCX futures contract found for {underlying_symbol}")
+        futs = futs.sort_values("SEM_EXPIRY_DATE")
+        min_days = getattr(swing_config, "MCX_MIN_DAYS_TO_EXPIRY", 3)
+        today = datetime.now(IST).date()
+        eligible = futs[futs["SEM_EXPIRY_DATE"].apply(
+            lambda d: (pd.Timestamp(d).date() - today).days >= min_days
+        )]
+        candidates = eligible if not eligible.empty else futs
+        if expiry_index >= len(candidates):
+            expiry_index = len(candidates) - 1
+        row = candidates.iloc[expiry_index]
         return FuturesContract(
             trading_symbol=str(row["SEM_CUSTOM_SYMBOL"]),
             security_id=str(int(row["SEM_SMST_SECURITY_ID"])),
@@ -1707,6 +1789,61 @@ class DhanWrapper:
             })
         return open_positions
 
+    def get_open_mcx_positions(self) -> list[dict]:
+        """MCX-segment counterpart to get_open_equity_positions above (added
+        12 Sep 2026, Swing v2's Copper options support). Necessary for the
+        same reason equity needed its own: get_open_fno_positions hard-
+        filters to "NSE_FNO" only, so a real open MCX position (Dhan's own
+        exchangeSegment for it is "MCX_COMM" - the same string already
+        used throughout this file's MCX market-data calls) is completely
+        invisible without this, which would make
+        get_broker_net_quantity(segment="MCX_COMM") wrongly report 0 -
+        see that function's own docstring for why that's actively
+        dangerous, not just incomplete."""
+        return _retry(self._get_open_mcx_positions_once)
+
+    def _get_open_mcx_positions_once(self) -> list[dict]:
+        """Mirrors _get_open_fno_positions_once's own pattern exactly:
+        keyed by security_id (unique) via _instrument_meta_by_security_id,
+        not Dhan's raw tradingSymbol string (unreliable - see that
+        function's own docstring), with option_type derived from the same
+        drvOptionType field FUTCOM/OPTFUT positions report identically to
+        FUTSTK/OPTSTK ones."""
+        resp = self.client.Dhan.get_positions()
+        if resp.get("status") != "success":
+            raise RuntimeError(f"get_positions failed: {resp.get('remarks')}")
+
+        open_positions = []
+        for p in (resp.get("data") or []):
+            net_qty = int(p.get("netQty") or 0)
+            if net_qty == 0 or p.get("exchangeSegment") != "MCX_COMM":
+                continue
+
+            security_id = str(p.get("securityId", ""))
+            try:
+                meta = self._instrument_meta_by_security_id(security_id)
+            except ValueError:
+                logger.warning(
+                    "Open MCX broker position security_id=%s (tradingSymbol=%s) not found "
+                    "in instrument master; skipping it for reconciliation.",
+                    security_id, p.get("tradingSymbol"),
+                )
+                continue
+
+            drv_type = p.get("drvOptionType") or ""
+            option_type = "CE" if drv_type == "CALL" else ("PE" if drv_type == "PUT" else "")
+
+            open_positions.append({
+                "trading_symbol": meta["trading_symbol"],
+                "underlying_symbol": meta["underlying_symbol"],
+                "option_type": option_type,
+                "lot_size": meta["lot_size"],
+                "quantity": net_qty,
+                "avg_price": float(p.get("buyAvg") or p.get("costPrice") or 0),
+                "product_type": p.get("productType") or "MARGIN",
+            })
+        return open_positions
+
     def get_broker_net_quantity(self, trading_symbol: str, segment: str = "NSE_FNO") -> int:
         """Net quantity currently held at the broker for this EXACT contract
         (matched on trading_symbol, not just underlying - a manual trade on
@@ -1721,15 +1858,22 @@ class DhanWrapper:
         calls on doomed order placements instead of one cheap position
         check.
 
-        `segment` (added 12 Sep 2026, Swing v2's equity basket-type) -
-        defaults to "NSE_FNO" so every existing Options/Futures/Luxury
-        caller is byte-identical to before. Pass "NSE_EQ" for an equity
-        position: without this, an equity leg would read as qty=0 against
-        the FNO-only list even while genuinely open at the broker, and the
-        exit-reconciliation logic in _exit_position would misread that as
-        "already flat" and skip the real exit order entirely - silently
-        orphaning real shares, not a cosmetic gap."""
-        positions = self.get_open_equity_positions() if segment == "NSE_EQ" else self.get_open_fno_positions()
+        `segment` (added 12 Sep 2026, Swing v2's equity basket-type;
+        extended 12 Sep 2026 for MCX) - defaults to "NSE_FNO" so every
+        existing Options/Futures/Luxury caller is byte-identical to
+        before. Pass "NSE_EQ" for an equity position or "MCX_COMM" for an
+        MCX commodity position: without branching on these, that leg
+        would read as qty=0 against the FNO-only list even while
+        genuinely open at the broker, and the exit-reconciliation logic
+        in _exit_position would misread that as "already flat" and skip
+        the real exit order entirely - silently orphaning a real position,
+        not a cosmetic gap."""
+        if segment == "NSE_EQ":
+            positions = self.get_open_equity_positions()
+        elif segment == "MCX_COMM":
+            positions = self.get_open_mcx_positions()
+        else:
+            positions = self.get_open_fno_positions()
         for p in positions:
             if p["trading_symbol"] == trading_symbol:
                 return p["quantity"]
@@ -1909,6 +2053,107 @@ class DhanWrapper:
         if not order_id:
             raise RuntimeError(
                 f"order_placement returned no order id for equity STOPLIMIT {transaction_type} "
+                f"{trading_symbol} - check Tradehull's console/log output for the underlying error."
+            )
+        return {"order_id": str(order_id)}
+
+    def place_mcx_market_order(
+        self, trading_symbol: str, quantity: int, transaction_type: str,
+        tag: Optional[str] = None, product_type: str = "MARGIN",
+    ) -> dict:
+        """MCX-segment counterpart to place_market_order above (added 12
+        Sep 2026, Swing v2's Copper options support) - NOT a reuse of that
+        function, same reasoning as place_equity_market_order: place_
+        market_order hardcodes exchange=config.DEFAULT_EXCHANGE ("NFO"),
+        wrong for MCX. "MCX" confirmed as the correct exchange string via
+        Tradehull's own internal script_exchange mapping (script_exchange
+        = {"NSE":..., "NFO":..., "MCX": self.Dhan.MCX}, appears repeatedly
+        throughout Dhan_Tradehull.py) - same "short exchange code" pairing
+        already proven by "NSE"/"NFO" and "NSE"/"NSE_EQ" elsewhere in this
+        file.
+
+        `quantity` here is Dhan's MCX "number of lots" convention (1 = one
+        full real-world lot), NOT the same thing as the real per-lot
+        rupee/kg exposure - verified via a live margin-calculator spike
+        (quantity=1 priced a real ~2,500kg Copper lot's actual margin;
+        quantity=2500 priced an absurd ~76 crore). Callers must pass
+        Swing/position_store.py's Position.quantity here (order-placement
+        quantity), never Position.pnl_multiplier (P&L-math quantity) -
+        see Position's own docstring for why these are two different
+        numbers for an MCX position."""
+        is_amo = not self.is_market_open()
+        logger.info("Placing MCX %s order: %s x%s (product=%s)%s", transaction_type, trading_symbol,
+                    quantity, product_type, " (AMO)" if is_amo else "")
+        order_id = self.client.order_placement(
+            tradingsymbol=trading_symbol,
+            exchange="MCX",
+            quantity=quantity,
+            price=0,
+            trigger_price=0,
+            order_type="MARKET",
+            transaction_type=transaction_type,
+            trade_type=product_type,
+            after_market_order=is_amo,
+            amo_time="OPEN",
+            tag=tag,
+        )
+        if not order_id:
+            raise RuntimeError(
+                f"order_placement returned no order id for MCX {transaction_type} {trading_symbol} "
+                "- check Tradehull's console/log output for the underlying error."
+            )
+        return {"order_id": str(order_id), "is_amo": is_amo}
+
+    def place_mcx_stop_loss_limit_order(
+        self, trading_symbol: str, quantity: int, transaction_type: str,
+        trigger_price: float, limit_price: float,
+        tag: Optional[str] = None, product_type: str = "MARGIN",
+    ) -> dict:
+        """MCX-segment counterpart to place_stop_loss_limit_order below -
+        same STOPLIMIT mechanics and tick-rounding, but exchange="MCX" and
+        looked up via the now-MCX-capable _instrument_meta. NOT wired into
+        Swing's live entry path yet (Swing's BROKER_STOP_LOSS_ENABLED
+        stays off for Copper in this first rollout - see Swing/config.py)
+        - built now so it exists once that's turned on. tick_size's /100
+        paise convention is unverified for an MCX row specifically (see
+        _instrument_meta's own docstring) - confirm against a real MCX
+        tick before relying on this in production."""
+        try:
+            tick_size = self._instrument_meta(trading_symbol).get("tick_size")
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: could not look up the real tick size before placing the MCX SL-L order - "
+                "falling back to plain 2-decimal rounding, which may still get rejected for a "
+                "tick-size mismatch", trading_symbol,
+            )
+            tick_size = None
+        rounded_trigger = _round_to_tick(trigger_price, tick_size)
+        rounded_limit = _round_to_tick(limit_price, tick_size)
+        if rounded_trigger != trigger_price or rounded_limit != limit_price:
+            logger.info(
+                "%s: rounded MCX SL-L prices to the real tick size (%.4f): trigger %.4f->%.4f, limit %.4f->%.4f",
+                trading_symbol, tick_size or 0.0, trigger_price, rounded_trigger, limit_price, rounded_limit,
+            )
+        trigger_price, limit_price = rounded_trigger, rounded_limit
+        logger.info(
+            "Placing MCX STOP-LOSS LIMIT order: %s %s x%s trigger=%.2f limit=%.2f (product=%s)",
+            transaction_type, trading_symbol, quantity, trigger_price, limit_price, product_type,
+        )
+        order_id = self.client.order_placement(
+            tradingsymbol=trading_symbol,
+            exchange="MCX",
+            quantity=quantity,
+            price=limit_price,
+            trigger_price=trigger_price,
+            order_type="STOPLIMIT",
+            transaction_type=transaction_type,
+            trade_type=product_type,
+            after_market_order=False,
+            tag=tag,
+        )
+        if not order_id:
+            raise RuntimeError(
+                f"order_placement returned no order id for MCX STOPLIMIT {transaction_type} "
                 f"{trading_symbol} - check Tradehull's console/log output for the underlying error."
             )
         return {"order_id": str(order_id)}

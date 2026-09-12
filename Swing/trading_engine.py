@@ -53,6 +53,39 @@ from Options.dhan_client import IST, OrderStatus, dhan_wrapper
 
 logger = logging.getLogger("swing_trading_engine")
 
+# Order-placement dispatch, keyed by Position.exchange_segment - added 12
+# Sep 2026 (Swing v2's Copper/MCX options support) to replace what used to
+# be a 2-way `if exchange_segment == "NSE_FNO": ... else: ...` at every
+# call site (that binary shape silently routed a THIRD segment into the
+# equity placer, which would be wrong - e.g. it would try exchange="NSE"
+# for an MCX order). Deliberately a NAME dict, resolved via getattr at
+# CALL time (not a dict of bound methods captured once at import time) -
+# this codebase's whole test suite mocks by reassigning an attribute on
+# the dhan_wrapper singleton at runtime (e.g. odc.dhan_wrapper.place_
+# market_order = fake_fn in tests/test_swing_v2_entry_exit.py); a dict
+# built once at import would have silently captured the pre-mock function
+# and ignored every test's monkey-patch. A missing key raises KeyError
+# rather than silently defaulting to the wrong exchange, which is the
+# correct failure mode here.
+_MARKET_ORDER_PLACER_NAMES = {
+    "NSE_FNO": "place_market_order",
+    "NSE_EQ": "place_equity_market_order",
+    "MCX_COMM": "place_mcx_market_order",
+}
+_SL_LIMIT_PLACER_NAMES = {
+    "NSE_FNO": "place_stop_loss_limit_order",
+    "NSE_EQ": "place_equity_stop_loss_limit_order",
+    "MCX_COMM": "place_mcx_stop_loss_limit_order",
+}
+
+
+def _market_order_placer(exchange_segment: str):
+    return getattr(dhan_wrapper, _MARKET_ORDER_PLACER_NAMES[exchange_segment])
+
+
+def _sl_limit_placer(exchange_segment: str):
+    return getattr(dhan_wrapper, _SL_LIMIT_PLACER_NAMES[exchange_segment])
+
 
 def _now_ist() -> datetime:
     return datetime.now(IST)
@@ -139,12 +172,12 @@ def _exit_reason_for(position: Position, ltp: float) -> Optional[str]:
     pure helpers - see that module for the LONG vs SHORT math, especially
     giveback_floor's mirrored sign for a SHORT."""
     side = position.instrument_side
-    loss_rs = -unrealized_pnl_rs(side, position.entry_price, ltp, position.quantity)
+    loss_rs = -unrealized_pnl_rs(side, position.entry_price, ltp, position.pnl_multiplier)
     if loss_rs >= config.MAX_LOSS_PROTECTION_RS:
         return "MAX_LOSS_HIT"
     if config.ENABLE_TARGET_EXIT and price_past_target(side, ltp, position.target_price):
         return "TARGET_HIT"
-    peak_profit_rs = unrealized_pnl_rs(side, position.entry_price, position.best_price, position.quantity)
+    peak_profit_rs = unrealized_pnl_rs(side, position.entry_price, position.best_price, position.pnl_multiplier)
     if peak_profit_rs > config.PROFIT_PROTECTION_RS:
         floor = giveback_floor(side, position.best_price, config.PROFIT_PROTECTION_GIVEBACK_PCT)
         if price_past_giveback_floor(side, ltp, floor):
@@ -175,6 +208,20 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
         await _record_swing_event("ENTRY_SKIPPED_EQUITY_LONG_ONLY", symbol, {"basket_type": basket_type})
         return {"symbol": symbol, "status": "skipped", "reason": "equity_long_only"}
 
+    # Copper/MCX futures trading is explicitly NOT enabled (user request 12
+    # Sep 2026: "disable Copper Future trading as of now, only Options
+    # trading for Copper") - checked BEFORE reserve_symbol, same reasoning
+    # as the equity+bearish skip above, so a MCX+FUTURES combination never
+    # burns a capacity slot for a trade that will never be placed. The
+    # futures contract for an MCX symbol is still resolved elsewhere (see
+    # Swing/signals.py) purely as the regime/Supertrend signal reference -
+    # this only blocks actually OPENING a real futures position.
+    is_mcx = symbol in config.MCX_SYMBOLS
+    if is_mcx and basket_type == "FUTURES":
+        logger.info("%s: skipped - Copper/MCX futures trading is not enabled (options only for now)", symbol)
+        await _record_swing_event("ENTRY_SKIPPED_MCX_FUTURES_DISABLED", symbol, {"basket_type": basket_type})
+        return {"symbol": symbol, "status": "skipped", "reason": "mcx_futures_disabled"}
+
     if not await position_store.reserve_symbol(symbol):
         return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
 
@@ -183,24 +230,43 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
         option_type = resolved_option_type_for(basket_type, regime)
         try:
             if basket_type == "FUTURES":
+                # is_mcx+FUTURES is already blocked above, so this branch
+                # only ever runs for an NSE underlying.
                 contract = await loop.run_in_executor(None, dhan_wrapper.get_futures_contract, symbol)
                 trading_symbol, security_id, lot_size = contract.trading_symbol, contract.security_id, contract.lot_size
                 exchange_segment, product_type = "NSE_FNO", config.FUTURES_PRODUCT
                 quantity = lot_size * config.QUANTITY_LOTS
+                pnl_multiplier = quantity
             elif basket_type == "OPTIONS":
+                # get_atm_option is already MCX-capable for a Copper-style
+                # symbol (Tradehull's own ATM_Strike_Selection has a native
+                # commodity_step_dict branch; the only thing that used to
+                # reject the MCX row was _instrument_meta's NSE-only filter,
+                # widened 12 Sep 2026) - same call for NSE and MCX symbols.
                 atm = await loop.run_in_executor(None, dhan_wrapper.get_atm_option, symbol, option_type)
                 if atm.expiry_date == _now_ist().date():
                     logger.info("%s: skipped - %s expires today and no later expiry is available yet",
                                 symbol, atm.trading_symbol)
                     return {"symbol": symbol, "status": "skipped_expiry_day", "option_trading_symbol": atm.trading_symbol}
                 trading_symbol, security_id, lot_size = atm.trading_symbol, atm.security_id, atm.lot_size
-                exchange_segment, product_type = "NSE_FNO", config.OPTIONS_PRODUCT
                 quantity = lot_size * config.QUANTITY_LOTS
+                if is_mcx:
+                    exchange_segment, product_type = "MCX_COMM", config.MCX_PRODUCT
+                    # NOT quantity - see Position.pnl_multiplier's own
+                    # docstring for why MCX needs a real, separately-
+                    # configured rupee-per-point multiplier here instead
+                    # of the tiny lot-count `quantity` (correct for order
+                    # placement, wrong for rupee-threshold math).
+                    pnl_multiplier = config.MCX_PNL_MULTIPLIERS[symbol] * config.QUANTITY_LOTS
+                else:
+                    exchange_segment, product_type = "NSE_FNO", config.OPTIONS_PRODUCT
+                    pnl_multiplier = quantity
             else:  # EQUITY
                 meta = await loop.run_in_executor(None, dhan_wrapper._equity_instrument_meta, symbol)
                 trading_symbol, security_id, lot_size = symbol, meta["security_id"], None
                 exchange_segment, product_type = "NSE_EQ", config.EQUITY_PRODUCT
                 quantity = config.EQUITY_QUANTITY
+                pnl_multiplier = quantity
         except Exception:  # noqa: BLE001
             logger.exception("%s: could not resolve the %s instrument for entry", symbol, basket_type)
             return {"symbol": symbol, "status": "error", "reason": "instrument_resolution_failed"}
@@ -225,13 +291,14 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
         transaction_type = entry_transaction_type(side)
         if exchange_segment == "NSE_FNO":
             await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, trading_symbol)
-            order_resp = await loop.run_in_executor(
-                None, dhan_wrapper.place_market_order, trading_symbol, quantity, transaction_type, tag, product_type,
-            )
-        else:
-            order_resp = await loop.run_in_executor(
-                None, dhan_wrapper.place_equity_market_order, trading_symbol, quantity, transaction_type, tag, product_type,
-            )
+        # WS ticks are ONLY subscribed for NSE_FNO above - equity and MCX
+        # both have no WS feed today (see Swing/config.py's MCX_SYMBOLS
+        # docstring for MCX; _get_ltp's own docstring for both) and fall
+        # back to the REST poll loop only.
+        place_fn = _market_order_placer(exchange_segment)
+        order_resp = await loop.run_in_executor(
+            None, place_fn, trading_symbol, quantity, transaction_type, tag, product_type,
+        )
         order_id, is_amo = order_resp["order_id"], order_resp["is_amo"]
         await position_store.record_order(OrderRecord(
             order_id=order_id, underlying_symbol=symbol, trading_symbol=trading_symbol,
@@ -263,12 +330,16 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
 
         stop_loss_order_id = None
         if config.BROKER_STOP_LOSS_ENABLED:
+            # pnl_multiplier, NOT quantity - the rupee cap must be divided
+            # by the REAL per-unit exposure, not the (possibly much
+            # smaller, for MCX) order-placement quantity. See Position.
+            # pnl_multiplier's own docstring.
             trigger_price, limit_price = broker_stop_trigger_and_limit(
-                side, fill_price, quantity, config.MAX_LOSS_PROTECTION_RS, config.BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE,
+                side, fill_price, pnl_multiplier, config.MAX_LOSS_PROTECTION_RS, config.BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE,
             )
             try:
                 stop_tag = _gen_tag("SL", symbol)
-                sl_placer = dhan_wrapper.place_stop_loss_limit_order if exchange_segment == "NSE_FNO" else dhan_wrapper.place_equity_stop_loss_limit_order
+                sl_placer = _sl_limit_placer(exchange_segment)
                 stop_resp = await loop.run_in_executor(
                     None, sl_placer, trading_symbol, quantity, exit_transaction_type(side),
                     trigger_price, limit_price, stop_tag, product_type,
@@ -293,7 +364,7 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
             quantity=quantity, lot_size=lot_size, entry_price=fill_price, best_price=fill_price,
             target_price=target_price_for(side, fill_price, config.TARGET_PCT),
             hard_stop_loss=hard_stop_for(side, fill_price, config.HARD_STOP_LOSS_PCT),
-            order_id=order_id, resolved_option_type=option_type,
+            order_id=order_id, pnl_multiplier=pnl_multiplier, resolved_option_type=option_type,
             supertrend_entry_candle_start=entry_candle_start, stop_loss_order_id=stop_loss_order_id,
         )
         await position_store.add_position(position)
@@ -406,6 +477,15 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
                             "order %s - a PARTIAL fill happened. Exiting only the real remaining %d qty instead "
                             "of the stale %d to avoid an unintended over-trade.",
                             symbol, broker_qty, position.quantity, stale_order_id, broker_qty, position.quantity)
+            # NOTE for when Swing's BROKER_STOP_LOSS_ENABLED is ever turned
+            # on for an MCX symbol: this partial-fill path is only reached
+            # via a stale broker-side SL-L order (see the gate a few lines
+            # up), which stays impossible for Copper in this rollout
+            # (BROKER_STOP_LOSS_ENABLED is off - Swing/config.py). If that
+            # ever changes, pnl_multiplier should be scaled down by the
+            # same ratio as quantity here (qty and pnl_multiplier both
+            # represent "how many lots/units are still actually held," so
+            # a partial fill shrinks both, not just the order quantity).
             position.quantity = broker_qty
 
     if position.exit_failure_count >= 1:
@@ -424,7 +504,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             return
 
     tag = _gen_tag("Ext", symbol)
-    place_fn = dhan_wrapper.place_market_order if position.exchange_segment == "NSE_FNO" else dhan_wrapper.place_equity_market_order
+    place_fn = _market_order_placer(position.exchange_segment)
     try:
         order_resp = await loop.run_in_executor(
             None, place_fn, position.trading_symbol, position.quantity, exit_side, tag, position.product_type,
@@ -464,7 +544,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
         await position_store.close_position(symbol, final_exit_price, reason)
         if position.exchange_segment == "NSE_FNO":
             await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
-        pnl = unrealized_pnl_rs(position.instrument_side, position.entry_price, final_exit_price, position.quantity)
+        pnl = unrealized_pnl_rs(position.instrument_side, position.entry_price, final_exit_price, position.pnl_multiplier)
         logger.info("%s exit order %s FILLED for %s (%s): reason=%s entry=%s exit=%s qty=%s pnl=%.2f",
                     exit_side, order_id, symbol, position.trading_symbol, reason,
                     position.entry_price, final_exit_price, position.quantity, pnl)
@@ -480,10 +560,12 @@ def _exit_on_cooldown(position: Position) -> bool:
 
 async def _get_ltp(position: Position) -> float:
     """FNO positions use the same WS-cache-then-REST-fallback pattern as
-    Options/Futures/Luxury (_get_ltp there). Equity has no WS feed today
-    (subscribe_option_price hardcodes the NSE_FNO market-feed segment -
-    see Swing/config.py's own note on this), so it's plain REST always -
-    a 5s poll is adequate for a swing strategy's equity leg."""
+    Options/Futures/Luxury (_get_ltp there). Equity and MCX have no WS
+    feed today (subscribe_option_price hardcodes the NSE_FNO market-feed
+    segment - see Swing/config.py's own note on this), so both are plain
+    REST always - a 5s poll is adequate for a swing strategy's equity/
+    Copper leg (MCX WS support deliberately deferred, 12 Sep 2026 - see
+    Swing/config.py's MCX_SYMBOLS docstring)."""
     loop = asyncio.get_running_loop()
     if position.exchange_segment != "NSE_FNO":
         return await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, position.trading_symbol)
@@ -660,9 +742,18 @@ async def reconcile_broker_positions() -> list[Position]:
     loop = asyncio.get_running_loop()
     fno_positions = await loop.run_in_executor(None, dhan_wrapper.get_open_fno_positions)
     equity_positions = await loop.run_in_executor(None, dhan_wrapper.get_open_equity_positions)
+    # MCX scan added 12 Sep 2026, Swing v2's Copper options support - a
+    # real open Copper position surviving a restart is picked back up the
+    # same way an NSE one already is, rather than being silently invisible
+    # to reconciliation (see get_open_mcx_positions' own docstring).
+    mcx_positions = await loop.run_in_executor(None, dhan_wrapper.get_open_mcx_positions)
 
     positions: list[Position] = []
-    for bp, exchange_segment in [(p, "NSE_FNO") for p in fno_positions] + [(p, "NSE_EQ") for p in equity_positions]:
+    for bp, exchange_segment in (
+        [(p, "NSE_FNO") for p in fno_positions]
+        + [(p, "NSE_EQ") for p in equity_positions]
+        + [(p, "MCX_COMM") for p in mcx_positions]
+    ):
         avg_price = bp["avg_price"]
         if not avg_price:
             logger.warning("Skipping Swing reconciliation for %s - broker reported no average price.", bp["trading_symbol"])
@@ -679,13 +770,35 @@ async def reconcile_broker_positions() -> list[Position]:
         side = "LONG" if bp["quantity"] > 0 else "SHORT"
         quantity = abs(bp["quantity"])
         basket_type = "EQUITY" if exchange_segment == "NSE_EQ" else ("OPTIONS" if bp.get("option_type") else "FUTURES")
+        underlying_symbol = bp["underlying_symbol"]
+        # pnl_multiplier: identical to quantity for NSE (see Position's own
+        # docstring) - looked up from MCX_PNL_MULTIPLIERS for a reconciled
+        # MCX position instead, same as a fresh entry would compute it.
+        # Fails open to `quantity` (a WRONG but at least non-crashing
+        # value) if this underlying was somehow never configured, logging
+        # loudly so it doesn't go unnoticed - a KeyError here would break
+        # startup reconciliation for every OTHER already-open position too.
+        if exchange_segment == "MCX_COMM":
+            if underlying_symbol in config.MCX_PNL_MULTIPLIERS:
+                pnl_multiplier = config.MCX_PNL_MULTIPLIERS[underlying_symbol] * config.QUANTITY_LOTS
+            else:
+                logger.error(
+                    "%s: reconciled MCX position has no configured MCX_PNL_MULTIPLIERS entry - "
+                    "falling back to quantity (%d) as the P&L multiplier, which is almost certainly "
+                    "WRONG for a commodity. Add SWING_MCX_PNL_MULTIPLIER_%s to .env.",
+                    underlying_symbol, quantity, underlying_symbol,
+                )
+                pnl_multiplier = quantity
+        else:
+            pnl_multiplier = quantity
         positions.append(Position(
-            underlying_symbol=bp["underlying_symbol"], trading_symbol=bp["trading_symbol"],
+            underlying_symbol=underlying_symbol, trading_symbol=bp["trading_symbol"],
             basket_type=basket_type, regime="UNKNOWN", instrument_side=side,
             exchange_segment=exchange_segment, product_type=bp.get("product_type") or config.FUTURES_PRODUCT,
             quantity=quantity, lot_size=bp.get("lot_size"), entry_price=avg_price, best_price=avg_price,
             target_price=target_price_for(side, avg_price, config.TARGET_PCT),
             hard_stop_loss=hard_stop_for(side, avg_price, config.HARD_STOP_LOSS_PCT),
-            order_id="", resolved_option_type=bp.get("option_type") or None, reconciled=True,
+            order_id="", pnl_multiplier=pnl_multiplier, resolved_option_type=bp.get("option_type") or None,
+            reconciled=True,
         ))
     return positions

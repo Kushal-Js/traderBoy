@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from Options.dhan_client import dhan_wrapper, _compute_ema, _compute_supertrend, IST
@@ -35,6 +35,36 @@ logger = logging.getLogger("swing_signals")
 
 def _now_ist() -> datetime:
     return datetime.now(IST)
+
+
+# Resolved MCX futures contract's security_id, cached per calendar day
+# (added 12 Sep 2026, Swing v2's Copper support) - re-resolving on every
+# tick would be wasteful and the contract only changes when a monthly
+# expiry cycle actually rolls, which get_mcx_futures_contract's own
+# roll-forward logic already only needs to check once a day for.
+_mcx_contract_cache: dict[str, tuple[date, str]] = {}
+
+
+def _underlying_reference(symbol: str) -> tuple[str, str, str]:
+    """Returns (security_id, exchange_segment, instrument_type) for the
+    underlying series both regime and Supertrend fetches read. A normal
+    watchlist symbol resolves its NSE cash-segment security_id, unchanged
+    from before. A symbol in config.MCX_SYMBOLS instead resolves the
+    CURRENT MCX futures contract (there's no continuous "spot" for an MCX
+    commodity - see Swing/config.py's MCX_SYMBOLS docstring), independent
+    of whatever BASKET_TYPE is actually configured - the regime/Supertrend
+    signal always needs a real continuous price series regardless of
+    which instrument ends up traded."""
+    if symbol in config.MCX_SYMBOLS:
+        today = _now_ist().date()
+        cached = _mcx_contract_cache.get(symbol)
+        if not cached or cached[0] != today:
+            contract = dhan_wrapper.get_mcx_futures_contract(symbol)
+            _mcx_contract_cache[symbol] = (today, contract.security_id)
+            logger.info("%s: resolved MCX futures contract for today's signal reference: security_id=%s",
+                        symbol, contract.security_id)
+        return _mcx_contract_cache[symbol][1], "MCX_COMM", "FUTCOM"
+    return dhan_wrapper._equity_security_id(symbol), "NSE_EQ", "EQUITY"
 
 
 # --------------------------------------------------------------------------- #
@@ -73,10 +103,10 @@ def _fetch_regime_state_once(symbol: str) -> Optional[RegimeState]:
     fetches (5-min and 15-min), each with the longer REGIME_EMA_LOOKBACK_
     DAYS override (see fetch_continuous_intraday's own docstring for why
     the shared 7-day global can't warm up a 200-period EMA at all)."""
-    security_id = dhan_wrapper._equity_security_id(symbol)
+    security_id, exchange_segment, instrument_type = _underlying_reference(symbol)
 
     fast_data = dhan_wrapper.fetch_continuous_intraday(
-        security_id, "NSE_EQ", "EQUITY", config.REGIME_FAST_INTERVAL_MINUTES,
+        security_id, exchange_segment, instrument_type, config.REGIME_FAST_INTERVAL_MINUTES,
         lookback_days_override=config.REGIME_EMA_LOOKBACK_DAYS,
     )
     fast_ema, fast_start = _ema200_on(
@@ -86,7 +116,7 @@ def _fetch_regime_state_once(symbol: str) -> Optional[RegimeState]:
         return None
 
     slow_data = dhan_wrapper.fetch_continuous_intraday(
-        security_id, "NSE_EQ", "EQUITY", config.REGIME_SLOW_INTERVAL_MINUTES,
+        security_id, exchange_segment, instrument_type, config.REGIME_SLOW_INTERVAL_MINUTES,
         lookback_days_override=config.REGIME_EMA_LOOKBACK_DAYS,
     )
     slow_ema, slow_start = _ema200_on(
@@ -165,9 +195,9 @@ def _fetch_supertrend_state_once(symbol: str) -> Optional[SupertrendState]:
     """Blocking - always call via run_in_executor. Returns None only if
     the fetch genuinely came back with too little data - callers treat
     that as "no signal," never as a false crossover."""
-    security_id = dhan_wrapper._equity_security_id(symbol)
+    security_id, exchange_segment, instrument_type = _underlying_reference(symbol)
     data = dhan_wrapper.fetch_continuous_intraday(
-        security_id, "NSE_EQ", "EQUITY", config.SUPERTREND_INTERVAL_MINUTES,
+        security_id, exchange_segment, instrument_type, config.SUPERTREND_INTERVAL_MINUTES,
     )
     highs = data.get("high") or []
     lows = data.get("low") or []

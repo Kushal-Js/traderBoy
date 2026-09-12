@@ -35,6 +35,11 @@ def _make_position(**overrides):
         target_price=120.0, hard_stop_loss=80.0, order_id="OID",
     )
     defaults.update(overrides)
+    # pnl_multiplier (added 12 Sep 2026, Swing v2's Copper/MCX support) -
+    # defaults to matching `quantity` (identical for every NSE test case
+    # here, same as real NSE positions) unless a test explicitly overrides
+    # it to exercise the MCX-divergent case.
+    defaults.setdefault("pnl_multiplier", defaults["quantity"])
     return Position(**defaults)
 
 

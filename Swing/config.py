@@ -275,6 +275,54 @@ OPTIONS_PRODUCT = os.getenv("SWING_OPTIONS_PRODUCT", "MARGIN")
 EQUITY_PRODUCT = os.getenv("SWING_EQUITY_PRODUCT", "CNC")
 
 # ---------------------------------------------------------------------------
+# MCX commodities (user request 12 Sep 2026: "enable COPPER MCX options and
+# future trading also via SWING strategy" - later corrected the same turn
+# to "disable Copper Future trading as of now, only Options trading for
+# Copper"). A watchlist symbol in MCX_SYMBOLS routes through Options/
+# dhan_client.py's MCX-aware resolvers (get_mcx_futures_contract for the
+# regime/Supertrend signal reference - there's no continuous "spot" for an
+# MCX commodity, only its futures contract - and the now-MCX-capable
+# get_atm_option for the tradeable leg) instead of the NSE-equity path
+# every other watchlist symbol uses. Real order placement for an MCX
+# symbol is ONLY allowed when BASKET_TYPE=="options" - see
+# Swing/trading_engine.py's enter_position_for_stock, which skips (does
+# NOT place a real order) any MCX symbol while BASKET_TYPE=="futures",
+# per the explicit correction above. BASKET_TYPE=="equity" was never
+# requested for a commodity and isn't meaningful for one (no delivery
+# concept), so it's untouched by any of this.
+# ---------------------------------------------------------------------------
+MCX_SYMBOLS = {s.strip().upper() for s in os.getenv("SWING_MCX_SYMBOLS", "COPPER").split(",") if s.strip()}
+
+# The REAL per-lot economic quantity (kg for Copper) - used ONLY for P&L/
+# rupee-threshold math (MAX_LOSS_PROTECTION_RS/PROFIT_PROTECTION_RS checks,
+# the broker-side SL-L trigger/limit formula), NEVER for the real order's
+# own `quantity` parameter. This is the single easiest thing to get wrong
+# for an MCX symbol: Dhan's own instrument master reports SEM_LOT_UNITS=1
+# for Copper FUTCOM/OPTFUT rows, which is CORRECT for order placement
+# (Dhan's MCX order-quantity convention is "number of lots", confirmed via
+# a live margin-calculator spike 12 Sep 2026: quantity=1 priced out to
+# Rs 304,687.50 margin - exactly one real 2,500kg lot; quantity=2500 priced
+# an absurd Rs 76+ crore) but WRONG as a rupee-per-point multiplier (a
+# single-unit "quantity" would make every rupee threshold here effectively
+# unreachable). See Swing/position_store.py's Position.pnl_multiplier
+# field and Swing/trading_engine.py's entry code for where quantity vs
+# pnl_multiplier are each actually used - they must never be swapped.
+# Before adding any FUTURE MCX symbol here, verify its own real per-lot
+# multiplier the same way (margin_calculator at quantity=1 should price
+# out to that commodity's real-world one-lot margin) rather than guessing.
+MCX_PNL_MULTIPLIERS = {
+    sym: int(os.getenv(f"SWING_MCX_PNL_MULTIPLIER_{sym}", "2500"))
+    for sym in MCX_SYMBOLS
+}
+
+MCX_PRODUCT = os.getenv("SWING_MCX_PRODUCT", "MARGIN")
+
+# Same rollover-avoidance guard CopperOptions/config.py (now removed) used
+# for its own expiry-cycle resolution - avoids trading a same-day/near-
+# expiry (extreme gamma/theta) contract just because it's nearest.
+MCX_MIN_DAYS_TO_EXPIRY = int(os.getenv("SWING_MCX_MIN_DAYS_TO_EXPIRY", "3"))
+
+# ---------------------------------------------------------------------------
 # Plumbing
 # ---------------------------------------------------------------------------
 MARKET_TZ = "Asia/Kolkata"
