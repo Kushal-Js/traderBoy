@@ -276,22 +276,37 @@ EQUITY_PRODUCT = os.getenv("SWING_EQUITY_PRODUCT", "CNC")
 
 # ---------------------------------------------------------------------------
 # MCX commodities (user request 12 Sep 2026: "enable COPPER MCX options and
-# future trading also via SWING strategy" - later corrected the same turn
-# to "disable Copper Future trading as of now, only Options trading for
-# Copper"). A watchlist symbol in MCX_SYMBOLS routes through Options/
+# future trading also via SWING strategy" - corrected twice the same day:
+# first to "disable Copper Future trading as of now, only Options trading
+# for Copper", then again to "whatever is the BASKET_TYPE, it should not
+# impact COPPER as it only has to trade in options" - i.e. Copper doesn't
+# just skip when BASKET_TYPE happens to be "futures", it always trades
+# options regardless of what BASKET_TYPE is set to, for the ENTIRE rest of
+# the watchlist. A watchlist symbol in MCX_SYMBOLS routes through Options/
 # dhan_client.py's MCX-aware resolvers (get_mcx_futures_contract for the
 # regime/Supertrend signal reference - there's no continuous "spot" for an
 # MCX commodity, only its futures contract - and the now-MCX-capable
 # get_atm_option for the tradeable leg) instead of the NSE-equity path
-# every other watchlist symbol uses. Real order placement for an MCX
-# symbol is ONLY allowed when BASKET_TYPE=="options" - see
-# Swing/trading_engine.py's enter_position_for_stock, which skips (does
-# NOT place a real order) any MCX symbol while BASKET_TYPE=="futures",
-# per the explicit correction above. BASKET_TYPE=="equity" was never
-# requested for a commodity and isn't meaningful for one (no delivery
-# concept), so it's untouched by any of this.
+# every other watchlist symbol uses.
 # ---------------------------------------------------------------------------
 MCX_SYMBOLS = {s.strip().upper() for s in os.getenv("SWING_MCX_SYMBOLS", "COPPER").split(",") if s.strip()}
+
+# The subset of MCX_SYMBOLS that ALWAYS trades OPTIONS, overriding the
+# otherwise-global BASKET_TYPE entirely for just that symbol - deliberately
+# a SEPARATE set from MCX_SYMBOLS, not "every MCX symbol behaves this way"
+# (explicit user correction, 12 Sep 2026: "this doesn't apply to all
+# instruments under MCX but only for COPPER to trade in options"). Any
+# future MCX symbol added to MCX_SYMBOLS but NOT to this set would simply
+# follow the global BASKET_TYPE like every NSE symbol does today - this
+# set exists so that decision is explicit per-symbol, never a blanket rule.
+# See Swing/trading_engine.py's enter_position_for_stock for where this is
+# actually applied (computes an `effective_basket_type` that's forced to
+# "OPTIONS" for a symbol in this set, used instead of the raw config.
+# BASKET_TYPE for every entry decision - side, instrument resolution, and
+# what gets stored on the resulting Position).
+MCX_OPTIONS_ONLY_SYMBOLS = {
+    s.strip().upper() for s in os.getenv("SWING_MCX_OPTIONS_ONLY_SYMBOLS", "COPPER").split(",") if s.strip()
+}
 
 # The REAL per-lot economic quantity (kg for Copper) - used ONLY for P&L/
 # rupee-threshold math (MAX_LOSS_PROTECTION_RS/PROFIT_PROTECTION_RS checks,

@@ -198,46 +198,49 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
         return {"symbol": symbol, "status": "ignored", "reason": "strategy_disabled"}
 
     basket_type = config.BASKET_TYPE.upper()
-    side = resolve_instrument_side(basket_type, regime)
+    is_mcx = symbol in config.MCX_SYMBOLS
+    # Only the symbols in MCX_OPTIONS_ONLY_SYMBOLS (Copper, today) ALWAYS
+    # trade OPTIONS, completely independent of what BASKET_TYPE is set to
+    # for the rest of the watchlist - user request 12 Sep 2026: "whatever
+    # is the BASKET_TYPE, it should not impact COPPER as it only has to
+    # trade in options", explicitly NOT a blanket rule for every MCX
+    # symbol ("this doesn't apply to all instruments under MCX but only
+    # for COPPER"). A future MCX symbol in MCX_SYMBOLS but not in
+    # MCX_OPTIONS_ONLY_SYMBOLS would just follow the global BASKET_TYPE
+    # like any NSE symbol. The futures contract for an MCX symbol is still
+    # resolved separately (see Swing/signals.py) purely as the regime/
+    # Supertrend signal reference - that's unrelated to which instrument
+    # actually gets traded here.
+    effective_basket_type = "OPTIONS" if symbol in config.MCX_OPTIONS_ONLY_SYMBOLS else basket_type
+    side = resolve_instrument_side(effective_basket_type, regime)
     if side is None:
         # Only EQUITY+BEARISH takes this path today (see resolve_instrument_
         # side's own docstring) - checked BEFORE reserve_symbol so this
         # doesn't burn a capacity slot for a trade that was never going to
         # be placed.
-        logger.info("%s: skipped - %s basket-type is long-only, regime is BEARISH", symbol, basket_type)
-        await _record_swing_event("ENTRY_SKIPPED_EQUITY_LONG_ONLY", symbol, {"basket_type": basket_type})
+        logger.info("%s: skipped - %s basket-type is long-only, regime is BEARISH", symbol, effective_basket_type)
+        await _record_swing_event("ENTRY_SKIPPED_EQUITY_LONG_ONLY", symbol, {"basket_type": effective_basket_type})
         return {"symbol": symbol, "status": "skipped", "reason": "equity_long_only"}
-
-    # Copper/MCX futures trading is explicitly NOT enabled (user request 12
-    # Sep 2026: "disable Copper Future trading as of now, only Options
-    # trading for Copper") - checked BEFORE reserve_symbol, same reasoning
-    # as the equity+bearish skip above, so a MCX+FUTURES combination never
-    # burns a capacity slot for a trade that will never be placed. The
-    # futures contract for an MCX symbol is still resolved elsewhere (see
-    # Swing/signals.py) purely as the regime/Supertrend signal reference -
-    # this only blocks actually OPENING a real futures position.
-    is_mcx = symbol in config.MCX_SYMBOLS
-    if is_mcx and basket_type == "FUTURES":
-        logger.info("%s: skipped - Copper/MCX futures trading is not enabled (options only for now)", symbol)
-        await _record_swing_event("ENTRY_SKIPPED_MCX_FUTURES_DISABLED", symbol, {"basket_type": basket_type})
-        return {"symbol": symbol, "status": "skipped", "reason": "mcx_futures_disabled"}
 
     if not await position_store.reserve_symbol(symbol):
         return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
 
     loop = asyncio.get_running_loop()
     try:
-        option_type = resolved_option_type_for(basket_type, regime)
+        option_type = resolved_option_type_for(effective_basket_type, regime)
         try:
-            if basket_type == "FUTURES":
-                # is_mcx+FUTURES is already blocked above, so this branch
-                # only ever runs for an NSE underlying.
+            if effective_basket_type == "FUTURES":
+                # A symbol in MCX_OPTIONS_ONLY_SYMBOLS always forces
+                # effective_basket_type="OPTIONS" above, so this branch
+                # only ever runs for an NSE underlying (or a hypothetical
+                # future MCX symbol NOT in MCX_OPTIONS_ONLY_SYMBOLS -
+                # unsupported today, no such symbol exists).
                 contract = await loop.run_in_executor(None, dhan_wrapper.get_futures_contract, symbol)
                 trading_symbol, security_id, lot_size = contract.trading_symbol, contract.security_id, contract.lot_size
                 exchange_segment, product_type = "NSE_FNO", config.FUTURES_PRODUCT
                 quantity = lot_size * config.QUANTITY_LOTS
                 pnl_multiplier = quantity
-            elif basket_type == "OPTIONS":
+            elif effective_basket_type == "OPTIONS":
                 # get_atm_option is already MCX-capable for a Copper-style
                 # symbol (Tradehull's own ATM_Strike_Selection has a native
                 # commodity_step_dict branch; the only thing that used to
@@ -268,7 +271,7 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
                 quantity = config.EQUITY_QUANTITY
                 pnl_multiplier = quantity
         except Exception:  # noqa: BLE001
-            logger.exception("%s: could not resolve the %s instrument for entry", symbol, basket_type)
+            logger.exception("%s: could not resolve the %s instrument for entry", symbol, effective_basket_type)
             return {"symbol": symbol, "status": "error", "reason": "instrument_resolution_failed"}
 
         tag = _gen_tag(config.ORDER_TAG_PREFIX, symbol)
@@ -285,7 +288,7 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
                 logger.exception("%s: could not price the leg for the funds check - proceeding optimistically", symbol)
                 sufficient = True
             if not sufficient:
-                await _record_swing_event("ENTRY_SKIPPED_INSUFFICIENT_FUNDS", symbol, {"basket_type": basket_type})
+                await _record_swing_event("ENTRY_SKIPPED_INSUFFICIENT_FUNDS", symbol, {"basket_type": effective_basket_type})
                 return {"symbol": symbol, "status": "skipped", "reason": "insufficient_funds", "trading_symbol": trading_symbol}
 
         transaction_type = entry_transaction_type(side)
@@ -359,7 +362,7 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
                 )
 
         position = Position(
-            underlying_symbol=symbol, trading_symbol=trading_symbol, basket_type=basket_type, regime=regime,
+            underlying_symbol=symbol, trading_symbol=trading_symbol, basket_type=effective_basket_type, regime=regime,
             instrument_side=side, exchange_segment=exchange_segment, product_type=product_type,
             quantity=quantity, lot_size=lot_size, entry_price=fill_price, best_price=fill_price,
             target_price=target_price_for(side, fill_price, config.TARGET_PCT),
@@ -369,7 +372,7 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
         )
         await position_store.add_position(position)
         await _record_swing_event("POSITION_OPENED", symbol, {
-            "basket_type": basket_type, "regime": regime, "instrument_side": side,
+            "basket_type": effective_basket_type, "regime": regime, "instrument_side": side,
             "trading_symbol": trading_symbol, "entry_price": fill_price, "quantity": quantity,
         })
         return {"symbol": symbol, "status": "entered", "trading_symbol": trading_symbol, "entry_price": fill_price}
