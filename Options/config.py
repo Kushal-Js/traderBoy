@@ -196,15 +196,20 @@ BROKER_STOP_LOSS_LIMIT_BUFFER_PCT = float(os.getenv("BROKER_STOP_LOSS_LIMIT_BUFF
 #   trigger_price = fill_price - (current_max_loss_per_trade_rs() / qty)
 #   limit_price   = trigger_price - (current_max_loss_per_trade_rs()
 #                                     * BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE / qty)
-# so with the default 1.0, the SL-L order's own fillable price band
-# (trigger down to limit) is exactly as wide, in rupees, as the MAX_LOSS_HIT
-# cap itself - if it fills anywhere in that band, the worst realistic
-# outcome is roughly 2x the cap, never an unbounded/unrelated-to-cap
-# amount the way a fixed 3%-of-price band could be (a few paise on a
-# cheap option, or a huge rupee swing on an expensive one, regardless of
-# what the cap actually is). Set below 1.0 for a tighter band (higher
-# chance of no fill on a violent gap, but a better floor if it does fill)
-# or above 1.0 for a wider one (more likely to fill, worse worst-case).
+# so at 1.0, the SL-L order's own fillable price band (trigger down to
+# limit) would be exactly as wide, in rupees, as the MAX_LOSS_HIT cap
+# itself - meaning a worst-case fill at the very bottom of that band
+# could run to roughly 2x the cap. Lowered 1.0->0.05 same day (user
+# feedback: "I don't want loss to trail much farther from MAX_LOSS
+# LIMIT... contained within max 200/300 rupees") - since the rupee gap
+# is cap * this multiple regardless of quantity, 0.05 caps the extra
+# tolerance at Rs 225 (before 11:30, cap 4500) / Rs 105 (after, cap
+# 2100), comfortably under that 200-300 ceiling. Code default kept at
+# its ORIGINAL 1.0 (see TARGET_PCT's own comment elsewhere in this file
+# for why) - .env's own BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE carries the
+# real deployed 0.05. Set lower still for an even tighter worst-case
+# (at the cost of a higher chance of no fill on a violent gap) or higher
+# for a wider, more-likely-to-fill band.
 BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE = float(os.getenv("BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE", "1.0"))
 
 # Liquidity guard master switch - ported from Luxury/config.py's own

@@ -190,8 +190,9 @@ BROKER_STOP_LOSS_LIMIT_BUFFER_PCT = float(os.getenv("LUXURY_BROKER_STOP_LOSS_LIM
 # Real broker-side SL-L limit gap, IN RUPEES, computed per-trade from the
 # same current_max_loss_per_trade_rs() used for trigger_price - see
 # Options/config.py's identical flag for the full mechanics/rationale.
-# Default 1.0 = the SL-L's fillable price band is exactly as wide, in
-# rupees, as the MAX_LOSS_HIT cap itself (currently 4500/2100 here).
+# Deployed at 0.05 (lowered from 1.0 same day, user feedback: "contained
+# within max 200/300 rupees") - Rs 225/105 extra tolerance before/after
+# 11:30 at the current 4500/2100 caps, independent of quantity.
 BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE = float(os.getenv("LUXURY_BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE", "1.0"))
 
 # Code default kept at its ORIGINAL value, same convention as Options'
