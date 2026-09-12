@@ -204,7 +204,12 @@ async def test_1_real_entry_places_broker_stop_with_correct_trigger_and_limit():
         assert call["quantity"] == result["quantity"], call
         entry_price = result["entry_price"]
         expected_trigger = entry_price - (ote.config.MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF / result["quantity"])
-        expected_limit = expected_trigger * (1 - ote.config.BROKER_STOP_LOSS_LIMIT_BUFFER_PCT)
+        # Gap is IN RUPEES, sized off the same cap used for trigger_price
+        # (12 Sep 2026 - replaced the old flat %-of-price buffer formula).
+        expected_limit = expected_trigger - (
+            ote.config.MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF * ote.config.BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE
+            / result["quantity"]
+        )
         assert abs(call["trigger_price"] - expected_trigger) < 0.001, \
             f"expected trigger {expected_trigger}, got {call['trigger_price']}"
         assert abs(call["limit_price"] - expected_limit) < 0.001, \

@@ -645,8 +645,15 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
     # MAX_LOSS_HIT check.
     stop_loss_order_id = None
     if config.BROKER_STOP_LOSS_ENABLED:
-        trigger_price = fill_price - (current_max_loss_per_trade_rs() / quantity)
-        limit_price = trigger_price * (1 - config.BROKER_STOP_LOSS_LIMIT_BUFFER_PCT)
+        max_loss_cap = current_max_loss_per_trade_rs()
+        trigger_price = fill_price - (max_loss_cap / quantity)
+        # Gap sized in RUPEES off the SAME cap used for trigger_price, not a
+        # flat % of price (12 Sep 2026 - see config.BROKER_STOP_LOSS_LIMIT_
+        # GAP_MULTIPLE's own docstring: keeps the SL-L's fillable price band
+        # "in sync" with MAX_LOSS_HIT's own size regardless of the option's
+        # premium level or the position's quantity, replacing the old flat
+        # BROKER_STOP_LOSS_LIMIT_BUFFER_PCT-of-price formula).
+        limit_price = trigger_price - (max_loss_cap * config.BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE / quantity)
         try:
             stop_tag = _gen_tag("SL", symbol)
             stop_resp = await loop.run_in_executor(

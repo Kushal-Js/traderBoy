@@ -84,7 +84,19 @@ LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
 # as Options: earn trust via a controlled live test before it runs against
 # a real production entry).
 BROKER_STOP_LOSS_ENABLED = os.getenv("FUTURES_BROKER_STOP_LOSS_ENABLED", "false").lower() == "true"
+
+# RETIRED 12 Sep 2026 - see Options/config.py's identical flag for the
+# full story (replaced by BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE below,
+# user feedback: "this has to be in sync with MAX_LOSS_HIT"). Left
+# defined (unused) rather than deleted.
 BROKER_STOP_LOSS_LIMIT_BUFFER_PCT = float(os.getenv("FUTURES_BROKER_STOP_LOSS_LIMIT_BUFFER_PCT", "0.03"))
+
+# Real broker-side SL-L limit gap, IN RUPEES, computed per-trade from the
+# same current_max_loss_per_trade_rs() used for trigger_price - see
+# Options/config.py's identical flag for the full mechanics/rationale.
+# Default 1.0 = the SL-L's fillable price band is exactly as wide, in
+# rupees, as the MAX_LOSS_HIT cap itself.
+BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE = float(os.getenv("FUTURES_BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE", "1.0"))
 
 # Liquidity guard: on/off gate for whether this package's own
 # _exit_reason_for acts on the shared dhan_client illiquidity signal

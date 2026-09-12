@@ -179,7 +179,33 @@ LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
 # earn trust via an actual controlled live test before running against
 # a real production entry, not by assumption.
 BROKER_STOP_LOSS_ENABLED = os.getenv("BROKER_STOP_LOSS_ENABLED", "false").lower() == "true"
+
+# RETIRED 12 Sep 2026 - trading_engine.py no longer reads this. Was a flat
+# % of trigger_price (limit_price = trigger_price * (1 - this)), untied to
+# MAX_LOSS_HIT's own rupee size - user feedback: "this has to be in sync
+# with MAX_LOSS_HIT". Replaced by BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE
+# below. Left defined (unused) rather than deleted, matching this file's
+# own convention for retired flags - see RSI_LOSS_REENTRY_* above for the
+# same pattern when LOSS_COOLDOWN_MINUTES was replaced.
 BROKER_STOP_LOSS_LIMIT_BUFFER_PCT = float(os.getenv("BROKER_STOP_LOSS_LIMIT_BUFFER_PCT", "0.03"))
+
+# Real broker-side SL-L limit gap, IN RUPEES, computed per-trade from the
+# same current_max_loss_per_trade_rs() used for trigger_price itself -
+# added 12 Sep 2026 (user request: "the gap value actually comes around
+# MAX_LOSS_HIT value... that's what I mean by in sync"). At entry:
+#   trigger_price = fill_price - (current_max_loss_per_trade_rs() / qty)
+#   limit_price   = trigger_price - (current_max_loss_per_trade_rs()
+#                                     * BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE / qty)
+# so with the default 1.0, the SL-L order's own fillable price band
+# (trigger down to limit) is exactly as wide, in rupees, as the MAX_LOSS_HIT
+# cap itself - if it fills anywhere in that band, the worst realistic
+# outcome is roughly 2x the cap, never an unbounded/unrelated-to-cap
+# amount the way a fixed 3%-of-price band could be (a few paise on a
+# cheap option, or a huge rupee swing on an expensive one, regardless of
+# what the cap actually is). Set below 1.0 for a tighter band (higher
+# chance of no fill on a violent gap, but a better floor if it does fill)
+# or above 1.0 for a wider one (more likely to fill, worse worst-case).
+BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE = float(os.getenv("BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE", "1.0"))
 
 # Liquidity guard master switch - ported from Luxury/config.py's own
 # LIQUIDITY_GUARD_ENABLED (added there 2 Sep 2026 after the real

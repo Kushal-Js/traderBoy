@@ -117,12 +117,15 @@ LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
 # Luxury's real COALINDIA/GVT&D/PAYTM entries that morning to be sold
 # within seconds of fill, regardless of actual price movement.
 #
-# CURRENT DESIGN (9 Sep 2026): a real SELL STOP-LOSS LIMIT (SL-L) order
-# instead - the ONLY broker-side conditional stop NSE still permits for
-# options. TWO prices: `trigger_price` (same rupee-cap calculation as
-# before) and a `limit_price` = trigger_price * (1 -
-# BROKER_STOP_LOSS_LIMIT_BUFFER_PCT) below it (see place_stop_loss_
-# limit_order's own docstring in Options/dhan_client.py for the exact
+# CURRENT DESIGN (9 Sep 2026, gap formula updated 12 Sep 2026): a real
+# SELL STOP-LOSS LIMIT (SL-L) order - the ONLY broker-side conditional
+# stop NSE still permits for options. TWO prices: `trigger_price` (the
+# rupee-cap calculation) and a `limit_price` = trigger_price - (current_
+# max_loss_per_trade_rs() * BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE / qty)
+# below it - the gap is sized in RUPEES off the SAME cap used for
+# trigger_price, not a flat % of price (see BROKER_STOP_LOSS_LIMIT_GAP_
+# MULTIPLE's own docstring below, and place_stop_loss_limit_order's own
+# docstring in Options/dhan_client.py for the exact order-placement
 # mechanics). Real tradeoff, inherent to SL-L and not a bug: if price
 # gaps straight through limit_price before filling, the order can sit
 # UNFILLED while price keeps falling - the freak-trade protection
@@ -175,12 +178,21 @@ BROKER_STOP_LOSS_ENABLED = os.getenv("LUXURY_BROKER_STOP_LOSS_ENABLED", "false")
 # through the limit band and leave the order unfilled, exactly the
 # scenario Dhan's own docs warn about; too WIDE (large) and a fill,
 # if it happens, could land meaningfully worse than the intended
-# max-loss cap, weakening the whole point of the order. 0.03 (3%) is a
-# starting value in the same scale as this file's own STOP_LOSS_PCT
-# (0.03) and DYNAMIC_SL_STEP_PCT_CE/_PE (0.07) - not yet tuned against
-# real fill data, since this feature hasn't run live yet (see
-# BROKER_STOP_LOSS_ENABLED's own docstring).
+# max-loss cap, weakening the whole point of the order.
+#
+# RETIRED 12 Sep 2026 - trading_engine.py no longer reads this. Was a
+# flat % of trigger_price, untied to MAX_LOSS_HIT's own rupee size -
+# user feedback: "this has to be in sync with MAX_LOSS_HIT". Replaced by
+# BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE below. Left defined (unused)
+# rather than deleted.
 BROKER_STOP_LOSS_LIMIT_BUFFER_PCT = float(os.getenv("LUXURY_BROKER_STOP_LOSS_LIMIT_BUFFER_PCT", "0.03"))
+
+# Real broker-side SL-L limit gap, IN RUPEES, computed per-trade from the
+# same current_max_loss_per_trade_rs() used for trigger_price - see
+# Options/config.py's identical flag for the full mechanics/rationale.
+# Default 1.0 = the SL-L's fillable price band is exactly as wide, in
+# rupees, as the MAX_LOSS_HIT cap itself (currently 4500/2100 here).
+BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE = float(os.getenv("LUXURY_BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE", "1.0"))
 
 # Code default kept at its ORIGINAL value, same convention as Options'
 # own TARGET_PCT/STOP_LOSS_PCT (whose code default is STILL "0.10"/"0.03"

@@ -1835,9 +1835,12 @@ class DhanWrapper:
         cap (where a working SL-M, if the exchange allowed one, would
         always find SOME fill price). Dhan's own guidance is a wider
         trigger-to-limit gap for illiquid names, tighter for liquid ones.
-        `limit_price` here is `trigger_price` minus a configurable buffer
-        (see config.BROKER_STOP_LOSS_LIMIT_BUFFER_PCT) - the caller's
-        choice, not fixed here.
+        `limit_price` here is `trigger_price` minus a configurable gap -
+        the caller's choice, not fixed here (see each package's own
+        config.BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE for the gap actually
+        used by trading_engine.py's real callers: sized in rupees off the
+        same MAX_LOSS_HIT cap used for trigger_price itself, not a flat %
+        of price).
 
         Also unlike SL-M's `price=0` convention, SL-L REQUIRES a non-zero
         `price` (the limit) - Dhan's own v1 docs list `price` as

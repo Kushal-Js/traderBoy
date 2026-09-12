@@ -500,8 +500,13 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
     # existing poll/tick-driven MAX_LOSS_HIT check.
     stop_loss_order_id = None
     if config.BROKER_STOP_LOSS_ENABLED:
-        trigger_price = fill_price - (current_max_loss_per_trade_rs() / quantity)
-        limit_price = trigger_price * (1 - config.BROKER_STOP_LOSS_LIMIT_BUFFER_PCT)
+        max_loss_cap = current_max_loss_per_trade_rs()
+        trigger_price = fill_price - (max_loss_cap / quantity)
+        # Gap sized in RUPEES off the SAME cap used for trigger_price - see
+        # Options/config.py's BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE docstring
+        # for the full rationale (12 Sep 2026, replacing the old flat
+        # BROKER_STOP_LOSS_LIMIT_BUFFER_PCT-of-price formula).
+        limit_price = trigger_price - (max_loss_cap * config.BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE / quantity)
         try:
             stop_tag = _gen_tag("SL", symbol)
             stop_resp = await loop.run_in_executor(
