@@ -76,51 +76,30 @@ def _freeze_time(module, dt: datetime):
 
 
 def test_1_lookup_functions_switch_at_the_cutoff():
-    """1200->1500 (user request 11 Sep 2026, alongside re-enabling
-    ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF after the disable-before-11:30
-    experiment - see that flag's own docstring) - pinned to the current
-    deployed value, same convention as every other "pinned" test in this
-    suite when a live constant changes."""
-    for label, module in (("Options", ote), ("Futures", fte)):
+    """1200->1500->4500 (before)/1000->2100 (after) - MAX_LOSS_HIT was
+    raised for Luxury only on 11 Sep 2026, then Options/Futures were
+    brought back in sync with Luxury's value on 12 Sep 2026 (user
+    request: "I need MAX_LOSS_HIT values for Futures/Options to be same
+    as Luxury current value") - all three packages share 4500/2100 again,
+    same convention as every other "pinned" test in this suite when a
+    live constant changes. PROFIT_PROTECTION_THRESHOLD_RS is untouched by
+    either change, still 1500/1000 for all three."""
+    for label, module in (("Options", ote), ("Futures", fte), ("Luxury", lte)):
         restore = _freeze_time(module, BEFORE_CUTOFF)
         try:
-            assert module.current_max_loss_per_trade_rs() == 1500, label
+            assert module.current_max_loss_per_trade_rs() == 4500, label
             assert module.current_profit_protection_threshold_rs() == 1500, label
         finally:
             restore()
 
         restore = _freeze_time(module, AFTER_CUTOFF)
         try:
-            assert module.current_max_loss_per_trade_rs() == 1000, label
+            assert module.current_max_loss_per_trade_rs() == 2100, label
             assert module.current_profit_protection_threshold_rs() == 1000, label
         finally:
             restore()
-    print("1. current_max_loss_per_trade_rs()/current_profit_protection_threshold_rs() "
-          "return 1500/1500 before 11:30 and 1000/1000 after, for both Options and Futures: PASSED")
-
-
-def test_1b_luxury_max_loss_pinned_to_its_own_wider_cap():
-    """Luxury's MAX_LOSS_HIT cap was raised to 4500/2100 (11 Sep 2026, user
-    request - Luxury only, Options/Futures unchanged at 1500/1000) - a
-    separate pinned check since Luxury now genuinely diverges from the
-    other two packages, not just its own independently-configured copy of
-    the same number. PROFIT_PROTECTION_THRESHOLD_RS is untouched by this
-    change, still 1500/1000 same as the others."""
-    restore = _freeze_time(lte, BEFORE_CUTOFF)
-    try:
-        assert lte.current_max_loss_per_trade_rs() == 4500, "Luxury"
-        assert lte.current_profit_protection_threshold_rs() == 1500, "Luxury"
-    finally:
-        restore()
-
-    restore = _freeze_time(lte, AFTER_CUTOFF)
-    try:
-        assert lte.current_max_loss_per_trade_rs() == 2100, "Luxury"
-        assert lte.current_profit_protection_threshold_rs() == 1000, "Luxury"
-    finally:
-        restore()
-    print("1b. Luxury's own current_max_loss_per_trade_rs() returns 4500 before 11:30 and 2100 "
-          "after (Options/Futures unaffected, still 1500/1000): PASSED")
+    print("1. current_max_loss_per_trade_rs() returns 4500 before 11:30 and 2100 after, "
+          "current_profit_protection_threshold_rs() returns 1500/1000, for all three packages: PASSED")
 
 
 def test_2_exact_boundary_instant_counts_as_after():
@@ -128,14 +107,14 @@ def test_2_exact_boundary_instant_counts_as_after():
     (is_past_square_off_time, is_past_allowed_trading_time - both use
     `_now_ist() >= cutoff`) - the boundary second itself already gets the
     tighter afternoon values, not the looser morning ones."""
-    for label, module in (("Options", ote), ("Futures", fte)):
+    for label, module in (("Options", ote), ("Futures", fte), ("Luxury", lte)):
         restore = _freeze_time(module, AT_CUTOFF)
         try:
-            assert module.current_max_loss_per_trade_rs() == 1000, label
+            assert module.current_max_loss_per_trade_rs() == 2100, label
             assert module.current_profit_protection_threshold_rs() == 1000, label
         finally:
             restore()
-    print("2. Exactly 11:30:00 already counts as 'after' for both packages, "
+    print("2. Exactly 11:30:00 already counts as 'after' for all three packages, "
           "consistent with every other time-of-day gate in this codebase: PASSED")
 
 
@@ -347,7 +326,6 @@ def test_6_disable_is_scoped_to_max_loss_hit_only():
 def main():
     print("=== Risk-threshold time-of-day cutoff test suite ===\n")
     test_1_lookup_functions_switch_at_the_cutoff()
-    test_1b_luxury_max_loss_pinned_to_its_own_wider_cap()
     test_2_exact_boundary_instant_counts_as_after()
     test_3_exit_reason_for_uses_the_correct_cap_on_each_side()
     test_4_max_loss_hit_disabled_before_cutoff_regardless_of_loss_size()

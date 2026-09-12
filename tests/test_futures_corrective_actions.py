@@ -309,10 +309,14 @@ def test_10_target_exit_disabled_flag_suppresses_target_hit():
         assert fte._exit_reason_for(riding, ltp=13.0) == "TARGET_HIT"
 
         # Flag off must not weaken the loss side: a real MAX_LOSS still exits.
+        # quantity=10000 so the same $2 move (entry 10.0 -> ltp 8.0) produces
+        # a Rs 20,000 loss - well past MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF's
+        # own current value (raised 1200->1500->4500, 12 Sep 2026) regardless
+        # of which side of the cutoff this test happens to run on.
         fte.config.ENABLE_TARGET_EXIT = False
         losing = Position(
             underlying_symbol="LOSER", option_trading_symbol="LOSER 29 SEP 100 CALL",
-            option_type="CE", quantity=1000, lot_size=1000, entry_price=10.0, target_price=12.0,
+            option_type="CE", quantity=10000, lot_size=10000, entry_price=10.0, target_price=12.0,
             highest_price=10.0, hard_stop_loss=8.4, order_id="X", product_type="MARGIN",
         )
         assert fte._exit_reason_for(losing, ltp=8.0) == "MAX_LOSS_HIT", \
