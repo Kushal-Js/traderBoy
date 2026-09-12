@@ -68,7 +68,17 @@ class WatchlistStore:
         there that aren't already being watched. Fails open - a missing
         file, an unreadable file, or a blank file all just mean "nothing
         to add this time," never an error that could interrupt the
-        monitor loop this is called from every tick."""
+        monitor loop this is called from every tick.
+
+        A line may still carry the old `,YYYY-MM-DD` backdate suffix from
+        the pre-rewrite design (confirmed live 12 Sep 2026 - the real
+        data/watchlist file on the droplet still has it on every line,
+        e.g. "ASHOKLEY,2026-09-01") - that date only ever mattered for the
+        old stale-age prune, which this rewrite removed, but the FILE
+        itself wasn't rewritten. Only the part before the first comma is
+        ever treated as the symbol; anything after it (the old date, or
+        nothing) is silently ignored rather than corrupting the symbol
+        with a literal ",2026-09-01" tail."""
         try:
             with open(WATCHLIST_FILE) as f:
                 lines = f.readlines()
@@ -79,9 +89,10 @@ class WatchlistStore:
             return []
 
         symbols = [
-            line.strip().upper() for line in lines
+            line.strip().split(",", 1)[0].strip().upper() for line in lines
             if line.strip() and not line.strip().startswith("#")
         ]
+        symbols = [s for s in symbols if s]
         if not symbols:
             return []
         added = await self.add_symbols(symbols)
