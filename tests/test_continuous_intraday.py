@@ -143,7 +143,6 @@ def test_4_no_today_only_intraday_fetch_remains_in_any_strategy():
     a `from_date=today, to_date=today` intraday_minute_data call."""
     import Swing.signals as ssig
     import IndexScalping.paper_engine as ise
-    import CopperOptions.paper_engine as cop
     import K01.paper_engine as k01
 
     offenders = []
@@ -154,7 +153,9 @@ def test_4_no_today_only_intraday_fetch_remains_in_any_strategy():
         # gets the identical guard from day one.
         (ssig, ["_fetch_supertrend_state_once", "_fetch_regime_state_once"]),
         (ise, ["_fetch_index_intraday"]),
-        (cop, ["_fetch_future_5min"]),
+        # CopperOptions.paper_engine removed 12 Sep 2026 (user request -
+        # "older Copper paper testing module can be deleted as not needed
+        # now", ahead of Swing v2 gaining its own Copper/MCX support).
         (k01, ["_fetch_intraday"]),
     ]
     for mod, fns in checks:

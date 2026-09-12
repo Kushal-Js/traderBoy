@@ -9,11 +9,6 @@ in the same process. Three are mounted today:
     PAPER TRADING ONLY (see IndexScalping/paper_engine.py's safety
     invariant) - runs its own signal/exit logic and logs what it would
     have done, places no real orders.
-  - CopperOptions/copper_main.py - an MCX Copper options-buying strategy
-    (gap + daily-RSI momentum, dual-Supertrend confirmed), also PAPER
-    TRADING ONLY (see CopperOptions/paper_engine.py's safety invariant),
-    with its own on/off flag (config.STRATEGY_ENABLED) independent of
-    the paper-trading invariant.
   - Futures/futures_main.py - PLACEHOLDER strategy (buys ATM CE options
     via the identical mechanics as Options/, standing in until real
     futures-contract buying replaces it, by explicit request), REAL
@@ -47,7 +42,7 @@ in the same process. Three are mounted today:
     defined. The first package in this codebase to trade an actual
     futures contract (Options/dhan_client.py's new get_futures_contract())
     rather than buying an ATM option as a placeholder for one.
-An eighth strategy would be added the same way - its own package,
+A seventh strategy would be added the same way - its own package,
 exporting `router` + `lifespan`, mounted below - without touching any
 existing one.
 
@@ -68,7 +63,6 @@ import cross_strategy_registry
 import fund_allocation
 from Options import option_main
 from IndexScalping import index_main
-from CopperOptions import copper_main
 from Futures import futures_main
 from K01 import screener_main
 from Luxury import luxury_main
@@ -92,18 +86,16 @@ async def lifespan(app: FastAPI):
     if more strategies are added later that also depend on it."""
     async with option_main.lifespan(app):
         async with index_main.lifespan(app):
-            async with copper_main.lifespan(app):
-                async with futures_main.lifespan(app):
-                    async with screener_main.lifespan(app):
-                        async with luxury_main.lifespan(app):
-                            async with swing_main.lifespan(app):
-                                yield
+            async with futures_main.lifespan(app):
+                async with screener_main.lifespan(app):
+                    async with luxury_main.lifespan(app):
+                        async with swing_main.lifespan(app):
+                            yield
 
 
 app = FastAPI(title="Chartink -> Dhan Algo Bot", lifespan=lifespan)
 app.include_router(option_main.router)
 app.include_router(index_main.router)
-app.include_router(copper_main.router)
 app.include_router(futures_main.router)
 app.include_router(screener_main.router)
 app.include_router(luxury_main.router)
