@@ -109,10 +109,30 @@ EQUITY_QUANTITY = int(os.getenv("SWING_EQUITY_QUANTITY", "200"))  # the "200 uni
 # convention rather than importing Options/Futures/Luxury's.
 # ---------------------------------------------------------------------------
 MAX_LOSS_PROTECTION_RS = float(os.getenv("SWING_MAX_LOSS_PROTECTION_RS", "4500"))
+
+# PROFIT_PROTECTION_RS/_GIVEBACK_PCT raised from the original 2000/0% on
+# 12 Sep 2026, straight off a real backtest (last 10 trading days,
+# ADANIPORTS/COALINDIA, FUTURES basket-type): at 2000/0%, 13 of 16
+# trades exited within minutes via PROFIT_PROTECTION_HIT (Rs 2000 is
+# under 0.5% of a typical futures position's real notional, and 0%
+# giveback locks in on the very FIRST downtick once crossed) - the
+# strategy was barely ever reaching its own intended SUPERTREND_REVERSAL
+# exit. Raising the threshold ALONE (to 10000, still 0% giveback) made
+# things WORSE (total swung from +34,782 to +20,822 on that same
+# sample) - without a giveback tolerance in between, several trades that
+# would have locked a small win instead rode all the way back into a
+# real loss (one past MAX_LOSS_HIT entirely) before Supertrend actually
+# reversed. Adding a 2% giveback on top of a 5000 threshold (a milder
+# threshold than the 10000 tested, matched with the giveback that same
+# backtest run proved necessary) let the two big trend trades run to
+# +31,920 and +16,942 respectively (from +10,592/+9,652 at 10000/0%)
+# while leaving every losing trade's outcome completely unchanged (they
+# never crossed the threshold in the first place - giveback only ever
+# affects trades that already armed).
+#
+# 0.0 giveback is bit-identical to Options/Futures/Luxury's own zero-
+# giveback default (lock in the instant price is off the peak).
 PROFIT_PROTECTION_RS = float(os.getenv("SWING_PROFIT_PROTECTION_RS", "2000"))
-# 0.0 = lock in the instant price is off the peak once PROFIT_PROTECTION_RS
-# is crossed - bit-identical to Options/Futures/Luxury's own zero-giveback
-# default. Raise this to tolerate a small pullback before locking in.
 PROFIT_PROTECTION_GIVEBACK_PCT = float(os.getenv("SWING_PROFIT_PROTECTION_GIVEBACK_PCT", "0.0"))
 TARGET_PCT = float(os.getenv("SWING_TARGET_PCT", "0.20"))
 HARD_STOP_LOSS_PCT = float(os.getenv("SWING_HARD_STOP_LOSS_PCT", "0.20"))
