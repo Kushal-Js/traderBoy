@@ -1,113 +1,41 @@
 """
-Central configuration for the Swing strategy.
+Central configuration for the Swing v2 strategy (complete rewrite, 12 Sep
+2026, user request: "Completely rewrite the Swing strategy with new
+rules (old rules and config for Swing to be discarded)").
 
-New package (user request 31 Aug 2026): buys 1 lot of a stock's FUTURES
-contract, hedged with 1 lot of its ATM PE option, as a single "basket" -
-placed as two separate real orders with an application-level all-or-
-nothing guarantee (Dhan has no native basket-order API - see the separate
-trading-skills repo's `basket-order-feasibility.md` for the full
-investigation this design is based on).
+This REPLACES the old 3-mode (basket/sequential/basket_hedge) design,
+its Chartink-driven watchlist scan + daily pruning, and an uncommitted
+broker-side stop-loss WIP that used SL-M on a PE options leg - NSE banned
+SL-M for options exchange-wide in Sep 2021, and that WIP almost certainly
+carried the identical bug that bit Luxury on 9 Sep 2026 (see trading-
+skills/incidents/2026-09-09-luxury-sl-m-orders-fill-as-limit.md). That
+old WIP was `git stash`'d (recoverable), not deleted, before this file
+was rewritten.
 
-STRATEGY_MODE (added 1 Sep 2026, user request) - Swing now has THREE
-entirely different trading-mechanics implementations living side by
-side, switched by this ONE flag rather than one replacing another ("we
-may need basket strategy again in coming days so a flag would be a
-better approach"):
-  - "basket" (the original design above): futures + PE bought TOGETHER,
-    all-or-nothing, exited together, then back to plain watching.
-  - "sequential": "2 different orders running sequentially" - buy ONLY
-    the futures contract on entry; when the exit condition fires, SELL
-    the futures and BUY the ATM PE instead (as a hedge/hold while
-    deciding); exit that PE either on its own rupee loss cap or once the
-    entry condition fires again (which also immediately re-buys futures) -
-    looping between the two instruments indefinitely for as long as the
-    underlying keeps producing signals. See trading_engine.py's own
-    module docstring for the full state-machine diagram and the two
-    ambiguous points confirmed with the user before building this
-    (AskUserQuestion, 1 Sep 2026): a PE loss-cap exit returns to plain
-    watching rather than blindly re-buying futures, and paper trading
-    mirrors whichever mode is active here rather than staying pinned to
-    basket mode.
-  - "basket_hedge" (added 1 Sep 2026, now the DEFAULT/active mode, user
-    request: "enabling basket buy strategy but with a caveat") - ENTRY is
-    the SAME as "basket" (futures + PE bought together, all-or-nothing).
-    But once the exit condition fires, instead of just going flat, sells
-    the basket and buys ONE standalone ATM PE hedge instead - held until
-    ANY of THREE conditions (user's own numbered list): (1) loss exceeds
-    PE_MAX_LOSS_RS, (2) profit exceeds PE_PROFIT_LOCK_RS ("lock profit"),
-    or (3) the underlying's 5-min close crosses back ABOVE its own
-    Supertrend again - checked as a BARE Supertrend reversal, deliberately
-    NOT the full entry signal (user's own words: "even if buy signal is
-    not yet triggered" - the price-confirmation gate and 1-min confirm
-    timeframe are NOT required for this specific exit). Once the PE hedge
-    exits (any of the 3), returns to plain watching for a fresh basket
-    entry - same "does not blindly chain into a new position" choice
-    already made for sequential mode's own loss-cap exit, since none of
-    the three PE-hedge exit conditions carry a confirmed fresh BUY signal
-    the way sequential mode's own entry-refire path does.
-Every mode's code, config, position store, and (for "basket"/"sequential")
-paper-trading engine all coexist unconditionally - flipping this flag
-(and restarting) is the only thing needed to switch, no code changes
-required in any direction. Paper trading does NOT yet have a
-"basket_hedge" implementation (see paper_engine.py's own docstring) -
-harmless today since PAPER_TRADING_ENABLED is False, but flag this if
-paper trading and basket_hedge mode are ever both wanted at once.
+New design, in one sentence: for each stock on a manually-curated
+watchlist, buy or sell ONE configurable instrument ("basket-type" -
+futures / ATM option / raw equity shares) the moment a 5-min Supertrend
+crossover confirms a trend that a slower 5-min-vs-15-min 200-EMA regime
+filter already agrees with, and exit on the opposite Supertrend
+crossover (or a flat rupee/percent risk limit, whichever comes first).
 
-Entry/exit CONDITION logic (added 31 Aug 2026, user request; ENTRY's
-price gate RELAXED from a strict gap-up to a broader "at/above
-yesterday's close" check on 1 Sep 2026) - a price-confirmation check plus
-a dual-timeframe Supertrend signal on the underlying's own STOCK price
-(not the futures/option premium - same convention Options/Futures/
-Luxury's own SUPERTREND_EXIT already uses):
-  - ENTRY: today's price is confirmed at or above yesterday's close -
-    true as soon as EITHER today's open >= yesterday's close (checked
-    once, at market open) OR the current price has, at any point since,
-    reached or crossed above yesterday's close (see trading_engine.py's
-    own _is_price_confirmed_above_prev_close for the exact one-way-latch
-    caching behavior - an explicit gap-up is no longer required, user's
-    own wording: "an explicit gap up is not mandatory... the entry
-    condition becomes active when current price cross above yesterday
-    close price"), AND the 5-min close crosses ABOVE the 5-min
-    Supertrend, AND the 1-min close is above (or has itself just crossed
-    above) the 1-min Supertrend - the two Supertrend conditions each read
-    on their own most recently fully-closed candle.
-  - EXIT: the 5-min close crosses BELOW the 5-min Supertrend (unchanged
-    since first defined).
-  - Both legs of a basket are always entered/exited together (unchanged -
-    the all-or-nothing entry/exit design predates and is untouched by
-    this price-gate change).
-See trading_engine.py's own module docstring for the full implementation
-(a self-contained, dual-timeframe crossover detector - deliberately NOT
-built on top of Options/dhan_client.py's own single-timeframe Supertrend
-cache, to avoid any risk to that already-live exit-protection mechanism
-for the three real-money strategies already relying on it).
+Reuses proven infrastructure rather than reinventing it: the continuous
+multi-day candle fetch (Options/dhan_client.py's fetch_continuous_
+intraday, extended here with a longer lookback specifically for the
+200-EMA warm-up - see Swing/signals.py), the broker-side SL-L order
+mechanics and its exact cancel-and-reconcile-on-square-off sequence
+(ported from Options/trading_engine.py's own incident-hardened
+_exit_position - see Swing/trading_engine.py), and the existing 2-bucket
+fund allocation system (this package draws from the PRIMARY bucket,
+Options/Futures/Luxury share the secondary one - unchanged from the old
+design).
 
-LIVE as of 1 Sep 2026 (STRATEGY_ENABLED=true, user confirmed explicitly
-after a stated-risk confirmation covering the untested-live sequential
-mode, then asked for MAX_LIVE_BASKETS lowered to 1 "we will change it
-later" as a deliberately cautious first real run) - real money, and a
-genuinely new capability for this codebase (the first package to trade
-an actual futures contract rather than buying an ATM option as a stand-in
-for one - see Options/dhan_client.py's new get_futures_contract()).
-Deployed DISABLED from this package's own creation (31 Aug 2026) until
-this date, paper-traded in the meantime (PAPER_TRADING_ENABLED, now
-turned back off below now that real trading is live - the two were
-always meant to be mutually exclusive, see that flag's own comment).
-Mode switched again the same day, "sequential" -> "basket_hedge" (see
-STRATEGY_MODE's own docstring) - the one real position already open at
-that point (APLAPOLLO futures, entered under sequential mode) was
-explicitly grandfathered in as a "basket_hedge" BASKET-state position by
-user request ("consider the open trade as a basket order for this time
-as it is already live") rather than left behind in the now-inactive
-sequential mode's own store - see reconcile_basket_hedge_positions()'s
-own docstring for how a lone futures leg (no paired PE - true for this
-one, since it was never bought as part of an all-or-nothing entry) is
-handled as a degraded/incomplete BASKET rather than treated as an
-anomaly the way pure "basket" mode's own reconciliation would.
-
-Reuses the Options package's single authenticated Dhan connection (see
-this package's own dhan_client.py) - no DHAN_CLIENT_ID/DHAN_PIN/etc. auth
-vars here, those only matter to Options/dhan_client.py's authenticate().
+No Chartink integration, no watchlist pruning, no dedicated webhook
+endpoint (user request: "No watchlist pruning logic or a separate
+webhook endpoint required as of now") - the watchlist is a plain list
+the user edits directly (see Swing/watchlist.py), and the bot itself
+decides when to enter by continuously evaluating the signals above, not
+by reacting to an inbound alert.
 """
 import os
 
@@ -115,321 +43,224 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Master on/off switch - see CopperOptions/config.py's identical flag for
-# the established pattern this follows: the monitor loop and both
-# webhooks stay running/reachable (no restart needed to flip this later)
-# but do nothing at all while False - both webhooks return
-# status=ignored/reason=strategy_disabled, and monitor_loop's own ticks
-# are no-ops. Flipped to DEPLOYED TRUE 1 Sep 2026 (user request, explicit
-# confirmation given) - see this file's own module docstring for the
-# full context of what went live and what was tightened first.
-STRATEGY_ENABLED = os.getenv("SWING_STRATEGY_ENABLED", "false").lower() == "true"
+# ---------------------------------------------------------------------------
+# Master gates
+# ---------------------------------------------------------------------------
+# SWING_V2_ (not the bare SWING_ prefix every other constant in this file
+# uses) specifically because SWING_STRATEGY_ENABLED already exists in the
+# live .env for the OLD design - reusing the bare name here would silently
+# inherit whatever that old flag happened to be set to. User request (12
+# Sep 2026): default TRUE - Swing v2 goes live looking for real entries
+# from the very first deploy, not gated behind a later manual flip (see
+# this session's rollout-sequencing plan for how the earlier, read-only
+# verification stages compensate for skipping that usual "ship disabled
+# first" caution).
+STRATEGY_ENABLED = os.getenv("SWING_V2_STRATEGY_ENABLED", "true").lower() == "true"
 
-# Which trading-mechanics implementation is active - see this file's own
-# module docstring for the full "basket"/"sequential"/"basket_hedge"
-# explanation. Deployed "basket_hedge" as of 1 Sep 2026 ("enabling basket
-# buy strategy but with a caveat") - the other two modes are fully
-# preserved, not deleted, switch back any time by setting this to
-# "basket" or "sequential" and restarting.
-STRATEGY_MODE = os.getenv("SWING_STRATEGY_MODE", "basket_hedge").lower()
+# Entry-only panic brake - exits always run regardless of this flag, same
+# convention as every other package's own ENTRY_ENABLED-style switch.
+# Flip this (not STRATEGY_ENABLED) to stop new entries while still
+# managing whatever's already open.
+ENTRY_ENABLED = os.getenv("SWING_ENTRY_ENABLED", "true").lower() == "true"
 
-# Watchlist-based entry kill switch (added 7 Sep 2026, user request:
-# "disable watchlist based trade execution for Swing strategy as of
-# now"). Scoped narrowly to just the WATCHLIST-sourced fresh-entry path
-# each monitor tick runs - flipping this False does NOT touch: exit-
-# condition monitoring for whatever's already live (a held basket/PE
-# hedge/sequential leg keeps being managed exactly as before, since it's
-# no longer on the watchlist anyway once entered); sequential mode's own
-# PE->FUTURES loop-continuation swap for an ALREADY-held symbol (that's
-# managing existing exposure, not a fresh watchlist-sourced entry); the
-# daily trend/stale-age prunes or the Chartink scan pull (both just
-# maintain watchlist_store's own membership, place no orders); or (the
-# whole reason this was requested) the newer, independent real-time
-# entry path added the same day, POST /chartink/webhook-swing-enter -
-# that one takes its own candidate list straight from each Chartink
-# alert's own payload, never from watchlist_store, so it was never
-# affected by this flag either way.
+# ---------------------------------------------------------------------------
+# Basket-type - the ONE configurable instrument choice for every watchlist
+# stock (user request: "This basket can contain either that stock Future
+# Contract 1 lot / 1 lot of ATM Option Contract (PE/CE...) / 200 units of
+# same stock, make this configurable so that I can change it anytime").
+# Confirmed with the user (12 Sep 2026): this is a SINGLE GLOBAL setting
+# for the whole watchlist, not a per-stock choice - change it and it
+# applies to every future entry from that point on. Read FRESH on every
+# entry (never cached at import into a derived constant) so a change
+# takes effect immediately, no restart needed.
 #
-# Added after observing the two paths race live for the one shared
-# MAX_LIVE_BASKETS slot: ADANIENT/AUROPHARMA (both still on the
-# watchlist, both genuinely trend-confirmed) kept re-attempting entry
-# every tick, repeatedly blocked by the funds check (each one's own
-# required margin alone exceeded the entire primary bucket), and while
-# each attempt briefly held the slot's reservation it caused a couple of
-# the new webhook's own alert firings to see "no capacity" for stocks
-# that had nothing to do with either of those two symbols. Turning this
-# off removes that source of contention while the alert-driven path is
-# the one actually being relied on.
-WATCHLIST_ENTRY_ENABLED = os.getenv("SWING_WATCHLIST_ENTRY_ENABLED", "true").lower() == "true"
-
-# How many baskets/positions can be live at once - entirely separate
-# from every other package's own capacity, since this trades a different
-# instrument combination on its own schedule. Shared across all THREE
-# modes (a symbol under active management in ANY mode occupies one slot,
-# same concept regardless of mode) - safe since only one mode's store is
-# ever actually written to at a time.
+# Default "options" (user request, 12 Sep 2026) - also happens to be the
+# smallest-capital, capped-loss choice of the three, which is a sensible
+# place to start regardless.
 #
-# Lowered 2->1 (user request 1 Sep 2026), deliberately, for the first
-# real live run of the new sequential mode ("make capacity smaller to 1,
-# we will change it later") - only one symbol can be under active real
-# management at a time until the user chooses to raise it again. Still 1
-# after the same-day switch to basket_hedge mode.
-MAX_LIVE_BASKETS = int(os.getenv("SWING_MAX_LIVE_BASKETS", "2"))
+# "equity" is LONG-ONLY (confirmed with the user, 12 Sep 2026): naked
+# overnight equity short-selling isn't legal in India (shorting shares is
+# only possible intraday, must square off same day - which would break
+# this strategy's whole multi-day trend-hold premise for that basket-type
+# specifically). When BASKET_TYPE=="equity" and a stock's regime turns
+# bearish, that stock's entry is skipped entirely - see
+# Swing/trading_engine.py's enter_position_for_stock.
+BASKET_TYPE = os.getenv("SWING_BASKET_TYPE", "options").lower()
+if BASKET_TYPE not in ("futures", "options", "equity"):
+    import logging
+    logging.getLogger(__name__).error(
+        "SWING_BASKET_TYPE=%r is not one of futures/options/equity - forcing "
+        "STRATEGY_ENABLED=False rather than trade with an undefined instrument type.",
+        BASKET_TYPE,
+    )
+    STRATEGY_ENABLED = False
 
-# The standalone PE hedge leg's own hard rupee loss cap (sequential mode,
-# and basket_hedge mode's own PE-hedge phase): "Exit this PE option
-# contract once loss become more than 2k" (user's own wording, reused
-# verbatim for basket_hedge mode's own condition 1). Checked continuously
-# (unrealized loss, mark-to-market against current LTP) the same way
-# every other rupee-cap in this codebase works (e.g. Options/config.py's
-# MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF) - NOT the trigger that re-buys
-# futures/re-enters a basket (that's a separate, signal-driven check in
-# both modes) - a loss-capped PE exit returns the symbol to plain
-# watching instead (user confirmed via AskUserQuestion 1 Sep 2026 for
-# sequential mode; explicitly requested outright for basket_hedge mode).
+QUANTITY_LOTS = int(os.getenv("SWING_QUANTITY_LOTS", "1"))  # futures/options basket-types
+EQUITY_QUANTITY = int(os.getenv("SWING_EQUITY_QUANTITY", "200"))  # the "200 units" - configurable per the request
+
+# ---------------------------------------------------------------------------
+# Risk management (user request, 12 Sep 2026, verbatim values):
+# "MAX LOSS PROTECTION = 4500 and PROFIT PROTECTION = 2000 and Target =
+# 20% and Hard Stop Loss = 20%". FLAT values, no before/after-11:30-cutoff
+# split - unlike Options/Futures/Luxury's current_max_loss_per_trade_rs()
+# pattern. This is deliberate, not an oversight: Swing's own historical
+# design (before this rewrite) also used flat values (PE_MAX_LOSS_RS,
+# FUTURES_MAX_LOSS_RS) with no time-of-day split, so this keeps that
+# convention rather than importing Options/Futures/Luxury's.
+# ---------------------------------------------------------------------------
+MAX_LOSS_PROTECTION_RS = float(os.getenv("SWING_MAX_LOSS_PROTECTION_RS", "4500"))
+PROFIT_PROTECTION_RS = float(os.getenv("SWING_PROFIT_PROTECTION_RS", "2000"))
+# 0.0 = lock in the instant price is off the peak once PROFIT_PROTECTION_RS
+# is crossed - bit-identical to Options/Futures/Luxury's own zero-giveback
+# default. Raise this to tolerate a small pullback before locking in.
+PROFIT_PROTECTION_GIVEBACK_PCT = float(os.getenv("SWING_PROFIT_PROTECTION_GIVEBACK_PCT", "0.0"))
+TARGET_PCT = float(os.getenv("SWING_TARGET_PCT", "0.20"))
+HARD_STOP_LOSS_PCT = float(os.getenv("SWING_HARD_STOP_LOSS_PCT", "0.20"))
+ENABLE_TARGET_EXIT = os.getenv("SWING_ENABLE_TARGET_EXIT", "true").lower() == "true"
+
+# NOTE for future tuning (not changed now, just flagged): 20% target/stop
+# on a FUTURES or EQUITY price is a large move that will rarely fire in
+# practice - MAX_LOSS_PROTECTION_RS will dominate those exits instead.
+# 20% on an OPTION PREMIUM is normal, and BASKET_TYPE defaults to
+# "options" per the request above, so this pairing is exactly right out
+# of the box. Only relevant if BASKET_TYPE is later switched to futures
+# or equity.
+
+# ---------------------------------------------------------------------------
+# Broker-side SL-L (real STOP-LOSS LIMIT order placed at Dhan right after
+# every fill) - user request: "along with broker side SL (how we
+# calculated for other strategies) but make sure all orders and trades
+# are in sync and when a trade square off is done, other pending SL
+# order are also closed". Ported verbatim from Options/Futures/Luxury's
+# proven design (never SL-M - NSE banned that for options in Sep 2021;
+# SL-L is the only broker-side conditional stop still permitted). See
+# Swing/trading_engine.py's enter_position_for_stock (placement) and
+# _exit_position (the cancel-and-reconcile sequence that satisfies "other
+# pending SL order are also closed").
 #
-# Lowered 2000->1500 (user request 7 Sep 2026), straight off a real
-# backtest of the "longTerm" Chartink scan's own alert history through
-# basket_hedge's live mechanics: 5 of 6 replayed trades exited via this
-# cap or PE_PROFIT_LOCK_RS rather than the bare Supertrend reversal, and
-# the user tightened the loss side without being asked to touch the
-# profit side.
-PE_MAX_LOSS_RS = float(os.getenv("SWING_PE_MAX_LOSS_RS", "1500"))
+# Kept OFF by default, same rollout discipline as every other package's
+# first SL-L launch (Options/config.py's own BROKER_STOP_LOSS_ENABLED
+# docstring: "earn trust via an actual controlled live test... not by
+# assumption") - the user's default-TRUE request above was for
+# STRATEGY_ENABLED (the master switch), not this. SWING_V2_ prefix for
+# the same reason as STRATEGY_ENABLED: SWING_BROKER_STOP_LOSS_ENABLED
+# already exists in .env for the old (SL-M) design.
+BROKER_STOP_LOSS_ENABLED = os.getenv("SWING_V2_BROKER_STOP_LOSS_ENABLED", "false").lower() == "true"
 
-# basket_hedge mode only (added 1 Sep 2026) - condition 2 of the PE
-# hedge's own 3-way exit: "Lock profit when it becomes more than 2k"
-# (user's own wording) - the mirror image of PE_MAX_LOSS_RS above, on the
-# upside. Unrealized profit, mark-to-market against current LTP, checked
-# every tick alongside the loss cap.
-PE_PROFIT_LOCK_RS = float(os.getenv("SWING_PE_PROFIT_LOCK_RS", "2000"))
+# The SL-L order's trigger-to-limit gap, sized IN RUPEES off the same
+# MAX_LOSS_PROTECTION_RS cap used for trigger_price itself (not a flat %
+# of price) - identical mechanism to Options/Futures/Luxury's own
+# BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE, adopted at the same 0.05 value
+# this session (worst-case extra loss ~Rs 225 on the current Rs 4500
+# cap, independent of quantity). See Options/trading_engine.py's
+# broker_stop_trigger_and_limit-equivalent computation for the exact
+# formula; Swing/position_store.py's own broker_stop_trigger_and_limit
+# helper implements the SHORT-side mirror image (trigger above entry,
+# limit above trigger) that Options/Futures/Luxury never needed since
+# they're always long.
+BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE = float(os.getenv("SWING_BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE", "0.05"))
 
-# The FUTURES leg's own hard rupee loss cap (added 7 Sep 2026, user
-# request: "Futures leg max loss to 5000" - given straight off seeing a
-# real backtest of the "longTerm" Chartink scan's own alert history where
-# the BASKET-phase futures leg lost Rs 8,100 and Rs 13,500 uncapped,
-# because until now the ONLY thing that could end BASKET state was the
-# 5-min Supertrend crossing below - no rupee floor under it at all, unlike
-# the PE-hedge phase which already had PE_MAX_LOSS_RS/PE_PROFIT_LOCK_RS).
-# Checked in _evaluate_basket_exit_signal (shared by "basket" mode's own
-# BASKET state, "sequential" mode's plain FUTURES-leg state, and
-# basket_hedge mode's own BASKET state - all three hold a bare futures
-# leg with no rupee floor before this), mark-to-market against current
-# LTP, BEFORE the Supertrend check - same priority PE_MAX_LOSS_RS gets
-# over the bare reversal in the PE-hedge phase. Deliberately loss-only,
-# no profit-lock mirror - not requested. A hit here routes through
-# exactly the same downstream path the Supertrend exit already used
-# (BASKET -> flat for "basket" mode, BASKET -> PE hedge for
-# "sequential"/basket_hedge - see _evaluate_basket_exit_signal's own
-# docstring), just with a different exit_reason string
-# ("FUTURES_MAX_LOSS_HIT") recorded so it's distinguishable in
-# /trade-history and /swing_events from a genuine Supertrend exit.
-FUTURES_MAX_LOSS_RS = float(os.getenv("SWING_FUTURES_MAX_LOSS_RS", "5000"))
+# ---------------------------------------------------------------------------
+# Signals - the regime filter + Supertrend crossover (user request,
+# verbatim): "Continuous candle to be used along with continuous EMA and
+# Super trend signals... over a period of many days like all other
+# brokers do... Pick each stock and create and manage 2 EMAs for it: 5
+# min close 200 EMA, 15 min close 200 EMA. If 5 min 200 EMA crosses above
+# or greater than 15 min 200 EMA then only buy the basket whenever 5 min
+# close crosses above 5 min Super Trend and square off when super trend
+# reverse[s]. If 5 min 200 EMA crosses below... then only sell the
+# basket... whenever 5 min close crosses below 5 min Super Trend..."
+#
+# See Swing/signals.py for where these are actually computed - kept as a
+# Swing-local module rather than added to Options/dhan_client.py's shared
+# signal cache, matching this package's own existing precedent (its old
+# Supertrend implementation was ALSO always kept independent of Options'
+# shared cache, specifically because that shared cache is live real-money
+# exit protection for three other strategies and no other package wants
+# a 200-EMA regime signal anyway).
+# ---------------------------------------------------------------------------
+REGIME_EMA_PERIOD = int(os.getenv("SWING_REGIME_EMA_PERIOD", "200"))
+REGIME_FAST_INTERVAL_MINUTES = int(os.getenv("SWING_REGIME_FAST_INTERVAL_MINUTES", "5"))
+REGIME_SLOW_INTERVAL_MINUTES = int(os.getenv("SWING_REGIME_SLOW_INTERVAL_MINUTES", "15"))
 
-QUANTITY_LOTS = int(os.getenv("SWING_QUANTITY_LOTS", "1"))
+# The global INTRADAY_CONTINUOUS_LOOKBACK_DAYS every other signal in this
+# codebase uses (default 7) is nowhere near enough to warm up a 200-period
+# EMA on 15-min bars (7 days is only ~125 bars; needs >=200 for a first
+# value at all, ~600 for a genuinely stable one). Confirmed via a live
+# spike (12 Sep 2026) that Dhan serves a 45-calendar-day/15-min request in
+# ONE call (795 bars returned, no chunking needed) - see fetch_continuous_
+# intraday's own lookback_days_override docstring for why this is a
+# per-call override rather than a change to the shared global (which
+# would silently alter every OTHER live signal for Options/Futures/
+# Luxury too).
+REGIME_EMA_LOOKBACK_DAYS = int(os.getenv("SWING_REGIME_EMA_LOOKBACK_DAYS", "45"))
 
-# Proactive funds check (added 1 Sep 2026, user request: "what happens
-# when the fund shortfall for any basket order... does bot calculate
-# available funds and place trade for next stock basket order which can
-# fit well in available funds?" -> "yes build this get_margin_required
-# and test and deploy it also"). Before this, a fund shortfall was only
-# ever discovered reactively via a real broker-side RMS rejection at
-# order-placement time. When enabled, every entry path (basket/
-# basket_hedge/sequential) checks the real required margin (Dhan's own
-# /margincalculator) against the real available balance BEFORE placing
-# any order, skipping a candidate that clearly won't fit in favor of the
-# next-ranked one within the same tick (see trading_engine.
-# _has_sufficient_funds's own docstring for the combo-margin caveat).
-# The broker's own RMS rejection remains the final safety net either
-# way - this flag only controls the PROACTIVE check, never the reactive
-# one.
-FUNDS_CHECK_ENABLED = os.getenv("SWING_FUNDS_CHECK_ENABLED", "true").lower() == "true"
+# A 15-min EMA(200) moves slowly and its own fetch is comparatively large
+# (45 days of candles) - refreshed far less often than a fast exit signal
+# needs to be. 60s, not the Supertrend's own 15s below.
+REGIME_REFRESH_SECONDS = int(os.getenv("SWING_REGIME_REFRESH_SECONDS", "60"))
 
-# Buffer added to available balance before comparing against required
-# margin (added 1 Sep 2026, user request): "Since Dhan might actually
-# extend some margin benefit while placing Basket order so let's add
-# 15k as additional fund to available funds before calculating out
-# required margins so that a best bet isn't lost." Directly compensates
-# for _has_sufficient_funds's own known conservatism (Dhan's
-# /margincalculator has ZERO combo-awareness - it can't price a
-# futures+PE hedge together, only each leg standalone, so summing both
-# legs' own standalone figures likely OVERSTATES what the broker will
-# actually require for the real hedged combo). A rough, provisional
-# estimate of that gap - the user's own plan is to observe the REAL
-# combo margin the next time a live basket is actually placed and
-# refine this number from that real data, rather than guessing further
-# now.
-FUNDS_CHECK_BUFFER_RS = float(os.getenv("SWING_FUNDS_CHECK_BUFFER_RS", "15000"))
-
-# "MARGIN" is Tradehull's code for NRML/carry-forward (see Options/config.py's
-# identical OPTIONS_PRODUCT for the full rationale) - used for BOTH legs,
-# not MIS, since Swing baskets are explicitly meant to be held across
-# multiple days, not squared off same-day like every other package here.
-FUTURES_PRODUCT = os.getenv("SWING_FUTURES_PRODUCT", "MARGIN")
-OPTIONS_PRODUCT = os.getenv("SWING_OPTIONS_PRODUCT", "MARGIN")
-
-MARKET_TZ = "Asia/Kolkata"
-
-MONITOR_INTERVAL_SECONDS = int(os.getenv("SWING_MONITOR_INTERVAL_SECONDS", "5"))
-
-ORDER_TAG_PREFIX = os.getenv("SWING_ORDER_TAG_PREFIX", "Swg")
-
-# Deliberately NO SQUARE_OFF_TIME/ENABLE_SQUARE_OFF here - unlike every
-# other package in this codebase, Swing baskets are meant to carry
-# overnight/across multiple days by design ("swing" trading), not be
-# force-closed at end of day. A manual kill-switch still exists
-# (POST /swing/square-off-now) for closing everything on demand.
-
-# --------------------------------------------------------------------------- #
-# Supertrend entry/exit signal (user request 31 Aug 2026) - own
-# independently-tunable Supertrend parameters, deliberately NOT read from
-# Options/config.py's own SUPERTREND_PERIOD/SUPERTREND_MULTIPLIER even
-# though they default to the same values - Swing computes its own
-# dual-timeframe signal directly (see trading_engine.py), it doesn't go
-# through Options/dhan_client.py's single-timeframe cache at all, so
-# there's no shared computation to couple these to.
+# Swing keeps its OWN independent Supertrend parameters/cache (see
+# Swing/signals.py) rather than sharing Options' - same precedent as
+# above. Values matched to Options' own defaults per the user's request
+# ("Super trend signals... like all other brokers do").
 SUPERTREND_PERIOD = int(os.getenv("SWING_SUPERTREND_PERIOD", "10"))
 SUPERTREND_MULTIPLIER = float(os.getenv("SWING_SUPERTREND_MULTIPLIER", "3.0"))
-
-# The two timeframes the entry rule reads - "5 min close cross above
-# supertrend WITH 1 min close greater than or crossed above 1 min
-# supertrend" (user's own wording). Exit only ever reads the entry
-# timeframe (5-min). Configurable rather than hardcoded 5/1 in the code,
-# consistent with every other tunable in this codebase, even though
-# changing them changes what the user's own stated rule actually means.
-SUPERTREND_ENTRY_TIMEFRAME_MINUTES = int(os.getenv("SWING_SUPERTREND_ENTRY_TIMEFRAME_MINUTES", "5"))
-SUPERTREND_CONFIRM_TIMEFRAME_MINUTES = int(os.getenv("SWING_SUPERTREND_CONFIRM_TIMEFRAME_MINUTES", "1"))
-
-# How often a (symbol, timeframe) Supertrend read is allowed to re-fetch
-# from Dhan - see Options/config.py's identical SUPERTREND_REFRESH_SECONDS
-# for the same rate-limit-avoidance rationale. Own independent value/cache
-# (trading_engine.py's own _supertrend_cache), not shared with Options'.
+SUPERTREND_INTERVAL_MINUTES = int(os.getenv("SWING_SUPERTREND_INTERVAL_MINUTES", "5"))
 SUPERTREND_REFRESH_SECONDS = int(os.getenv("SWING_SUPERTREND_REFRESH_SECONDS", "15"))
+ENABLE_SUPERTREND_EXIT = os.getenv("SWING_ENABLE_SUPERTREND_EXIT", "true").lower() == "true"
 
-# --------------------------------------------------------------------------- #
-# Daily watchlist prune (user request 1 Sep 2026): "removing any stock
-# when its daily close crossed below daily super trend / daily 12 EMA...
-# has to run daily when market starts at 9:15 AM." Runs once per trading
-# day, gated by a DATE comparison rather than an exact clock-time match
-# (see trading_engine._daily_watchlist_prune_tick's own docstring) -
-# unlike the entry/exit signal above (which reads intraday 5-min/1-min
-# candles), this reads DAILY candles via Dhan's own historical_daily_data
-# endpoint, using whichever daily candle is the LAST FULLY CLOSED one
-# (yesterday's at market open - today's daily candle can't exist yet).
-# Deliberately its own on/off flag, independent of STRATEGY_ENABLED -
-# this only ever mutates the watchlist (no order-placement risk), same
-# "watchlist hygiene is independent of the trading-enabled flag"
-# convention watchlist_store.sync_from_file() already follows.
-WATCHLIST_DAILY_PRUNE_ENABLED = os.getenv("SWING_WATCHLIST_DAILY_PRUNE_ENABLED", "true").lower() == "true"
+# ---------------------------------------------------------------------------
+# Capacity (user request: "Keep Max Concurrent Trade capacity as 2 as of
+# now but make it configurable also"). ONE shared counter across the
+# whole strategy - not split by direction/basket-type, since a stock's
+# regime is mutually exclusive at any given time (it's never
+# simultaneously both a long and a short candidate).
+# ---------------------------------------------------------------------------
+MAX_CONCURRENT_TRADES = int(os.getenv("SWING_MAX_CONCURRENT_TRADES", "2"))
 
-# Reuses the SAME Supertrend period/multiplier as the intraday signal
-# above (SUPERTREND_PERIOD/SUPERTREND_MULTIPLIER) - just fed daily
-# candles instead of intraday ones; the indicator's own settings aren't
-# meant to differ by timeframe, only the candles it's computed over do.
-# DAILY_EMA_PERIOD is the "12" in "DAILY 12 EMA" - the user's own number,
-# made configurable rather than hardcoded like every other tunable here.
-DAILY_EMA_PERIOD = int(os.getenv("SWING_DAILY_EMA_PERIOD", "12"))
+# ---------------------------------------------------------------------------
+# Funds (user request: "Use primary bucket funds as max cap available for
+# this strategy (we already have primary and secondary buckets)") - this
+# matches what the OLD Swing design already did correctly
+# (fund_allocation.has_sufficient_bucket_funds("primary", ...) via the old
+# _has_sufficient_funds wrapper), carried forward unchanged into this
+# rewrite. FUND_BUCKET is a named constant purely so it's greppable, not
+# because anything else reads it as a variable.
+# ---------------------------------------------------------------------------
+FUND_BUCKET = "primary"
+FUNDS_CHECK_ENABLED = os.getenv("SWING_FUNDS_CHECK_ENABLED", "true").lower() == "true"
 
-# Calendar days of daily-candle history to fetch per symbol for the
-# prune check - comfortably more than SUPERTREND_PERIOD/DAILY_EMA_PERIOD
-# need to seed (accounting for weekends/holidays eating into calendar
-# days - roughly 5 trading days per 7 calendar days), so both indicators
-# have settled past their own warm-up window rather than just barely
-# meeting the bare minimum candle count.
-DAILY_TREND_LOOKBACK_DAYS = int(os.getenv("SWING_DAILY_TREND_LOOKBACK_DAYS", "90"))
+# The OLD design's Rs 15,000 buffer existed ONLY to compensate for the
+# basket/basket_hedge modes' 2-leg (futures+PE) combo margin benefit that
+# Dhan's own /margincalculator can't price (it has zero combo-awareness -
+# see fund_allocation.py's own docstring). Swing v2 is ALWAYS single-leg
+# (exactly one of futures/options/equity per basket), so there's no
+# combo benefit left to compensate for - buffer reverts to 0.
+FUNDS_CHECK_BUFFER_RS = float(os.getenv("SWING_FUNDS_CHECK_BUFFER_RS", "0"))
 
-# --------------------------------------------------------------------------- #
-# Daily Chartink scan pull for the watchlist (user request 1 Sep 2026):
-# "I am thinking to automate updation of our watchlist file" -> a
-# specific Chartink scan, polled once daily pre-market, its own result
-# list added straight to the watchlist. The mirror image of the daily
-# prune above (that one REMOVES on a daily trend break; this one ADDS
-# from a scan the user already runs on Chartink). See
-# Swing/chartink_scan.py's own module docstring for exactly how this
-# pulls Chartink's own public scan results server-side - no login or
-# API key involved, the same unauthenticated request any visitor's
-# browser makes when viewing the scan page and clicking "Run Scan"
-# (confirmed live via a real browser session, network-intercepted, then
-# independently re-verified with a bare `requests` script matching the
-# exact same result set).
-# --------------------------------------------------------------------------- #
-CHARTINK_WATCHLIST_SCAN_ENABLED = os.getenv("SWING_CHARTINK_WATCHLIST_SCAN_ENABLED", "true").lower() == "true"
+# ---------------------------------------------------------------------------
+# Order product types. FUTURES_PRODUCT/OPTIONS_PRODUCT stay configurable
+# strings, defaulting to "MARGIN" - this codebase's existing Tradehull
+# code for NRML carry-forward on F&O (identical to what Options/Futures/
+# Luxury already use). NOTE: the user's own 12 Sep request phrased these
+# as "NRML/CNC" - CNC ("Cash and Carry") is a real Dhan/exchange product
+# type, but it only exists for EQUITY DELIVERY, it is not a valid product
+# type for a futures or options contract, so it can't actually be set on
+# these two. EQUITY_PRODUCT below carries CNC for the one basket-type it
+# actually applies to.
+# ---------------------------------------------------------------------------
+FUTURES_PRODUCT = os.getenv("SWING_FUTURES_PRODUCT", "MARGIN")
+OPTIONS_PRODUCT = os.getenv("SWING_OPTIONS_PRODUCT", "MARGIN")
+EQUITY_PRODUCT = os.getenv("SWING_EQUITY_PRODUCT", "CNC")
 
-# The user's own "LONGTERM" scan on Chartink.
-CHARTINK_WATCHLIST_SCAN_URL = os.getenv(
-    "SWING_CHARTINK_WATCHLIST_SCAN_URL", "https://chartink.com/screener/longterm-15272",
-)
-
-# The exact query Chartink's OWN "Run Scan" button sends to reproduce
-# this scan's results - captured live via a real browser (network
-# interception) 1 Sep 2026, NOT re-derived from the URL alone (no
-# public endpoint returns a scan's own definition without being logged
-# in as its owner). STALE THE MOMENT the scan is edited on Chartink's
-# own site - see chartink_scan.py's own module docstring for how to
-# re-sync it (re-run the same browser-network-capture approach against
-# the edited scan).
-CHARTINK_WATCHLIST_SCAN_CLAUSE = (
-    "( {33489} (  daily close >  daily supertrend( 7 , 3 ) and  daily open >  1 day ago close and  "
-    "daily \"close - 1 candle ago close / 1 candle ago close * 100\" >  1 and  daily close >  daily "
-    "ema(  daily close , 20 ) and  daily close >  daily ema(  daily close , 200 ) and  daily close =  "
-    "daily max( 10 ,  daily close ) and(  daily close -  daily ema(  daily close , 20 ) ) >  (  1 day "
-    "ago close -  1 day ago ema(  daily close , 20 ) ) ) )"
-)
-
-# Pre-market, well before MARKET_OPEN_TIME (09:15) - the user's own
-# words: "once daily, pre-market." Chosen distinctly earlier than the
-# daily watchlist PRUNE's own 09:15 gate above so a fresh scan result is
-# already on the watchlist by the time market open's prune (and the
-# intraday entry signal) start evaluating it - not a hard requirement
-# (both read/write the same daily-candle-based data, unaffected by
-# intraday timing), just a sensible ordering.
-CHARTINK_WATCHLIST_SCAN_TIME = os.getenv("SWING_CHARTINK_WATCHLIST_SCAN_TIME", "08:00")
-
-# --------------------------------------------------------------------------- #
-# Stale-age watchlist prune (user request 1 Sep 2026, verbatim): "those
-# stocks that were added 10 days earlier to be removed unless they are
-# again fed in using chartink scan results." A SECOND, independent daily
-# watchlist prune alongside WATCHLIST_DAILY_PRUNE_ENABLED above (that one
-# checks a daily TREND break; this one is purely AGE-based) - any symbol
-# whose own `last_confirmed_at` (see Swing/watchlist.py's own
-# WatchlistEntry) is WATCHLIST_STALE_AGE_DAYS or more calendar days old
-# gets removed. Applies to EVERY watchlist symbol uniformly, regardless
-# of how it was originally added (webhook, hand-edited file, or the
-# Chartink scan itself) - the ONE thing that resets a symbol's own clock
-# is the daily Chartink scan pull re-returning it (see trading_engine.
-# _run_chartink_watchlist_scan's own docstring for why only THAT source
-# counts as "fed in again," per the user's own wording). Runs at the
-# SAME 09:15 IST gate as WATCHLIST_DAILY_PRUNE_ENABLED above (its own
-# independent day-tracking variable, same tolerant date-comparison
-# convention) - both are "prune the watchlist once market opens" tasks,
-# grouped by timing even though they're separate, independently-
-# toggleable checks.
-# --------------------------------------------------------------------------- #
-WATCHLIST_STALE_AGE_PRUNE_ENABLED = os.getenv("SWING_WATCHLIST_STALE_AGE_PRUNE_ENABLED", "true").lower() == "true"
-
-# The user's own number: "added 10 days earlier."
-WATCHLIST_STALE_AGE_DAYS = int(os.getenv("SWING_WATCHLIST_STALE_AGE_DAYS", "10"))
-
-# --------------------------------------------------------------------------- #
-# Paper trading (added 1 Sep 2026 - "enable paper trading for tomorrow...
-# keep track of trades, history and profit loss also like real trades in
-# files", turned back OFF the same day once real trading went live -
-# "Enable live real market trading for Swing package and disable paper
-# trading"). Entirely INDEPENDENT of STRATEGY_ENABLED above - the two are
-# meant to be mutually exclusive in practice (paper trading exists to
-# evaluate the signal BEFORE trusting it with a real order; once
-# STRATEGY_ENABLED is genuinely live, paper trading's own job is done)
-# though nothing in the code actually enforces that exclusivity - both
-# could be flipped on together if ever useful again. See
-# paper_engine.py's own module docstring for the full design (simulated
-# fills at current LTP, its own on-disk log entirely separate from real
-# trade history, no capacity cap since nothing here risks real capital).
-# Mirrors STRATEGY_MODE for "basket"/"sequential" (user confirmed via
-# AskUserQuestion) - paper trading simulates whichever of THOSE two modes
-# is active, so paper results actually reflect what real trading would do
-# if turned on right now. Does NOT yet have a "basket_hedge" simulation
-# (added 1 Sep 2026, after paper trading was already turned off for
-# going live) - harmless while this stays False, but if paper trading and
-# basket_hedge mode are ever both wanted at once, paper_engine.py's own
-# poll loop needs a third tick implementation first (see its own
-# docstring).
-PAPER_TRADING_ENABLED = os.getenv("SWING_PAPER_TRADING_ENABLED", "false").lower() == "true"
+# ---------------------------------------------------------------------------
+# Plumbing
+# ---------------------------------------------------------------------------
+MARKET_TZ = "Asia/Kolkata"
+MONITOR_INTERVAL_SECONDS = int(os.getenv("SWING_MONITOR_INTERVAL_SECONDS", "5"))
+# Inter-symbol delay while scanning the watchlist for entry signals -
+# respects Dhan's market-data rate limits on back-to-back calls, same
+# rationale as every other per-symbol pacing sleep in this codebase.
+SYMBOL_PACING_SECONDS = float(os.getenv("SWING_SYMBOL_PACING_SECONDS", "0.35"))
+ORDER_TAG_PREFIX = os.getenv("SWING_ORDER_TAG_PREFIX", "Sw2")

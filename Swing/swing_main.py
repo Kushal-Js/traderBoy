@@ -1,36 +1,15 @@
 """
-Swing strategy: user request 31 Aug 2026 - buys 1 lot of a stock's
-futures contract hedged with 1 lot of its ATM PE option, as an all-or-
-nothing "basket" (see trading_engine.py's own module docstring for the
-compensating-rollback design, since Dhan has no native basket-order API -
-see the separate trading-skills repo's `basket-order-feasibility.md` for
-the investigation this is based on).
-
-Entry/exit condition logic (price-confirmation gate + dual-timeframe
-Supertrend crossover, see trading_engine.py's own module docstring) has
-been fully defined and live since 1 Sep 2026 - what's live today is a
-continuously-monitored watchlist (though its own fresh-entry side is
-currently OFF, see config.WATCHLIST_ENTRY_ENABLED) plus two webhooks:
-   - POST /chartink/webhook-swing-enter      - a continuously-polled
-     Chartink entry webhook. Directly enters every stock in the payload,
-     one at a time, up to available capacity - the decision of WHICH
-     stock and WHEN lives in the Chartink scan/alert itself, not in an
-     extra evaluation step here (briefly gained real signal evaluation +
-     ranking 7 Sep 2026, reverted the same day per explicit user
-     request - see chartink_webhook_swing_enter's own docstring).
-   - POST /chartink/webhook-swing-watchlist  - adds stock(s) to the
-     watchlist trading_engine.monitor_loop() continuously polls, without
-     attempting an immediate entry (use webhook-swing-enter for that).
-
-config.STRATEGY_ENABLED gates all real order placement (see config.py's
-own docstring) - live (true) since 1 Sep 2026.
+Swing v2 (complete rewrite, 12 Sep 2026 - see Swing/config.py's module
+docstring for the full design). No Chartink integration, no dedicated
+entry webhook (user request: "No watchlist pruning logic or a separate
+webhook endpoint required as of now") - the bot decides when to enter by
+continuously evaluating its own signals against a plain, manually-edited
+watchlist, not by reacting to an inbound alert.
 
 `lifespan` and `router` are composed into the shared app by the top-level
-main.py, the same way every other strategy package is. Reuses the
-Options package's single authenticated Dhan connection (dhan_client.py
-here just re-exports it, plus the new get_futures_contract) - main.py
-must mount this package's lifespan *inside* Options' own (after it), the
-same pattern Futures/Luxury/CopperOptions/IndexScalping already use.
+main.py, the same way every other strategy package is - mounted *inside*
+Options' own lifespan (after it), reusing Options' single authenticated
+Dhan connection and WebSocket feed.
 """
 from __future__ import annotations
 
@@ -39,24 +18,14 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import APIRouter, FastAPI, HTTPException
-from pydantic import BaseModel, field_validator
+from fastapi import APIRouter, FastAPI
+from pydantic import BaseModel
 
-from trade_history import fire_and_forget, record_webhook_alert
+from Options.dhan_client import dhan_wrapper
 
-from . import config
-from .paper_engine import paper_basket_store, paper_poll_loop, sequential_paper_store
-from .position_store import basket_hedge_store, basket_store, sequential_store
-from .trading_engine import (
-    _enter_basket_hedge_for_stock,
-    _enter_futures_for_stock,
-    _run_chartink_watchlist_scan,
-    enter_basket_for_stock,
-    monitor_loop,
-    reconcile_basket_hedge_positions,
-    reconcile_broker_positions,
-    reconcile_sequential_positions,
-)
+from . import config, signals
+from .position_store import position_store
+from .trading_engine import monitor_loop, on_price_tick, reconcile_broker_positions
 from .watchlist import watchlist_store
 
 logger = logging.getLogger("swing_main")
@@ -64,283 +33,76 @@ logger = logging.getLogger("swing_main")
 router = APIRouter()
 
 _monitor_task: Optional[asyncio.Task] = None
-_paper_task: Optional[asyncio.Task] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Swing strategy's own startup/shutdown. Does NOT authenticate or
-    start the Dhan feed - reuses Options' already-authenticated
-    connection. Reconciliation always runs regardless of
-    config.STRATEGY_ENABLED - a real, still-open basket from before a
-    restart needs to be picked back up whether or not NEW entries are
-    currently allowed. The monitor loop always starts too - see
-    config.py's own docstring for why."""
-    global _monitor_task, _paper_task
+    """Does NOT authenticate or start the Dhan feed - reuses Options'
+    already-authenticated connection. Reconciliation and the monitor loop
+    always run regardless of config.STRATEGY_ENABLED - a real, still-open
+    position from before a restart needs to be picked back up whether or
+    not NEW entries are currently allowed, and flipping STRATEGY_ENABLED
+    should never need a restart to take effect."""
+    global _monitor_task
 
-    # Best-effort load of whatever's already in data/watchlist (user
-    # request 31 Aug 2026) - so a restart doesn't lose stocks that were
-    # only ever added by hand-editing the file, not through the webhook.
-    # Runs regardless of config.STRATEGY_ENABLED - populating the
-    # watchlist is inert on its own; only the entry SIGNAL evaluation
-    # (gated by the flag) can actually act on it. See watchlist.py's own
-    # docstring.
     try:
         await watchlist_store.sync_from_file()
     except Exception:  # noqa: BLE001
         logger.exception("Could not sync watchlist from data/watchlist at startup - continuing without it.")
 
-    # Mode-aware (added 1 Sep 2026, extended to 3-way 1 Sep 2026) - a lone
-    # Swing-attributed broker leg means something different in each mode
-    # (an anomaly in basket mode, the NORMAL shape in sequential mode, and
-    # ONE OF TWO normal shapes in basket_hedge mode - see
-    # reconcile_basket_hedge_positions's own docstring, which is also
-    # what grandfathers the real, already-open APLAPOLLO futures position
-    # into basket_hedge mode's own store as a degraded 1-leg BASKET, per
-    # the user's own words: "consider the open trade as a basket order
-    # for this time as it is already live"), so each mode runs its own
-    # reconciliation function against its own store.
-    if config.STRATEGY_MODE == "basket":
-        try:
-            reconciled = await reconcile_broker_positions()
-            if reconciled:
-                await basket_store.reconcile_from_broker(reconciled)
-                logger.info(
-                    "Reconciled %d existing Swing basket(s) at startup: %s",
-                    len(reconciled), [b.underlying_symbol for b in reconciled],
-                )
-        except Exception:  # noqa: BLE001
-            logger.exception("Could not reconcile broker baskets at startup - continuing without them.")
-    elif config.STRATEGY_MODE == "basket_hedge":
-        try:
-            reconciled_positions = await reconcile_basket_hedge_positions()
-            for position in reconciled_positions:
-                await basket_hedge_store.reconcile_position(position)
-            if reconciled_positions:
-                logger.info(
-                    "Reconciled %d existing Swing basket_hedge position(s) at startup: %s",
-                    len(reconciled_positions),
-                    [(p.underlying_symbol, p.state) for p in reconciled_positions],
-                )
-        except Exception:  # noqa: BLE001
-            logger.exception("Could not reconcile broker basket_hedge positions at startup - continuing without them.")
-    else:
-        try:
-            reconciled_legs = await reconcile_sequential_positions()
-            for leg in reconciled_legs:
-                await sequential_store.reconcile_leg(leg)
-            if reconciled_legs:
-                logger.info(
-                    "Reconciled %d existing Swing sequential leg(s) at startup: %s",
-                    len(reconciled_legs), [(l.underlying_symbol, l.option_type) for l in reconciled_legs],
-                )
-        except Exception:  # noqa: BLE001
-            logger.exception("Could not reconcile broker sequential legs at startup - continuing without them.")
+    try:
+        reconciled = await reconcile_broker_positions()
+        if reconciled:
+            await position_store.reconcile_from_broker(reconciled)
+            logger.info("Reconciled %d existing Swing position(s) at startup: %s",
+                        len(reconciled), [p.underlying_symbol for p in reconciled])
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not reconcile broker positions at startup - continuing without them.")
+
+    # Wire the WebSocket tick feed - additive (Options/Futures/Luxury each
+    # register their own subscriber the same way; this doesn't replace
+    # theirs). Only futures/options positions ever get a match here
+    # (equity is never WS-subscribed - see Swing/config.py's own note).
+    loop = asyncio.get_running_loop()
+
+    def _on_price_tick(trading_symbol: str, ltp: float) -> None:
+        asyncio.run_coroutine_threadsafe(on_price_tick(trading_symbol, ltp), loop)
+
+    dhan_wrapper.add_price_tick_subscriber(_on_price_tick)
 
     _monitor_task = asyncio.create_task(monitor_loop())
-    # Own independent loop, own independent flag (config.PAPER_TRADING_ENABLED)
-    # - see paper_engine.py's own module docstring for why this always
-    # starts alongside the real monitor loop regardless of either flag.
-    _paper_task = asyncio.create_task(paper_poll_loop())
     logger.info(
-        "Swing strategy startup complete: monitor loop running (reusing Options' Dhan connection). "
-        "strategy_enabled=%s strategy_mode=%s paper_trading_enabled=%s",
-        config.STRATEGY_ENABLED, config.STRATEGY_MODE, config.PAPER_TRADING_ENABLED,
+        "Swing v2 startup complete: monitor loop running (reusing Options' Dhan connection). "
+        "strategy_enabled=%s basket_type=%s broker_stop_loss_enabled=%s max_concurrent_trades=%s",
+        config.STRATEGY_ENABLED, config.BASKET_TYPE, config.BROKER_STOP_LOSS_ENABLED, config.MAX_CONCURRENT_TRADES,
     )
     yield
     if _monitor_task:
         _monitor_task.cancel()
-    if _paper_task:
-        _paper_task.cancel()
 
 
-# --------------------------------------------------------------------------- #
-# Webhook payload schemas (same shape as every other Chartink-style
-# payload in this codebase, for consistency - scan_name/alert_name etc.
-# are optional here since these two webhooks are meant to be called
-# directly/manually, not necessarily from an actual Chartink scan)
-# --------------------------------------------------------------------------- #
-class SwingWebhookPayload(BaseModel):
-    stocks: str
-    trigger_prices: Optional[str] = None
-    triggered_at: Optional[str] = None
-    scan_name: Optional[str] = None
-    scan_url: Optional[str] = None
-    alert_name: Optional[str] = None
-    webhook_url: Optional[str] = None
-
-    @field_validator("stocks")
-    @classmethod
-    def not_empty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("stocks must not be empty")
-        return v
+class WatchlistPayload(BaseModel):
+    stocks: str  # comma-separated, same convention as every other payload in this codebase
 
     def stock_list(self) -> list[str]:
         return [s.strip().upper() for s in self.stocks.split(",") if s.strip()]
 
 
 # --------------------------------------------------------------------------- #
-# Webhook endpoints
+# Watchlist management (user provides stocks directly - requirement #1)
 # --------------------------------------------------------------------------- #
-@router.post("/chartink/webhook-swing-enter")
-async def chartink_webhook_swing_enter(payload: SwingWebhookPayload):
-    """Continuously-polled Chartink entry webhook. Directly enters a
-    basket (or the mode-appropriate equivalent) for each stock in the
-    payload, one at a time (deliberately sequential, not concurrent like
-    Options/Futures/Luxury's own multi-stock ranking - each basket entry
-    is already a multi-step, two-leg operation; keeping multiple entries
-    from interleaving keeps the all-or-nothing rollback easy to reason
-    about). The decision of WHICH stock to send and WHEN lives in the
-    Chartink scan/alert itself, not in an extra evaluation step here.
-
-    REVERTED 7 Sep 2026 (user request, verbatim): "I don't think we need
-    steps 2, 3, 4 for webhook based entry system now, however the basket
-    and PE based strategy and other logic are still the same or as it
-    is." Earlier the same day this briefly gained a real entry-signal
-    evaluation + ranking step (_rank_and_enter_candidates - price
-    confirmation + dual-timeframe Supertrend crossover, then freshest-
-    crossover/higher-volume ranking) before attempting entry. That
-    pre-filter is removed again here - every stock in the payload is
-    entered directly, unconditionally, same as this endpoint's own
-    original behavior - while the actual entry MECHANICS (basket/PE
-    hedge/sequential state machines, the funds check, dedup, ATM/futures
-    contract resolution) are completely untouched, exactly as the user
-    asked. _rank_and_enter_candidates itself is NOT deleted (see its own
-    docstring in trading_engine.py) - kept, unused for now, in case this
-    behavior is wanted again later, same "never delete, might need it
-    again" convention already established for Swing's own 3 trading
-    modes.
-
-    Mode-aware (added 1 Sep 2026, extended to 3-way 1 Sep 2026): under
-    config.STRATEGY_MODE == "sequential", this drives the SAME NONE ->
-    FUTURES transition monitor_loop's own entry-signal path uses (futures
-    only, no PE leg yet - the PE only ever comes in as the hedge once the
-    futures leg later exits) rather than the basket entry, and checks
-    sequential_store's own capacity instead of basket_store's. Under
-    "basket_hedge", this drives the same all-or-nothing basket entry as
-    plain "basket" mode (futures+PE together) but against
-    basket_hedge_store's own capacity instead."""
+@router.post("/swing/watchlist/add")
+async def add_to_watchlist(payload: WatchlistPayload):
     stocks = payload.stock_list()
-
-    def _log_alert(status: str, reason: Optional[str] = None) -> None:
-        fire_and_forget(record_webhook_alert(
-            "Swing", payload.scan_name or "manual", payload.alert_name or "swing-enter", stocks, status, reason,
-        ))
-
-    if not config.STRATEGY_ENABLED:
-        logger.info("Swing enter webhook received but strategy is disabled - ignoring: stocks=%s", stocks)
-        _log_alert("ignored", "strategy_disabled")
-        return {"status": "ignored", "reason": "strategy_disabled", "stocks": stocks}
-
-    logger.info("Swing enter webhook received: stocks=%s mode=%s", stocks, config.STRATEGY_MODE)
-    if config.STRATEGY_MODE == "basket":
-        store = basket_store
-    elif config.STRATEGY_MODE == "basket_hedge":
-        store = basket_hedge_store
-    else:
-        store = sequential_store
-    remaining = await store.remaining_capacity()
-    if remaining == 0:
-        logger.info("No capacity left (%s live/in-flight already) - ignoring alert.", config.MAX_LIVE_BASKETS)
-        _log_alert("ignored", "max_live_baskets_reached")
-        return {
-            "status": "ignored", "reason": "max_live_baskets_reached",
-            "max_live_baskets": config.MAX_LIVE_BASKETS,
-        }
-
-    if config.STRATEGY_MODE == "basket":
-        entry_fn = enter_basket_for_stock
-    elif config.STRATEGY_MODE == "basket_hedge":
-        entry_fn = _enter_basket_hedge_for_stock
-    else:
-        entry_fn = _enter_futures_for_stock
-    results = [await entry_fn(symbol) for symbol in stocks]
-    _log_alert("processed")
-    return {"status": "processed", "mode": config.STRATEGY_MODE, "entries": results}
-
-
-@router.post("/chartink/webhook-swing-watchlist")
-async def chartink_webhook_swing_watchlist(payload: SwingWebhookPayload):
-    """Adds stock(s) to the watchlist trading_engine.monitor_loop()
-    continuously polls - see this module's own docstring."""
-    stocks = payload.stock_list()
-
-    def _log_alert(status: str, reason: Optional[str] = None) -> None:
-        fire_and_forget(record_webhook_alert(
-            "Swing-Watchlist", payload.scan_name or "manual", payload.alert_name or "swing-watchlist",
-            stocks, status, reason,
-        ))
-
-    if not config.STRATEGY_ENABLED:
-        logger.info("Swing watchlist webhook received but strategy is disabled - ignoring: stocks=%s", stocks)
-        _log_alert("ignored", "strategy_disabled")
-        return {"status": "ignored", "reason": "strategy_disabled", "stocks": stocks}
-
     added = await watchlist_store.add_symbols(stocks)
-    logger.info("Swing watchlist webhook received: stocks=%s added=%s", stocks, added)
-    _log_alert("processed")
-    return {
-        "status": "processed", "requested": stocks, "added": added,
-        "already_on_watchlist": [s for s in stocks if s not in added],
-    }
+    return {"requested": stocks, "added": added, "already_on_watchlist": [s for s in stocks if s not in added]}
 
 
-@router.post("/swing/chartink-scan-now")
-async def trigger_chartink_watchlist_scan():
-    """Manual trigger for the daily Chartink scan pull (added 1 Sep
-    2026) - runs config.CHARTINK_WATCHLIST_SCAN_URL's own scan right now
-    and adds whatever it returns to the watchlist, rather than waiting
-    for the next scheduled run (config.CHARTINK_WATCHLIST_SCAN_TIME).
-    Bypasses the once-a-day gate deliberately - a manual request means
-    "run it now." Doesn't touch the gate either, so the regularly
-    scheduled run at config.CHARTINK_WATCHLIST_SCAN_TIME still fires on
-    its own later the same day regardless - harmless, since add_symbols
-    is idempotent (a symbol already on the watchlist is simply skipped).
-    Works regardless of config.STRATEGY_ENABLED (only ever mutates the
-    watchlist, never places an order) but NOT while
-    config.CHARTINK_WATCHLIST_SCAN_ENABLED is False - the feature flag
-    still wins over a manual request, same as every other flag in this
-    codebase."""
-    if not config.CHARTINK_WATCHLIST_SCAN_ENABLED:
-        return {"status": "ignored", "reason": "chartink_watchlist_scan_disabled"}
-    try:
-        result = await _run_chartink_watchlist_scan()
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Manual Chartink watchlist scan trigger failed")
-        raise HTTPException(status_code=502, detail=f"Chartink scan fetch failed: {exc}") from exc
-    return {"status": "processed"} | result
-
-
-# --------------------------------------------------------------------------- #
-# Observability endpoints
-# --------------------------------------------------------------------------- #
-@router.get("/swing/positions")
-async def get_positions():
-    """Basket-mode positions - live_baskets/reserved_symbols read empty
-    while config.STRATEGY_MODE == "sequential" (that store is simply
-    never written to under sequential mode) - see GET /swing/sequential-
-    positions for the currently-active mode's own view."""
-    return {"strategy_mode": config.STRATEGY_MODE} | await basket_store.snapshot()
-
-
-@router.get("/swing/sequential-positions")
-async def get_sequential_positions():
-    """Sequential-mode positions (added 1 Sep 2026) - live_legs/
-    reserved_symbols read empty while config.STRATEGY_MODE == "basket"."""
-    return {"strategy_mode": config.STRATEGY_MODE} | await sequential_store.snapshot()
-
-
-@router.get("/swing/basket-hedge-positions")
-async def get_basket_hedge_positions():
-    """basket_hedge-mode positions (added 1 Sep 2026) - live_positions/
-    reserved_symbols read empty unless config.STRATEGY_MODE ==
-    "basket_hedge". Each position's own `state` field (BASKET or
-    PE_HEDGE) and `legs` list (1 or 2 entries) show exactly what's
-    currently held - use this right after a restart to confirm a
-    grandfathered position (e.g. APLAPOLLO) reconciled correctly as a
-    1-leg BASKET with the right entry_price."""
-    return {"strategy_mode": config.STRATEGY_MODE} | await basket_hedge_store.snapshot()
+@router.post("/swing/watchlist/remove")
+async def remove_from_watchlist(payload: WatchlistPayload):
+    stocks = payload.stock_list()
+    removed = [s for s in stocks if await watchlist_store.remove_symbol(s)]
+    return {"requested": stocks, "removed": removed}
 
 
 @router.get("/swing/watchlist")
@@ -348,40 +110,47 @@ async def get_watchlist():
     return await watchlist_store.snapshot()
 
 
-@router.get("/swing/paper-trades")
-async def get_paper_trades():
-    """Completed + live PAPER baskets, and aggregate pnl/win-rate - see
-    paper_engine.py's own docstring. Always reachable (no
-    strategy_enabled/paper_trading_enabled gate on the GET itself) so past
-    results stay visible even after paper trading is later turned off.
-    Basket-mode only - reads empty while config.STRATEGY_MODE ==
-    "sequential" (paper trading mirrors whichever mode is active - see
-    GET /swing/sequential-paper-trades for that one)."""
-    return {"strategy_mode": config.STRATEGY_MODE} | await paper_basket_store.snapshot()
+# --------------------------------------------------------------------------- #
+# Observability
+# --------------------------------------------------------------------------- #
+@router.get("/swing/positions")
+async def get_positions():
+    return await position_store.snapshot()
 
 
-@router.get("/swing/sequential-paper-trades")
-async def get_sequential_paper_trades():
-    """Sequential-mode PAPER trades (added 1 Sep 2026) - reads empty
-    while config.STRATEGY_MODE == "basket"."""
-    return {"strategy_mode": config.STRATEGY_MODE} | await sequential_paper_store.snapshot()
+@router.get("/swing/signals")
+async def get_signals():
+    """Cache-only regime + Supertrend state for every watchlist symbol -
+    no live fetch (see Swing/signals.py's own peek_* functions). This is
+    the main rollout safety tool: watch this for a full trading day with
+    STRATEGY_ENABLED=false before trusting it against real money - it
+    lets the strategy's own reasoning be observed directly rather than
+    inferred from whether a trade happened to fire."""
+    out = []
+    for symbol in await watchlist_store.symbols():
+        regime = signals.peek_regime_state(symbol)
+        st = signals.peek_supertrend_state(symbol)
+        out.append({
+            "symbol": symbol,
+            "regime": None if regime is None else {
+                "is_bullish": regime.is_bullish, "fast_ema": regime.fast_ema, "slow_ema": regime.slow_ema,
+                "fast_candle_start": regime.fast_candle_start.isoformat() if regime.fast_candle_start else None,
+                "slow_candle_start": regime.slow_candle_start.isoformat() if regime.slow_candle_start else None,
+            },
+            "supertrend": None if st is None else {
+                "close": st.close, "supertrend": st.supertrend, "is_above": st.is_above,
+                "crossed_above": st.crossed_above, "crossed_below": st.crossed_below,
+                "candle_start": st.candle_start.isoformat() if st.candle_start else None,
+            },
+        })
+    return {"signals": out}
 
 
 @router.post("/swing/square-off-now")
 async def manual_square_off():
     """Manual kill-switch: closes every live Swing position immediately -
-    both legs of every basket in basket mode, the single held leg of
-    every symbol in sequential mode, or every leg of every basket_hedge
-    position (whatever state it's currently in) in basket_hedge mode -
-    returning each straight to plain watching, never continuing into or
-    past a hedge - works regardless of config.STRATEGY_ENABLED (an open
-    position should always be closeable, even while new entries are
-    currently disabled). See trading_engine._square_off_all's own
-    docstring for the mode dispatch."""
-    from .trading_engine import _square_off_all  # local import to avoid cycles at module load
+    works regardless of config.STRATEGY_ENABLED (an open position should
+    always be closeable, even while new entries are currently disabled)."""
+    from .trading_engine import _square_off_all  # local import to avoid a cycle at module load time
     await _square_off_all("MANUAL_SQUARE_OFF")
-    if config.STRATEGY_MODE == "basket":
-        return {"strategy_mode": config.STRATEGY_MODE} | await basket_store.snapshot()
-    if config.STRATEGY_MODE == "basket_hedge":
-        return {"strategy_mode": config.STRATEGY_MODE} | await basket_hedge_store.snapshot()
-    return {"strategy_mode": config.STRATEGY_MODE} | await sequential_store.snapshot()
+    return await position_store.snapshot()

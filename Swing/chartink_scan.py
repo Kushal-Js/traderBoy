@@ -1,4 +1,13 @@
 """
+RETIRED 12 Sep 2026 - Swing v2's complete rewrite dropped Chartink
+integration entirely (user request: "No watchlist pruning logic or a
+separate webhook endpoint required as of now" - the watchlist is now
+purely user-maintained via data/watchlist or the /swing/watchlist/add
+endpoint). No longer imported/started by Swing/swing_main.py or
+trading_engine.py. Left on disk rather than deleted since it's real
+prior work; ask before reviving if Chartink-driven watchlist population
+is wanted again.
+
 Pulls a Chartink scan's own CURRENT result list directly, server-side -
 user request 1 Sep 2026 ("I am thinking to automate updation of our
 watchlist file" -> "A specific Chartink scan URL", "once daily,

@@ -1,4 +1,13 @@
 """
+RETIRED 12 Sep 2026 - targets the old basket/sequential/basket_hedge
+design (Swing v2's complete rewrite removed those modes - see
+Swing/config.py's own module docstring). No longer imported/started by
+Swing/swing_main.py; calling anything here now will AttributeError
+against trading_engine.py's new (different) function set. Left on disk
+rather than deleted since it's real prior work, not because any of it
+still runs. A Swing v2 equivalent hasn't been built - ask if paper
+trading is wanted again before assuming this can just be revived as-is.
+
 Paper-trading engine for the Swing strategy - PAPER ONLY.
 
 User request 1 Sep 2026: "Let's enable paper trading for tomorrow for

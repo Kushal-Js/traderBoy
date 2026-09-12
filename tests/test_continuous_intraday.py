@@ -141,14 +141,18 @@ def test_4_no_today_only_intraday_fetch_remains_in_any_strategy():
     """Every strategy's intraday indicator fetch must go through
     fetch_continuous_intraday. Guard against a regression that reintroduces
     a `from_date=today, to_date=today` intraday_minute_data call."""
-    import Swing.trading_engine as ste
+    import Swing.signals as ssig
     import IndexScalping.paper_engine as ise
     import CopperOptions.paper_engine as cop
     import K01.paper_engine as k01
 
     offenders = []
     checks = [
-        (ste, ["_fetch_supertrend_state_once"]),
+        # Moved from Swing/trading_engine.py to Swing/signals.py in the Swing
+        # v2 rewrite (12 Sep 2026) - same function, new home. _fetch_regime_
+        # state_once is new in that rewrite (the 200-EMA regime signal) and
+        # gets the identical guard from day one.
+        (ssig, ["_fetch_supertrend_state_once", "_fetch_regime_state_once"]),
         (ise, ["_fetch_index_intraday"]),
         (cop, ["_fetch_future_5min"]),
         (k01, ["_fetch_intraday"]),
