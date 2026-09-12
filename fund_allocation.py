@@ -116,7 +116,8 @@ def snapshot() -> dict:
 
 
 async def has_sufficient_bucket_funds(
-    bucket: str, symbol: str, legs: List[Tuple[str, str, int, float]], buffer_rs: float = 0.0,
+    bucket: str, symbol: str, legs: List[Tuple],  # noqa: UP006 - see docstring for the 4- and 5-tuple leg shapes
+    buffer_rs: float = 0.0,
 ) -> bool:
     """Shared proactive funds check, used by every real-money package in
     this codebase (Swing via its own `_has_sufficient_funds` wrapper;
@@ -133,7 +134,11 @@ async def has_sufficient_bucket_funds(
 
     `legs`: (security_id, product_type, quantity, price) for each leg
     about to be BOUGHT - 2 for Swing's basket/basket_hedge modes, 1 for
-    Swing's sequential mode AND for Options/Futures/Luxury alike.
+    Swing's sequential mode AND for Options/Futures/Luxury alike. An
+    optional 5th element, `exchange_segment` (added 12 Sep 2026, Swing
+    v2's equity basket-type), defaults to "NSE_FNO" when omitted so every
+    existing 4-tuple caller is unaffected - pass "NSE_EQ" for an equity
+    leg's own margin lookup.
 
     Fails OPEN to "sufficient" (returns True) if the check itself fails
     (a margin-API or funds-API hiccup) - a funds-check OUTAGE must never
@@ -143,10 +148,12 @@ async def has_sufficient_bucket_funds(
     loop = asyncio.get_running_loop()
     try:
         total_required = 0.0
-        for security_id, product_type, quantity, price in legs:
+        for leg in legs:
+            security_id, product_type, quantity, price = leg[0], leg[1], leg[2], leg[3]
+            exchange_segment = leg[4] if len(leg) > 4 else "NSE_FNO"
             margin_data = await loop.run_in_executor(
                 None, dhan_wrapper.get_margin_required,
-                security_id, "NSE_FNO", "BUY", quantity, product_type, price,
+                security_id, exchange_segment, "BUY", quantity, product_type, price,
             )
             total_required += margin_data.get("totalMargin") or 0.0
         available = await loop.run_in_executor(None, get_bucket_available_funds, bucket)

@@ -484,6 +484,32 @@ class DhanWrapper:
             raise ValueError(f"No NSE equity instrument found for {underlying_symbol}")
         return str(int(row.iloc[0]["SEM_SMST_SECURITY_ID"]))
 
+    def _equity_instrument_meta(self, underlying_symbol: str) -> dict:
+        """Equity-segment counterpart to _instrument_meta (added 12 Sep 2026,
+        Swing v2's equity basket-type) - deliberately does NOT reuse
+        _instrument_meta itself, which matches on SEM_EXM_EXCH_ID=="NSE"
+        alone and takes row.iloc[-1], the exact non-uniqueness footgun that
+        function's own docstring warns about (it's built for options/
+        futures trading symbols, not plain equity). This uses the same
+        precise EQUITY+exact-symbol filter as _equity_security_id above,
+        so there's exactly one matching row, and returns the tick size in
+        the same rupee-converted form _instrument_meta does (Dhan reports
+        SEM_TICK_SIZE in paise)."""
+        df = self.instruments()
+        row = df[
+            (df["SEM_EXM_EXCH_ID"] == "NSE")
+            & (df["SEM_INSTRUMENT_NAME"] == "EQUITY")
+            & (df["SEM_TRADING_SYMBOL"] == underlying_symbol)
+        ]
+        if row.empty:
+            raise ValueError(f"No NSE equity instrument found for {underlying_symbol}")
+        r = row.iloc[0]
+        return {
+            "security_id": str(int(r["SEM_SMST_SECURITY_ID"])),
+            "lot_size": int(float(r["SEM_LOT_UNITS"])) or 1,
+            "tick_size": float(r["SEM_TICK_SIZE"]) / 100.0,
+        }
+
     # ------------------------------------------------------------------ #
     # Market hours (Dhan requires an explicit afterMarketOrder flag - unlike
     # Groww it does NOT auto-detect AMO from placement time)
@@ -985,6 +1011,7 @@ class DhanWrapper:
     # ------------------------------------------------------------------ #
     def fetch_continuous_intraday(
         self, security_id: str, exchange_segment: str, instrument_type: str, interval_minutes: int,
+        lookback_days_override: Optional[int] = None,
     ) -> dict:
         """Intraday candles spanning the last
         config.INTRADAY_CONTINUOUS_LOOKBACK_DAYS calendar days THROUGH today -
@@ -996,12 +1023,27 @@ class DhanWrapper:
         series across sessions (verified: a 7-day 1-min request spans ~5
         trading days with no synthetic overnight bars).
 
+        `lookback_days_override` (added 12 Sep 2026, Swing v2's 200-period
+        EMA regime signal) - the global INTRADAY_CONTINUOUS_LOOKBACK_DAYS
+        (default 7) is nowhere near enough for a 200-period EMA on 15-min
+        bars: 7 days is only ~125 fifteen-minute bars, below the 200 needed
+        for _compute_ema to even return a first value. Rather than widen
+        the shared global (which would silently change every OTHER live
+        signal - Supertrend/EMA-cross/RSI - for Options/Futures/Luxury too),
+        this optional per-call override lets one caller ask for a longer
+        window without touching anyone else's. Confirmed via a live spike
+        (12 Sep 2026) that Dhan serves a 45-day/15-min request in one call
+        (795 bars returned, no chunking needed) - if a future caller needs
+        a window Dhan won't serve in one request, this is the parameter to
+        extend with real chunking, not a reason to raise the global.
+
         Returns the raw resp["data"] dict (open/high/low/close/volume/
         timestamp lists), or {} on failure - callers apply their own
         still-forming-last-candle drop and minimum-length checks. Wrapped in
         _retry for Dhan's intermittent rate-limit failures on back-to-back
         market-data calls."""
-        from_date = (datetime.now(IST) - timedelta(days=config.INTRADAY_CONTINUOUS_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+        days = lookback_days_override or config.INTRADAY_CONTINUOUS_LOOKBACK_DAYS
+        from_date = (datetime.now(IST) - timedelta(days=days)).strftime("%Y-%m-%d")
         to_date = datetime.now(IST).strftime("%Y-%m-%d")
         resp = _retry(
             self.client.Dhan.intraday_minute_data,
@@ -1635,7 +1677,37 @@ class DhanWrapper:
             for p in self.get_open_fno_positions()
         )
 
-    def get_broker_net_quantity(self, trading_symbol: str) -> int:
+    def get_open_equity_positions(self) -> list[dict]:
+        """Equity-segment counterpart to get_open_fno_positions above (added
+        12 Sep 2026, Swing v2's equity basket-type). Necessary because
+        get_positions() returns BOTH segments together and
+        get_open_fno_positions hard-filters to "NSE_FNO" only - without
+        this, an open equity position is invisible to every reconciliation
+        path that reads "open positions," which would make
+        get_broker_net_quantity(segment="NSE_EQ") wrongly report 0 (see
+        that function's own docstring for why that's actively dangerous,
+        not just incomplete)."""
+        return _retry(self._get_open_equity_positions_once)
+
+    def _get_open_equity_positions_once(self) -> list[dict]:
+        resp = self.client.Dhan.get_positions()
+        if resp.get("status") != "success":
+            raise RuntimeError(f"get_positions failed: {resp.get('remarks')}")
+        open_positions = []
+        for p in (resp.get("data") or []):
+            net_qty = int(p.get("netQty") or 0)
+            if net_qty == 0 or p.get("exchangeSegment") != "NSE_EQ":
+                continue
+            open_positions.append({
+                "trading_symbol": str(p.get("tradingSymbol", "")),
+                "underlying_symbol": str(p.get("tradingSymbol", "")),
+                "quantity": net_qty,
+                "avg_price": float(p.get("buyAvg") or p.get("costPrice") or 0),
+                "product_type": p.get("productType") or "CNC",
+            })
+        return open_positions
+
+    def get_broker_net_quantity(self, trading_symbol: str, segment: str = "NSE_FNO") -> int:
         """Net quantity currently held at the broker for this EXACT contract
         (matched on trading_symbol, not just underlying - a manual trade on
         a different strike for the same underlying shouldn't be confused
@@ -1647,8 +1719,18 @@ class DhanWrapper:
         stuck RMS rejection resolving itself) can leave the bot blindly
         retrying a SELL for something that's already flat, burning API
         calls on doomed order placements instead of one cheap position
-        check."""
-        for p in self.get_open_fno_positions():
+        check.
+
+        `segment` (added 12 Sep 2026, Swing v2's equity basket-type) -
+        defaults to "NSE_FNO" so every existing Options/Futures/Luxury
+        caller is byte-identical to before. Pass "NSE_EQ" for an equity
+        position: without this, an equity leg would read as qty=0 against
+        the FNO-only list even while genuinely open at the broker, and the
+        exit-reconciliation logic in _exit_position would misread that as
+        "already flat" and skip the real exit order entirely - silently
+        orphaning real shares, not a cosmetic gap."""
+        positions = self.get_open_equity_positions() if segment == "NSE_EQ" else self.get_open_fno_positions()
+        for p in positions:
             if p["trading_symbol"] == trading_symbol:
                 return p["quantity"]
         return 0
@@ -1740,6 +1822,96 @@ class DhanWrapper:
                 "- check Tradehull's console/log output for the underlying error."
             )
         return {"order_id": str(order_id), "is_amo": is_amo}
+
+    def place_equity_market_order(
+        self, trading_symbol: str, quantity: int, transaction_type: str,
+        tag: Optional[str] = None, product_type: str = "CNC",
+    ) -> dict:
+        """Equity-segment counterpart to place_market_order above (added 12
+        Sep 2026, Swing v2's equity basket-type) - NOT a reuse of that
+        function with a parameter tweak, because place_market_order hard-
+        codes exchange=config.DEFAULT_EXCHANGE ("NFO"), which is simply
+        wrong for a plain NSE cash-segment order. Tradehull's own
+        order_placement() maps a plain "NSE" exchange string to its cash
+        segment internally (confirmed against the vendored library) -
+        distinct from "NFO" (F&O). product_type defaults to "CNC" (real
+        delivery), not "MIS", since Swing v2's equity basket-type is
+        long-only and meant to carry for days - an intraday MIS product
+        would auto-square-off same day regardless of the strategy's own
+        exit signal, which would be silently wrong here."""
+        is_amo = not self.is_market_open()
+        logger.info("Placing equity %s order: %s x%s (product=%s)%s", transaction_type, trading_symbol,
+                    quantity, product_type, " (AMO)" if is_amo else "")
+        order_id = self.client.order_placement(
+            tradingsymbol=trading_symbol,
+            exchange="NSE",
+            quantity=quantity,
+            price=0,
+            trigger_price=0,
+            order_type="MARKET",
+            transaction_type=transaction_type,
+            trade_type=product_type,
+            after_market_order=is_amo,
+            amo_time="OPEN",
+            tag=tag,
+        )
+        if not order_id:
+            raise RuntimeError(
+                f"order_placement returned no order id for equity {transaction_type} {trading_symbol} "
+                "- check Tradehull's console/log output for the underlying error."
+            )
+        return {"order_id": str(order_id), "is_amo": is_amo}
+
+    def place_equity_stop_loss_limit_order(
+        self, trading_symbol: str, quantity: int, transaction_type: str,
+        trigger_price: float, limit_price: float,
+        tag: Optional[str] = None, product_type: str = "CNC",
+    ) -> dict:
+        """Equity-segment counterpart to place_stop_loss_limit_order below -
+        same STOPLIMIT mechanics and tick-rounding, but exchange="NSE" and
+        looked up via _equity_instrument_meta (not _instrument_meta, which
+        isn't safe for plain equity symbols - see that function's own
+        docstring). See place_stop_loss_limit_order's docstring for why
+        SL-L (not SL-M) and for the tick-rounding rationale in full."""
+        try:
+            tick_size = self._equity_instrument_meta(trading_symbol).get("tick_size")
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: could not look up the real tick size before placing the equity SL-L order - "
+                "falling back to plain 2-decimal rounding, which may still get rejected for a "
+                "tick-size mismatch", trading_symbol,
+            )
+            tick_size = None
+        rounded_trigger = _round_to_tick(trigger_price, tick_size)
+        rounded_limit = _round_to_tick(limit_price, tick_size)
+        if rounded_trigger != trigger_price or rounded_limit != limit_price:
+            logger.info(
+                "%s: rounded equity SL-L prices to the real tick size (%.4f): trigger %.4f->%.4f, limit %.4f->%.4f",
+                trading_symbol, tick_size or 0.0, trigger_price, rounded_trigger, limit_price, rounded_limit,
+            )
+        trigger_price, limit_price = rounded_trigger, rounded_limit
+        logger.info(
+            "Placing equity STOP-LOSS LIMIT order: %s %s x%s trigger=%.2f limit=%.2f (product=%s)",
+            transaction_type, trading_symbol, quantity, trigger_price, limit_price, product_type,
+        )
+        order_id = self.client.order_placement(
+            tradingsymbol=trading_symbol,
+            exchange="NSE",
+            quantity=quantity,
+            price=limit_price,
+            trigger_price=trigger_price,
+            order_type="STOPLIMIT",
+            transaction_type=transaction_type,
+            trade_type=product_type,
+            after_market_order=False,
+            tag=tag,
+        )
+        if not order_id:
+            raise RuntimeError(
+                f"order_placement returned no order id for equity STOPLIMIT {transaction_type} "
+                f"{trading_symbol} - check Tradehull's console/log output for the underlying error."
+            )
+        return {"order_id": str(order_id)}
 
     def place_stop_loss_market_order(
         self, trading_symbol: str, quantity: int, transaction_type: str, trigger_price: float,
