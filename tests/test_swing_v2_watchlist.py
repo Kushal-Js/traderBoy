@@ -68,11 +68,52 @@ def test_3_missing_file_fails_open():
         wl_module.WATCHLIST_FILE = real_file
 
 
+def test_4_replace_symbols_wipes_and_replaces_not_adds():
+    async def run():
+        store = WatchlistStore()
+        await store.add_symbols(["OLDSTOCK1", "OLDSTOCK2"])
+        result = await store.replace_symbols(["ADANIPORTS", "coalindia", " copper "])
+        assert result == ["ADANIPORTS", "COALINDIA", "COPPER"], result
+        current = await store.symbols()
+        assert set(current) == {"ADANIPORTS", "COALINDIA", "COPPER"}, current
+        assert "OLDSTOCK1" not in current and "OLDSTOCK2" not in current, \
+            "replace must be a full wipe, not additive like add_symbols"
+    asyncio.run(run())
+    print("4. replace_symbols wipes the existing watchlist entirely (not additive), dedupes/uppercases: PASSED")
+
+
+def test_5_persist_to_file_writes_back_and_backs_up_the_old_file():
+    async def run():
+        store = WatchlistStore()
+        await store.replace_symbols(["ADANIPORTS", "COPPER"])
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "watchlist"
+            f.write_text("OLDSTOCK1\nOLDSTOCK2\n")
+            import Swing.watchlist as wl_module
+            real_file = wl_module.WATCHLIST_FILE
+            wl_module.WATCHLIST_FILE = f
+            try:
+                await store.persist_to_file()
+                new_content = f.read_text()
+                assert new_content == "ADANIPORTS\nCOPPER\n", repr(new_content)
+                backups = list(Path(d).glob("watchlist.bak.*"))
+                assert len(backups) == 1, "the pre-existing file must be backed up before being overwritten"
+                assert backups[0].read_text() == "OLDSTOCK1\nOLDSTOCK2\n", \
+                    "the backup must hold the OLD content, not the new one"
+            finally:
+                wl_module.WATCHLIST_FILE = real_file
+    asyncio.run(run())
+    print("5. persist_to_file overwrites the file with the current in-memory watchlist, backing up "
+          "the old content first: PASSED")
+
+
 def main():
     print("=== Swing v2 watchlist file-sync test suite ===\n")
     test_1_old_date_suffix_lines_are_stripped_to_just_the_symbol()
     test_2_plain_lines_without_a_suffix_still_work()
     test_3_missing_file_fails_open()
+    test_4_replace_symbols_wipes_and_replaces_not_adds()
+    test_5_persist_to_file_writes_back_and_backs_up_the_old_file()
     print("\nALL SWING V2 WATCHLIST CHECKS PASSED")
 
 

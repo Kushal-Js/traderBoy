@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
@@ -54,6 +55,51 @@ class WatchlistStore:
             existed = symbol.strip().upper() in self._symbols
             self._symbols.pop(symbol.strip().upper(), None)
             return existed
+
+    async def replace_symbols(self, symbols: List[str]) -> List[str]:
+        """Wipes the ENTIRE current watchlist and replaces it with exactly
+        `symbols` (added 12 Sep 2026, user request: "replace existing
+        watchlist contents... replace entire content of watchlist file any
+        time"). Unlike add_symbols/remove_symbol, this is NOT additive -
+        any symbol not in the new list stops being watched immediately
+        (any of ITS live positions are unaffected - see monitor_loop's own
+        handling of a position whose symbol has left the watchlist; this
+        only stops NEW entries on the removed symbol, it never touches an
+        already-open position). Deduplicates and uppercases, preserving
+        the order given. Caller is responsible for also calling
+        persist_to_file() if this replacement should survive a restart -
+        kept as two steps rather than one so an in-memory-only preview is
+        possible, though every real caller today does both together."""
+        async with self._lock:
+            self._symbols = {}
+            for sym in symbols:
+                sym = sym.strip().upper()
+                if sym:
+                    self._symbols[sym] = None
+            return list(self._symbols.keys())
+
+    async def persist_to_file(self) -> None:
+        """Overwrites WATCHLIST_FILE with the CURRENT in-memory watchlist,
+        one symbol per line - the write-back counterpart to sync_from_file
+        (added 12 Sep 2026 for the new /swing/watchlist/replace endpoint).
+        Without this, a replace only lives in memory: sync_from_file only
+        ever ADDS, so any symbol still sitting in the old on-disk file
+        would silently reappear on the next restart, quietly undoing the
+        replace. Backs up the existing file first (same discipline as
+        every other watchlist-file edit this session) - never a hard
+        overwrite with no way back."""
+        WATCHLIST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if WATCHLIST_FILE.exists():
+            backup_path = WATCHLIST_FILE.with_name(
+                f"{WATCHLIST_FILE.name}.bak.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
+            try:
+                backup_path.write_text(WATCHLIST_FILE.read_text())
+            except Exception:  # noqa: BLE001
+                logger.exception("Could not back up %s before overwriting it - proceeding anyway", WATCHLIST_FILE)
+        symbols = await self.symbols()
+        WATCHLIST_FILE.write_text("".join(f"{sym}\n" for sym in symbols))
+        logger.info("Persisted %d symbol(s) to %s: %s", len(symbols), WATCHLIST_FILE, symbols)
 
     async def symbols(self) -> List[str]:
         async with self._lock:

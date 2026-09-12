@@ -88,6 +88,13 @@ class WatchlistPayload(BaseModel):
         return [s.strip().upper() for s in self.stocks.split(",") if s.strip()]
 
 
+class WatchlistReplacePayload(BaseModel):
+    """A real JSON array, not the comma-separated `stocks` string the
+    add/remove endpoints use - added 12 Sep 2026 per explicit request
+    ("post a JSON data") for the bulk-replace endpoint below."""
+    symbols: list[str]
+
+
 # --------------------------------------------------------------------------- #
 # Watchlist management (user provides stocks directly - requirement #1)
 # --------------------------------------------------------------------------- #
@@ -103,6 +110,25 @@ async def remove_from_watchlist(payload: WatchlistPayload):
     stocks = payload.stock_list()
     removed = [s for s in stocks if await watchlist_store.remove_symbol(s)]
     return {"requested": stocks, "removed": removed}
+
+
+@router.post("/swing/watchlist/replace")
+async def replace_watchlist(payload: WatchlistReplacePayload):
+    """Wipes the ENTIRE watchlist and replaces it with exactly the given
+    symbols - added 12 Sep 2026, user request: "replace existing
+    watchlist contents with this json payload... replace entire content
+    of watchlist file any time". Unlike /add or /remove, this is NOT
+    additive: any symbol not in this payload stops being watched
+    immediately. Also rewrites data/watchlist (backed up first) so the
+    replacement survives a restart - see WatchlistStore.persist_to_file's
+    own docstring for why skipping that would let old symbols silently
+    reappear later. Does NOT touch any already-open position for a
+    removed symbol - only stops new entries on it.
+
+    Example body: {"symbols": ["ADANIPORTS", "COALINDIA", "COPPER"]}"""
+    new_watchlist = await watchlist_store.replace_symbols(payload.symbols)
+    await watchlist_store.persist_to_file()
+    return {"requested": payload.symbols, "watchlist": new_watchlist, "count": len(new_watchlist)}
 
 
 @router.get("/swing/watchlist")
