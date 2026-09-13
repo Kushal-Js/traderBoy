@@ -53,8 +53,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -76,23 +74,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
-# Every strategy's blocking Dhan/Tradehull calls (order placement, ATM/
-# futures resolution, margin checks, LTP REST fallback, position
-# reconciliation) go through `loop.run_in_executor(None, ...)`, which
-# without this would fall back to Python's default pool sized
-# min(32, cpu_count()+4) - just 5 threads on the droplet's 1 vCPU, shared
-# across ALL FOUR live strategies (Options/Futures/Luxury/Swing) at once.
-# Raised 13 Sep 2026 (user-requested, after identifying this as the real
-# bottleneck under simultaneous multi-stock/multi-strategy entries -
-# TOP_N_STOCKS=4 stocks already enter concurrently via asyncio.gather,
-# which alone can nearly saturate 5 threads) - these are I/O-bound waits
-# on Dhan's API, not CPU-bound work, so more threads than vCPUs is safe
-# and doesn't compete for the box's limited CPU the way more concurrent
-# computation would. Does NOT help with Dhan's own broker-side rate
-# limits (a separate, unaffected risk) - this only relieves OUR OWN
-# internal queuing.
-EXECUTOR_MAX_WORKERS = int(os.getenv("EXECUTOR_MAX_WORKERS", "10"))
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -102,15 +83,7 @@ async def lifespan(app: FastAPI):
     runs first since IndexScalping/Futures reuse its already-authenticated
     Dhan connection (see IndexScalping/paper_engine.py's and
     Futures/futures_main.py's docstrings) - keep it first in this nesting
-    if more strategies are added later that also depend on it.
-
-    The executor is sized BEFORE any strategy's lifespan starts, since
-    Options' own lifespan authenticates against Dhan immediately and that
-    already goes through run_in_executor."""
-    asyncio.get_running_loop().set_default_executor(
-        ThreadPoolExecutor(max_workers=EXECUTOR_MAX_WORKERS)
-    )
-    logger.info("Default executor sized to max_workers=%d", EXECUTOR_MAX_WORKERS)
+    if more strategies are added later that also depend on it."""
     async with option_main.lifespan(app):
         async with index_main.lifespan(app):
             async with futures_main.lifespan(app):
