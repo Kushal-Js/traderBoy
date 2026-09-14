@@ -188,16 +188,24 @@ class SupertrendState:
         return self.prev_is_above and not self.is_above
 
 
-_supertrend_cache: dict[str, tuple[datetime, Optional[SupertrendState]]] = {}
+_supertrend_cache: dict[tuple[str, int], tuple[datetime, Optional[SupertrendState]]] = {}
 
 
-def _fetch_supertrend_state_once(symbol: str) -> Optional[SupertrendState]:
+def _fetch_supertrend_state_once(symbol: str, interval_minutes: int) -> Optional[SupertrendState]:
     """Blocking - always call via run_in_executor. Returns None only if
     the fetch genuinely came back with too little data - callers treat
-    that as "no signal," never as a false crossover."""
+    that as "no signal," never as a false crossover.
+
+    interval_minutes was hardcoded to config.SUPERTREND_INTERVAL_MINUTES
+    (5) until 14 Sep 2026, when the "v2" combined entry strategy (see
+    Swing/config.py's ENTRY_STRATEGY_VERSION) needed a SECOND Supertrend
+    instance on the 15-min timeframe as an additional entry filter -
+    parameterized here rather than duplicating this whole function, since
+    period/multiplier/the crossover math are identical for either
+    timeframe, only the candle interval differs."""
     security_id, exchange_segment, instrument_type = _underlying_reference(symbol)
     data = dhan_wrapper.fetch_continuous_intraday(
-        security_id, exchange_segment, instrument_type, config.SUPERTREND_INTERVAL_MINUTES,
+        security_id, exchange_segment, instrument_type, interval_minutes,
     )
     highs = data.get("high") or []
     lows = data.get("low") or []
@@ -208,7 +216,7 @@ def _fetch_supertrend_state_once(symbol: str) -> Optional[SupertrendState]:
     period = config.SUPERTREND_PERIOD
     if timestamps:
         last_candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST)
-        if _now_ist() < last_candle_start + timedelta(minutes=config.SUPERTREND_INTERVAL_MINUTES):
+        if _now_ist() < last_candle_start + timedelta(minutes=interval_minutes):
             highs, lows, closes, volumes, timestamps = highs[:-1], lows[:-1], closes[:-1], volumes[:-1], timestamps[:-1]
 
     # period+1 candles for the first computable bar, one more on top for a
@@ -228,23 +236,34 @@ def _fetch_supertrend_state_once(symbol: str) -> Optional[SupertrendState]:
     )
 
 
-def peek_supertrend_state(symbol: str) -> Optional[SupertrendState]:
-    """Cache-only counterpart to peek_regime_state above."""
-    cached = _supertrend_cache.get(symbol)
+def peek_supertrend_state(symbol: str, interval_minutes: Optional[int] = None) -> Optional[SupertrendState]:
+    """Cache-only counterpart to peek_regime_state above. interval_minutes
+    defaults to config.SUPERTREND_INTERVAL_MINUTES (5) so every pre-14-Sep
+    call site (which only ever wants the one 5-min series) is unaffected
+    by this function now supporting a second timeframe."""
+    interval_minutes = interval_minutes if interval_minutes is not None else config.SUPERTREND_INTERVAL_MINUTES
+    cached = _supertrend_cache.get((symbol, interval_minutes))
     return cached[1] if cached else None
 
 
-async def get_supertrend_state(symbol: str) -> Optional[SupertrendState]:
+async def get_supertrend_state(symbol: str, interval_minutes: Optional[int] = None) -> Optional[SupertrendState]:
     """Cached, throttled (config.SUPERTREND_REFRESH_SECONDS), fail-open -
-    same "keep the last good value" discipline as get_regime_state above."""
-    cached = _supertrend_cache.get(symbol)
+    same "keep the last good value" discipline as get_regime_state above.
+    interval_minutes defaults to config.SUPERTREND_INTERVAL_MINUTES (5),
+    same backward-compatibility note as peek_supertrend_state above - the
+    v2 combined entry strategy is the only caller that ever passes a
+    different value (config.REGIME_SLOW_INTERVAL_MINUTES, 15)."""
+    interval_minutes = interval_minutes if interval_minutes is not None else config.SUPERTREND_INTERVAL_MINUTES
+    cache_key = (symbol, interval_minutes)
+    cached = _supertrend_cache.get(cache_key)
     if cached and (_now_ist() - cached[0]).total_seconds() < config.SUPERTREND_REFRESH_SECONDS:
         return cached[1]
     loop = asyncio.get_running_loop()
     try:
-        state = await loop.run_in_executor(None, _fetch_supertrend_state_once, symbol)
+        state = await loop.run_in_executor(None, _fetch_supertrend_state_once, symbol, interval_minutes)
     except Exception:  # noqa: BLE001
-        logger.exception("%s: could not fetch Supertrend state - keeping last cached value", symbol)
+        logger.exception("%s: could not fetch Supertrend state (%smin) - keeping last cached value",
+                          symbol, interval_minutes)
         return cached[1] if cached else None
-    _supertrend_cache[symbol] = (_now_ist(), state)
+    _supertrend_cache[cache_key] = (_now_ist(), state)
     return state

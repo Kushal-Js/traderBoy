@@ -230,6 +230,41 @@ SUPERTREND_INTERVAL_MINUTES = int(os.getenv("SWING_SUPERTREND_INTERVAL_MINUTES",
 SUPERTREND_REFRESH_SECONDS = int(os.getenv("SWING_SUPERTREND_REFRESH_SECONDS", "15"))
 ENABLE_SUPERTREND_EXIT = os.getenv("SWING_ENABLE_SUPERTREND_EXIT", "true").lower() == "true"
 
+# Entry-signal strategy version (user request 14 Sep 2026: "mark current
+# deployed EMA-regime strategy with a version and then add another
+# version to this Combined (15min ST OR EMA) strategy"). Two entry
+# filters share the SAME 5-min Supertrend crossover trigger and the SAME
+# exit ladder (nothing below this point changes between versions - see
+# Swing/trading_engine.py's _evaluate_exit_signal/_exit_reason_for,
+# neither reads this setting):
+#
+#   "v1" (default - the original 12 Sep 2026 design, UNCHANGED): regime
+#     is bullish (5-min EMA200 > 15-min EMA200) AND 5-min close crosses
+#     above the 5-min Supertrend -> BULLISH; the mirror for BEARISH.
+#
+#   "v2" (added 14 Sep 2026, backtested same-day: ADANIPORTS +Rs 17,765/
+#     35.0% WR, COALINDIA +Rs 12,487/40.9% WR, Copper +Rs 52,950/45.3% WR
+#     over the same 20-trading-day window that produced v1's own
+#     comparison numbers - see trading-skills for the full writeup):
+#     (15-min Supertrend showing green, i.e. close > its own Supertrend
+#     line - a LEVEL, not a crossover) OR (regime bullish) -> filter
+#     passes bullish; 5-min close crosses above the 5-min Supertrend ->
+#     BULLISH. Mirror for BEARISH. This is a strict OR against v1's
+#     single EMA-regime filter, so v2 never rejects a signal v1 would
+#     have taken - it only ever admits MORE entries.
+#
+# Default stays "v1" - a fresh deploy with no explicit override must
+# reproduce today's live behavior byte-for-byte, never silently switch
+# strategies. Switching to "v2" is a deliberate, explicit .env change.
+ENTRY_STRATEGY_VERSION = os.getenv("SWING_ENTRY_STRATEGY_VERSION", "v1").lower()
+if ENTRY_STRATEGY_VERSION not in ("v1", "v2"):
+    import logging
+    logging.getLogger(__name__).error(
+        "SWING_ENTRY_STRATEGY_VERSION=%r is not one of v1/v2 - falling back to v1.",
+        ENTRY_STRATEGY_VERSION,
+    )
+    ENTRY_STRATEGY_VERSION = "v1"
+
 # ---------------------------------------------------------------------------
 # Capacity (user request: "Keep Max Concurrent Trade capacity as 2 as of
 # now but make it configurable also"). ONE shared counter across the

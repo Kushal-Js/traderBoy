@@ -122,18 +122,44 @@ async def _record_swing_event(event: str, symbol: str, detail: dict) -> None:
 # Signal evaluation
 # --------------------------------------------------------------------------- #
 async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
-    """None unless BOTH the regime and Supertrend signals have real data.
-    "BULLISH" if the regime is bullish AND the 5-min close just crossed
-    ABOVE the 5-min Supertrend; "BEARISH" if the regime is bearish AND it
-    just crossed BELOW. Uses the crossover EDGE (crossed_above/
-    crossed_below - a state change between the last two closed candles),
-    not a standing "is above", so an established trend doesn't re-fire
-    an entry signal on every single bar."""
+    """None unless every signal this version needs has real data. Uses
+    the 5-min Supertrend's crossover EDGE (crossed_above/crossed_below -
+    a state change between the last two closed candles), not a standing
+    "is above", so an established trend doesn't re-fire an entry signal
+    on every single bar - true for BOTH versions below, only the
+    higher-timeframe FILTER that gates that trigger differs.
+
+    config.ENTRY_STRATEGY_VERSION ("v1" default / "v2", added 14 Sep
+    2026 - see Swing/config.py's own docstring for the full backtest
+    numbers behind this):
+
+    v1 (original design, unchanged): regime bullish (5-min EMA200 >
+      15-min EMA200) AND 5-min close crossed ABOVE the 5-min Supertrend
+      -> "BULLISH"; the mirror for "BEARISH".
+
+    v2 (combined): (15-min Supertrend showing green, i.e. its own close
+      is above its own Supertrend line - a LEVEL check, not a crossover)
+      OR (regime bullish) -> filter passes bullish; 5-min close crossed
+      ABOVE the 5-min Supertrend -> "BULLISH". Mirror for "BEARISH". This
+      OR means v2 can only admit MORE entries than v1 would from the
+      same underlying data, never fewer - v1's own filter is one of the
+      two ORed conditions."""
     regime = await signals.get_regime_state(symbol)
     if regime is None:
         return None
     st = await signals.get_supertrend_state(symbol)
     if st is None:
+        return None
+    if config.ENTRY_STRATEGY_VERSION == "v2":
+        st15 = await signals.get_supertrend_state(symbol, config.REGIME_SLOW_INTERVAL_MINUTES)
+        if st15 is None:
+            return None
+        filter_bullish = st15.is_above or regime.is_bullish
+        filter_bearish = (not st15.is_above) or (not regime.is_bullish)
+        if filter_bullish and st.crossed_above:
+            return "BULLISH"
+        if filter_bearish and st.crossed_below:
+            return "BEARISH"
         return None
     if regime.is_bullish and st.crossed_above:
         return "BULLISH"
