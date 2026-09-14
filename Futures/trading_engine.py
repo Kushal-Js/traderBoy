@@ -146,18 +146,20 @@ def _is_before_risk_threshold_cutoff() -> bool:
     return _now_ist() < _parse_hhmm_today(config.RISK_THRESHOLD_CUTOFF_TIME)
 
 
-def current_max_loss_per_trade_rs() -> float:
-    """MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF before config.
-    RISK_THRESHOLD_CUTOFF_TIME, MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF from
-    that instant on for the rest of the day (user request 31 Aug 2026) -
-    see config.py's own comment for the rationale. Evaluated fresh on
-    every _exit_reason_for() call (not cached), so a position that's been
-    open since before the cutoff is still re-evaluated against the
-    tighter afternoon cap once the clock crosses it, same as every other
-    time-of-day gate in this file."""
-    if _is_before_risk_threshold_cutoff():
-        return config.MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF
-    return config.MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF
+def current_max_loss_per_trade_rs(option_type: str) -> float:
+    """MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF_{CE,PE} before config.
+    RISK_THRESHOLD_CUTOFF_TIME, the matching _AFTER_CUTOFF_{CE,PE} from
+    that instant on for the rest of the day (user request 31 Aug 2026,
+    CE/PE split added 14 Sep 2026 - see config.py's own comment for the
+    rationale of each). Evaluated fresh on every _exit_reason_for() call
+    (not cached), so a position that's been open since before the cutoff
+    is still re-evaluated against the tighter afternoon cap once the
+    clock crosses it, same as every other time-of-day gate in this file."""
+    if option_type == "CE":
+        return (config.MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF_CE if _is_before_risk_threshold_cutoff()
+                else config.MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF_CE)
+    return (config.MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF_PE if _is_before_risk_threshold_cutoff()
+            else config.MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF_PE)
 
 
 def current_profit_protection_threshold_rs() -> float:
@@ -645,7 +647,7 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
     # MAX_LOSS_HIT check.
     stop_loss_order_id = None
     if config.BROKER_STOP_LOSS_ENABLED:
-        max_loss_cap = current_max_loss_per_trade_rs()
+        max_loss_cap = current_max_loss_per_trade_rs(option_type)
         trigger_price = fill_price - (max_loss_cap / quantity)
         # Gap sized in RUPEES off the SAME cap used for trigger_price - see
         # Options/config.py's BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE docstring
@@ -1149,7 +1151,7 @@ def _exit_reason_for(
     fetches/passes it (see _ema_cross_signal_for)."""
     loss_rs = (position.entry_price - ltp) * position.quantity
     if (config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF or not _is_before_risk_threshold_cutoff()) \
-            and loss_rs >= current_max_loss_per_trade_rs():
+            and loss_rs >= current_max_loss_per_trade_rs(position.option_type):
         return "MAX_LOSS_HIT"
     if config.ENABLE_TARGET_EXIT and ltp >= position.target_price:
         return "TARGET_HIT"

@@ -281,6 +281,24 @@ ENABLE_TARGET_EXIT = os.getenv("ENABLE_TARGET_EXIT", "true").lower() == "true"
 MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF = float(os.getenv("MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF", "1200"))
 MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF = float(os.getenv("MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF", "1000"))
 
+# Split into CE/PE-specific overrides (user request 14 Sep 2026: tighter
+# caps for PE only - Rs 3500/1600 vs whatever CE stays at) - same
+# established pattern as MAX_LIVE_POSITIONS_CE/_PE and DYNAMIC_SL_STEP_
+# PCT_CE/_PE above. Each falls back to the existing shared value above if
+# its own CE/PE-specific env var isn't set, so CE's behavior (and PE's,
+# until explicitly overridden) is unchanged from before this split -
+# nothing here silently changes what was already deployed. See
+# trading_engine.current_max_loss_per_trade_rs(option_type) for where
+# this is actually applied.
+MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF_CE = float(os.getenv(
+    "MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF_CE", str(MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF)))
+MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF_CE = float(os.getenv(
+    "MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF_CE", str(MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF)))
+MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF_PE = float(os.getenv(
+    "MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF_PE", str(MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF)))
+MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF_PE = float(os.getenv(
+    "MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF_PE", str(MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF)))
+
 # Master on/off switch for the MAX_LOSS_HIT exit specifically BEFORE
 # RISK_THRESHOLD_CUTOFF_TIME (added 11 Sep 2026, user request: "disable
 # MAX_LOSS_HIT for before 11:30 and add exit conditions as below: EMA 9

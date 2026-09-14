@@ -132,6 +132,23 @@ ENABLE_TARGET_EXIT = os.getenv("FUTURES_ENABLE_TARGET_EXIT", "true").lower() == 
 MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF = float(os.getenv("FUTURES_MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF", "1200"))
 MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF = float(os.getenv("FUTURES_MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF", "1000"))
 
+# Split into CE/PE-specific overrides (user request 14 Sep 2026: tighter
+# caps for PE only - Rs 3500/1600 vs whatever CE stays at) - see
+# Options/config.py's own identical split for the full rationale. Note:
+# futures_main.py only exposes a bullish (CE) webhook today (see
+# MAX_LIVE_POSITIONS_PE's own comment above) - this PE override has no
+# live effect until/unless a bearish endpoint exists, same "kept for
+# parity" reasoning as that capacity cap. Each falls back to the existing
+# shared value above if its own CE/PE-specific env var isn't set.
+MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF_CE = float(os.getenv(
+    "FUTURES_MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF_CE", str(MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF)))
+MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF_CE = float(os.getenv(
+    "FUTURES_MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF_CE", str(MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF)))
+MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF_PE = float(os.getenv(
+    "FUTURES_MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF_PE", str(MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF)))
+MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF_PE = float(os.getenv(
+    "FUTURES_MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF_PE", str(MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF)))
+
 # See Options/config.py's ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF comment (11
 # Sep 2026) for the full rationale - this package's own independently-
 # tunable switch. Default False = MAX_LOSS_HIT never fires before
