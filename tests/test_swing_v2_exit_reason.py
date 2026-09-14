@@ -26,6 +26,18 @@ import Swing.trading_engine as ste
 from Swing.position_store import Position
 from Swing.signals import SupertrendState
 
+# Captured at import time (before any test can have monkeypatched it) -
+# Swing.trading_engine's `signals` reference IS the real Swing.signals
+# module object, not a copy, so `ste.signals.get_supertrend_state = ...`
+# mutates the one shared instance every test file in this session sees.
+# A test that patches it must restore THIS exact reference afterward, or
+# the fake silently leaks into every test that runs later in the same
+# pytest process, in any file, regardless of which module "owns" it -
+# see test_6 below for the real incident this fixes (14 Sep 2026: caused
+# tests/test_swing_v2_signals.py's own Supertrend test to read this
+# file's leftover fake data whenever both files ran in the same session).
+_REAL_GET_SUPERTREND_STATE = ste.signals.get_supertrend_state
+
 
 def _make_position(**overrides):
     defaults = dict(
@@ -153,6 +165,7 @@ async def test_6_supertrend_reversal_suppressed_on_the_entry_candle():
               "later reversal fires SUPERTREND_REVERSAL: PASSED")
     finally:
         sc.ENABLE_SUPERTREND_EXIT = real_supertrend
+        ste.signals.get_supertrend_state = _REAL_GET_SUPERTREND_STATE
 
 
 async def _resolved(value):

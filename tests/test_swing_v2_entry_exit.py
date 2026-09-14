@@ -51,6 +51,17 @@ import Swing.signals as signals
 import Swing.trading_engine as ste
 from Swing.position_store import SwingPositionStore, exit_transaction_type
 
+# Captured at import time, before any test (in this file or any other
+# test_swing_v2_*.py file collected in the same pytest run) can have
+# monkeypatched it - ste.signals IS the real Swing.signals module object,
+# not a copy, so overwriting ste.signals.get_supertrend_state mutates the
+# one instance every test file shares. _set() below patches it on every
+# test in this file; install_mocks()'s own restore() puts this exact
+# reference back so nothing leaks into a later-running file (see
+# test_swing_v2_exit_reason.py's own _REAL_GET_SUPERTREND_STATE for the
+# real incident this pattern fixes).
+_REAL_GET_SUPERTREND_STATE = ste.signals.get_supertrend_state
+
 FUTURE_EXPIRY = date.today() + timedelta(days=25)
 
 
@@ -134,6 +145,7 @@ def install_mocks(broker_net_quantity=250, fail_stop_loss_placement=False, entry
     def restore():
         for name, fn in originals.items():
             setattr(odc.dhan_wrapper, name, fn)
+        ste.signals.get_supertrend_state = _REAL_GET_SUPERTREND_STATE
     return restore, placed_orders, stop_loss_calls
 
 

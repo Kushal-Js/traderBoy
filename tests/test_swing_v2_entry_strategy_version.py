@@ -39,6 +39,18 @@ import Swing.config as sc
 import Swing.trading_engine as ste
 from Swing.signals import RegimeState, SupertrendState
 
+# Captured at import time, before any test (in this file or any other
+# test_swing_v2_*.py file collected in the same pytest run) can have
+# monkeypatched it - ste.signals IS the real Swing.signals module object,
+# not a copy, so a test that overwrites ste.signals.get_regime_state/
+# get_supertrend_state and never restores it leaks that fake into every
+# OTHER test file that runs afterward in the same pytest process (see
+# tests/test_swing_v2_exit_reason.py's own _REAL_GET_SUPERTREND_STATE for
+# the real incident - 14 Sep 2026 - this pattern fixes across the whole
+# suite). Every test below restores both from these two references.
+_REAL_GET_REGIME_STATE = ste.signals.get_regime_state
+_REAL_GET_SUPERTREND_STATE = ste.signals.get_supertrend_state
+
 
 def _regime(is_bullish: bool) -> RegimeState:
     return RegimeState(fast_ema=101.0 if is_bullish else 99.0, slow_ema=100.0, is_bullish=is_bullish,
@@ -85,6 +97,8 @@ def test_1_v1_ignores_15min_supertrend_entirely():
         print("1. v1 ignores the 15-min Supertrend entirely (regime alone gates it, unchanged): PASSED")
     finally:
         sc.ENTRY_STRATEGY_VERSION = real_version
+        ste.signals.get_regime_state = _REAL_GET_REGIME_STATE
+        ste.signals.get_supertrend_state = _REAL_GET_SUPERTREND_STATE
 
 
 def test_2_v2_admits_bullish_via_15min_supertrend_alone():
@@ -99,6 +113,8 @@ def test_2_v2_admits_bullish_via_15min_supertrend_alone():
         print("2. v2 admits BULLISH when only the 15-min Supertrend agrees (EMA-regime disagrees): PASSED")
     finally:
         sc.ENTRY_STRATEGY_VERSION = real_version
+        ste.signals.get_regime_state = _REAL_GET_REGIME_STATE
+        ste.signals.get_supertrend_state = _REAL_GET_SUPERTREND_STATE
 
 
 def test_3_v2_admits_bullish_via_ema_regime_alone():
@@ -113,6 +129,8 @@ def test_3_v2_admits_bullish_via_ema_regime_alone():
         print("3. v2 admits BULLISH when only the EMA-regime agrees (15-min Supertrend disagrees): PASSED")
     finally:
         sc.ENTRY_STRATEGY_VERSION = real_version
+        ste.signals.get_regime_state = _REAL_GET_REGIME_STATE
+        ste.signals.get_supertrend_state = _REAL_GET_SUPERTREND_STATE
 
 
 def test_4_v2_mirrors_bearish_case():
@@ -127,6 +145,8 @@ def test_4_v2_mirrors_bearish_case():
         print("4. v2's BEARISH mirror admits the entry when only the 15-min Supertrend agrees: PASSED")
     finally:
         sc.ENTRY_STRATEGY_VERSION = real_version
+        ste.signals.get_regime_state = _REAL_GET_REGIME_STATE
+        ste.signals.get_supertrend_state = _REAL_GET_SUPERTREND_STATE
 
 
 def test_5_v2_rejects_when_both_filters_disagree_with_the_crossover():
@@ -143,6 +163,8 @@ def test_5_v2_rejects_when_both_filters_disagree_with_the_crossover():
         print("5. v2 correctly rejects a crossover neither higher-timeframe filter supports: PASSED")
     finally:
         sc.ENTRY_STRATEGY_VERSION = real_version
+        ste.signals.get_regime_state = _REAL_GET_REGIME_STATE
+        ste.signals.get_supertrend_state = _REAL_GET_SUPERTREND_STATE
 
 
 if __name__ == "__main__":

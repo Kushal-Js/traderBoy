@@ -54,6 +54,13 @@ import Swing.config as sc
 import Swing.trading_engine as ste
 from Swing.position_store import unrealized_pnl_rs
 
+# Captured at import time, before any test (in this file or any other
+# test_swing_v2_*.py file collected in the same pytest run) can have
+# monkeypatched it - see test_swing_v2_exit_reason.py's own
+# _REAL_GET_SUPERTREND_STATE for the real cross-file leak this pattern
+# fixes (ste.signals IS the shared Swing.signals module, not a copy).
+_REAL_GET_SUPERTREND_STATE = ste.signals.get_supertrend_state
+
 FUTURE_EXPIRY = date.today() + timedelta(days=25)
 
 
@@ -99,6 +106,7 @@ def install_mocks():
     def restore():
         for name, fn in originals.items():
             setattr(odc.dhan_wrapper, name, fn)
+        ste.signals.get_supertrend_state = _REAL_GET_SUPERTREND_STATE
     return restore, placed_orders, ws_calls
 
 
