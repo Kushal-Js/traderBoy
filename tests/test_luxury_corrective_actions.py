@@ -175,7 +175,7 @@ def install_all_dhan_mocks(volumes_sequence=None):
     # For the liquidity-guard tests: mock _instrument_meta (security_id
     # lookup) and the raw Dhan intraday_minute_data call the new
     # refresh_liquidity_signal makes directly.
-    odc.dhan_wrapper._instrument_meta = lambda trading_symbol: {"security_id": "999999"}
+    odc.dhan_wrapper._instrument_meta = lambda trading_symbol, expected_exchange=None: {"security_id": "999999"}
     seq_iter = iter(volumes_sequence or [])
 
     class FakeDhanClient:

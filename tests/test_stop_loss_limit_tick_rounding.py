@@ -72,7 +72,7 @@ def _wrapper_with_order_placement(tick_size, order_id="999"):
         return order_id
 
     wrapper._client = types.SimpleNamespace(order_placement=fake_order_placement)
-    wrapper._instrument_meta = lambda trading_symbol: {"tick_size": tick_size}
+    wrapper._instrument_meta = lambda trading_symbol, expected_exchange=None: {"tick_size": tick_size}
     return wrapper, calls
 
 
@@ -120,7 +120,7 @@ def test_4_place_stop_loss_limit_order_sends_tick_rounded_prices():
 
 def test_5_tick_lookup_failure_falls_back_without_blocking_the_order():
     wrapper, calls = _wrapper_with_order_placement(tick_size=0.05)
-    def raising_meta(trading_symbol):
+    def raising_meta(trading_symbol, expected_exchange=None):
         raise ValueError("simulated instrument lookup failure")
     wrapper._instrument_meta = raising_meta
 

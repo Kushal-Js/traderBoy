@@ -413,7 +413,23 @@ class DhanWrapper:
             return parts[0]
         return "-".join(parts[:-3])
 
-    def _instrument_meta(self, trading_symbol: str) -> dict:
+    def _is_mcx_commodity(self, underlying_symbol: str) -> bool:
+        """Data-driven check (no hardcoded symbol list, no cross-package
+        config import needed) - does a real MCX FUTCOM contract for this
+        underlying exist in the instrument master right now? Same
+        STARTSWITH convention _get_mcx_futures_contract_once already uses.
+        Used by _get_atm_option_once to tell _instrument_meta which
+        exchange it actually wants (see that function's own
+        expected_exchange docstring for the real incident this exists to
+        prevent)."""
+        df = self.instruments()
+        return bool((
+            (df["SEM_EXM_EXCH_ID"] == "MCX")
+            & (df["SEM_INSTRUMENT_NAME"] == "FUTCOM")
+            & (df["SEM_TRADING_SYMBOL"].str.startswith(underlying_symbol + "-"))
+        ).any())
+
+    def _instrument_meta(self, trading_symbol: str, expected_exchange: Optional[str] = None) -> dict:
         """Looks up an instrument by trading_symbol string. NOTE: the scrip
         master is not guaranteed unique on SEM_TRADING_SYMBOL (confirmed
         live - two different SBIN option contracts shared the exact same
@@ -428,17 +444,36 @@ class DhanWrapper:
         natively resolves a valid MCX OPTFUT SEM_CUSTOM_SYMBOL for a
         commodity underlying (it has its own commodity_step_dict branch);
         this function was the only thing rejecting the row it hands back.
-        NSE and MCX trading/custom symbol strings look nothing alike in
-        practice (e.g. "RELIANCE-Aug2026-..." vs "COPPER-23Sep2026-..."),
-        so widening this is not expected to introduce cross-exchange
-        ambiguity for any symbol actually in use."""
+
+        `expected_exchange` (added 14 Sep 2026 - REAL LIVE BUG found while
+        investigating Copper's margin requirements, not theoretical):
+        Dhan's own instrument master is not even guaranteed unique ACROSS
+        exchanges on this symbol-string match, contrary to this function's
+        original "NSE and MCX symbol strings look nothing alike" assumption
+        above. Confirmed live: "COPPER-23Sep2026-1360-CE" / "COPPER 23 SEP
+        1360 CALL" matches BOTH a genuine MCX OPTFUT row (security_id
+        574852, expiry 23-Sep 23:30 - a real MCX Copper option expiry time)
+        AND a bogus row tagged SEM_EXM_EXCH_ID="NSE" with an invalid expiry
+        time (security_id 123250, expiry 20:00 - not a real NSE or MCX
+        session time), which looks like corrupted/duplicate data in Dhan's
+        own scrip master rather than a real tradeable instrument. Without
+        a hint, `.iloc[-1]` below picked the bogus NSE row - get_atm_option
+        ("COPPER", "CE") would have handed a live entry a security_id that
+        doesn't correspond to any real instrument. Every call site that
+        knows which exchange it actually wants (all of them do - each one
+        either only ever deals with NSE_FNO, or MCX_COMM specifically) now
+        passes it, so the ambiguous cross-exchange row can never win a
+        tiebreak it has no business being in."""
         df = self.instruments()
         row = df[
             ((df["SEM_TRADING_SYMBOL"] == trading_symbol) | (df["SEM_CUSTOM_SYMBOL"] == trading_symbol))
             & (df["SEM_EXM_EXCH_ID"].isin(["NSE", "MCX"]))
         ]
+        if expected_exchange is not None:
+            row = row[row["SEM_EXM_EXCH_ID"] == expected_exchange]
         if row.empty:
-            raise ValueError(f"No instrument found for trading_symbol {trading_symbol}")
+            suffix = f" on {expected_exchange}" if expected_exchange else ""
+            raise ValueError(f"No instrument found for trading_symbol {trading_symbol}{suffix}")
         r = row.iloc[-1]
         return {
             "security_id": str(int(r["SEM_SMST_SECURITY_ID"])),
@@ -651,14 +686,18 @@ class DhanWrapper:
     def subscribe_option_price(self, trading_symbol: str) -> None:
         if not config.ENABLE_WS_FEED:
             return
-        meta = self._instrument_meta(trading_symbol)
+        # NSE_FNO-only subscription (no MCX WS feed exists in this codebase
+        # today - see Swing/trading_engine.py's own guard) - expected_exchange
+        # pins the lookup so a symbol-string collision with an unrelated
+        # MCX row (see _instrument_meta's own docstring) can never win here.
+        meta = self._instrument_meta(trading_symbol, expected_exchange="NSE")
         self._security_id_to_symbol[meta["security_id"]] = trading_symbol
         self.market_feed.subscribe_symbols([(MarketFeed.NSE_FNO, meta["security_id"], MarketFeed.Ticker)])
 
     def unsubscribe_option_price(self, trading_symbol: str) -> None:
         if not config.ENABLE_WS_FEED:
             return
-        meta = self._instrument_meta(trading_symbol)
+        meta = self._instrument_meta(trading_symbol, expected_exchange="NSE")
         security_id = meta["security_id"]
         self._security_id_to_symbol.pop(security_id, None)
         # Found + fixed 31 Aug 2026 (user request, "memory issues" audit):
@@ -696,7 +735,7 @@ class DhanWrapper:
         catches genuinely stale/silent instruments."""
         if not config.ENABLE_WS_FEED:
             return None
-        meta = self._instrument_meta(trading_symbol)
+        meta = self._instrument_meta(trading_symbol, expected_exchange="NSE")
         security_id = meta["security_id"]
         ltp = self._ltp_cache.get(security_id)
         if ltp is not None and config.LTP_STALE_AFTER_SECONDS > 0:
@@ -725,7 +764,7 @@ class DhanWrapper:
         naturally throttled to roughly once per LTP_STALE_AFTER_SECONDS,
         not once per poll."""
         try:
-            meta = self._instrument_meta(trading_symbol)
+            meta = self._instrument_meta(trading_symbol, expected_exchange="NSE")
         except ValueError:
             return  # best-effort - a lookup failure here shouldn't break the exit check that called us
         self._ltp_cache[meta["security_id"]] = ltp
@@ -821,7 +860,8 @@ class DhanWrapper:
         if not trading_symbol:
             raise ValueError(f"No {option_type} leg found for {underlying_symbol} at strike {strike}")
 
-        meta = self._instrument_meta(trading_symbol)
+        expected_exchange = "MCX" if self._is_mcx_commodity(underlying_symbol) else "NSE"
+        meta = self._instrument_meta(trading_symbol, expected_exchange=expected_exchange)
         return AtmOption(
             trading_symbol=trading_symbol,
             strike=float(strike),
@@ -1642,7 +1682,7 @@ class DhanWrapper:
         if cached and (datetime.now(IST) - cached[0]).total_seconds() < config.LIQUIDITY_GUARD_REFRESH_SECONDS:
             return
         try:
-            security_id = self._instrument_meta(option_trading_symbol)["security_id"]
+            security_id = self._instrument_meta(option_trading_symbol, expected_exchange="NSE")["security_id"]
             # Continuous multi-session 1-min series (fetch_continuous_intraday)
             # rather than today-only: the "last N bars all zero volume" check
             # can then fire in the first N minutes of the session too, using
@@ -2119,7 +2159,7 @@ class DhanWrapper:
         _instrument_meta's own docstring) - confirm against a real MCX
         tick before relying on this in production."""
         try:
-            tick_size = self._instrument_meta(trading_symbol).get("tick_size")
+            tick_size = self._instrument_meta(trading_symbol, expected_exchange="MCX").get("tick_size")
         except Exception:  # noqa: BLE001
             logger.exception(
                 "%s: could not look up the real tick size before placing the MCX SL-L order - "
@@ -2277,7 +2317,7 @@ class DhanWrapper:
         after a real intraday fill)."""
         product_type = product_type or config.OPTIONS_PRODUCT
         try:
-            tick_size = self._instrument_meta(trading_symbol).get("tick_size")
+            tick_size = self._instrument_meta(trading_symbol, expected_exchange="NSE").get("tick_size")
         except Exception:  # noqa: BLE001
             logger.exception(
                 "%s: could not look up the real tick size before placing the SL-L order - falling "
