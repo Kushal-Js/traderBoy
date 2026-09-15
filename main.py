@@ -42,7 +42,13 @@ in the same process. Three are mounted today:
     defined. The first package in this codebase to trade an actual
     futures contract (Options/dhan_client.py's new get_futures_contract())
     rather than buying an ATM option as a placeholder for one.
-A seventh strategy would be added the same way - its own package,
+  - Paper01/paper01_main.py - user request 15 Sep 2026: a real-time,
+    paper-only twin of the Options strategy - exact same entry/exit rules
+    (reuses Options' own ranking/exit-ladder/Position code directly, see
+    Paper01/trading_engine.py's own docstring), own CE+PE webhooks, own
+    separate paper-only position pool/capacity, PAPER TRADING ONLY (see
+    Paper01/config.py's safety invariant) - never places a real order.
+An eighth strategy would be added the same way - its own package,
 exporting `router` + `lifespan`, mounted below - without touching any
 existing one.
 
@@ -69,6 +75,7 @@ from Futures import futures_main
 from K01 import screener_main
 from Luxury import luxury_main
 from Swing import swing_main
+from Paper01 import paper01_main
 
 logging.basicConfig(
     level=logging.INFO,
@@ -128,7 +135,8 @@ async def lifespan(app: FastAPI):
                 async with screener_main.lifespan(app):
                     async with luxury_main.lifespan(app):
                         async with swing_main.lifespan(app):
-                            yield
+                            async with paper01_main.lifespan(app):
+                                yield
 
 
 app = FastAPI(title="Chartink -> Dhan Algo Bot", lifespan=lifespan)
@@ -138,6 +146,7 @@ app.include_router(futures_main.router)
 app.include_router(screener_main.router)
 app.include_router(luxury_main.router)
 app.include_router(swing_main.router)
+app.include_router(paper01_main.router)
 
 
 # --------------------------------------------------------------------------- #
@@ -203,10 +212,10 @@ async def webhook_alerts(strategy: str | None = None):
     returns all; pass strategy=Options/Futures/Luxury/Swing/Swing-Watchlist/
     Options-PaperTrade to filter to one."""
     if strategy is not None and strategy not in (
-        "Options", "Futures", "Luxury", "Swing", "Swing-Watchlist", "Options-PaperTrade",
+        "Options", "Futures", "Luxury", "Swing", "Swing-Watchlist", "Options-PaperTrade", "Paper01",
     ):
         return {"error": "strategy must be 'Options', 'Futures', 'Luxury', 'Swing', 'Swing-Watchlist', "
-                          "or 'Options-PaperTrade' (or omitted for all)"}
+                          "'Options-PaperTrade', or 'Paper01' (or omitted for all)"}
     alerts = read_all_webhook_alerts(strategy)
     return {"count": len(alerts), "alerts": alerts}
 
