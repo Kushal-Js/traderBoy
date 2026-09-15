@@ -189,6 +189,20 @@ async def _evaluate_exit_signal(symbol: str, position: Position) -> Optional[str
     return None
 
 
+def current_profit_protection_rs(basket_type: str) -> float:
+    """OPTIONS gets its own override (see config.py's own comment on
+    PROFIT_PROTECTION_RS_OPTIONS) - falls back to the shared
+    PROFIT_PROTECTION_RS for FUTURES/EQUITY, unchanged."""
+    return config.PROFIT_PROTECTION_RS_OPTIONS if basket_type == "OPTIONS" else config.PROFIT_PROTECTION_RS
+
+
+def current_profit_protection_giveback_pct(basket_type: str) -> float:
+    return (
+        config.PROFIT_PROTECTION_GIVEBACK_PCT_OPTIONS if basket_type == "OPTIONS"
+        else config.PROFIT_PROTECTION_GIVEBACK_PCT
+    )
+
+
 def _exit_reason_for(position: Position, ltp: float) -> Optional[str]:
     """Pure function - flat rupee/percent thresholds (user request: MAX
     LOSS PROTECTION=4500, PROFIT PROTECTION=2000, TARGET=20%, HARD STOP
@@ -196,7 +210,13 @@ def _exit_reason_for(position: Position, ltp: float) -> Optional[str]:
     in this codebase (rupee cap first, then target, then profit-lock,
     then the hard stop). Direction-aware via Swing/position_store.py's
     pure helpers - see that module for the LONG vs SHORT math, especially
-    giveback_floor's mirrored sign for a SHORT."""
+    giveback_floor's mirrored sign for a SHORT.
+
+    PROFIT_PROTECTION_RS/_GIVEBACK_PCT are basket_type-aware (see
+    current_profit_protection_rs/_giveback_pct above) - an OPTIONS
+    position reads its own, separately-tunable threshold instead of the
+    shared FUTURES/EQUITY one, evaluated fresh off position.basket_type
+    (snapshotted at entry) on every check."""
     side = position.instrument_side
     loss_rs = -unrealized_pnl_rs(side, position.entry_price, ltp, position.pnl_multiplier)
     if loss_rs >= config.MAX_LOSS_PROTECTION_RS:
@@ -204,8 +224,8 @@ def _exit_reason_for(position: Position, ltp: float) -> Optional[str]:
     if config.ENABLE_TARGET_EXIT and price_past_target(side, ltp, position.target_price):
         return "TARGET_HIT"
     peak_profit_rs = unrealized_pnl_rs(side, position.entry_price, position.best_price, position.pnl_multiplier)
-    if peak_profit_rs > config.PROFIT_PROTECTION_RS:
-        floor = giveback_floor(side, position.best_price, config.PROFIT_PROTECTION_GIVEBACK_PCT)
+    if peak_profit_rs > current_profit_protection_rs(position.basket_type):
+        floor = giveback_floor(side, position.best_price, current_profit_protection_giveback_pct(position.basket_type))
         if price_past_giveback_floor(side, ltp, floor):
             return "PROFIT_PROTECTION_HIT"
     if price_past_hard_stop(side, ltp, position.hard_stop_loss):

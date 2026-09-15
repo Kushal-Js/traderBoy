@@ -134,6 +134,25 @@ MAX_LOSS_PROTECTION_RS = float(os.getenv("SWING_MAX_LOSS_PROTECTION_RS", "4500")
 # giveback default (lock in the instant price is off the peak).
 PROFIT_PROTECTION_RS = float(os.getenv("SWING_PROFIT_PROTECTION_RS", "2000"))
 PROFIT_PROTECTION_GIVEBACK_PCT = float(os.getenv("SWING_PROFIT_PROTECTION_GIVEBACK_PCT", "0.0"))
+
+# OPTIONS-specific override (user request 15 Sep 2026, straight off
+# switching BASKET_TYPE to options): the values above were tuned against
+# FUTURES-notional P&L (see the backtest history right above) - an
+# option's own premium swings represent a much smaller absolute rupee
+# move for the same underlying move, so the same flat 5000/2% threshold
+# arms far later relative to a typical options trade's real profit
+# potential. Falls back to the shared PROFIT_PROTECTION_RS/_GIVEBACK_PCT
+# above when unset, so FUTURES/EQUITY baskets are completely unaffected -
+# same "new variant, old value stays the default" pattern already used
+# for Options/Futures/Luxury's own CE/PE-specific splits. Read by
+# basket_type at each exit check (see current_profit_protection_rs/
+# current_profit_protection_giveback_pct in trading_engine.py), not
+# baked into the Position at entry - so a live tune here applies to an
+# already-open OPTIONS position's very next check too.
+PROFIT_PROTECTION_RS_OPTIONS = float(os.getenv("SWING_PROFIT_PROTECTION_RS_OPTIONS", str(PROFIT_PROTECTION_RS)))
+PROFIT_PROTECTION_GIVEBACK_PCT_OPTIONS = float(
+    os.getenv("SWING_PROFIT_PROTECTION_GIVEBACK_PCT_OPTIONS", str(PROFIT_PROTECTION_GIVEBACK_PCT))
+)
 TARGET_PCT = float(os.getenv("SWING_TARGET_PCT", "0.20"))
 HARD_STOP_LOSS_PCT = float(os.getenv("SWING_HARD_STOP_LOSS_PCT", "0.20"))
 ENABLE_TARGET_EXIT = os.getenv("SWING_ENABLE_TARGET_EXIT", "true").lower() == "true"
