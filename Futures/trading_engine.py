@@ -229,6 +229,34 @@ async def reconcile_broker_positions() -> list[Position]:
             )
             continue
 
+        # Proactively discover a pre-existing resting broker-side stop-loss
+        # order for this reconciled position (added 15 Sep 2026, real
+        # incident on Options/JSWENERGY - see Options/trading_engine.py's
+        # identical addition and Options/dhan_client.py's get_pending_
+        # order_id fix for the full incident writeup): reconciliation
+        # otherwise has no way to learn about one, leaving Position.stop_
+        # loss_order_id empty and _exit_position's own scan as the only
+        # remaining safety net. Best-effort: a failure here just leaves
+        # stop_loss_order_id empty, exactly as before this change.
+        stop_loss_order_id = None
+        if config.BROKER_STOP_LOSS_ENABLED:
+            try:
+                stop_loss_order_id = await loop.run_in_executor(
+                    None, dhan_wrapper.get_pending_order_id, bp["trading_symbol"], "SELL"
+                )
+                if stop_loss_order_id:
+                    logger.info(
+                        "%s: discovered a pre-existing resting SELL order %s during reconciliation - "
+                        "tracking it as this position's own stop-loss order.",
+                        bp["trading_symbol"], stop_loss_order_id,
+                    )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "%s: could not check for a pre-existing resting stop-loss order during "
+                    "reconciliation - proceeding without it (same as before this check existed)",
+                    bp["trading_symbol"],
+                )
+
         positions.append(Position(
             underlying_symbol=bp["underlying_symbol"],
             option_trading_symbol=bp["trading_symbol"],
@@ -240,6 +268,7 @@ async def reconcile_broker_positions() -> list[Position]:
             target_price=avg_price * (1 + config.TARGET_PCT),
             hard_stop_loss=avg_price * (1 - config.STOP_LOSS_PCT),
             order_id="",
+            stop_loss_order_id=stop_loss_order_id,
             # NOT bp["product_type"]: the broker's positions API reports a
             # human-readable label ("INTRADAY"), not the product code our
             # own order_placement() call needs ("MIS") - passing the label

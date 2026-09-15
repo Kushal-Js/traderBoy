@@ -1920,10 +1920,10 @@ class DhanWrapper:
         return 0
 
     def get_pending_order_id(self, trading_symbol: str, transaction_type: str) -> Optional[str]:
-        """order_id of an existing non-terminal (TRANSIT/PENDING/PART_TRADED)
-        broker order for this EXACT trading_symbol + transaction_type, or
-        None if there isn't one. Used to avoid placing a duplicate exit
-        order on top of one already outstanding at the broker.
+        """order_id of an existing non-terminal broker order for this EXACT
+        contract + transaction_type, or None if there isn't one. Used to
+        avoid placing a duplicate exit order on top of one already
+        outstanding at the broker.
 
         Confirmed live on 26 Aug 2026 (BHARATFORG): our own in-memory
         pending_exit_order_id tracking is wiped by a restart, but a SELL
@@ -1938,20 +1938,55 @@ class DhanWrapper:
         your pending order... cancel that order") - see NOTES.md's
         design-decision entry for the sources.
 
-        TRIGGER_PENDING is in the status filter so a still-resting broker-
-        side SL-L stop order (it sits in that status until its trigger
-        fires) is matched here too. Even so, this scan can miss an order
+        Matches on EITHER the raw tradingSymbol string OR the resolved
+        security_id (added 15 Sep 2026, real incident): this scan used to
+        match on tradingSymbol alone, which silently missed JSWENERGY's
+        genuinely-resting broker-side SL-L stop order at exit time - the
+        position had been reconciled from the broker earlier that session
+        (reconciliation has no way to discover a pre-existing resting
+        order, so Position.stop_loss_order_id was empty, leaving THIS scan
+        as the only remaining safety net), and Dhan's order-list API can
+        echo tradingSymbol in a different format (SEM_TRADING_SYMBOL)
+        than this codebase's own trading_symbol values (always SEM_CUSTOM_
+        SYMBOL - see _instrument_meta's own docstring) - a plain string
+        match can miss a real match that a security_id comparison would
+        catch. _instrument_meta already resolves either format to the
+        same security_id, so this reuses it rather than inventing a new
+        lookup; a failure to resolve it here (e.g. the instrument isn't in
+        today's master) just means falling back to the string match alone,
+        never a hard failure of this safety check.
+
+        Status check switched from an explicit allow-list (which
+        included "TRIGGER_PENDING" - not actually one of DhanHQ's
+        documented order statuses, see OrderStatus's own docstring) to
+        OrderStatus.TERMINAL_STATUSES as a deny-list: ANY status that
+        ISN'T definitively terminal (REJECTED/CANCELLED/TRADED/EXPIRED)
+        means the order can still affect real money and must be treated
+        as "still there," rather than trying to keep guessing every
+        intermediate status string Dhan might actually use.
+
+        Even with both improvements, this scan can still miss an order
         that is only seconds old (Dhan OMS lag - OIL, 10 Sep 2026), so a
         caller that already holds a specific id (Position.stop_loss_order_
         id) must prefer that over relying on this scan alone."""
+        try:
+            security_id = self._instrument_meta(trading_symbol).get("security_id")
+        except Exception:  # noqa: BLE001
+            security_id = None
+
         resp = self.client.Dhan.get_order_list()
         if resp.get("status") != "success":
             raise RuntimeError(f"get_order_list failed: {resp.get('remarks')}")
         for order in (resp.get("data") or []):
-            if (order.get("tradingSymbol") == trading_symbol
-                    and order.get("transactionType") == transaction_type
-                    and order.get("orderStatus") in ("TRANSIT", "PENDING", "PART_TRADED", "TRIGGER_PENDING")):
-                return order.get("orderId")
+            symbol_matches = order.get("tradingSymbol") == trading_symbol
+            security_matches = security_id is not None and str(order.get("securityId", "")) == security_id
+            if not (symbol_matches or security_matches):
+                continue
+            if order.get("transactionType") != transaction_type:
+                continue
+            if order.get("orderStatus") in OrderStatus.TERMINAL_STATUSES:
+                continue
+            return order.get("orderId")
         return None
 
     def cancel_order(self, order_id: str) -> None:
