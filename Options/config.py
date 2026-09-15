@@ -621,6 +621,19 @@ ENABLE_TRADING_WINDOWS = os.getenv("ENABLE_TRADING_WINDOWS", "false").lower() ==
 TRADING_WINDOWS = os.getenv("TRADING_WINDOWS", "09:15-11:00,14:00-15:28")
 MARKET_CLOSE_TIME = "15:30"
 
+# MCX (commodity) segment trades a materially longer session than NSE F&O -
+# Copper and other non-agri commodities run into the evening (23:30 most of
+# the year, 23:55 during the Nov-Mar window when Dhan/MCX extends it for US
+# daylight saving - override MCX_MARKET_CLOSE_TIME via env during that
+# window if needed). Added 15 Sep 2026 after a real incident: dhan_client.
+# is_market_open() used to check ONLY these NSE hours regardless of segment,
+# so every Swing MCX order placed after 15:30 IST was wrongly tagged AMO
+# even though MCX was still genuinely open - see is_market_open()'s own
+# docstring for the full incident and Swing/trading_engine.py's per-symbol
+# entry-retry-cooldown addition for the other half of that fix.
+MCX_MARKET_OPEN_TIME = os.getenv("MCX_MARKET_OPEN_TIME", "09:00")
+MCX_MARKET_CLOSE_TIME = os.getenv("MCX_MARKET_CLOSE_TIME", "23:30")
+
 # ---------------------------------------------------------------------------
 # Nifty50 open gap-down / sharp-fall CE cool-off (added 11 Sep 2026, user
 # request: "evaluate if Nifty50 has a Gap Down opening of more than 100

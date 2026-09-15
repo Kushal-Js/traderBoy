@@ -396,6 +396,16 @@ MCX_MIN_DAYS_TO_EXPIRY = int(os.getenv("SWING_MCX_MIN_DAYS_TO_EXPIRY", "3"))
 # ---------------------------------------------------------------------------
 MARKET_TZ = "Asia/Kolkata"
 MONITOR_INTERVAL_SECONDS = int(os.getenv("SWING_MONITOR_INTERVAL_SECONDS", "5"))
+# Cooldown before re-attempting entry for the same symbol after a failed
+# (non-TRADED, error, or skipped) entry attempt - added 15 Sep 2026 after a
+# real incident: with no cooldown, a persistent failure (e.g. a genuinely
+# stuck AMO tag from the MCX-hours bug, or a real insufficient-funds
+# rejection) got retried on the very next MONITOR_INTERVAL_SECONDS tick,
+# placing 4 duplicate real broker orders for COPPER in under a minute
+# before the retries were finally blocked. A transient one-off failure
+# (a single rate-limited LTP call) just waits out this cooldown and tries
+# again - this only prevents the HOT retry loop, not retrying at all.
+ENTRY_RETRY_COOLDOWN_SECONDS = int(os.getenv("SWING_ENTRY_RETRY_COOLDOWN_SECONDS", "180"))
 # Inter-symbol delay while scanning the watchlist for entry signals -
 # respects Dhan's market-data rate limits on back-to-back calls, same
 # rationale as every other per-symbol pacing sleep in this codebase.

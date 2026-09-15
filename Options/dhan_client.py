@@ -566,10 +566,25 @@ class DhanWrapper:
     # Market hours (Dhan requires an explicit afterMarketOrder flag - unlike
     # Groww it does NOT auto-detect AMO from placement time)
     # ------------------------------------------------------------------ #
-    def is_market_open(self) -> bool:
+    def is_market_open(self, exchange_segment: str = "NSE_FNO") -> bool:
+        """Defaults to NSE F&O hours (config.MARKET_OPEN_TIME/_CLOSE_TIME) -
+        every existing caller (Options/Futures/Luxury's own EOD-gating
+        logic, plus place_market_order/place_equity_market_order) is
+        NSE-only and relies on that default unchanged. Pass
+        exchange_segment="MCX_COMM" for an MCX order/check instead - MCX's
+        session runs materially longer than NSE's (see config.MCX_MARKET_
+        OPEN_TIME/_CLOSE_TIME's own docstring for the real incident this
+        fixed: an MCX order placed well within MCX's live evening session
+        used to be wrongly tagged AMO because this checked only NSE hours,
+        which caused Swing to treat it as a failed entry and rapid-retry,
+        placing several duplicate real orders before this was fixed)."""
         now = datetime.now(IST).time()
-        open_t = datetime.strptime(config.MARKET_OPEN_TIME, "%H:%M").time()
-        close_t = datetime.strptime(config.MARKET_CLOSE_TIME, "%H:%M").time()
+        if exchange_segment == "MCX_COMM":
+            open_t = datetime.strptime(config.MCX_MARKET_OPEN_TIME, "%H:%M").time()
+            close_t = datetime.strptime(config.MCX_MARKET_CLOSE_TIME, "%H:%M").time()
+        else:
+            open_t = datetime.strptime(config.MARKET_OPEN_TIME, "%H:%M").time()
+            close_t = datetime.strptime(config.MARKET_CLOSE_TIME, "%H:%M").time()
         return open_t <= now <= close_t
 
     # ------------------------------------------------------------------ #
@@ -2156,7 +2171,7 @@ class DhanWrapper:
         quantity), never Position.pnl_multiplier (P&L-math quantity) -
         see Position's own docstring for why these are two different
         numbers for an MCX position."""
-        is_amo = not self.is_market_open()
+        is_amo = not self.is_market_open(exchange_segment="MCX_COMM")
         logger.info("Placing MCX %s order: %s x%s (product=%s)%s", transaction_type, trading_symbol,
                     quantity, product_type, " (AMO)" if is_amo else "")
         order_id = self.client.order_placement(

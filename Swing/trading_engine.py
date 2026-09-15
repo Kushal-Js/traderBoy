@@ -427,8 +427,13 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
         return {"symbol": symbol, "status": "error"}
     finally:
         # Any path above that didn't reach add_position() must release the
-        # reservation so a later signal can retry this symbol.
+        # reservation so a later signal can retry this symbol - but also
+        # start this symbol's entry-retry cooldown first (added 15 Sep
+        # 2026, real incident: with no cooldown, a persistent failure got
+        # hot-retried on literally the next 5-second monitor tick, placing
+        # 4 duplicate real COPPER orders before it was finally blocked).
         if symbol not in position_store.live_positions:
+            await position_store.record_failed_entry(symbol)
             await position_store.release_symbol(symbol)
 
 
@@ -743,6 +748,8 @@ async def _monitor_tick() -> None:
     candidates: list[tuple[str, str]] = []
     for i, symbol in enumerate(symbols):
         if symbol in position_store.reserved_symbols:
+            continue
+        if await position_store.is_in_entry_cooldown(symbol):
             continue
         if i:
             await asyncio.sleep(config.SYMBOL_PACING_SECONDS)

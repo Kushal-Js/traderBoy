@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -247,6 +248,10 @@ class SwingPositionStore:
         self.closed_positions_today: List[Position] = []
         self.orders_today: Dict[str, OrderRecord] = {}
         self._trading_day: date = date.today()
+        # time.monotonic() timestamps, not wall-clock - a cooldown only
+        # ever cares about elapsed duration, and monotonic is immune to
+        # a system clock jump/DST shift falsely resetting or extending it.
+        self._last_failed_entry_at: Dict[str, float] = {}
 
     async def maybe_reset_for_new_day(self) -> None:
         """Unlike Options/position_store.py's version, this NEVER clears
@@ -289,6 +294,21 @@ class SwingPositionStore:
         async with self._lock:
             if underlying_symbol not in self.live_positions:
                 self.reserved_symbols.discard(underlying_symbol)
+
+    async def record_failed_entry(self, underlying_symbol: str) -> None:
+        """Marks this symbol as having just failed an entry attempt (any
+        outcome other than a real fill - order rejected, stuck non-TRADED,
+        insufficient funds, instrument resolution error, etc.) so the next
+        monitor tick's watchlist scan can skip it for config.ENTRY_RETRY_
+        COOLDOWN_SECONDS instead of hot-retrying immediately - see that
+        config's own docstring for the real incident this prevents."""
+        async with self._lock:
+            self._last_failed_entry_at[underlying_symbol] = time.monotonic()
+
+    async def is_in_entry_cooldown(self, underlying_symbol: str) -> bool:
+        async with self._lock:
+            last = self._last_failed_entry_at.get(underlying_symbol)
+            return last is not None and (time.monotonic() - last) < config.ENTRY_RETRY_COOLDOWN_SECONDS
 
     async def remaining_capacity(self) -> int:
         async with self._lock:
