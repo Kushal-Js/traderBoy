@@ -44,25 +44,24 @@ Coverage:
 HOW TO RUN:
     uv run python tests/test_get_pending_order_id_security_id_match.py
 
-KNOWN TEST-ISOLATION ISSUE (documented 15 Sep 2026, not yet root-caused,
-deliberately deferred - the 5 tests below all pass standalone, see the
-run command above): running this file together with
-tests/test_futures_broker_stop_loss.py in the SAME pytest session (e.g.
-the full `pytest tests/` suite) causes test_3 and test_5 below to fail -
-bisected via `pytest tests/test_futures_broker_stop_loss.py
-tests/test_get_pending_order_id_security_id_match.py`, confirmed that
-file is the source. Something in test_futures_broker_stop_loss.py leaves
-dhan_wrapper (likely `.instruments`/`._instrument_meta`/`._client` or a
-cached instrument lookup) in a state that survives its own test
-teardown and affects _instrument_meta resolution for tests run
-afterward - same general CLASS of bug as the Swing.signals cross-test-
-file leak found and fixed earlier this session (a monkeypatch/fixture
-not restored in a finally block), just not yet pinpointed to the exact
-line. Does not affect the PRODUCTION fix these tests cover - confirmed
-via a full `git stash` before/after comparison that Options/dhan_client.py's
-get_pending_order_id fix introduces zero regressions anywhere else in
-the suite (identical 16-failed baseline with or without it). Follow-up:
-find and fix the actual unrestored mock in test_futures_broker_stop_loss.py.
+FIXED TEST-ISOLATION ISSUE (found 15 Sep 2026, root-caused and fixed the
+same day): running this file together with
+tests/test_futures_broker_stop_loss.py (and, it turned out,
+test_options_broker_stop_loss.py / test_luxury_broker_stop_loss.py - the
+identical bug was copy-pasted into all three) in the SAME pytest session
+used to fail some of the tests below. Root cause: those files' own
+test_6/test_8/test_9/test_10 each did
+`real_get_pending = odc.dhan_wrapper.get_pending_order_id` AFTER already
+calling `install_all_dhan_mocks()` - but that helper itself mocks
+get_pending_order_id (and cancel_order) as part of its own setup, so
+"real_get_pending" was actually capturing the MOCK, not the true
+original. Each test's own `finally: odc.dhan_wrapper.get_pending_order_id
+= real_get_pending` then permanently overwrote the real method with that
+stale mock for every test collected afterward in the same pytest
+session - the exact same class of bug as the Swing.signals cross-test-
+file leak found earlier this session (a monkeypatch captured/restored in
+the wrong order). Fixed by moving the `real_*` capture lines to BEFORE
+`install_all_dhan_mocks()` in all 4 affected tests across all 3 files.
 """
 import os
 import sys

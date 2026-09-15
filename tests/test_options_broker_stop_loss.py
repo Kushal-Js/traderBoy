@@ -356,13 +356,21 @@ async def test_6_real_target_hit_finds_and_cancels_the_resting_broker_stop():
     ote.position_store = store
     real_enabled = ote.config.BROKER_STOP_LOSS_ENABLED
     ote.config.BROKER_STOP_LOSS_ENABLED = True
+    # Captured BEFORE install_all_dhan_mocks() runs - that call itself
+    # mocks get_pending_order_id/cancel_order (see its own body), so
+    # capturing "real_*" AFTER it would silently save the MOCK as "real"
+    # and permanently overwrite the true original with it in this test's
+    # own finally block (found + fixed 15 Sep 2026 - a real cross-test-
+    # file leak: this exact bug left get_pending_order_id stubbed to
+    # always-None for every test file collected afterward in the same
+    # pytest session).
+    real_get_pending = odc.dhan_wrapper.get_pending_order_id
+    real_cancel = odc.dhan_wrapper.cancel_order
     restore, placed_orders, stop_loss_calls = install_all_dhan_mocks(
         stop_loss_order_id_factory=lambda: "OID-RESTING-SL",
         broker_net_quantity=500,  # nothing partially filled - broker still shows the full original qty
     )
     cancelled_order_ids = []
-    real_get_pending = odc.dhan_wrapper.get_pending_order_id
-    real_cancel = odc.dhan_wrapper.cancel_order
     try:
         entry = await ote._process_one_entry("HDFCBANK", "CE")
         assert entry["status"] == "entered", entry
@@ -422,13 +430,15 @@ async def test_8_partial_fill_on_resting_stop_never_oversells():
     ote.position_store = store
     real_enabled = ote.config.BROKER_STOP_LOSS_ENABLED
     ote.config.BROKER_STOP_LOSS_ENABLED = True
+    # See test_6's identical comment - must capture "real_*" BEFORE
+    # install_all_dhan_mocks() mocks them, not after.
+    real_get_pending = odc.dhan_wrapper.get_pending_order_id
+    real_cancel = odc.dhan_wrapper.cancel_order
     restore, placed_orders, stop_loss_calls = install_all_dhan_mocks(
         stop_loss_order_id_factory=lambda: "OID-RESTING-SL",
         broker_net_quantity=250,
     )
     cancelled_order_ids = []
-    real_get_pending = odc.dhan_wrapper.get_pending_order_id
-    real_cancel = odc.dhan_wrapper.cancel_order
     try:
         entry = await ote._process_one_entry("ITC", "CE")
         assert entry["status"] == "entered", entry
@@ -469,14 +479,16 @@ async def test_9_stop_fully_filled_during_cancel_race_reconciles_without_a_fresh
     ote.position_store = store
     real_enabled = ote.config.BROKER_STOP_LOSS_ENABLED
     ote.config.BROKER_STOP_LOSS_ENABLED = True
+    # See test_6's identical comment - must capture "real_*" BEFORE
+    # install_all_dhan_mocks() mocks them, not after.
+    real_get_pending = odc.dhan_wrapper.get_pending_order_id
+    real_cancel = odc.dhan_wrapper.cancel_order
+    real_refresh = odc.dhan_wrapper.refresh_order_status
     restore, placed_orders, stop_loss_calls = install_all_dhan_mocks(
         stop_loss_order_id_factory=lambda: "OID-RESTING-SL",
         broker_net_quantity=0,
     )
     cancelled_order_ids = []
-    real_get_pending = odc.dhan_wrapper.get_pending_order_id
-    real_cancel = odc.dhan_wrapper.cancel_order
-    real_refresh = odc.dhan_wrapper.refresh_order_status
     odc.dhan_wrapper.refresh_order_status = lambda order_id, is_amo=False: OrderResult(
         order_id=order_id, status=OrderStatus.TRADED, remark="", fill_price=32.1, filled_quantity=500, is_amo=False,
     )
@@ -527,13 +539,15 @@ async def test_10_sl_l_still_cancelled_when_the_order_book_scan_misses_it():
     ote.position_store = store
     real_enabled = ote.config.BROKER_STOP_LOSS_ENABLED
     ote.config.BROKER_STOP_LOSS_ENABLED = True
+    # See test_6's identical comment - must capture "real_*" BEFORE
+    # install_all_dhan_mocks() mocks them, not after.
+    real_get_pending = odc.dhan_wrapper.get_pending_order_id
+    real_cancel = odc.dhan_wrapper.cancel_order
     restore, placed_orders, stop_loss_calls = install_all_dhan_mocks(
         stop_loss_order_id_factory=lambda: "OID-RESTING-SL",
         broker_net_quantity=500,  # nothing filled - the SL-L is genuinely just resting
     )
     cancelled_order_ids = []
-    real_get_pending = odc.dhan_wrapper.get_pending_order_id
-    real_cancel = odc.dhan_wrapper.cancel_order
     try:
         entry = await ote._process_one_entry("BAJFINANCE", "CE")
         assert entry["status"] == "entered", entry
