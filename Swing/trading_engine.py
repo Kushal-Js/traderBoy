@@ -820,6 +820,38 @@ async def reconcile_broker_positions() -> list[Position]:
         quantity = abs(bp["quantity"])
         basket_type = "EQUITY" if exchange_segment == "NSE_EQ" else ("OPTIONS" if bp.get("option_type") else "FUTURES")
         underlying_symbol = bp["underlying_symbol"]
+
+        # Proactively discover a pre-existing resting broker-side stop-loss
+        # order for this reconciled position (added 15 Sep 2026, same fix
+        # as Options/Futures/Luxury's reconcile_broker_positions, applied
+        # here before SWING_V2_BROKER_STOP_LOSS_ENABLED is turned on live
+        # for the first time): without this, Position.stop_loss_order_id
+        # comes back empty on every restart, and the only remaining safety
+        # net is _exit_position's own get_pending_order_id scan - exactly
+        # what missed JSWENERGY's resting order and left it orphaned at the
+        # broker. Swing is side-aware (a SHORT's resting order is a BUY,
+        # not a SELL), so exit_transaction_type(side) is used rather than
+        # a hardcoded "SELL". Best-effort: a failure here just leaves
+        # stop_loss_order_id empty, exactly as before this change, and
+        # never blocks reconciling the position itself.
+        stop_loss_order_id = None
+        if config.BROKER_STOP_LOSS_ENABLED:
+            try:
+                stop_loss_order_id = await loop.run_in_executor(
+                    None, dhan_wrapper.get_pending_order_id, bp["trading_symbol"], exit_transaction_type(side)
+                )
+                if stop_loss_order_id:
+                    logger.info(
+                        "%s: discovered a pre-existing resting %s order %s during reconciliation - "
+                        "tracking it as this position's own stop-loss order.",
+                        bp["trading_symbol"], exit_transaction_type(side), stop_loss_order_id,
+                    )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "%s: could not check for a pre-existing resting stop-loss order during "
+                    "reconciliation - proceeding without it (same as before this check existed)",
+                    bp["trading_symbol"],
+                )
         # pnl_multiplier: identical to quantity for NSE (see Position's own
         # docstring) - looked up from MCX_PNL_MULTIPLIERS for a reconciled
         # MCX position instead, same as a fresh entry would compute it.
@@ -848,6 +880,6 @@ async def reconcile_broker_positions() -> list[Position]:
             target_price=target_price_for(side, avg_price, config.TARGET_PCT),
             hard_stop_loss=hard_stop_for(side, avg_price, config.HARD_STOP_LOSS_PCT),
             order_id="", pnl_multiplier=pnl_multiplier, resolved_option_type=bp.get("option_type") or None,
-            reconciled=True,
+            reconciled=True, stop_loss_order_id=stop_loss_order_id,
         ))
     return positions
