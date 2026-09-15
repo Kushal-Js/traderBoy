@@ -1067,7 +1067,10 @@ async def _square_off_all(reason: str) -> None:
 async def _sync_pending_orders() -> None:
     """See Options/trading_engine.py's version - identical logic, operates
     only on orders this package itself placed (position_store.orders_today),
-    so it works correctly without broker reconciliation."""
+    so it works correctly without broker reconciliation. Includes the
+    stale-entry-order retry/abandon logic added 15 Sep 2026 (see Options/
+    config.py's STALE_ENTRY_ORDER_TIMEOUT_SECONDS for the ICICIPRULI
+    incident this fixes)."""
     loop = asyncio.get_running_loop()
 
     pending_entries = [
@@ -1123,6 +1126,110 @@ async def _sync_pending_orders() -> None:
                 "AMO BUY order %s for %s filled - position now live.",
                 order.order_id, order.underlying_symbol,
             )
+            continue
+
+        # Still non-terminal. A genuinely-queued AMO is SUPPOSED to sit
+        # like this until the next session dispatches it - not stale.
+        if order.is_amo:
+            continue
+
+        age_seconds = (datetime.now() - order.placed_at).total_seconds()
+        if age_seconds < config.STALE_ENTRY_ORDER_TIMEOUT_SECONDS:
+            continue  # not stale yet - check again next tick
+
+        will_retry = order.retry_count < 1
+        logger.warning(
+            "%s: BUY order %s has been stuck %s for %.0fs (>= %ds timeout) - cancelling it%s.",
+            order.underlying_symbol, order.order_id, result.status, age_seconds,
+            config.STALE_ENTRY_ORDER_TIMEOUT_SECONDS,
+            " and retrying at the current market price" if will_retry
+            else " and abandoning this entry (already retried once)",
+        )
+        try:
+            await loop.run_in_executor(None, dhan_wrapper.cancel_order, order.order_id)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: could not cancel stale BUY order %s - leaving it for the next tick rather than "
+                "risking a duplicate order if the cancel actually succeeded silently",
+                order.underlying_symbol, order.order_id,
+            )
+            continue
+        await position_store.update_order_status(order.order_id, OrderStatus.CANCELLED, "stale entry order cancelled")
+
+        try:
+            broker_qty = await loop.run_in_executor(
+                None, dhan_wrapper.get_broker_net_quantity, order.trading_symbol
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: could not verify broker quantity after cancelling stale order %s - treating as "
+                "genuinely unfilled", order.underlying_symbol, order.order_id,
+            )
+            broker_qty = 0
+
+        if broker_qty > 0:
+            fill_price = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, order.trading_symbol)
+            entry_candle_start = await _capture_supertrend_entry_candle(loop, order.underlying_symbol)
+            position = Position(
+                underlying_symbol=order.underlying_symbol,
+                option_trading_symbol=order.trading_symbol,
+                option_type=order.option_type or config.OPTION_TYPE,
+                quantity=broker_qty,
+                lot_size=order.lot_size or config.LOT_SIZE_FALLBACK,
+                entry_price=fill_price,
+                highest_price=fill_price,
+                target_price=fill_price * (1 + config.TARGET_PCT),
+                hard_stop_loss=fill_price * (1 - config.STOP_LOSS_PCT),
+                order_id=order.order_id,
+                product_type=config.OPTIONS_PRODUCT,
+                supertrend_entry_candle_start=entry_candle_start,
+            )
+            await position_store.add_position(position)
+            logger.info(
+                "%s: stale order %s had actually filled right as it was being cancelled - position now "
+                "live using the broker's real quantity/LTP.", order.underlying_symbol, order.order_id,
+            )
+            continue
+
+        if not will_retry:
+            logger.warning("%s: giving up on this entry after one retry - releasing reservation.",
+                            order.underlying_symbol)
+            await position_store.release_symbol(order.underlying_symbol)
+            await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, order.trading_symbol)
+            continue
+
+        try:
+            retry_resp = await loop.run_in_executor(
+                None, dhan_wrapper.place_market_order, order.trading_symbol, order.quantity, "BUY",
+                _gen_tag(config.ORDER_TAG_PREFIX, order.underlying_symbol), config.OPTIONS_PRODUCT,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: retry order placement failed for stale BUY %s - releasing reservation",
+                order.underlying_symbol, order.order_id,
+            )
+            await position_store.release_symbol(order.underlying_symbol)
+            await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, order.trading_symbol)
+            continue
+
+        new_order_id = retry_resp["order_id"]
+        await position_store.record_order(OrderRecord(
+            order_id=new_order_id,
+            underlying_symbol=order.underlying_symbol,
+            trading_symbol=order.trading_symbol,
+            transaction_type="BUY",
+            quantity=order.quantity,
+            status=OrderStatus.TRANSIT,
+            is_amo=retry_resp.get("is_amo", False),
+            lot_size=order.lot_size,
+            option_type=order.option_type,
+            retry_count=order.retry_count + 1,
+            owned_by_placer=False,
+        ))
+        logger.info(
+            "%s: placed retry BUY order %s (was %s) at the current market price.",
+            order.underlying_symbol, new_order_id, order.order_id,
+        )
 
     positions = dict(position_store.live_positions)
     for symbol, position in positions.items():

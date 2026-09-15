@@ -69,6 +69,13 @@ class OrderRecord:
     # follow-up - never for a normal fill/rejection, which the placer
     # always resolves to completion itself.
     owned_by_placer: bool = True
+    # 0 for a normal entry; 1 for a fresh order placed by _sync_pending_
+    # orders' own stale-order retry (see config.STALE_ENTRY_ORDER_TIMEOUT_
+    # SECONDS) after cancelling the original stuck order. Caps that retry
+    # at exactly once - a SECOND stale timeout on the retried order
+    # abandons the entry instead of retrying again, so a persistently
+    # unfillable contract can't loop forever.
+    retry_count: int = 0
 
 
 @dataclass

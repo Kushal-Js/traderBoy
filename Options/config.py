@@ -734,3 +734,21 @@ LTP_STALE_AFTER_SECONDS = float(os.getenv("LTP_STALE_AFTER_SECONDS", "5"))
 # ---------------------------------------------------------------------------
 LOT_SIZE_FALLBACK = int(os.getenv("LOT_SIZE_FALLBACK", "1"))
 ORDER_TAG_PREFIX = os.getenv("ORDER_TAG_PREFIX", "Cti")  # correlation id prefix
+
+# Stale entry-order timeout (user request 15 Sep 2026, real incident:
+# ICICIPRULI's BUY market order sat PENDING at the broker for 10+ minutes
+# straight during live market hours with no fill and no rejection -
+# _sync_pending_orders already re-checks every non-AMO-queued pending BUY
+# order on every monitor tick, but previously had no notion of "this has
+# been stuck too long, do something" - it would just keep re-logging the
+# same PENDING status forever. Once a BUY order (placed during market
+# hours, NOT a genuinely-queued AMO - those are SUPPOSED to sit non-
+# terminal until the next session) has been non-terminal for this many
+# seconds, _sync_pending_orders cancels it and makes exactly ONE retry
+# attempt (a fresh market order for the identical contract/quantity - a
+# market order always fills at whatever the CURRENT price is, so simply
+# re-submitting IS the "adjust to current price" retry; there's no
+# separate limit price to change on a market order). If that retry ALSO
+# times out, the entry is abandoned (reservation released) rather than
+# retried indefinitely.
+STALE_ENTRY_ORDER_TIMEOUT_SECONDS = int(os.getenv("STALE_ENTRY_ORDER_TIMEOUT_SECONDS", "300"))

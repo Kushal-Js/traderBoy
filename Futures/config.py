@@ -248,3 +248,8 @@ MONITOR_INTERVAL_SECONDS = int(os.getenv("FUTURES_MONITOR_INTERVAL_SECONDS", "2"
 
 LOT_SIZE_FALLBACK = int(os.getenv("FUTURES_LOT_SIZE_FALLBACK", "1"))
 ORDER_TAG_PREFIX = os.getenv("FUTURES_ORDER_TAG_PREFIX", "Fut")
+
+# Stale entry-order timeout - see Options/config.py's identical setting
+# for the full ICICIPRULI incident writeup (user request 15 Sep 2026).
+# Own independently-tunable value, same default.
+STALE_ENTRY_ORDER_TIMEOUT_SECONDS = int(os.getenv("FUTURES_STALE_ENTRY_ORDER_TIMEOUT_SECONDS", "300"))

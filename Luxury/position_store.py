@@ -52,6 +52,10 @@ class OrderRecord:
     placed_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     owned_by_placer: bool = True
+    # See Options/position_store.py's identical field for the full
+    # rationale (ICICIPRULI stale-entry-order incident, 15 Sep 2026) -
+    # caps _sync_pending_orders' stale-order retry at exactly once.
+    retry_count: int = 0
 
 
 @dataclass

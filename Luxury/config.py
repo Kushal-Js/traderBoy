@@ -364,3 +364,8 @@ MONITOR_INTERVAL_SECONDS = int(os.getenv("LUXURY_MONITOR_INTERVAL_SECONDS", "2")
 
 LOT_SIZE_FALLBACK = int(os.getenv("LUXURY_LOT_SIZE_FALLBACK", "1"))
 ORDER_TAG_PREFIX = os.getenv("LUXURY_ORDER_TAG_PREFIX", "Lux")
+
+# Stale entry-order timeout - see Options/config.py's identical setting
+# for the full ICICIPRULI incident writeup (user request 15 Sep 2026).
+# Own independently-tunable value, same default.
+STALE_ENTRY_ORDER_TIMEOUT_SECONDS = int(os.getenv("LUXURY_STALE_ENTRY_ORDER_TIMEOUT_SECONDS", "300"))
