@@ -29,6 +29,7 @@ from typing import Dict, List, Optional
 
 from . import config
 from trade_history import fire_and_forget, record_closed_trade, record_opened_position
+import reversal_filters
 
 logger = logging.getLogger("luxury_position_store")
 
@@ -187,6 +188,11 @@ class PositionStore:
             # attribute this exact broker position back to Luxury (not
             # Options/Futures) during reconciliation.
             fire_and_forget(record_opened_position("Luxury", pos))
+            # Shadow-mode reversal-prevention filters (prototype, 16 Sep
+            # 2026) - see reversal_filters.py's own module docstring.
+            fire_and_forget(reversal_filters.evaluate_and_log(
+                "Luxury", pos.underlying_symbol, pos.option_type, pos.entry_price, pos.order_id,
+            ))
             logger.info(
                 "Position OPENED: %s (%s) entry=%.2f target=%.2f sl=%.2f qty=%s",
                 pos.underlying_symbol, pos.option_trading_symbol,
@@ -292,6 +298,8 @@ class PositionStore:
             pos.exit_price = exit_price
             pos.closed_at = datetime.now()
             self.closed_positions_today.append(pos)
+            if reason == "SUPERTREND_EXIT":
+                reversal_filters.record_supertrend_exit("Luxury", pos.underlying_symbol, pos.option_type)
             # Fire-and-forget - see Options/position_store.py's identical
             # comment / trade_history.py's record_closed_trade docstring:
             # must not be awaited while _lock is held.

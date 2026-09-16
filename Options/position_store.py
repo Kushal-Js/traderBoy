@@ -32,6 +32,7 @@ from typing import Dict, List, Optional
 
 from . import config
 from trade_history import fire_and_forget, record_closed_trade, record_opened_position
+import reversal_filters
 
 logger = logging.getLogger("position_store")
 
@@ -298,6 +299,13 @@ class PositionStore:
             # /positions data has no per-strategy tag at all. See
             # trade_history.py's attribute_open_broker_position docstring.
             fire_and_forget(record_opened_position("Options", pos))
+            # Shadow-mode reversal-prevention filters (prototype, 16 Sep
+            # 2026) - logs what each candidate filter WOULD have done for
+            # this real entry, never blocks it. See reversal_filters.py's
+            # own module docstring for the backtest evidence behind this.
+            fire_and_forget(reversal_filters.evaluate_and_log(
+                "Options", pos.underlying_symbol, pos.option_type, pos.entry_price, pos.order_id,
+            ))
             logger.info(
                 "Position OPENED: %s (%s) entry=%.2f target=%.2f sl=%.2f qty=%s",
                 pos.underlying_symbol, pos.option_trading_symbol,
@@ -429,6 +437,10 @@ class PositionStore:
             pos.exit_price = exit_price
             pos.closed_at = datetime.now()
             self.closed_positions_today.append(pos)
+            if reason == "SUPERTREND_EXIT":
+                # Feeds the shadow cooldown filter's lookback - trivial
+                # in-memory write, no I/O, safe to call while _lock is held.
+                reversal_filters.record_supertrend_exit("Options", pos.underlying_symbol, pos.option_type)
             # Fire-and-forget - MUST NOT be awaited here (see
             # trade_history.py's record_closed_trade docstring): this runs
             # while _lock is held, and awaiting the write would make every
