@@ -157,6 +157,25 @@ LOSS_REPEAT_BLOCK_ENABLED = os.getenv("LOSS_REPEAT_BLOCK_ENABLED", "true").lower
 LOSS_REPEAT_BLOCK_COUNT = int(os.getenv("LOSS_REPEAT_BLOCK_COUNT", "2"))
 LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
 
+# Volume-floor entry gate (promoted from shadow-mode logging to a real
+# live gate, 16 Sep 2026) - the single strongest filter across two
+# backtest rounds against real trades (+Rs.7,131.50 on 37 trades/2 days,
+# +Rs.17,123.00 on 143 trades/15 days - see reversal_filters.py's own
+# module docstring for the full evidence). Blocks a new entry if the
+# underlying's own 5-min entry candle traded on less than
+# VOLUME_FLOOR_RATIO_MIN times its 20-bar average volume - a thin,
+# below-average-conviction candle is exactly the pattern behind most of
+# the LIQUIDITY_GUARD/SUPERTREND_EXIT losses this filter was built to
+# catch. Deliberately a flag (default enabled per explicit user request,
+# 16 Sep 2026: "keep this turned on before deployment to live") so it can
+# be switched off instantly via .env without touching any strategy logic
+# if it ever needs to be paused. Fails OPEN (never blocks) on a fetch
+# failure or insufficient data - see reversal_filters.check_volume_floor's
+# own docstring for why a diagnostic check's own failure must never
+# itself cause a missed entry.
+VOLUME_FLOOR_GATE_ENABLED = os.getenv("VOLUME_FLOOR_GATE_ENABLED", "true").lower() == "true"
+VOLUME_FLOOR_RATIO_MIN = float(os.getenv("VOLUME_FLOOR_RATIO_MIN", "1.2"))
+
 # Real broker-side SELL STOP-LOSS LIMIT (SL-L) order - ported from
 # Luxury/config.py's own BROKER_STOP_LOSS_ENABLED (see that file's own
 # docstring for the full SL-M->SL-L story: NSE bans SL-M for index/stock

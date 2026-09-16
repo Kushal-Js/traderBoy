@@ -391,6 +391,23 @@ MCX_PRODUCT = os.getenv("SWING_MCX_PRODUCT", "MARGIN")
 # expiry (extreme gamma/theta) contract just because it's nearest.
 MCX_MIN_DAYS_TO_EXPIRY = int(os.getenv("SWING_MCX_MIN_DAYS_TO_EXPIRY", "3"))
 
+# Volume-floor entry gate for MCX symbols ONLY (promoted from shadow-mode
+# analysis, 16 Sep 2026, user request: "enable this to SWING strategy but
+# for MCX only") - NSE-equity watchlist symbols (ADANIPORTS/ANGELONE/
+# COALINDIA) are never gated by this. Blocks a new MCX entry if the
+# underlying futures contract's own 5-min entry candle traded on less
+# than MCX_VOLUME_FLOOR_RATIO_MIN times its 20-bar average volume - same
+# threshold and rationale as Options' own VOLUME_FLOOR_GATE_ENABLED (see
+# that flag's own docstring in Options/config.py for the full backtest
+# evidence). A real, if smaller, live confirmation exists too: COPPER's
+# own real entry on 16 Sep 2026 had a volume ratio of 0.688 (would have
+# been blocked) and was later stopped out for a real loss. Deliberately a
+# flag, default ENABLED per explicit user request ("make it enabled as of
+# now") - can be switched off instantly via .env without touching any
+# strategy logic.
+MCX_VOLUME_FLOOR_GATE_ENABLED = os.getenv("SWING_MCX_VOLUME_FLOOR_GATE_ENABLED", "true").lower() == "true"
+MCX_VOLUME_FLOOR_RATIO_MIN = float(os.getenv("SWING_MCX_VOLUME_FLOOR_RATIO_MIN", "1.2"))
+
 # ---------------------------------------------------------------------------
 # Plumbing
 # ---------------------------------------------------------------------------

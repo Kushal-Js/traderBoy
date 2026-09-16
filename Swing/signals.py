@@ -162,6 +162,18 @@ async def get_regime_state(symbol: str) -> Optional[RegimeState]:
 # proven, unchanged in substance - only the interval is no longer a
 # parameter, since Swing v2 only ever needs the one 5-min series).
 # --------------------------------------------------------------------------- #
+def _volume_ratio_at(volumes: list[float], idx: int, lookback: int = 20) -> Optional[float]:
+    """Entry candle's volume vs the average of the prior `lookback` bars -
+    same formula as reversal_filters.py's identical helper (kept as its
+    own copy here per this codebase's per-package indicator-duplication
+    convention)."""
+    if idx < lookback or idx >= len(volumes):
+        return None
+    window = volumes[idx - lookback:idx]
+    avg = sum(window) / len(window) if window else 0.0
+    return (volumes[idx] / avg) if avg else None
+
+
 @dataclass
 class SupertrendState:
     """The last TWO fully-closed candles' relationship to the Supertrend
@@ -175,6 +187,12 @@ class SupertrendState:
     prev_supertrend: float
     prev_is_above: bool
     volume: float = 0.0
+    # Entry candle's volume vs its own 20-bar rolling average - added 16
+    # Sep 2026 for the MCX volume-floor entry gate (see config.MCX_
+    # VOLUME_FLOOR_GATE_ENABLED). None if there wasn't enough history to
+    # compute yet - callers must treat None as "gate fails open," never
+    # "block."
+    volume_ratio: Optional[float] = None
 
     @property
     def crossed_above(self) -> bool:
@@ -233,6 +251,7 @@ def _fetch_supertrend_state_once(symbol: str, interval_minutes: int) -> Optional
         close=closes[-1], supertrend=supertrend[-1], is_above=closes[-1] > supertrend[-1],
         prev_close=closes[-2], prev_supertrend=supertrend[-2], prev_is_above=closes[-2] > supertrend[-2],
         volume=volumes[-1] if volumes else 0.0,
+        volume_ratio=_volume_ratio_at(volumes, len(volumes) - 1) if volumes else None,
     )
 
 

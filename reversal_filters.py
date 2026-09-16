@@ -277,3 +277,55 @@ async def evaluate_and_log(strategy: str, symbol: str, option_type: str, entry_p
     like record_opened_position already is."""
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _evaluate_and_log_sync, strategy, symbol, option_type, entry_price, order_id)
+
+
+# --------------------------------------------------------------------- #
+# Live gate (promoted from shadow-mode, 16 Sep 2026) - unlike
+# evaluate_and_log above (diagnostic, called AFTER a real entry, never
+# blocks anything), this is called BEFORE placing a real order and its
+# return value actually decides whether the entry proceeds. Options-only
+# (NSE equity underlying) - Swing's own MCX-aware volume floor reuses its
+# own already-fetched SupertrendState.volume_ratio instead (see
+# Swing/signals.py) rather than duplicating this NSE-specific fetch.
+# --------------------------------------------------------------------- #
+def check_volume_floor_sync(symbol: str, min_ratio: float) -> tuple[bool, Optional[float]]:
+    """Blocking - must be called via run_in_executor. Returns (passes,
+    vol_ratio) - passes=True means the entry should proceed. Fails OPEN
+    (passes=True) whenever the real answer isn't confidently known (not
+    yet authenticated, fetch failure, or insufficient candle history) -
+    a diagnostic check's own failure or cold-start must never itself
+    cause a missed entry; only a CONFIRMED thin candle actually blocks.
+    Same single-attempt, no-retry, no-lazy-auth-trigger discipline as
+    _evaluate_and_log_sync above, for the identical shared-executor-
+    thread-pool-contention reason - see that function's own docstring."""
+    if dhan_wrapper._client is None:
+        return True, None
+    try:
+        security_id = dhan_wrapper._equity_security_id(symbol)
+        now_ist = datetime.now(IST)
+        from_date = (now_ist - timedelta(days=7)).strftime("%Y-%m-%d")
+        to_date = now_ist.strftime("%Y-%m-%d")
+        resp = dhan_wrapper.client.Dhan.intraday_minute_data(
+            security_id=security_id, exchange_segment="NSE_EQ", instrument_type="EQUITY",
+            from_date=from_date, to_date=to_date, interval=5,
+        )
+        data = (resp.get("data") or {}) if isinstance(resp, dict) else {}
+        volumes = data.get("volume") or []
+        if not volumes:
+            return True, None
+        vol_ratio = _volume_ratio_at(volumes, len(volumes) - 1)
+        if vol_ratio is None:
+            return True, None
+        return vol_ratio >= min_ratio, vol_ratio
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: volume floor gate check failed - failing OPEN (entry proceeds unaffected)", symbol)
+        return True, None
+
+
+async def check_volume_floor(symbol: str, min_ratio: float) -> tuple[bool, Optional[float]]:
+    """Async wrapper for check_volume_floor_sync - call this from an
+    entry path, e.g.:
+        passes, vol_ratio = await reversal_filters.check_volume_floor(symbol, config.VOLUME_FLOOR_RATIO_MIN)
+        if not passes: ... skip the entry ..."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, check_volume_floor_sync, symbol, min_ratio)

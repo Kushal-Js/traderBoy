@@ -268,6 +268,25 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
         await _record_swing_event("ENTRY_SKIPPED_EQUITY_LONG_ONLY", symbol, {"basket_type": effective_basket_type})
         return {"symbol": symbol, "status": "skipped", "reason": "equity_long_only"}
 
+    # MCX-only volume-floor entry gate (promoted from shadow-mode
+    # analysis, 16 Sep 2026 - see config.MCX_VOLUME_FLOOR_GATE_ENABLED's
+    # own docstring). NSE-equity watchlist symbols are never gated here.
+    # Checked before reserve_symbol, same "don't burn a capacity slot for
+    # a trade that was never going to be placed" reasoning as the check
+    # just above. Reuses the ALREADY-FETCHED 5-min SupertrendState's own
+    # volume_ratio (cached/throttled - the entry signal that got us here
+    # already computed this moments ago) rather than a fresh fetch.
+    if is_mcx and config.MCX_VOLUME_FLOOR_GATE_ENABLED:
+        st = await signals.get_supertrend_state(symbol)
+        vol_ratio = st.volume_ratio if st else None
+        if vol_ratio is not None and vol_ratio < config.MCX_VOLUME_FLOOR_RATIO_MIN:
+            logger.info(
+                "%s: skipped - MCX volume floor gate (entry-candle volume %.3fx 20-bar avg, below %.2fx floor)",
+                symbol, vol_ratio, config.MCX_VOLUME_FLOOR_RATIO_MIN,
+            )
+            await _record_swing_event("ENTRY_SKIPPED_MCX_VOLUME_FLOOR", symbol, {"vol_ratio": vol_ratio})
+            return {"symbol": symbol, "status": "skipped", "reason": "mcx_volume_floor_gate", "vol_ratio": vol_ratio}
+
     if not await position_store.reserve_symbol(symbol):
         return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
 
