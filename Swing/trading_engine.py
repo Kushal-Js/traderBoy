@@ -357,6 +357,41 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
                 return {"symbol": symbol, "status": "skipped", "reason": "insufficient_funds", "trading_symbol": trading_symbol}
 
         transaction_type = entry_transaction_type(side)
+
+        # Duplicate-real-order guard (added 16 Sep 2026, real incident:
+        # COALINDIA placed a fresh real AMO BUY order every ~3 minutes for
+        # hours). Root cause: Swing has no AMO-promotion path for entries
+        # (see the TRADED-only check below's own docstring) - a plain
+        # after-hours entry queues as AMO, gets treated as a "failed"
+        # entry, and once ENTRY_RETRY_COOLDOWN_SECONDS expires, the SAME
+        # still-true after-hours signal fires again and places ANOTHER
+        # real order - forever, every cooldown period, until the market
+        # finally reopens hours later. A longer cooldown alone would only
+        # slow this down, not stop it - this is a STRUCTURAL fix instead:
+        # never place a 2nd real order while a 1st is still resting,
+        # checked directly against broker truth every time, regardless of
+        # timing. (Deliberately does NOT also check get_broker_net_
+        # quantity for an already-FILLED untracked position here - that's
+        # a real, separate, lower-probability gap - today's AMO hasn't
+        # reached its own session yet, so nothing has filled - documented
+        # as a follow-up rather than folded into this urgent fix.)
+        try:
+            existing_order_id = await loop.run_in_executor(
+                None, dhan_wrapper.get_pending_order_id, trading_symbol, transaction_type,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not check for an already-resting entry order - proceeding anyway", symbol)
+            existing_order_id = None
+        if existing_order_id:
+            logger.warning(
+                "%s: a %s order %s is already resting/pending at the broker for %s - NOT placing "
+                "a duplicate. Waiting for it to resolve (fill at the next session, or a manual/"
+                "automatic cancel) before this symbol can be entered again.",
+                symbol, transaction_type, existing_order_id, trading_symbol,
+            )
+            return {"symbol": symbol, "status": "already_pending", "order_id": existing_order_id,
+                    "trading_symbol": trading_symbol}
+
         if exchange_segment == "NSE_FNO":
             await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, trading_symbol)
         # WS ticks are ONLY subscribed for NSE_FNO above - equity and MCX
