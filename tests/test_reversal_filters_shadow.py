@@ -14,10 +14,14 @@ Coverage:
   2. record_supertrend_exit is a trivial, synchronous, never-raising
      in-memory write.
   3. The pure indicator functions (_compute_rsi/_compute_adx/
-     _volume_ratio_at) match known reference values.
+     _volume_ratio_at/_efficiency_ratio_at) match known reference values.
   4. evaluate_and_log's exception safety - a failure deep inside the
      sync path must never raise into the caller (it's called via
      fire_and_forget from inside a position-store lock).
+  5. Kaufman Efficiency Ratio (added 17 Sep 2026, shadow-mode/log-only -
+     see reversal_filters.py's own docstring for the backtest evidence
+     and why it's not in the recommended combo yet) is wired to the
+     conservative 0.3 threshold, not the in-sample-best 0.45.
 
 HOW TO RUN:
     uv run python tests/test_reversal_filters_shadow.py
@@ -114,6 +118,34 @@ def test_7_climax_combo_needs_both_conditions() -> None:
     print("7. Climax-combo filter logic requires BOTH RSI-extreme AND a volume spike, neither alone: PASSED")
 
 
+def test_8_efficiency_ratio_matches_known_reference():
+    # Monotonically rising closes by 1 each bar -> every bar contributes
+    # fully to net direction -> ER should be exactly 1.0 (pure trend).
+    closes = [100.0 + i for i in range(15)]
+    er = rf._efficiency_ratio_at(closes, idx=14, period=10)
+    assert er == 1.0, er
+
+    # A pure back-and-forth oscillation (up 1, down 1, ...) makes net
+    # displacement ~0 while the path sum keeps growing -> ER near 0.
+    closes_choppy = [100.0, 101.0] * 8
+    er_choppy = rf._efficiency_ratio_at(closes_choppy, idx=10, period=10)
+    assert er_choppy is not None and er_choppy < 0.2, er_choppy
+
+    # Under-warmed series (idx < period) must return None, not raise.
+    assert rf._efficiency_ratio_at([100.0, 101.0, 102.0], idx=2, period=10) is None
+    print("8. _efficiency_ratio_at returns 1.0 for a pure trend, near-0 for pure chop, "
+          "None when under-warmed: PASSED")
+
+
+def test_9_er_blocks_uses_the_conservative_threshold_not_the_in_sample_best():
+    """Sanity-check the threshold actually wired in is the conservative
+    0.3 recommended after the overlap backtest, not the in-sample-best
+    0.45 found during the same research (see reversal_filters.py's own
+    docstring for why 0.45 would be an overfit choice)."""
+    assert rf.ER_THRESHOLD == 0.3, rf.ER_THRESHOLD
+    print("9. ER_THRESHOLD is wired to the conservative 0.3, not the in-sample-best 0.45: PASSED")
+
+
 async def main():
     print("=== reversal_filters.py shadow-mode filter test suite ===\n")
     await test_1_never_triggers_real_auth_when_not_yet_authenticated()
@@ -123,6 +155,8 @@ async def main():
     test_5_compute_adx_returns_none_until_warm()
     test_6_volume_ratio_at_basic_math()
     test_7_climax_combo_needs_both_conditions()
+    test_8_efficiency_ratio_matches_known_reference()
+    test_9_er_blocks_uses_the_conservative_threshold_not_the_in_sample_best()
     print("\nALL reversal_filters shadow-mode tests PASSED")
 
 

@@ -8,11 +8,14 @@ results can be reviewed against what really happened (win/loss/exit
 reason, already logged separately via trade_history's real_trades log)
 before any of this is trusted to actually gate a live entry.
 
-Built directly on two backtest rounds against real trades:
+Built directly on these backtest rounds against real trades:
   - backtest_reversal_filters_sep15_16.py (37 trades, 2 days)
-  - backtest_reversal_filters_15day.py (139 trades, 15 days, loaded
+  - backtest_reversal_filters_15day.py (139-147 trades, 15 days, loaded
     programmatically from history/*_real_trades.log)
-Both rounds are the evidence behind every threshold below - see those
+  - backtest_trend_strength_indicators.py / backtest_er_vs_volume_floor.py /
+    backtest_er_daywise_with_swing_check.py (16 Sep 2026 - Kaufman
+    Efficiency Ratio research, see ER's own note below)
+All rounds are the evidence behind every threshold below - see those
 files' own docstrings for the full methodology and per-trade findings.
 
 Filters:
@@ -43,10 +46,32 @@ Filters:
     entered 3-8+ minutes later; every window tested had zero forgone
     gains, but returns clearly diminish past 10-15 min. IN the
     recommended combo.
+  - Kaufman Efficiency Ratio (ER, period 10) < 0.3: |net price
+    displacement| / (sum of |bar-to-bar price changes|) over the last 10
+    closes - unlike ADX/Choppiness Index, NOT built from ATR/true-range,
+    so it doesn't just re-flag what Supertrend/cooldown already encode
+    (confirmed: ADX(14)<20 overlaps almost entirely with cooldown, ER
+    does not). Backtested net POSITIVE (+Rs.10,925.75 alone,
+    +Rs.5,561.25 INCREMENTAL on top of the already-live volume floor,
+    143 trades/15 days) but the evidence is thin and lumpy, not yet
+    trustworthy enough to gate anything: 85% of that incremental benefit
+    came from a single day (11 Sep - three different symbols/asset-
+    classes, MCX/Futures/Options, all with healthy-to-high volume but
+    ER<0.15, all genuine losers) while two OTHER days had ER blocking
+    real winners for a net cost (-Rs.390 on 10 Sep, -Rs.980 on 15 Sep) -
+    contrast with volume floor's own evidence, whose best single day was
+    only 32% of its 15-day total, a much more evenly-distributed
+    (trustworthy) signal at the same stage. LOGGED FOR REFERENCE ONLY -
+    excluded from the recommended combo until more days of shadow data
+    confirm the 11 Sep cluster wasn't a fluke (target: re-review at EOD
+    17 Sep 2026). Threshold intentionally left at the conservative 0.3
+    (not the in-sample-best 0.45 found while backtesting - that number
+    was optimized on the same data it was scored against, see
+    backtest_trend_strength_indicators.py's own overfitting caveat).
 
 RECOMMENDED_COMBO_BLOCKS = volume floor OR climax combo OR cooldown.
 This is what's reported as the headline "would this have been blocked"
-verdict; ADX/RSI-alone are logged purely for comparison.
+verdict; ADX/RSI-alone/ER are logged purely for comparison.
 
 Evaluated once per REAL entry (hooked into each package's own
 PositionStore.add_position, right alongside record_opened_position - see
@@ -77,6 +102,8 @@ RSI_OVERBOUGHT, RSI_OVERSOLD = 70.0, 30.0
 VOL_RATIO_MIN = 1.2
 SPIKE_RATIO = 20.0
 COOLDOWN_MINUTES = 10
+ER_PERIOD = 10
+ER_THRESHOLD = 0.3
 
 # In-memory only, per-process - (strategy, symbol, option_type) -> last
 # SUPERTREND_EXIT time. Resets on restart, same as every other in-process
@@ -182,6 +209,22 @@ def _volume_ratio_at(volumes: list[float], idx: int, lookback: int = 20) -> Opti
     return volumes[idx] / avg
 
 
+def _efficiency_ratio_at(closes: list[float], idx: int, period: int = ER_PERIOD) -> Optional[float]:
+    """Kaufman Efficiency Ratio: |net displacement| / (sum of |bar-to-bar
+    moves|) over the last `period` closes ending at idx. 1.0 = every bar
+    contributed to net direction (efficient/trending), 0.0 = pure noise
+    (lots of motion, no net progress). Unlike ADX/Choppiness Index, this
+    is NOT built from ATR/true-range - see this module's own docstring
+    for why that's exactly what makes it worth logging separately."""
+    if idx < period:
+        return None
+    net_change = abs(closes[idx] - closes[idx - period])
+    path_sum = sum(abs(closes[j] - closes[j - 1]) for j in range(idx - period + 1, idx + 1))
+    if path_sum <= 0:
+        return None
+    return net_change / path_sum
+
+
 def _evaluate_and_log_sync(strategy: str, symbol: str, option_type: str, entry_price: float, order_id: str) -> None:
     """Blocking - must be called via run_in_executor, never directly from
     async code. Never raises - any failure here just means this one
@@ -238,6 +281,7 @@ def _evaluate_and_log_sync(strategy: str, symbol: str, option_type: str, entry_p
         rsi = _compute_rsi(closes)[idx]
         adx = _compute_adx(highs, lows, closes)[idx]
         vol_ratio = _volume_ratio_at(volumes, idx)
+        er = _efficiency_ratio_at(closes, idx)
 
         rsi_extreme = rsi is not None and (rsi > RSI_OVERBOUGHT if option_type == "CE" else rsi < RSI_OVERSOLD)
         adx_blocks = adx is not None and adx < ADX_MIN
@@ -245,6 +289,7 @@ def _evaluate_and_log_sync(strategy: str, symbol: str, option_type: str, entry_p
         climax_combo_blocks = rsi_extreme and vol_ratio is not None and vol_ratio > SPIKE_RATIO
         last_exit = _last_supertrend_exit.get((strategy, symbol, option_type))
         cooldown_blocks = last_exit is not None and (datetime.now() - last_exit).total_seconds() <= COOLDOWN_MINUTES * 60
+        er_blocks = er is not None and er < ER_THRESHOLD
 
         recommended_combo_blocks = volume_blocks or climax_combo_blocks or cooldown_blocks
 
@@ -254,17 +299,18 @@ def _evaluate_and_log_sync(strategy: str, symbol: str, option_type: str, entry_p
             "rsi": round(rsi, 2) if rsi is not None else None,
             "adx": round(adx, 2) if adx is not None else None,
             "vol_ratio": round(vol_ratio, 2) if vol_ratio is not None else None,
+            "er": round(er, 3) if er is not None else None,
             "adx_blocks": adx_blocks, "rsi_extreme_alone_blocks": rsi_extreme, "volume_blocks": volume_blocks,
-            "climax_combo_blocks": climax_combo_blocks, "cooldown_blocks": cooldown_blocks,
+            "climax_combo_blocks": climax_combo_blocks, "cooldown_blocks": cooldown_blocks, "er_blocks": er_blocks,
             "recommended_combo_blocks": recommended_combo_blocks,
             "entry_time": datetime.now().isoformat(),
         }
         append_jsonl(SHADOW_LOG_NAME, record)
         logger.info(
-            "%s %s %s: shadow filters logged - RSI=%s ADX=%s VolRatio=%s -> recommended_combo_blocks=%s "
-            "(volume=%s climax=%s cooldown=%s)",
-            strategy, symbol, option_type, record["rsi"], record["adx"], record["vol_ratio"],
-            recommended_combo_blocks, volume_blocks, climax_combo_blocks, cooldown_blocks,
+            "%s %s %s: shadow filters logged - RSI=%s ADX=%s VolRatio=%s ER=%s -> recommended_combo_blocks=%s "
+            "(volume=%s climax=%s cooldown=%s er=%s [reference only, not yet in combo])",
+            strategy, symbol, option_type, record["rsi"], record["adx"], record["vol_ratio"], record["er"],
+            recommended_combo_blocks, volume_blocks, climax_combo_blocks, cooldown_blocks, er_blocks,
         )
     except Exception:  # noqa: BLE001
         logger.exception("%s %s: shadow filter evaluation failed - real entry unaffected, this is logging-only",
