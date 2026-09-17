@@ -125,7 +125,7 @@ def install_mocks(broker_net_quantity=250, fail_stop_loss_placement=False, entry
     odc.dhan_wrapper.get_option_ltp = lambda ts: 50.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 100.0 if funds_sufficient else 10_000_000.0}
     odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 1_000_000.0}
-    odc.dhan_wrapper.get_pending_order_id = lambda trading_symbol, transaction_type: None
+    odc.dhan_wrapper.get_pending_order_id = lambda trading_symbol, transaction_type, *_: None
     odc.dhan_wrapper.get_broker_net_quantity = lambda trading_symbol, segment="NSE_FNO": broker_net_quantity
     odc.dhan_wrapper.cancel_order = lambda order_id: None
     odc.dhan_wrapper.subscribe_option_price = lambda ts: None
@@ -306,7 +306,7 @@ async def test_9_squareoff_cancels_resting_sl_before_placing_its_own_exit():
         cancelled = []
         try:
             odc.dhan_wrapper.cancel_order = lambda order_id: cancelled.append(order_id)
-            odc.dhan_wrapper.get_pending_order_id = lambda ts, tt: (sl_calls[-1]["trading_symbol"] if tt == expect_exit_side else None)
+            odc.dhan_wrapper.get_pending_order_id = lambda ts, tt, *_: (sl_calls[-1]["trading_symbol"] if tt == expect_exit_side else None)
 
             result = await ste.enter_position_for_stock("RELIANCE", regime)
             assert result["status"] == "entered", result
@@ -334,7 +334,7 @@ async def test_10_squareoff_cancel_falls_back_to_stored_stop_loss_order_id():
     cancelled = []
     try:
         odc.dhan_wrapper.cancel_order = lambda order_id: cancelled.append(order_id)
-        odc.dhan_wrapper.get_pending_order_id = lambda ts, tt: None  # scan misses it every time
+        odc.dhan_wrapper.get_pending_order_id = lambda ts, tt, *_: None  # scan misses it every time
 
         result = await ste.enter_position_for_stock("RELIANCE", "BULLISH")
         pos = ste.position_store.live_positions["RELIANCE"]
@@ -357,7 +357,7 @@ async def test_11_partial_fill_reconciliation_on_squareoff():
         odc.dhan_wrapper.cancel_order = lambda order_id: None
         result = await ste.enter_position_for_stock("RELIANCE", "BULLISH")
         pos = ste.position_store.live_positions["RELIANCE"]
-        odc.dhan_wrapper.get_pending_order_id = lambda ts, tt: pos.stop_loss_order_id if tt == "SELL" else None
+        odc.dhan_wrapper.get_pending_order_id = lambda ts, tt, *_: pos.stop_loss_order_id if tt == "SELL" else None
 
         assert await ste.position_store.try_start_exit("RELIANCE")
         await ste._exit_position("RELIANCE", pos, exit_price=pos.entry_price, reason="TARGET_HIT")
@@ -379,7 +379,7 @@ async def test_12_fully_filled_during_cancel_race_closes_with_no_fresh_order():
         result = await ste.enter_position_for_stock("RELIANCE", "BULLISH")
         pos = ste.position_store.live_positions["RELIANCE"]
         n_orders_before_exit = len(placed)
-        odc.dhan_wrapper.get_pending_order_id = lambda ts, tt: pos.stop_loss_order_id if tt == "SELL" else None
+        odc.dhan_wrapper.get_pending_order_id = lambda ts, tt, *_: pos.stop_loss_order_id if tt == "SELL" else None
 
         assert await ste.position_store.try_start_exit("RELIANCE")
         await ste._exit_position("RELIANCE", pos, exit_price=pos.entry_price, reason="TARGET_HIT")
@@ -470,7 +470,7 @@ async def test_14_ltp_stale_for_too_long_forces_a_market_exit_and_cancels_broker
         odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: (_ for _ in ()).throw(
             ValueError(f"No LTP returned for {trading_symbol}")
         )
-        odc.dhan_wrapper.get_pending_order_id = lambda ts, tt: (
+        odc.dhan_wrapper.get_pending_order_id = lambda ts, tt, *_: (
             pos.stop_loss_order_id if tt == exit_transaction_type(pos.instrument_side) else None
         )
         odc.dhan_wrapper.cancel_order = lambda order_id: cancelled_order_ids.append(order_id)

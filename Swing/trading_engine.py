@@ -401,6 +401,7 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
         try:
             existing_order_id = await loop.run_in_executor(
                 None, dhan_wrapper.get_pending_order_id, trading_symbol, transaction_type,
+                "MCX" if exchange_segment == "MCX_COMM" else "NSE",
             )
         except Exception:  # noqa: BLE001
             logger.exception("%s: could not check for an already-resting entry order - proceeding anyway", symbol)
@@ -560,7 +561,8 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
 
     try:
         stale_order_id = await loop.run_in_executor(
-            None, dhan_wrapper.get_pending_order_id, position.trading_symbol, exit_side
+            None, dhan_wrapper.get_pending_order_id, position.trading_symbol, exit_side,
+            "MCX" if position.exchange_segment == "MCX_COMM" else "NSE",
         )
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not check for an already-outstanding %s order before placing a new one - "
@@ -981,7 +983,8 @@ async def reconcile_broker_positions() -> list[Position]:
         if config.BROKER_STOP_LOSS_ENABLED:
             try:
                 stop_loss_order_id = await loop.run_in_executor(
-                    None, dhan_wrapper.get_pending_order_id, bp["trading_symbol"], exit_transaction_type(side)
+                    None, dhan_wrapper.get_pending_order_id, bp["trading_symbol"], exit_transaction_type(side),
+                    "MCX" if exchange_segment == "MCX_COMM" else "NSE",
                 )
                 if stop_loss_order_id:
                     logger.info(

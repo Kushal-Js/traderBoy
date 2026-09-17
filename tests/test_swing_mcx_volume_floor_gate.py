@@ -81,12 +81,38 @@ def install_mocks(entry_fill_status=OrderStatus.TRADED):
         "place_mcx_market_order": getattr(odc.dhan_wrapper, "place_mcx_market_order", None),
         "place_market_order": odc.dhan_wrapper.place_market_order,
         "wait_for_order_result": odc.dhan_wrapper.wait_for_order_result,
+        "get_last_historical_close": odc.dhan_wrapper.get_last_historical_close,
+        "get_cached_option_ltp": odc.dhan_wrapper.get_cached_option_ltp,
+        "note_rest_ltp": odc.dhan_wrapper.note_rest_ltp,
+        "place_mcx_stop_loss_limit_order": odc.dhan_wrapper.place_mcx_stop_loss_limit_order,
+        "place_stop_loss_limit_order": odc.dhan_wrapper.place_stop_loss_limit_order,
     }
+    # config.BROKER_STOP_LOSS_ENABLED is never overridden by this file's
+    # own _set() (unlike every OTHER Swing test file), so every test here
+    # picks up the AMBIENT real .env value - which is true - meaning every
+    # "entered" result below (tests 2-5) would otherwise fall through to a
+    # REAL, unmocked broker-side stop-loss placement attempt
+    # (place_mcx_stop_loss_limit_order for COPPER, place_stop_loss_limit_
+    # order for ADANIPORTS in test_3) touching dhan_wrapper.client for
+    # real - this is what was actually causing the repeated real Dhan
+    # login attempts (one per successful entry test), not the LTP-cache
+    # gap alone.
+    odc.dhan_wrapper.place_mcx_stop_loss_limit_order = lambda *a, **k: {"order_id": "FAKE-SL-MCX"}
+    odc.dhan_wrapper.place_stop_loss_limit_order = lambda *a, **k: {"order_id": "FAKE-SL"}
+    # get_cached_option_ltp/note_rest_ltp both call the REAL _instrument_
+    # meta internally, which touches dhan_wrapper.client - a lazy property
+    # that triggers a genuine Dhan login if unmocked (see trading-skills'
+    # incidents/2026-09-08-test-suite-real-auth-leak.md and its
+    # recurrence 3 days later - this file was missed when that class of
+    # gap was fixed elsewhere, and made real login attempts, including
+    # tripping Dhan's own account-level rate limiter, before this fix).
+    odc.dhan_wrapper.get_cached_option_ltp = lambda trading_symbol: None
+    odc.dhan_wrapper.note_rest_ltp = lambda trading_symbol, ltp: None
     odc.dhan_wrapper.get_atm_option = lambda symbol, option_type: _mcx_option(symbol, option_type)
     odc.dhan_wrapper.get_option_ltp = lambda ts: 50.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 100.0}
     odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 1_000_000.0}
-    odc.dhan_wrapper.get_pending_order_id = lambda trading_symbol, transaction_type: None
+    odc.dhan_wrapper.get_pending_order_id = lambda trading_symbol, transaction_type, *_: None
     odc.dhan_wrapper.subscribe_option_price = lambda ts: None
     odc.dhan_wrapper.unsubscribe_option_price = lambda ts: None
 

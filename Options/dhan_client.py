@@ -1966,11 +1966,30 @@ class DhanWrapper:
                 return p["quantity"]
         return 0
 
-    def get_pending_order_id(self, trading_symbol: str, transaction_type: str) -> Optional[str]:
+    def get_pending_order_id(
+        self, trading_symbol: str, transaction_type: str, expected_exchange: Optional[str] = None,
+    ) -> Optional[str]:
         """order_id of an existing non-terminal broker order for this EXACT
         contract + transaction_type, or None if there isn't one. Used to
         avoid placing a duplicate exit order on top of one already
         outstanding at the broker.
+
+        expected_exchange (added 17 Sep 2026, real incident - a genuine
+        resting COPPER SL-L order this scan needed to find for the first
+        time): passed straight through to _instrument_meta, same as every
+        other MCX-aware caller in this file. Without it, this scan's own
+        security_id lookup below defaults to NSE-preferring resolution and
+        can resolve an MCX symbol string to a WRONG, unrelated NSE row's
+        security_id instead (confirmed live: "COPPER 23 SEP 1400 CALL"
+        resolved to security_id 123831 with no hint, vs the real 574836
+        with expected_exchange="MCX") - the exact "cross-exchange
+        instrument-master collision" class of bug already fixed for ATM
+        resolution (12 Sep 2026, commit c7ffaa3) but never ported to this
+        function, since it predates Copper/MCX support entirely. Optional
+        and defaults to None (today's exact behavior, zero risk) since
+        Options/Futures/Luxury only ever call this for NSE symbols, where
+        no such ambiguity exists - only Swing's own MCX call sites need to
+        pass "MCX" here.
 
         Confirmed live on 26 Aug 2026 (BHARATFORG): our own in-memory
         pending_exit_order_id tracking is wiped by a restart, but a SELL
@@ -2017,7 +2036,7 @@ class DhanWrapper:
         caller that already holds a specific id (Position.stop_loss_order_
         id) must prefer that over relying on this scan alone."""
         try:
-            security_id = self._instrument_meta(trading_symbol).get("security_id")
+            security_id = self._instrument_meta(trading_symbol, expected_exchange=expected_exchange).get("security_id")
         except Exception:  # noqa: BLE001
             security_id = None
 
