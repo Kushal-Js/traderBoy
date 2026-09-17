@@ -430,6 +430,24 @@ MCX_MIN_DAYS_TO_EXPIRY = int(os.getenv("SWING_MCX_MIN_DAYS_TO_EXPIRY", "3"))
 MCX_VOLUME_FLOOR_GATE_ENABLED = os.getenv("SWING_MCX_VOLUME_FLOOR_GATE_ENABLED", "true").lower() == "true"
 MCX_VOLUME_FLOOR_RATIO_MIN = float(os.getenv("SWING_MCX_VOLUME_FLOOR_RATIO_MIN", "1.2"))
 
+# Same volume-floor gate, extended to every NON-MCX watchlist symbol (18 Sep
+# 2026, user request after investigating the ANGELONE 29 SEP 295 PUT real
+# loss of Rs 4,125 on 17 Sep 2026) - independently controllable from the MCX
+# gate above, not a shared flag, so either can be tuned/disabled without
+# touching the other. That ANGELONE entry had a shadow reversal-filter
+# VolRatio of 0.01 at entry time (recommended_combo_blocks=True, logged but
+# not enforced outside MCX) - almost zero entry-candle volume, the same
+# thin-liquidity pattern this gate already blocks for MCX. The 1.2x
+# threshold reuses the SAME value MCX_VOLUME_FLOOR_RATIO_MIN defaults to,
+# which is itself no coincidence: that number was originally derived from a
+# 15-day shadow-mode backtest across Options/Futures/Luxury REAL trades
+# (see MCX_VOLUME_FLOOR_RATIO_MIN's own docstring) - i.e. non-MCX data -
+# before ever being applied to MCX, so there is already real empirical
+# grounding for using it here too, not a blind copy. Default ENABLED,
+# consistent with the MCX gate's own "make it enabled as of now" precedent.
+NSE_VOLUME_FLOOR_GATE_ENABLED = os.getenv("SWING_NSE_VOLUME_FLOOR_GATE_ENABLED", "true").lower() == "true"
+NSE_VOLUME_FLOOR_RATIO_MIN = float(os.getenv("SWING_NSE_VOLUME_FLOOR_RATIO_MIN", "1.2"))
+
 # ---------------------------------------------------------------------------
 # Plumbing
 # ---------------------------------------------------------------------------

@@ -1,25 +1,37 @@
 """
-Tests for Swing's MCX-only volume-floor entry gate (promoted from
-shadow-mode analysis to a live gate, 16 Sep 2026 - user request: "enable
-this to SWING strategy but for MCX only and make it flag enabled/disabled
-but make it enabled as of now").
+Tests for Swing's volume-floor entry gate - originally MCX-only (promoted
+from shadow-mode analysis to a live gate, 16 Sep 2026 - user request:
+"enable this to SWING strategy but for MCX only and make it flag
+enabled/disabled but make it enabled as of now"), extended to every
+non-MCX watchlist symbol on 18 Sep 2026 after investigating a real
+ANGELONE 29 SEP 295 PUT loss of Rs 4,125 on 17 Sep 2026 - that entry had
+a shadow reversal-filter VolRatio of 0.01 (near-zero entry-candle volume)
+that was logged but never enforced outside MCX. The MCX and NSE gates are
+independently configured (separate enabled flags and thresholds) even
+though the underlying check is identical.
 
 Coverage:
   1. An MCX symbol (COPPER) with a thin entry-candle volume (< the
-     configured floor) is BLOCKED when the gate is enabled - no
+     configured floor) is BLOCKED when the MCX gate is enabled - no
      reservation taken, no order placed.
-  2. The SAME thin-volume MCX symbol is allowed through when the gate is
-     DISABLED (config.MCX_VOLUME_FLOOR_GATE_ENABLED = False) - proves
-     this is a genuine, real-time-flippable flag, not baked into the
-     entry logic unconditionally.
-  3. An NSE-EQUITY watchlist symbol (e.g. ADANIPORTS, not in MCX_SYMBOLS)
-     is NEVER gated by this, even with an equally thin volume ratio -
-     the user's explicit "for MCX only" scoping.
-  4. A healthy (>= floor) volume ratio on an MCX symbol is NOT blocked -
+  2. The SAME thin-volume MCX symbol is allowed through when the MCX gate
+     is DISABLED - proves this is a genuine, real-time-flippable flag,
+     not baked into the entry logic unconditionally.
+  3. An NSE-equity watchlist symbol (e.g. ADANIPORTS, not in MCX_SYMBOLS)
+     with a thin entry-candle volume is BLOCKED when the NSE gate is
+     enabled - the extension this file's own header describes.
+  4. The SAME thin-volume NSE symbol is allowed through when the NSE gate
+     is disabled - independently flippable, same as the MCX gate.
+  5. The two gates are genuinely INDEPENDENT: MCX enabled + NSE disabled
+     blocks COPPER but lets an equally-thin ADANIPORTS entry through (and
+     the mirror configuration the other way around).
+  6. A healthy (>= floor) volume ratio on an MCX symbol is NOT blocked -
      the gate only rejects genuinely thin candles, not every MCX entry.
-  5. Missing volume data (volume_ratio=None, e.g. get_supertrend_state
-     itself returned None) fails OPEN - never blocks on missing
+  7. Missing volume data (volume_ratio=None, e.g. get_supertrend_state
+     itself returned None) fails OPEN for MCX - never blocks on missing
      information, only on a CONFIRMED thin reading.
+  8. The same healthy-volume-not-blocked check for the NSE gate.
+  9. The same missing-data-fails-open check for the NSE gate.
 
 HOW TO RUN:
     uv run python tests/test_swing_mcx_volume_floor_gate.py
@@ -137,19 +149,21 @@ def install_mocks(entry_fill_status=OrderStatus.TRADED):
     return restore, placed_orders
 
 
-def _set(gate_enabled, floor_ratio=1.2):
+def _set(mcx_gate_enabled, nse_gate_enabled=False, floor_ratio=1.2):
     sc.BASKET_TYPE = "options"
     sc.MCX_SYMBOLS = {"COPPER"}
     sc.MCX_OPTIONS_ONLY_SYMBOLS = {"COPPER"}
     sc.MCX_PNL_MULTIPLIERS = {"COPPER": 2500}
-    sc.MCX_VOLUME_FLOOR_GATE_ENABLED = gate_enabled
+    sc.MCX_VOLUME_FLOOR_GATE_ENABLED = mcx_gate_enabled
     sc.MCX_VOLUME_FLOOR_RATIO_MIN = floor_ratio
+    sc.NSE_VOLUME_FLOOR_GATE_ENABLED = nse_gate_enabled
+    sc.NSE_VOLUME_FLOOR_RATIO_MIN = floor_ratio
     sc.MAX_CONCURRENT_TRADES = 2
     ste.position_store.__init__()
 
 
 async def test_1_thin_mcx_volume_blocked_when_gate_enabled():
-    _set(gate_enabled=True)
+    _set(mcx_gate_enabled=True)
     restore, placed = install_mocks()
     ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=0.5))
     try:
@@ -157,13 +171,13 @@ async def test_1_thin_mcx_volume_blocked_when_gate_enabled():
         assert result["status"] == "skipped" and result["reason"] == "mcx_volume_floor_gate", result
         assert len(placed) == 0, "no real order should have been placed"
         assert "COPPER" not in ste.position_store.reserved_symbols
-        print("1. Thin MCX volume (0.5x < 1.2x floor) is BLOCKED when the gate is enabled - zero orders placed: PASSED")
+        print("1. Thin MCX volume (0.5x < 1.2x floor) is BLOCKED when the MCX gate is enabled - zero orders placed: PASSED")
     finally:
         restore()
 
 
 async def test_2_same_thin_volume_allowed_when_gate_disabled():
-    _set(gate_enabled=False)
+    _set(mcx_gate_enabled=False)
     restore, placed = install_mocks()
     ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=0.5))
     try:
@@ -176,37 +190,84 @@ async def test_2_same_thin_volume_allowed_when_gate_disabled():
         restore()
 
 
-async def test_3_nse_equity_symbol_never_gated_regardless_of_volume():
-    _set(gate_enabled=True)
+async def test_3_thin_nse_volume_blocked_when_nse_gate_enabled():
+    """The extension: ADANIPORTS is NOT in MCX_SYMBOLS, so is_mcx=False -
+    this now goes through the NSE gate instead of skipping volume checks
+    entirely. Mirrors the real ANGELONE incident's VolRatio=0.01 entry."""
+    _set(mcx_gate_enabled=False, nse_gate_enabled=True)
     restore, placed = install_mocks()
-    # ADANIPORTS is NOT in MCX_SYMBOLS - is_mcx=False, gate must never apply
-    ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=0.1))
+    ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=0.01))
     try:
         result = await ste.enter_position_for_stock("ADANIPORTS", "BULLISH")
-        assert result["status"] == "entered", result
-        assert len(placed) == 1
-        print("3. An NSE-equity watchlist symbol (ADANIPORTS) is NEVER gated by the MCX-only volume floor, "
-              "even with an equally thin (0.1x) volume ratio: PASSED")
+        assert result["status"] == "skipped" and result["reason"] == "nse_volume_floor_gate", result
+        assert len(placed) == 0, "no real order should have been placed"
+        assert "ADANIPORTS" not in ste.position_store.reserved_symbols
+        print("3. Thin NSE volume (0.01x < 1.2x floor, the real ANGELONE incident's own ratio) is BLOCKED "
+              "when the NSE gate is enabled - zero orders placed: PASSED")
     finally:
         restore()
 
 
-async def test_4_healthy_mcx_volume_not_blocked():
-    _set(gate_enabled=True)
+async def test_4_same_thin_nse_volume_allowed_when_nse_gate_disabled():
+    _set(mcx_gate_enabled=False, nse_gate_enabled=False)
+    restore, placed = install_mocks()
+    ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=0.01))
+    try:
+        result = await ste.enter_position_for_stock("ADANIPORTS", "BULLISH")
+        assert result["status"] == "entered", result
+        assert len(placed) == 1
+        print("4. The SAME thin NSE volume (0.01x) is allowed through when NSE_VOLUME_FLOOR_GATE_ENABLED=False "
+              "- independently flippable, same as the MCX gate: PASSED")
+    finally:
+        restore()
+
+
+async def test_5_mcx_and_nse_gates_are_genuinely_independent():
+    """MCX enabled + NSE disabled: COPPER (thin) is blocked, ADANIPORTS
+    (equally thin) is not - and the mirror configuration the other way -
+    proving these are two separate flags/thresholds, not one shared one."""
+    _set(mcx_gate_enabled=True, nse_gate_enabled=False)
+    restore, placed = install_mocks()
+    ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=0.3))
+    try:
+        copper_result = await ste.enter_position_for_stock("COPPER", "BULLISH")
+        assert copper_result["status"] == "skipped" and copper_result["reason"] == "mcx_volume_floor_gate", copper_result
+        adaniports_result = await ste.enter_position_for_stock("ADANIPORTS", "BULLISH")
+        assert adaniports_result["status"] == "entered", adaniports_result
+    finally:
+        restore()
+
+    _set(mcx_gate_enabled=False, nse_gate_enabled=True)
+    restore, placed = install_mocks()
+    ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=0.3))
+    try:
+        copper_result = await ste.enter_position_for_stock("COPPER", "BULLISH")
+        assert copper_result["status"] == "entered", copper_result
+        adaniports_result = await ste.enter_position_for_stock("ADANIPORTS", "BULLISH")
+        assert adaniports_result["status"] == "skipped" and adaniports_result["reason"] == "nse_volume_floor_gate", \
+            adaniports_result
+        print("5. The MCX and NSE volume-floor gates are genuinely independent - either can be enabled/disabled "
+              "without affecting the other's own symbols: PASSED")
+    finally:
+        restore()
+
+
+async def test_6_healthy_mcx_volume_not_blocked():
+    _set(mcx_gate_enabled=True)
     restore, placed = install_mocks()
     ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=2.5))
     try:
         result = await ste.enter_position_for_stock("COPPER", "BULLISH")
         assert result["status"] == "entered", result
         assert len(placed) == 1
-        print("4. A healthy (2.5x >= 1.2x floor) MCX volume ratio is NOT blocked - "
+        print("6. A healthy (2.5x >= 1.2x floor) MCX volume ratio is NOT blocked - "
               "the gate only rejects genuinely thin candles: PASSED")
     finally:
         restore()
 
 
-async def test_5_missing_volume_data_fails_open():
-    _set(gate_enabled=True)
+async def test_7_missing_volume_data_fails_open_mcx():
+    _set(mcx_gate_enabled=True)
     restore, placed = install_mocks()
     ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(None)
     try:
@@ -214,7 +275,36 @@ async def test_5_missing_volume_data_fails_open():
         assert result["status"] != "skipped" or result.get("reason") != "mcx_volume_floor_gate", \
             f"missing signal data (volume_ratio unknown) must never be treated as a confirmed thin candle: {result}"
         assert result["status"] == "entered", result
-        print("5. Missing volume data (get_supertrend_state returned None) fails OPEN on the volume gate "
+        print("7. Missing volume data (get_supertrend_state returned None) fails OPEN on the MCX volume gate "
+              "specifically - proceeds to a real entry rather than blocking on missing information: PASSED")
+    finally:
+        restore()
+
+
+async def test_8_healthy_nse_volume_not_blocked():
+    _set(mcx_gate_enabled=False, nse_gate_enabled=True)
+    restore, placed = install_mocks()
+    ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=2.5))
+    try:
+        result = await ste.enter_position_for_stock("ADANIPORTS", "BULLISH")
+        assert result["status"] == "entered", result
+        assert len(placed) == 1
+        print("8. A healthy (2.5x >= 1.2x floor) NSE volume ratio is NOT blocked - "
+              "the NSE gate only rejects genuinely thin candles: PASSED")
+    finally:
+        restore()
+
+
+async def test_9_missing_volume_data_fails_open_nse():
+    _set(mcx_gate_enabled=False, nse_gate_enabled=True)
+    restore, placed = install_mocks()
+    ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(None)
+    try:
+        result = await ste.enter_position_for_stock("ADANIPORTS", "BULLISH")
+        assert result["status"] != "skipped" or result.get("reason") != "nse_volume_floor_gate", \
+            f"missing signal data (volume_ratio unknown) must never be treated as a confirmed thin candle: {result}"
+        assert result["status"] == "entered", result
+        print("9. Missing volume data (get_supertrend_state returned None) fails OPEN on the NSE volume gate "
               "specifically - proceeds to a real entry rather than blocking on missing information: PASSED")
     finally:
         restore()
@@ -225,13 +315,17 @@ async def _async(value):
 
 
 async def main():
-    print("=== Swing MCX-only volume-floor gate test suite ===\n")
+    print("=== Swing volume-floor gate (MCX + NSE) test suite ===\n")
     await test_1_thin_mcx_volume_blocked_when_gate_enabled()
     await test_2_same_thin_volume_allowed_when_gate_disabled()
-    await test_3_nse_equity_symbol_never_gated_regardless_of_volume()
-    await test_4_healthy_mcx_volume_not_blocked()
-    await test_5_missing_volume_data_fails_open()
-    print("\nALL Swing MCX volume-floor gate tests PASSED")
+    await test_3_thin_nse_volume_blocked_when_nse_gate_enabled()
+    await test_4_same_thin_nse_volume_allowed_when_nse_gate_disabled()
+    await test_5_mcx_and_nse_gates_are_genuinely_independent()
+    await test_6_healthy_mcx_volume_not_blocked()
+    await test_7_missing_volume_data_fails_open_mcx()
+    await test_8_healthy_nse_volume_not_blocked()
+    await test_9_missing_volume_data_fails_open_nse()
+    print("\nALL Swing volume-floor gate (MCX + NSE) tests PASSED")
 
 
 if __name__ == "__main__":

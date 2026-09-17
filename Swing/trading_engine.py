@@ -291,24 +291,35 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
         await _record_swing_event("ENTRY_SKIPPED_EQUITY_LONG_ONLY", symbol, {"basket_type": effective_basket_type})
         return {"symbol": symbol, "status": "skipped", "reason": "equity_long_only"}
 
-    # MCX-only volume-floor entry gate (promoted from shadow-mode
-    # analysis, 16 Sep 2026 - see config.MCX_VOLUME_FLOOR_GATE_ENABLED's
-    # own docstring). NSE-equity watchlist symbols are never gated here.
-    # Checked before reserve_symbol, same "don't burn a capacity slot for
-    # a trade that was never going to be placed" reasoning as the check
-    # just above. Reuses the ALREADY-FETCHED 5-min SupertrendState's own
-    # volume_ratio (cached/throttled - the entry signal that got us here
-    # already computed this moments ago) rather than a fresh fetch.
-    if is_mcx and config.MCX_VOLUME_FLOOR_GATE_ENABLED:
+    # Volume-floor entry gate (MCX version promoted from shadow-mode
+    # analysis, 16 Sep 2026; extended to every non-MCX watchlist symbol 18
+    # Sep 2026 after the ANGELONE 29 SEP 295 PUT real loss - see
+    # config.MCX_VOLUME_FLOOR_GATE_ENABLED/NSE_VOLUME_FLOOR_GATE_ENABLED's
+    # own docstrings). The two are independently configured (separate
+    # flags/thresholds) even though the check itself is identical - MCX
+    # keeps its own reason string/event name so the already-deployed
+    # test/monitoring around "mcx_volume_floor_gate" is completely
+    # unaffected by this extension. Checked before reserve_symbol, same
+    # "don't burn a capacity slot for a trade that was never going to be
+    # placed" reasoning as the check just above. Reuses the ALREADY-
+    # FETCHED 5-min SupertrendState's own volume_ratio (cached/throttled -
+    # the entry signal that got us here already computed this moments ago)
+    # rather than a fresh fetch.
+    volume_floor_enabled = config.MCX_VOLUME_FLOOR_GATE_ENABLED if is_mcx else config.NSE_VOLUME_FLOOR_GATE_ENABLED
+    volume_floor_ratio_min = config.MCX_VOLUME_FLOOR_RATIO_MIN if is_mcx else config.NSE_VOLUME_FLOOR_RATIO_MIN
+    if volume_floor_enabled:
         st = await signals.get_supertrend_state(symbol)
         vol_ratio = st.volume_ratio if st else None
-        if vol_ratio is not None and vol_ratio < config.MCX_VOLUME_FLOOR_RATIO_MIN:
+        if vol_ratio is not None and vol_ratio < volume_floor_ratio_min:
+            gate_label = "MCX" if is_mcx else "NSE"
             logger.info(
-                "%s: skipped - MCX volume floor gate (entry-candle volume %.3fx 20-bar avg, below %.2fx floor)",
-                symbol, vol_ratio, config.MCX_VOLUME_FLOOR_RATIO_MIN,
+                "%s: skipped - %s volume floor gate (entry-candle volume %.3fx 20-bar avg, below %.2fx floor)",
+                symbol, gate_label, vol_ratio, volume_floor_ratio_min,
             )
-            await _record_swing_event("ENTRY_SKIPPED_MCX_VOLUME_FLOOR", symbol, {"vol_ratio": vol_ratio})
-            return {"symbol": symbol, "status": "skipped", "reason": "mcx_volume_floor_gate", "vol_ratio": vol_ratio}
+            gate_reason = "mcx_volume_floor_gate" if is_mcx else "nse_volume_floor_gate"
+            gate_event = "ENTRY_SKIPPED_MCX_VOLUME_FLOOR" if is_mcx else "ENTRY_SKIPPED_NSE_VOLUME_FLOOR"
+            await _record_swing_event(gate_event, symbol, {"vol_ratio": vol_ratio})
+            return {"symbol": symbol, "status": "skipped", "reason": gate_reason, "vol_ratio": vol_ratio}
 
     if not await position_store.reserve_symbol(symbol):
         return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
