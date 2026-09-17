@@ -72,30 +72,86 @@ def _underlying_reference(symbol: str) -> tuple[str, str, str]:
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class RegimeState:
+    """fast_ema/slow_ema/is_bullish are the plain LEVEL comparison,
+    UNCHANGED in meaning since this file's own original design - still
+    what v1's own simpler entry rule and GET /swing/signals read.
+
+    crossed_above/crossed_below (added 17 Sep 2026, user request) are a
+    SEPARATE, EDGE-based reading of the exact same two EMAs - the 5-min
+    EMA200 crossing above/below the 15-min EMA200 between the last two
+    closed 5-min candles, mirroring Supertrend's own crossed_above/
+    crossed_below (a state CHANGE, not "currently above/below"). v2's own
+    combined entry rule uses THIS as its "Regime Bullish/Bearish" leg -
+    is_bullish is a different, coarser signal, kept as-is for v1/
+    observability.
+
+    gap_widened (added 17 Sep 2026, user request) - whether the |fast_ema
+    - slow_ema| gap has grown (not shrunk) over the last config.REGIME_
+    GAP_WIDENING_LOOKBACK_CANDLES 5-min candles, in whichever direction it
+    currently sits - a strengthening-trend confirmation, not just "still
+    on the same side." Real motivating case (COPPER, same night): a
+    regime reading can be technically bullish/bearish by sign while the
+    two EMAs are actually CONVERGING (about to flip) - a hairline,
+    weakening gap is a much lower-conviction signal than a genuinely
+    widening one. v2's own "Trend-aware Filter Bullish/Bearish" leg =
+    (is_bullish/not is_bullish) AND gap_widened. None (not False) when
+    there isn't yet enough history to judge - callers must treat None the
+    same as False (fails closed, never fires this leg on missing data)."""
     fast_ema: float
     slow_ema: float
-    is_bullish: bool          # fast_ema > slow_ema
+    is_bullish: bool          # fast_ema > slow_ema (LEVEL - unchanged meaning)
     fast_candle_start: Optional[datetime]
     slow_candle_start: Optional[datetime]
+    prev_is_bullish: Optional[bool] = None
+    gap_widened: Optional[bool] = None
+
+    @property
+    def crossed_above(self) -> bool:
+        return bool(self.prev_is_bullish is False and self.is_bullish is True)
+
+    @property
+    def crossed_below(self) -> bool:
+        return bool(self.prev_is_bullish is True and self.is_bullish is False)
 
 
 _regime_cache: dict[str, tuple[datetime, Optional[RegimeState]]] = {}
 
 
-def _ema200_on(closes: list[float], timestamps: list[int], interval_minutes: int) -> tuple[Optional[float], Optional[datetime]]:
-    """Drops a still-forming last candle, requires at least REGIME_EMA_
-    PERIOD closed bars, returns (last EMA(200) value, that candle's own
-    start) or (None, None)."""
-    if timestamps:
-        last_candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST)
-        if _now_ist() < last_candle_start + timedelta(minutes=interval_minutes):
-            closes, timestamps = closes[:-1], timestamps[:-1]
-    if len(closes) < config.REGIME_EMA_PERIOD:
-        return None, None
-    ema = _compute_ema(closes, config.REGIME_EMA_PERIOD)
-    if ema[-1] is None:
-        return None, None
-    return ema[-1], (datetime.fromtimestamp(timestamps[-1], tz=IST) if timestamps else None)
+def _last_closed_idx(timestamps: list[int], cutoff_ts: float, interval_minutes: int) -> Optional[int]:
+    """Index of the last candle that had FULLY CLOSED by cutoff_ts (its
+    own start + interval <= cutoff) - not merely started by then. Shared
+    by the regime gap-alignment lookback below (a 5-min candle's own
+    close instant -> the most recently closed 15-min candle as of that
+    same moment)."""
+    interval_s = interval_minutes * 60
+    best = None
+    for i, ts in enumerate(timestamps):
+        if ts + interval_s <= cutoff_ts:
+            best = i
+        else:
+            break
+    return best
+
+
+def _aligned_gap(
+    fast_ema: list[Optional[float]], fast_ts: list[int], fast_idx: int,
+    slow_ema: list[Optional[float]], slow_ts: list[int],
+) -> Optional[float]:
+    """fast_ema[fast_idx] minus the slow EMA value from the most recently
+    CLOSED slow candle as of that fast candle's own close instant -
+    generalizes the "15-min state as of this 5-min candle" alignment
+    _evaluate_entry_signal's v2 filter already uses, to any historical
+    fast_idx (not only the latest), so the crossover/gap-widening checks
+    below can look back multiple 5-min candles at the correctly-aligned
+    slow value for each one. None if fast_idx is out of range or either
+    side doesn't have a real value there yet (not enough history)."""
+    if fast_idx < 0 or fast_idx >= len(fast_ema) or fast_ema[fast_idx] is None:
+        return None
+    cutoff = fast_ts[fast_idx] + config.REGIME_FAST_INTERVAL_MINUTES * 60
+    idx = _last_closed_idx(slow_ts, cutoff, config.REGIME_SLOW_INTERVAL_MINUTES)
+    if idx is None or slow_ema[idx] is None:
+        return None
+    return fast_ema[fast_idx] - slow_ema[idx]
 
 
 def _fetch_regime_state_once(symbol: str) -> Optional[RegimeState]:
@@ -133,10 +189,16 @@ def _fetch_regime_state_once(symbol: str) -> Optional[RegimeState]:
             f"{config.REGIME_FAST_INTERVAL_MINUTES}-min regime series - treating as a fetch "
             f"failure, not genuinely insufficient history"
         )
-    fast_ema, fast_start = _ema200_on(
-        fast_data.get("close") or [], fast_data.get("timestamp") or [], config.REGIME_FAST_INTERVAL_MINUTES,
-    )
-    if fast_ema is None:
+    fast_closes = fast_data.get("close") or []
+    fast_ts = fast_data.get("timestamp") or []
+    if fast_ts:
+        last_candle_start = datetime.fromtimestamp(fast_ts[-1], tz=IST)
+        if _now_ist() < last_candle_start + timedelta(minutes=config.REGIME_FAST_INTERVAL_MINUTES):
+            fast_closes, fast_ts = fast_closes[:-1], fast_ts[:-1]
+    if len(fast_closes) < config.REGIME_EMA_PERIOD:
+        return None
+    fast_ema_arr = _compute_ema(fast_closes, config.REGIME_EMA_PERIOD)
+    if fast_ema_arr[-1] is None:
         return None
 
     slow_data = dhan_wrapper.fetch_continuous_intraday(
@@ -149,15 +211,47 @@ def _fetch_regime_state_once(symbol: str) -> Optional[RegimeState]:
             f"{config.REGIME_SLOW_INTERVAL_MINUTES}-min regime series - treating as a fetch "
             f"failure, not genuinely insufficient history"
         )
-    slow_ema, slow_start = _ema200_on(
-        slow_data.get("close") or [], slow_data.get("timestamp") or [], config.REGIME_SLOW_INTERVAL_MINUTES,
-    )
-    if slow_ema is None:
+    slow_closes = slow_data.get("close") or []
+    slow_ts = slow_data.get("timestamp") or []
+    if slow_ts:
+        last_candle_start = datetime.fromtimestamp(slow_ts[-1], tz=IST)
+        if _now_ist() < last_candle_start + timedelta(minutes=config.REGIME_SLOW_INTERVAL_MINUTES):
+            slow_closes, slow_ts = slow_closes[:-1], slow_ts[:-1]
+    if len(slow_closes) < config.REGIME_EMA_PERIOD:
+        return None
+    slow_ema_arr = _compute_ema(slow_closes, config.REGIME_EMA_PERIOD)
+    if slow_ema_arr[-1] is None:
         return None
 
+    # "Current" reading is byte-identical to the pre-17-Sep-2026 code path
+    # (plain last-value comparison) - only the NEW historical lookups
+    # below (prev candle, N candles back) need the generalized alignment
+    # helper, since they must look at an EARLIER 5-min candle against
+    # whatever 15-min candle was actually closed at THAT moment in time.
+    fast_ema = fast_ema_arr[-1]
+    slow_ema = slow_ema_arr[-1]
+    current_gap = fast_ema - slow_ema
+    is_bullish = current_gap > 0
+
+    fast_idx_now = len(fast_ema_arr) - 1
+    prev_gap = _aligned_gap(fast_ema_arr, fast_ts, fast_idx_now - 1, slow_ema_arr, slow_ts)
+    prev_is_bullish = (prev_gap > 0) if prev_gap is not None else None
+
+    gap_n_ago = _aligned_gap(
+        fast_ema_arr, fast_ts, fast_idx_now - config.REGIME_GAP_WIDENING_LOOKBACK_CANDLES, slow_ema_arr, slow_ts,
+    )
+    if gap_n_ago is None:
+        gap_widened = None
+    elif is_bullish:
+        gap_widened = current_gap > gap_n_ago
+    else:
+        gap_widened = current_gap < gap_n_ago
+
     return RegimeState(
-        fast_ema=fast_ema, slow_ema=slow_ema, is_bullish=fast_ema > slow_ema,
-        fast_candle_start=fast_start, slow_candle_start=slow_start,
+        fast_ema=fast_ema, slow_ema=slow_ema, is_bullish=is_bullish,
+        fast_candle_start=datetime.fromtimestamp(fast_ts[-1], tz=IST) if fast_ts else None,
+        slow_candle_start=datetime.fromtimestamp(slow_ts[-1], tz=IST) if slow_ts else None,
+        prev_is_bullish=prev_is_bullish, gap_widened=gap_widened,
     )
 
 

@@ -222,6 +222,28 @@ REGIME_EMA_PERIOD = int(os.getenv("SWING_REGIME_EMA_PERIOD", "200"))
 REGIME_FAST_INTERVAL_MINUTES = int(os.getenv("SWING_REGIME_FAST_INTERVAL_MINUTES", "5"))
 REGIME_SLOW_INTERVAL_MINUTES = int(os.getenv("SWING_REGIME_SLOW_INTERVAL_MINUTES", "15"))
 
+# v2 entry rewrite, 17 Sep 2026 (user request, direct follow-up to the
+# same-night COPPER trade investigation - see trading-skills' own
+# incident write-up: that trade fired on a hairline, ALREADY-SHRINKING
+# regime gap that happened to sit on the bearish side by sign alone, with
+# the far-more-reliable 15-min Supertrend still reading bullish). Two
+# real, DISTINCT changes to what "regime" means for v2's own entry rule:
+#   1. RegimeState.crossed_above/crossed_below (an EDGE, the fast EMA200
+#      crossing the slow one - mirrors Supertrend's own crossed_above/
+#      crossed_below) is now v2's own "Regime Bullish/Bearish" leg,
+#      replacing the old plain LEVEL check (is_bullish) that leg used to
+#      read. is_bullish itself is UNCHANGED and still used by v1's own
+#      simpler rule and GET /swing/signals - only v2's combined formula
+#      switched what "Regime Bullish" means for its own purposes.
+#   2. A NEW "Trend-aware Filter" leg: the level check (is_bullish/not)
+#      AND the gap must have WIDENED (not narrowed) over this many 5-min
+#      candles before counting as "genuinely" bullish/bearish - a
+#      strengthening-trend confirmation on top of the plain level, since
+#      that COPPER trade's own regime gap was NARROWING every candle
+#      leading up to entry (converging toward a flip), the opposite of a
+#      confirmed trend.
+REGIME_GAP_WIDENING_LOOKBACK_CANDLES = int(os.getenv("SWING_REGIME_GAP_WIDENING_LOOKBACK_CANDLES", "8"))
+
 # The global INTRADAY_CONTINUOUS_LOOKBACK_DAYS every other signal in this
 # codebase uses (default 7) is nowhere near enough to warm up a 200-period
 # EMA on 15-min bars (7 days is only ~125 bars; needs >=200 for a first

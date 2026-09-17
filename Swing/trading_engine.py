@@ -142,16 +142,29 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
     numbers behind this):
 
     v1 (original design, unchanged): regime bullish (5-min EMA200 >
-      15-min EMA200) AND 5-min close crossed ABOVE the 5-min Supertrend
-      -> "BULLISH"; the mirror for "BEARISH".
+      15-min EMA200 - a plain LEVEL check, regime.is_bullish) AND 5-min
+      close crossed ABOVE the 5-min Supertrend -> "BULLISH"; the mirror
+      for "BEARISH".
 
-    v2 (combined): (15-min Supertrend showing green, i.e. its own close
-      is above its own Supertrend line - a LEVEL check, not a crossover)
-      OR (regime bullish) -> filter passes bullish; 5-min close crossed
-      ABOVE the 5-min Supertrend -> "BULLISH". Mirror for "BEARISH". This
-      OR means v2 can only admit MORE entries than v1 would from the
-      same underlying data, never fewer - v1's own filter is one of the
-      two ORed conditions."""
+    v2 (combined, redesigned 17 Sep 2026 - user request, direct follow-up
+      to the same-night COPPER trade investigation: that trade fired on a
+      hairline, ALREADY-NARROWING regime gap that happened to sit on the
+      bearish side by sign alone, while the far more reliable 15-min
+      Supertrend was still bullish - see trading-skills' own incident
+      write-up). Filter is now a THREE-way OR, not two:
+        (15-min Supertrend showing green/red - a LEVEL check, unchanged)
+        OR (Trend-aware Filter: the level check AND the gap has WIDENED,
+            not narrowed, over config.REGIME_GAP_WIDENING_LOOKBACK_
+            CANDLES 5-min candles - regime.gap_widened, a strengthening-
+            trend confirmation the old plain level check never had)
+        OR (Regime Bullish/Bearish: the 5-min EMA200 just crossed the
+            15-min one - regime.crossed_above/crossed_below, an EDGE,
+            not "currently above/below" - mirrors how the Supertrend leg
+            below already works)
+      AND 5-min close crossed the 5-min Supertrend -> the entry. Still
+      strictly more permissive than v1 (v1's own level-only filter is
+      still one of the three ORed legs), just with two additional,
+      more-deliberate ways in as well."""
     regime = await signals.get_regime_state(symbol)
     if regime is None:
         return None
@@ -162,8 +175,10 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
         st15 = await signals.get_supertrend_state(symbol, config.REGIME_SLOW_INTERVAL_MINUTES)
         if st15 is None:
             return None
-        filter_bullish = st15.is_above or regime.is_bullish
-        filter_bearish = (not st15.is_above) or (not regime.is_bullish)
+        trend_aware_bullish = bool(regime.is_bullish and regime.gap_widened)
+        trend_aware_bearish = bool((not regime.is_bullish) and regime.gap_widened)
+        filter_bullish = st15.is_above or trend_aware_bullish or regime.crossed_above
+        filter_bearish = (not st15.is_above) or trend_aware_bearish or regime.crossed_below
         if filter_bullish and st.crossed_above:
             return "BULLISH"
         if filter_bearish and st.crossed_below:

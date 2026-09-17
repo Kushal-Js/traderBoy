@@ -160,6 +160,8 @@ async def get_signals():
             "symbol": symbol,
             "regime": None if regime is None else {
                 "is_bullish": regime.is_bullish, "fast_ema": regime.fast_ema, "slow_ema": regime.slow_ema,
+                "crossed_above": regime.crossed_above, "crossed_below": regime.crossed_below,
+                "gap_widened": regime.gap_widened,
                 "fast_candle_start": regime.fast_candle_start.isoformat() if regime.fast_candle_start else None,
                 "slow_candle_start": regime.slow_candle_start.isoformat() if regime.slow_candle_start else None,
             },
