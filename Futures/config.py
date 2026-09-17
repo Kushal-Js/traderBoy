@@ -78,6 +78,21 @@ LOSS_REPEAT_BLOCK_ENABLED = os.getenv("FUTURES_LOSS_REPEAT_BLOCK_ENABLED", "true
 LOSS_REPEAT_BLOCK_COUNT = int(os.getenv("FUTURES_LOSS_REPEAT_BLOCK_COUNT", "2"))
 LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
 
+# Volume-floor entry gate (17 Sep 2026) - same mechanism, threshold, and
+# rationale as Options/config.py's own VOLUME_FLOOR_GATE_ENABLED (ported
+# there 16 Sep 2026 after backtesting showed it's the single strongest
+# reversal-prevention filter across real Options/Futures/Luxury trades -
+# see reversal_filters.py's own module docstring). Blocks a new entry if
+# the underlying's own 5-min entry candle traded on less than
+# VOLUME_FLOOR_RATIO_MIN times its 20-bar average volume. Flag-enabled
+# (default on) so it can be switched off instantly via .env without
+# touching strategy logic. Fails OPEN (never blocks) on a fetch failure
+# or insufficient data - see reversal_filters.check_volume_floor's own
+# docstring for why a diagnostic check's own failure must never itself
+# cause a missed entry.
+VOLUME_FLOOR_GATE_ENABLED = os.getenv("FUTURES_VOLUME_FLOOR_GATE_ENABLED", "true").lower() == "true"
+VOLUME_FLOOR_RATIO_MIN = float(os.getenv("FUTURES_VOLUME_FLOOR_RATIO_MIN", "1.2"))
+
 # Real broker-side SELL STOP-LOSS LIMIT (SL-L) order placed after every
 # entry - an additional faster backstop on top of the poll/tick MAX_LOSS
 # check, never a replacement. Kept OFF by default (same rollout discipline

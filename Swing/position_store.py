@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
+import reversal_filters
 from . import config
 from trade_history import fire_and_forget, record_closed_trade, record_opened_position
 
@@ -319,6 +320,27 @@ class SwingPositionStore:
             self.live_positions[pos.underlying_symbol] = pos
             self.reserved_symbols.add(pos.underlying_symbol)
             fire_and_forget(record_opened_position("Swing", pos))
+            # Shadow-mode reversal-prevention filters (17 Sep 2026) - logs
+            # what each candidate filter (ADX/RSI/volume-ratio/Efficiency
+            # Ratio) WOULD have done for this real entry, never blocks it.
+            # See reversal_filters.py's own module docstring for the
+            # backtest evidence behind this. reversal_filters' RSI-extreme
+            # check just needs a CE/PE-shaped direction label, not a real
+            # options resolution - pos.resolved_option_type is None for
+            # EQUITY/FUTURES basket types (see resolved_option_type_for's
+            # own docstring), so this derives the label straight from
+            # pos.regime instead (BULLISH -> overbought-direction check,
+            # BEARISH -> oversold-direction check), which is always
+            # populated regardless of basket type. Only ever NSE-equity-
+            # fetchable underlyings get a real shadow row - reversal_
+            # filters.check_volume_floor/_evaluate_and_log_sync fetch NSE_EQ
+            # data specifically, so an MCX symbol (COPPER) fails its own
+            # internal fetch and is silently skipped, exactly like any
+            # other fetch failure this module already fails open on.
+            shadow_option_type = "CE" if pos.regime.upper() == "BULLISH" else "PE"
+            fire_and_forget(reversal_filters.evaluate_and_log(
+                "Swing", pos.underlying_symbol, shadow_option_type, pos.entry_price, pos.order_id,
+            ))
             logger.info(
                 "Position OPENED: %s (%s, %s %s) entry=%.2f target=%.2f sl=%.2f qty=%s",
                 pos.underlying_symbol, pos.trading_symbol, pos.basket_type, pos.instrument_side,
