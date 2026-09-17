@@ -64,6 +64,14 @@ from .position_store import EXIT_CLAIMED, OrderRecord, Position, position_store
 
 logger = logging.getLogger("luxury_trading_engine")
 
+# Tracks how long each open position's LTP fetch has been continuously
+# failing - see config.LTP_STALE_FORCE_EXIT_MINUTES's own docstring for
+# the real incident (ANGELONE/ICICIPRULI) this exists to catch. Keyed by
+# (symbol, position.opened_at) rather than just symbol so a NEW position
+# for the same underlying never inherits a stale timestamp left over from
+# a PREVIOUS, already-closed position on that symbol.
+_ltp_failure_since: dict[tuple[str, datetime], datetime] = {}
+
 
 async def reconcile_broker_positions() -> list[Position]:
     """Near-verbatim copy of Options/trading_engine.py's own function - see
@@ -1002,6 +1010,36 @@ async def _check_broker_stop_already_filled(symbol: str, position: Position) -> 
     return False
 
 
+async def _handle_ltp_staleness(symbol: str, position: Position) -> None:
+    """Called from _check_one_position whenever a single LTP fetch fails.
+    Forces a market exit once the failure has been CONTINUOUS for
+    config.LTP_STALE_FORCE_EXIT_MINUTES - see that setting's own docstring
+    for the real ANGELONE/ICICIPRULI incident history. A single transient
+    failure (the common case - Dhan's REST calls do occasionally blip) is
+    not itself alarming; this only fires once the position has gone truly
+    dark for a sustained stretch."""
+    key = (symbol, position.opened_at)
+    failure_start = _ltp_failure_since.setdefault(key, datetime.now())
+    stale_minutes = (datetime.now() - failure_start).total_seconds() / 60
+    if stale_minutes < config.LTP_STALE_FORCE_EXIT_MINUTES:
+        return
+    logger.error(
+        "LTP STALENESS FORCED EXIT: %s (%s) has had NO live price for %.1f minutes "
+        "(>= %s min threshold) - forcing a market exit rather than continuing to hold "
+        "an unmonitorable position with no active exit-ladder protection.",
+        symbol, position.option_trading_symbol, stale_minutes, config.LTP_STALE_FORCE_EXIT_MINUTES,
+    )
+    loop = asyncio.get_running_loop()
+    fallback_price = await loop.run_in_executor(
+        None, dhan_wrapper.get_last_historical_close, position.option_trading_symbol
+    )
+    if fallback_price is None:
+        fallback_price = position.entry_price
+    if await position_store.try_start_exit(symbol):
+        await _exit_position(symbol, position, fallback_price, "LTP_STALE_FORCED_EXIT")
+    _ltp_failure_since.pop(key, None)
+
+
 async def _check_one_position(symbol: str, position: Position) -> None:
     if position.pending_exit_order_id or _exit_on_cooldown(position):
         return
@@ -1013,8 +1051,10 @@ async def _check_one_position(symbol: str, position: Position) -> None:
         ltp = await _get_ltp(position.option_trading_symbol)
     except Exception:  # noqa: BLE001
         logger.exception("Could not fetch LTP for %s", position.option_trading_symbol)
+        await _handle_ltp_staleness(symbol, position)
         return
 
+    _ltp_failure_since.pop((symbol, position.opened_at), None)
     await position_store.update_highest_price(symbol, ltp)
 
     supertrend_against_position = False

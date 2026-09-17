@@ -53,6 +53,14 @@ from Options.dhan_client import IST, OrderStatus, dhan_wrapper
 
 logger = logging.getLogger("swing_trading_engine")
 
+# Tracks how long each open position's LTP fetch has been continuously
+# failing - see config.LTP_STALE_FORCE_EXIT_MINUTES's own docstring for
+# the real incident (ANGELONE, this exact package, 17 Sep 2026) this
+# exists to catch. Keyed by (symbol, position.opened_at) rather than just
+# symbol so a NEW position for the same underlying never inherits a stale
+# timestamp left over from a PREVIOUS, already-closed position.
+_ltp_failure_since: dict[tuple[str, datetime], datetime] = {}
+
 # Order-placement dispatch, keyed by Position.exchange_segment - added 12
 # Sep 2026 (Swing v2's Copper/MCX options support) to replace what used to
 # be a 2-way `if exchange_segment == "NSE_FNO": ... else: ...` at every
@@ -703,6 +711,46 @@ async def _get_ltp(position: Position) -> float:
     return ltp
 
 
+async def _handle_ltp_staleness(symbol: str, position: Position) -> None:
+    """Called from _check_one_position whenever a single LTP fetch fails.
+    Forces a market exit once the failure has been CONTINUOUS for
+    config.LTP_STALE_FORCE_EXIT_MINUTES - see that setting's own docstring
+    for the real ANGELONE incident (this exact package, 17 Sep 2026) this
+    exists to catch. A single transient failure (the common case - Dhan's
+    REST calls do occasionally blip) is not itself alarming; this only
+    fires once the position has gone truly dark for a sustained stretch.
+
+    The historical-close fallback (get_last_historical_close) only covers
+    the NSE_FNO OPTSTK shape - correct for basket_type=="OPTIONS" (what
+    the real ANGELONE incident was), which is also this package's default
+    and most-used basket_type. For FUTURES/EQUITY it falls back straight
+    to position.entry_price instead of attempting a fetch that function
+    isn't built for - purely a rough logging mark either way (see that
+    function's own docstring: no real order depends on this value)."""
+    key = (symbol, position.opened_at)
+    failure_start = _ltp_failure_since.setdefault(key, datetime.now())
+    stale_minutes = (datetime.now() - failure_start).total_seconds() / 60
+    if stale_minutes < config.LTP_STALE_FORCE_EXIT_MINUTES:
+        return
+    logger.error(
+        "LTP STALENESS FORCED EXIT: %s (%s) has had NO live price for %.1f minutes "
+        "(>= %s min threshold) - forcing a market exit rather than continuing to hold "
+        "an unmonitorable position with no active exit-ladder protection.",
+        symbol, position.trading_symbol, stale_minutes, config.LTP_STALE_FORCE_EXIT_MINUTES,
+    )
+    fallback_price = None
+    if position.basket_type == "OPTIONS":
+        loop = asyncio.get_running_loop()
+        fallback_price = await loop.run_in_executor(
+            None, dhan_wrapper.get_last_historical_close, position.option_trading_symbol
+        )
+    if fallback_price is None:
+        fallback_price = position.entry_price
+    if await position_store.try_start_exit(symbol):
+        await _exit_position(symbol, position, fallback_price, "LTP_STALE_FORCED_EXIT")
+    _ltp_failure_since.pop(key, None)
+
+
 async def _check_one_position(symbol: str, position: Position) -> None:
     if position.pending_exit_order_id or _exit_on_cooldown(position):
         return
@@ -712,8 +760,10 @@ async def _check_one_position(symbol: str, position: Position) -> None:
         ltp = await _get_ltp(position)
     except Exception:  # noqa: BLE001
         logger.exception("Could not fetch LTP for %s", position.trading_symbol)
+        await _handle_ltp_staleness(symbol, position)
         return
 
+    _ltp_failure_since.pop((symbol, position.opened_at), None)
     await position_store.update_best_price(symbol, ltp)
 
     reason = _exit_reason_for(position, ltp)

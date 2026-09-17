@@ -120,6 +120,14 @@ BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE = float(os.getenv("FUTURES_BROKER_STOP_LOSS_
 # are shared and live in Options/config.py).
 LIQUIDITY_GUARD_ENABLED = os.getenv("FUTURES_LIQUIDITY_GUARD_ENABLED", "true").lower() == "true"
 
+# Forces a market exit once _get_ltp has failed continuously for this many
+# minutes on an open position - see Options/config.py's own LTP_STALE_
+# FORCE_EXIT_MINUTES docstring for the full ANGELONE/ICICIPRULI incident
+# history behind this (a position the monitor can't price has zero active
+# exit-ladder protection for however long Dhan's live-quote feed stays
+# dark on that one contract).
+LTP_STALE_FORCE_EXIT_MINUTES = float(os.getenv("FUTURES_LTP_STALE_FORCE_EXIT_MINUTES", "5"))
+
 # Profit-protection give-back buffer (default 0.0 = bit-identical to the
 # original zero-tolerance behaviour; net-negative in backtest, left off).
 PROFIT_PROTECTION_GIVEBACK_PCT = float(os.getenv("FUTURES_PROFIT_PROTECTION_GIVEBACK_PCT", "0.0"))

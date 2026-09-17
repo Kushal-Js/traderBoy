@@ -300,6 +300,15 @@ ENABLE_EMA_CROSS_EXIT = os.getenv("LUXURY_ENABLE_EMA_CROSS_EXIT", "false").lower
 # even though every package's own ENABLE_SUPERTREND_EXIT is independent.
 LIQUIDITY_GUARD_ENABLED = os.getenv("LUXURY_LIQUIDITY_GUARD_ENABLED", "true").lower() == "true"
 
+# Forces a market exit once _get_ltp has failed continuously for this many
+# minutes on an open position - see Options/config.py's own LTP_STALE_
+# FORCE_EXIT_MINUTES docstring for the full ANGELONE/ICICIPRULI incident
+# history behind this (PAGEIND's own LIQUIDITY_GUARD_ZERO_VOLUME exit
+# earlier this same night, 17 Sep 2026, is a related but distinct case -
+# that one was about an EXIT order stalling, this one is about never even
+# being able to CHECK for an exit in the first place).
+LTP_STALE_FORCE_EXIT_MINUTES = float(os.getenv("LUXURY_LTP_STALE_FORCE_EXIT_MINUTES", "5"))
+
 # Fallback default only (used where Dhan's own reported option_type comes
 # back missing/None, e.g. reconciliation/AMO-sync) - both real webhooks
 # below pass their own explicit option_type, same as Options' identical

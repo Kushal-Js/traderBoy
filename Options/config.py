@@ -243,6 +243,29 @@ BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE = float(os.getenv("BROKER_STOP_LOSS_LIMIT_GA
 # guard rails as Luxury" request.
 LIQUIDITY_GUARD_ENABLED = os.getenv("LIQUIDITY_GUARD_ENABLED", "true").lower() == "true"
 
+# Real incident, ANGELONE 17 Sep 2026 (Swing) + ICICIPRULI 10 Sep 2026
+# (Options, see trading-skills' incidents/2026-09-10-icicipruli-
+# unmonitorable-position.md - that write-up's own "fix direction, not yet
+# built"): Dhan's live-quote endpoint can go opaquely dark for a specific
+# contract for many minutes to hours (confirmed via a direct raw quote
+# call returning status=failure with null error details) while a fresh,
+# separate re-authenticated session gets a normal quote back immediately -
+# meaning it's Dhan-side flakiness on that one contract's live feed, not a
+# code bug, and self-heals eventually, but with no bound on how long. A
+# position the monitor loop can't price is a position with ZERO active
+# exit-ladder protection (target/trailing-SL/MAX_LOSS/regime-reversal all
+# need a real LTP) for however long the outage lasts - only a resting
+# broker-side stop-loss order (if BROKER_STOP_LOSS_ENABLED) still protects
+# it independently. Once _get_ltp has failed continuously for this many
+# minutes on an open position, _check_one_position forces a market exit
+# (using get_last_historical_close as a rough logging mark, since the
+# historical 1-min feed kept working through the ICICIPRULI outage even
+# though live quotes didn't) rather than continuing to hold something
+# un-monitorable - _exit_position's own existing stale-pending-order check
+# also cancels any resting broker-side SL before placing the fresh exit,
+# so this closes both the position AND its own protective order together.
+LTP_STALE_FORCE_EXIT_MINUTES = float(os.getenv("LTP_STALE_FORCE_EXIT_MINUTES", "5"))
+
 # /chartink/webhook-papertrade (paper_webhook.py) - a second, independent
 # position pool for evaluating a new Chartink scan before trusting it with
 # real money. Deliberately separate from TOP_N_STOCKS/MAX_LIVE_POSITIONS_CE

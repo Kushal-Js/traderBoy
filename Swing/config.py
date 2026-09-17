@@ -413,6 +413,29 @@ MCX_VOLUME_FLOOR_RATIO_MIN = float(os.getenv("SWING_MCX_VOLUME_FLOOR_RATIO_MIN",
 # ---------------------------------------------------------------------------
 MARKET_TZ = "Asia/Kolkata"
 MONITOR_INTERVAL_SECONDS = int(os.getenv("SWING_MONITOR_INTERVAL_SECONDS", "5"))
+
+# Real incident, ANGELONE 29 SEP 295 PUT, 17 Sep 2026: Dhan's live-quote
+# endpoint went opaquely dark for this one contract for 20+ minutes
+# (confirmed via a direct raw quote call returning status=failure with
+# null error details, while a fresh re-authenticated session got a normal
+# quote back immediately - Dhan-side flakiness on that one contract's live
+# feed, not a code bug, but with no bound on how long it can last). See
+# also trading-skills' incidents/2026-09-10-icicipruli-unmonitorable-
+# position.md (Options) for the same failure mode, and its own "fix
+# direction, not yet built" that this setting finally builds. A position
+# _check_one_position can't price has ZERO active exit-ladder protection
+# (target/trailing-SL/MAX_LOSS/regime-reversal all need a real LTP) for as
+# long as the outage lasts - only a resting broker-side stop-loss order
+# (BROKER_STOP_LOSS_ENABLED) still protects it independently in the
+# meantime. Once _get_ltp has failed continuously for this many minutes on
+# an open position, force a market exit (using get_last_historical_close
+# as a rough logging mark - the option's own historical 1-min feed kept
+# working through the ICICIPRULI outage even though live quotes didn't)
+# rather than continuing to hold something un-monitorable. _exit_position's
+# own existing stale-pending-order check also cancels any resting
+# broker-side SL before placing the fresh exit, so this closes both the
+# position AND its own protective order together.
+LTP_STALE_FORCE_EXIT_MINUTES = float(os.getenv("SWING_LTP_STALE_FORCE_EXIT_MINUTES", "5"))
 # Cooldown before re-attempting entry for the same symbol after a failed
 # (non-TRADED, error, or skipped) entry attempt - added 15 Sep 2026 after a
 # real incident: with no cooldown, a persistent failure (e.g. a genuinely

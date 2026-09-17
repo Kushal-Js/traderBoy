@@ -1740,6 +1740,38 @@ class DhanWrapper:
         cached = self._liquidity_cache.get(option_trading_symbol)
         return cached[1] if cached else None
 
+    def get_last_historical_close(self, option_trading_symbol: str) -> Optional[float]:
+        """Fallback-of-the-fallback price source for when the LIVE LTP path
+        (WebSocket + REST get_option_ltp) has been dead for a while - the
+        option's own historical 1-min candles, which stay available even
+        during a real live-quote outage (confirmed via the ICICIPRULI
+        incident, 10 Sep 2026: a 384-bar historical read succeeded the
+        whole day the live LTP feed was down - see trading-skills'
+        incidents/2026-09-10-icicipruli-unmonitorable-position.md). Reuses
+        the exact same fetch shape as refresh_liquidity_signal (security_id
+        via _instrument_meta, NSE_FNO/OPTSTK, 1-min interval).
+
+        This is ONLY meant as a rough mark for a forced-exit's own logging/
+        pnl estimate, never as something a real order depends on - a market
+        SELL/BUY order needs no price input at all and fills at whatever
+        the exchange's own current best price is regardless of what this
+        function returns. Returns None (not an exception) on any failure -
+        callers should fall back to something else (e.g. position.entry_price)
+        rather than block a forced exit on this being unavailable too."""
+        try:
+            security_id = self._instrument_meta(option_trading_symbol, expected_exchange="NSE")["security_id"]
+            data = self.fetch_continuous_intraday(security_id, "NSE_FNO", "OPTSTK", 1)
+            closes = data.get("close") or []
+            timestamps = data.get("timestamp") or []
+            if timestamps:
+                last_candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST)
+                if datetime.now(IST) < last_candle_start + timedelta(minutes=1):
+                    closes = closes[:-1]  # still-forming candle - same drop as refresh_liquidity_signal
+            return float(closes[-1]) if closes else None
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not fetch a historical fallback close for %s", option_trading_symbol)
+            return None
+
     # ------------------------------------------------------------------ #
     # Portfolio (positions already open at the broker)
     # ------------------------------------------------------------------ #

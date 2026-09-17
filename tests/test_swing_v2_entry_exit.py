@@ -28,7 +28,7 @@ import asyncio
 import os
 import sys
 import tempfile
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -105,7 +105,20 @@ def install_mocks(broker_net_quantity=250, fail_stop_loss_placement=False, entry
         "check_if_order_filled": odc.dhan_wrapper.check_if_order_filled,
         "refresh_order_status": odc.dhan_wrapper.refresh_order_status,
         "wait_for_order_result": odc.dhan_wrapper.wait_for_order_result,
+        "get_last_historical_close": odc.dhan_wrapper.get_last_historical_close,
+        "get_cached_option_ltp": odc.dhan_wrapper.get_cached_option_ltp,
+        "note_rest_ltp": odc.dhan_wrapper.note_rest_ltp,
     }
+    # get_cached_option_ltp/note_rest_ltp both call the REAL _instrument_
+    # meta internally, which touches dhan_wrapper.client - a lazy property
+    # that triggers a genuine Dhan login if unmocked. Found the hard way
+    # (see trading-skills' incidents/2026-09-08-test-suite-real-auth-
+    # leak.md and its recurrence 3 days later): a local test making a real
+    # login attempt can invalidate the LIVE droplet's own session token.
+    # Mocked defensively - only _check_one_position/_get_ltp exercises
+    # this pair.
+    odc.dhan_wrapper.get_cached_option_ltp = lambda trading_symbol: None
+    odc.dhan_wrapper.note_rest_ltp = lambda trading_symbol, ltp: None
     odc.dhan_wrapper.get_atm_option = fake_atm_option
     odc.dhan_wrapper.get_futures_contract = fake_futures_contract
     odc.dhan_wrapper._equity_instrument_meta = lambda sym: {"security_id": f"EQSEC-{sym}", "lot_size": 1, "tick_size": 0.05}
@@ -141,6 +154,11 @@ def install_mocks(broker_net_quantity=250, fail_stop_loss_placement=False, entry
     odc.dhan_wrapper.check_if_order_filled = lambda order_id: None
     odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
         order_id=order_id, status=entry_fill_status, remark="", fill_price=50.0, filled_quantity=broker_net_quantity, is_amo=False)
+    # Never touch dhan_wrapper.client (real Dhan auth) from a unit test -
+    # the LTP-staleness forced-exit path calls this as its fallback price
+    # source, defaulting to None here so it always falls through to
+    # position.entry_price instead.
+    odc.dhan_wrapper.get_last_historical_close = lambda trading_symbol: None
 
     def restore():
         for name, fn in originals.items():
@@ -420,6 +438,74 @@ async def test_13_still_pending_non_amo_exit_defers_instead_of_closing():
         restore()
 
 
+async def test_14_ltp_stale_for_too_long_forces_a_market_exit_and_cancels_broker_stop():
+    """Real incident, ANGELONE 29 SEP 295 PUT, this exact package, 17 Sep
+    2026 (see also trading-skills' incidents/2026-09-10-icicipruli-
+    unmonitorable-position.md - Options, same failure class, whose own
+    "fix direction, not yet built" this implements): Dhan's live-quote
+    endpoint went opaquely dark for a specific contract for 20+ minutes
+    (confirmed via a direct raw quote call returning status=failure with
+    null error details), leaving a real open position with ZERO active
+    exit-ladder protection since _exit_reason_for never got a chance to
+    run without an LTP - only a resting broker-side stop-loss order still
+    protected it independently. Once _get_ltp has failed CONTINUOUSLY for
+    config.LTP_STALE_FORCE_EXIT_MINUTES, _check_one_position now forces a
+    market exit via the same _exit_position pathway everything else uses -
+    which also finds and cancels the resting broker-side SL-L before
+    placing the fresh exit, closing both the position and its own
+    protective order together, exactly as requested."""
+    _set("options", broker_stop=True)
+    restore, placed, sl_calls = install_mocks()
+    real_get_ltp = odc.dhan_wrapper.get_option_ltp
+    real_get_pending = odc.dhan_wrapper.get_pending_order_id
+    real_cancel = odc.dhan_wrapper.cancel_order
+    cancelled_order_ids = []
+    ste._ltp_failure_since.clear()
+    try:
+        result = await ste.enter_position_for_stock("RELIANCE", "BEARISH")
+        assert result["status"] == "entered", result
+        pos = ste.position_store.live_positions["RELIANCE"]
+        assert pos.stop_loss_order_id is not None
+
+        odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: (_ for _ in ()).throw(
+            ValueError(f"No LTP returned for {trading_symbol}")
+        )
+        odc.dhan_wrapper.get_pending_order_id = lambda ts, tt: (
+            pos.stop_loss_order_id if tt == exit_transaction_type(pos.instrument_side) else None
+        )
+        odc.dhan_wrapper.cancel_order = lambda order_id: cancelled_order_ids.append(order_id)
+
+        await ste._check_one_position("RELIANCE", pos)
+        assert "RELIANCE" in ste.position_store.live_positions, \
+            "one failed LTP tick alone must never force an exit"
+        assert cancelled_order_ids == [], "nothing should be touched before the staleness threshold is reached"
+
+        key = ("RELIANCE", pos.opened_at)
+        ste._ltp_failure_since[key] = datetime.now() - timedelta(
+            minutes=ste.config.LTP_STALE_FORCE_EXIT_MINUTES + 1
+        )
+        await ste._check_one_position("RELIANCE", pos)
+
+        assert cancelled_order_ids == [pos.stop_loss_order_id], \
+            f"the resting broker-side stop-loss must be cancelled as part of the forced exit, got {cancelled_order_ids}"
+        assert "RELIANCE" not in ste.position_store.live_positions, \
+            "the position must be force-closed once truly stale"
+        closed = ste.position_store.closed_positions_today[-1]
+        assert closed.exit_reason == "LTP_STALE_FORCED_EXIT", closed.exit_reason
+        assert key not in ste._ltp_failure_since, "the staleness tracker must be cleared once the forced exit fires"
+
+        print("14. An LTP fetch failing CONTINUOUSLY for >= LTP_STALE_FORCE_EXIT_MINUTES forces a market "
+              "exit AND cancels the resting broker-side stop-loss order together, instead of holding an "
+              "unmonitorable position indefinitely (the real ANGELONE 17 Sep 2026 incident this fix was "
+              "written for): PASSED")
+    finally:
+        odc.dhan_wrapper.get_option_ltp = real_get_ltp
+        odc.dhan_wrapper.get_pending_order_id = real_get_pending
+        odc.dhan_wrapper.cancel_order = real_cancel
+        restore()
+        ste._ltp_failure_since.clear()
+
+
 async def main():
     print("=== Swing v2 entry/exit/broker-stop-loss integration test suite ===\n")
     await test_1_futures_bearish_shorts_to_open()
@@ -435,6 +521,7 @@ async def main():
     await test_11_partial_fill_reconciliation_on_squareoff()
     await test_12_fully_filled_during_cancel_race_closes_with_no_fresh_order()
     await test_13_still_pending_non_amo_exit_defers_instead_of_closing()
+    await test_14_ltp_stale_for_too_long_forces_a_market_exit_and_cancels_broker_stop()
     print("\nALL SWING V2 ENTRY/EXIT/BROKER-STOP-LOSS CHECKS PASSED")
 
 
