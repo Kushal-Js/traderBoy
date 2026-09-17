@@ -618,6 +618,53 @@ async def test_11_rejected_exit_rechecks_broker_on_the_first_failure():
         restore()
 
 
+async def test_12_still_pending_non_amo_exit_defers_instead_of_closing():
+    """Same root-cause fix as the PAGEIND (Luxury) incident, 17 Sep 2026,
+    applied here since Futures shares the identical exit-order-resolution
+    code: a SELL exit order that's still PENDING (non-terminal, non-AMO)
+    after wait_for_order_result's own poll budget must NOT be treated as
+    filled. The old code fell through to close_position() regardless,
+    silently recording the position as closed while the real order sat
+    unfilled at the broker - orphaning it on the next restart since
+    attribute_open_broker_position would then find no strategy claiming
+    it as open. The fix defers to _sync_pending_orders instead."""
+    store = fps.PositionStore()
+    fte.position_store = store
+    restore, placed_orders, stop_loss_calls = install_all_dhan_mocks()
+    real_wait = odc.dhan_wrapper.wait_for_order_result
+    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
+        order_id=order_id, status=OrderStatus.PENDING, remark="", fill_price=0.0,
+        filled_quantity=0, is_amo=False,
+    )
+    try:
+        position = Position(
+            underlying_symbol="BANKNIFTY", option_trading_symbol="BANKNIFTY FAKE EXP CE",
+            option_type="CE", quantity=25, lot_size=25, entry_price=48000.0, highest_price=48000.0,
+            target_price=48500.0, hard_stop_loss=47800.0, order_id="OID-ENTRY", product_type="MARGIN",
+        )
+        store.live_positions["BANKNIFTY"] = position
+
+        assert await store.try_start_exit("BANKNIFTY")
+        await fte._exit_position("BANKNIFTY", position, 47900.0, "STOP_LOSS_HIT")
+
+        assert "BANKNIFTY" in store.live_positions, \
+            "a still-PENDING, non-AMO exit order must NOT be treated as filled - the position must stay open"
+        live = store.live_positions["BANKNIFTY"]
+        assert live.pending_exit_order_id and live.pending_exit_order_id != fte.EXIT_CLAIMED, \
+            f"the real pending exit order_id must remain set so _sync_pending_orders can resolve it later, " \
+            f"got {live.pending_exit_order_id!r}"
+        assert store.closed_positions_today == [], \
+            "nothing must be recorded as closed while the exit order is still genuinely live at the broker"
+
+        print("12. A SELL exit order still PENDING (non-terminal, non-AMO) after the poll budget is "
+              "NOT treated as filled - the position stays live with pending_exit_order_id set for "
+              "_sync_pending_orders to resolve later, instead of being silently closed (mirrors the "
+              "PAGEIND 17 Sep 2026 regression): PASSED")
+    finally:
+        odc.dhan_wrapper.wait_for_order_result = real_wait
+        restore()
+
+
 async def main():
     print("=== Futures broker-side stop-loss order test suite ===\n")
     await test_1_real_entry_places_broker_stop_with_correct_trigger_and_limit()
@@ -631,6 +678,7 @@ async def main():
     await test_9_stop_fully_filled_during_cancel_race_reconciles_without_a_fresh_sell()
     await test_10_sl_l_still_cancelled_when_the_order_book_scan_misses_it()
     await test_11_rejected_exit_rechecks_broker_on_the_first_failure()
+    await test_12_still_pending_non_amo_exit_defers_instead_of_closing()
     print("\nALL FUTURES BROKER STOP-LOSS CHECKS PASSED")
 
 

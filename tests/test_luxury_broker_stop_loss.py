@@ -655,6 +655,59 @@ async def test_11_rejected_exit_rechecks_broker_on_the_first_failure():
         restore()
 
 
+async def test_12_still_pending_non_amo_exit_defers_instead_of_closing():
+    """Real incident, 17 Sep 2026: PAGEIND's LIQUIDITY_GUARD_ZERO_VOLUME
+    exit placed a market SELL that couldn't find an immediate
+    counterparty (the same illiquidity that triggered the exit also
+    stalled the exit order itself) and stayed PENDING past wait_for_
+    order_result's own poll budget. The old code had no explicit check
+    for this case - not rejected/cancelled, not a queued AMO - and fell
+    straight through to close_position(), silently recording the
+    position as closed while the real SELL sat unfilled at the broker.
+    On the next restart, attribute_open_broker_position (trade_history.py)
+    correctly-but-wrongly concluded "no strategy currently owns this"
+    since our own history said it was already closed, orphaning a real,
+    still-open position with no owner. The fix mirrors the pre-existing
+    entry-side pattern: defer to _sync_pending_orders (which already
+    re-checks ANY pending exit order every tick) instead of assuming the
+    fill happened."""
+    store = lps.PositionStore()
+    lte.position_store = store
+    restore, placed_orders, stop_loss_calls = install_all_dhan_mocks()
+    real_wait = odc.dhan_wrapper.wait_for_order_result
+    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
+        order_id=order_id, status=OrderStatus.PENDING, remark="", fill_price=0.0,
+        filled_quantity=0, is_amo=False,
+    )
+    try:
+        position = Position(
+            underlying_symbol="PAGEIND", option_trading_symbol="PAGEIND FAKE EXP PE",
+            option_type="PE", quantity=20, lot_size=20, entry_price=100.0, highest_price=100.0,
+            target_price=130.0, hard_stop_loss=84.0, order_id="OID-ENTRY", product_type="MARGIN",
+        )
+        store.live_positions["PAGEIND"] = position
+
+        assert await store.try_start_exit("PAGEIND")
+        await lte._exit_position("PAGEIND", position, 90.0, "LIQUIDITY_GUARD_ZERO_VOLUME")
+
+        assert "PAGEIND" in store.live_positions, \
+            "a still-PENDING, non-AMO exit order must NOT be treated as filled - the position must stay open"
+        live = store.live_positions["PAGEIND"]
+        assert live.pending_exit_order_id and live.pending_exit_order_id != lte.EXIT_CLAIMED, \
+            f"the real pending exit order_id must remain set so _sync_pending_orders can resolve it later, " \
+            f"got {live.pending_exit_order_id!r}"
+        assert store.closed_positions_today == [], \
+            "nothing must be recorded as closed while the exit order is still genuinely live at the broker"
+
+        print("12. A SELL exit order still PENDING (non-terminal, non-AMO) after the poll budget is "
+              "NOT treated as filled - the position stays live with pending_exit_order_id set for "
+              "_sync_pending_orders to resolve later, instead of being silently closed (the real "
+              "PAGEIND 17 Sep 2026 incident this fix was written for): PASSED")
+    finally:
+        odc.dhan_wrapper.wait_for_order_result = real_wait
+        restore()
+
+
 async def main():
     print("=== Luxury broker-side stop-loss order test suite ===\n")
     await test_1_real_entry_places_broker_stop_with_correct_trigger_and_limit()
@@ -668,6 +721,7 @@ async def main():
     await test_9_stop_fully_filled_during_cancel_race_reconciles_without_a_fresh_sell()
     await test_10_sl_l_still_cancelled_when_the_order_book_scan_misses_it()
     await test_11_rejected_exit_rechecks_broker_on_the_first_failure()
+    await test_12_still_pending_non_amo_exit_defers_instead_of_closing()
     print("\nALL LUXURY BROKER STOP-LOSS CHECKS PASSED")
 
 

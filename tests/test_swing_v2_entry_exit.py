@@ -376,6 +376,50 @@ async def test_12_fully_filled_during_cancel_race_closes_with_no_fresh_order():
         restore()
 
 
+async def test_13_still_pending_non_amo_exit_defers_instead_of_closing():
+    """Same root-cause fix as the real PAGEIND (Luxury) incident, 17 Sep
+    2026, applied here since Swing shares the identical exit-order-
+    resolution pattern (adapted for LONG/SHORT via exit_side instead of
+    a hardcoded SELL): an exit order still PENDING (non-terminal,
+    non-AMO) after wait_for_order_result's own poll budget must NOT be
+    treated as filled. The old code fell through to close_position()
+    regardless, silently recording the position as closed while the
+    real order sat unfilled at the broker - orphaning it on the next
+    restart since attribute_open_broker_position would then find no
+    strategy claiming it as open. The fix defers to
+    _sync_pending_exit_orders instead, which already re-checks ANY
+    pending exit order every tick."""
+    _set("futures", broker_stop=False)
+    restore, placed, sl_calls = install_mocks()
+    try:
+        result = await ste.enter_position_for_stock("RELIANCE", "BULLISH")
+        assert result["status"] == "entered", result
+        pos = ste.position_store.live_positions["RELIANCE"]
+
+        odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
+            order_id=order_id, status=OrderStatus.PENDING, remark="", fill_price=0.0,
+            filled_quantity=0, is_amo=False,
+        )
+        assert await ste.position_store.try_start_exit("RELIANCE")
+        await ste._exit_position("RELIANCE", pos, exit_price=pos.entry_price, reason="TARGET_HIT")
+
+        assert "RELIANCE" in ste.position_store.live_positions, \
+            "a still-PENDING, non-AMO exit order must NOT be treated as filled - the position must stay open"
+        live = ste.position_store.live_positions["RELIANCE"]
+        assert live.pending_exit_order_id and live.pending_exit_order_id != ste.EXIT_CLAIMED, \
+            f"the real pending exit order_id must remain set so _sync_pending_exit_orders can resolve it " \
+            f"later, got {live.pending_exit_order_id!r}"
+        assert ste.position_store.closed_positions_today == [], \
+            "nothing must be recorded as closed while the exit order is still genuinely live at the broker"
+
+        print("13. An exit order still PENDING (non-terminal, non-AMO) after the poll budget is NOT "
+              "treated as filled - the position stays live with pending_exit_order_id set for "
+              "_sync_pending_exit_orders to resolve later, instead of being silently closed (mirrors the "
+              "PAGEIND 17 Sep 2026 regression): PASSED")
+    finally:
+        restore()
+
+
 async def main():
     print("=== Swing v2 entry/exit/broker-stop-loss integration test suite ===\n")
     await test_1_futures_bearish_shorts_to_open()
@@ -390,6 +434,7 @@ async def main():
     await test_10_squareoff_cancel_falls_back_to_stored_stop_loss_order_id()
     await test_11_partial_fill_reconciliation_on_squareoff()
     await test_12_fully_filled_during_cancel_race_closes_with_no_fresh_order()
+    await test_13_still_pending_non_amo_exit_defers_instead_of_closing()
     print("\nALL SWING V2 ENTRY/EXIT/BROKER-STOP-LOSS CHECKS PASSED")
 
 

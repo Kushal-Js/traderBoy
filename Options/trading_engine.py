@@ -1004,6 +1004,34 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             )
             return
 
+        if result.status not in OrderStatus.TERMINAL_STATUSES:
+            # Didn't reach a terminal status within wait_for_order_result's
+            # own poll budget - not rejected/cancelled (caught above) and
+            # not a queued AMO (caught above), so the SELL is still
+            # genuinely live at the broker and may yet fill or reject.
+            # Real incident, 17 Sep 2026 (PAGEIND): a LIQUIDITY_GUARD_ZERO_
+            # VOLUME exit's own market SELL couldn't find an immediate
+            # counterparty (the SAME illiquidity that triggered the exit in
+            # the first place also stalled the exit order itself), stayed
+            # PENDING past the retry budget, and this code fell straight
+            # through to close_position() below - silently recording the
+            # position as closed while the real order sat unfilled at the
+            # broker, orphaning a real position with no owner (attribute_
+            # open_broker_position could no longer match it to Options,
+            # since our own history now said "closed"). Mirrors the
+            # identical, already-proven fix on the ENTRY side above (see
+            # its own "still %s after poll budget" branch) - leave
+            # pending_exit_order_id set (already applied above) and defer
+            # to _sync_pending_orders, which already re-checks ANY pending
+            # exit order (not just AMO ones - see its own code) every
+            # monitor tick until it reaches a real terminal status.
+            logger.warning(
+                "SELL order %s for %s still %s after the poll budget - deferring to "
+                "background sync instead of assuming it filled.",
+                order_id, symbol, result.status,
+            )
+            return
+
         final_exit_price = result.fill_price or exit_price
         await position_store.close_position(symbol, final_exit_price, reason)
         await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.option_trading_symbol)

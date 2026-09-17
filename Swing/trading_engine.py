@@ -648,6 +648,23 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
                         exit_side, order_id, symbol)
             return
 
+        if result.status not in OrderStatus.TERMINAL_STATUSES:
+            # Didn't reach a terminal status within wait_for_order_result's
+            # own poll budget - not rejected/cancelled (caught above) and
+            # not a queued AMO (caught above), so the exit order is still
+            # genuinely live at the broker and may yet fill or reject.
+            # Same real incident (17 Sep 2026, Luxury/PAGEIND) and the
+            # same already-proven fix as Options/Futures/Luxury's own
+            # identical exit paths - leave pending_exit_order_id set
+            # (already applied above) and defer to whatever periodic
+            # pending-order recheck this package already runs every
+            # monitor tick, rather than assuming a non-terminal status
+            # means filled.
+            logger.warning("%s exit order %s for %s still %s after the poll budget - deferring "
+                            "to background sync instead of assuming it filled.",
+                            exit_side, order_id, symbol, result.status)
+            return
+
         final_exit_price = result.fill_price or exit_price
         await position_store.close_position(symbol, final_exit_price, reason)
         if position.exchange_segment == "NSE_FNO":

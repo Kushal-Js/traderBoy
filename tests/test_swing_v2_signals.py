@@ -170,6 +170,67 @@ def test_5_supertrend_crossed_above_fires_only_on_the_transition_candle():
         W._client, W._equity_security_id = saved_client, saved_eqid
 
 
+def test_6_completely_empty_fetch_response_keeps_last_good_cached_value():
+    """Real incident, 17 Sep 2026: fetch_continuous_intraday's own
+    documented failure mode is to return {} (no exception) when the
+    underlying Dhan call fails - during a live Dhan API instability
+    window, this silently produced a "0 candles" result that
+    _fetch_regime_state_once/_fetch_supertrend_state_once then computed a
+    normal (non-exceptional) None from, which get_regime_state/
+    get_supertrend_state cached as if it were a legitimate reading -
+    clobbering the LAST GOOD cached regime/Supertrend with None across
+    every watchlist symbol, with zero errors logged (since nothing ever
+    raised). Fixed by having _fetch_regime_state_once/_fetch_supertrend_
+    state_once explicitly raise when a fetch comes back completely empty,
+    so the EXISTING "keep last good cached value on a fetch exception"
+    path (already proven by test_4 above) actually gets to run instead of
+    being silently bypassed. This test simulates that exact completely-
+    empty-response shape (not a raised exception) and confirms the last
+    good cached value survives it, for BOTH regime and Supertrend."""
+    saved_client, saved_eqid = W._client, W._equity_security_id
+    try:
+        W._equity_security_id = lambda sym: "SID"
+
+        # --- Regime ---
+        fake_client, _ = _install_fake_client([100.0 + i * 0.5 for i in range(250)], [100.0] * 250)
+        W._client = fake_client
+        signals._regime_cache.clear()
+        first = asyncio.run(signals.get_regime_state("TESTSTOCK"))
+        assert first is not None and first.is_bullish is True
+
+        cached_at, cached_val = signals._regime_cache["TESTSTOCK"]
+        signals._regime_cache["TESTSTOCK"] = (cached_at - timedelta(seconds=sc.REGIME_REFRESH_SECONDS + 1), cached_val)
+
+        def empty_response(*a, **k):
+            return {"status": "success", "data": {}}  # exactly what a failed Dhan call returns - no exception
+        W._client = types.SimpleNamespace(Dhan=types.SimpleNamespace(intraday_minute_data=empty_response))
+
+        second = asyncio.run(signals.get_regime_state("TESTSTOCK"))
+        assert second is not None and second.is_bullish is True, \
+            "a completely empty fetch response must be treated as a failure and keep the last good " \
+            "cached RegimeState, never silently cached as None"
+
+        # --- Supertrend ---
+        fake_client2, _ = _install_fake_client([100.0] * 30 + [200.0], [100.0] * 30 + [200.0])
+        W._client = fake_client2
+        signals._supertrend_cache.clear()
+        st_first = asyncio.run(signals.get_supertrend_state("TESTSTOCK"))
+        assert st_first is not None
+
+        cached_at2, cached_val2 = signals._supertrend_cache[("TESTSTOCK", sc.SUPERTREND_INTERVAL_MINUTES)]
+        signals._supertrend_cache[("TESTSTOCK", sc.SUPERTREND_INTERVAL_MINUTES)] = (
+            cached_at2 - timedelta(seconds=sc.SUPERTREND_REFRESH_SECONDS + 1), cached_val2,
+        )
+        W._client = types.SimpleNamespace(Dhan=types.SimpleNamespace(intraday_minute_data=empty_response))
+        st_second = asyncio.run(signals.get_supertrend_state("TESTSTOCK"))
+        assert st_second is not None and st_second.close == st_first.close, \
+            "a completely empty fetch response must keep the last good cached SupertrendState too"
+        print("6. A completely empty (non-exception) fetch response is treated as a failure and keeps "
+              "the last good cached regime/Supertrend value, for both signals: PASSED")
+    finally:
+        W._client, W._equity_security_id = saved_client, saved_eqid
+
+
 def main():
     print("=== Swing v2 signals (regime + Supertrend crossover) test suite ===\n")
     test_1_lookback_override_reaches_the_fetch_for_both_intervals()
@@ -177,6 +238,7 @@ def main():
     test_3_insufficient_bars_returns_none_not_a_guess()
     test_4_fetch_failure_keeps_last_good_cached_value()
     test_5_supertrend_crossed_above_fires_only_on_the_transition_candle()
+    test_6_completely_empty_fetch_response_keeps_last_good_cached_value()
     print("\nALL SWING V2 SIGNALS CHECKS PASSED")
 
 

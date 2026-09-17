@@ -994,6 +994,31 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             )
             return
 
+        if result.status not in OrderStatus.TERMINAL_STATUSES:
+            # Didn't reach a terminal status within wait_for_order_result's
+            # own poll budget - not rejected/cancelled (caught above) and
+            # not a queued AMO (caught above), so the SELL is still
+            # genuinely live at the broker and may yet fill or reject. Real
+            # incident, 17 Sep 2026 (Luxury/PAGEIND, same shared exit
+            # pattern this file copies): a LIQUIDITY_GUARD_ZERO_VOLUME
+            # exit's own market SELL couldn't find an immediate
+            # counterparty and stayed PENDING past the retry budget; this
+            # code used to fall straight through to close_position() below,
+            # silently recording the position as closed while the real
+            # order sat unfilled at the broker. Mirrors the identical,
+            # already-proven fix on the ENTRY side (see its own "still %s
+            # after poll budget" branch) - leave pending_exit_order_id set
+            # (already applied above) and defer to _sync_pending_orders,
+            # which already re-checks ANY pending exit order (not just AMO
+            # ones) every monitor tick until it reaches a real terminal
+            # status.
+            logger.warning(
+                "SELL order %s for %s still %s after the poll budget - deferring to "
+                "background sync instead of assuming it filled.",
+                order_id, symbol, result.status,
+            )
+            return
+
         final_exit_price = result.fill_price or exit_price
         await position_store.close_position(symbol, final_exit_price, reason)
         await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.option_trading_symbol)

@@ -102,13 +102,37 @@ def _fetch_regime_state_once(symbol: str) -> Optional[RegimeState]:
     """Blocking - always call via run_in_executor. Two continuous-candle
     fetches (5-min and 15-min), each with the longer REGIME_EMA_LOOKBACK_
     DAYS override (see fetch_continuous_intraday's own docstring for why
-    the shared 7-day global can't warm up a 200-period EMA at all)."""
+    the shared 7-day global can't warm up a 200-period EMA at all).
+
+    Raises if either fetch comes back COMPLETELY empty (real incident,
+    17 Sep 2026: a live Dhan API instability window made
+    fetch_continuous_intraday silently return {} - its own documented
+    failure mode - for every watchlist symbol; since that reads as
+    "0 candles" rather than an exception, this function used to just
+    compute None and return normally, which get_regime_state's caller
+    then cached as a legitimate reading, silently overwriting whatever
+    good regime value was already cached with None - the exact "goes
+    silently null with zero logged errors" pattern from an earlier,
+    still-unexplained watchlist anomaly this same night). A genuinely
+    too-new symbol (never has REGIME_EMA_PERIOD bars of real history)
+    still returns None normally below - Dhan serves however many bars
+    actually exist for a real, currently-listed instrument, so a
+    COMPLETELY empty response from an already-established watchlist
+    symbol is a fetch failure, not a warm-up state, and must be treated
+    as one so get_regime_state's own try/except (which already knows how
+    to keep the last good cached value) actually gets to run."""
     security_id, exchange_segment, instrument_type = _underlying_reference(symbol)
 
     fast_data = dhan_wrapper.fetch_continuous_intraday(
         security_id, exchange_segment, instrument_type, config.REGIME_FAST_INTERVAL_MINUTES,
         lookback_days_override=config.REGIME_EMA_LOOKBACK_DAYS,
     )
+    if not fast_data.get("close"):
+        raise RuntimeError(
+            f"{symbol}: fetch_continuous_intraday returned no data at all for the "
+            f"{config.REGIME_FAST_INTERVAL_MINUTES}-min regime series - treating as a fetch "
+            f"failure, not genuinely insufficient history"
+        )
     fast_ema, fast_start = _ema200_on(
         fast_data.get("close") or [], fast_data.get("timestamp") or [], config.REGIME_FAST_INTERVAL_MINUTES,
     )
@@ -119,6 +143,12 @@ def _fetch_regime_state_once(symbol: str) -> Optional[RegimeState]:
         security_id, exchange_segment, instrument_type, config.REGIME_SLOW_INTERVAL_MINUTES,
         lookback_days_override=config.REGIME_EMA_LOOKBACK_DAYS,
     )
+    if not slow_data.get("close"):
+        raise RuntimeError(
+            f"{symbol}: fetch_continuous_intraday returned no data at all for the "
+            f"{config.REGIME_SLOW_INTERVAL_MINUTES}-min regime series - treating as a fetch "
+            f"failure, not genuinely insufficient history"
+        )
     slow_ema, slow_start = _ema200_on(
         slow_data.get("close") or [], slow_data.get("timestamp") or [], config.REGIME_SLOW_INTERVAL_MINUTES,
     )
@@ -225,6 +255,19 @@ def _fetch_supertrend_state_once(symbol: str, interval_minutes: int) -> Optional
     data = dhan_wrapper.fetch_continuous_intraday(
         security_id, exchange_segment, instrument_type, interval_minutes,
     )
+    if not data.get("close"):
+        # A COMPLETELY empty response for an already-established watchlist
+        # symbol is a fetch failure (see _fetch_regime_state_once's own
+        # docstring for the real incident this guards against - the same
+        # "fetch silently returns {}, gets cached as a legitimate None"
+        # pattern applies here identically), not genuinely insufficient
+        # history - raise so get_supertrend_state's try/except keeps the
+        # last good cached value instead of overwriting it.
+        raise RuntimeError(
+            f"{symbol}: fetch_continuous_intraday returned no data at all for the "
+            f"{interval_minutes}-min Supertrend series - treating as a fetch failure, "
+            f"not genuinely insufficient history"
+        )
     highs = data.get("high") or []
     lows = data.get("low") or []
     closes = data.get("close") or []

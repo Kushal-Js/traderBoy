@@ -791,6 +791,40 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             )
             return
 
+        if result.status not in OrderStatus.TERMINAL_STATUSES:
+            # Didn't reach a terminal status within wait_for_order_result's
+            # own poll budget - not rejected/cancelled (caught above) and
+            # not a queued AMO (caught above), so the SELL is still
+            # genuinely live at the broker and may yet fill or reject. REAL
+            # INCIDENT, 17 Sep 2026: PAGEIND's own LIQUIDITY_GUARD_ZERO_
+            # VOLUME exit fired specifically because the contract had gone
+            # quiet - its own market SELL then couldn't find an immediate
+            # counterparty either, stayed PENDING past the retry budget,
+            # and this code (before this check existed) fell straight
+            # through to close_position() below - silently recording the
+            # position as CLOSED (with a real exit_price/closed_at) while
+            # the real SELL order sat unfilled at the broker. That false
+            # "closed" record then made attribute_open_broker_position
+            # unable to match the still-open real position back to Luxury
+            # on the next restart (its own logic compares last_open_at vs
+            # last_closed_at - a closed_at this position never actually
+            # earned made it look, correctly by that function's own
+            # inputs, like "no strategy currently owns this as open"),
+            # orphaning a real position with no owner. Mirrors the
+            # identical, already-proven fix on the ENTRY side elsewhere in
+            # this codebase (see Options/trading_engine.py's own "still %s
+            # after poll budget" branch) - leave pending_exit_order_id set
+            # (already applied above) and defer to _sync_pending_orders,
+            # which already re-checks ANY pending exit order (not just AMO
+            # ones - see its own code) every monitor tick until it reaches
+            # a real terminal status.
+            logger.warning(
+                "SELL order %s for %s still %s after the poll budget - deferring to "
+                "background sync instead of assuming it filled.",
+                order_id, symbol, result.status,
+            )
+            return
+
         final_exit_price = result.fill_price or exit_price
         await position_store.close_position(symbol, final_exit_price, reason)
         await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.option_trading_symbol)
