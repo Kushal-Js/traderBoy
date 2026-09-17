@@ -311,6 +311,10 @@ ENABLE_EMA_CROSS_EXIT = os.getenv("LUXURY_ENABLE_EMA_CROSS_EXIT", "false").lower
 # even though every package's own ENABLE_SUPERTREND_EXIT is independent.
 LIQUIDITY_GUARD_ENABLED = os.getenv("LUXURY_LIQUIDITY_GUARD_ENABLED", "true").lower() == "true"
 
+# Option-liquidity ENTRY gate (18 Sep 2026) - see Options/config.py's own
+# LIQUIDITY_ENTRY_GATE_ENABLED comment for the full SOLARINDS rationale.
+LIQUIDITY_ENTRY_GATE_ENABLED = os.getenv("LUXURY_LIQUIDITY_ENTRY_GATE_ENABLED", "true").lower() == "true"
+
 # Forces a market exit once _get_ltp has failed continuously for this many
 # minutes on an open position - see Options/config.py's own LTP_STALE_
 # FORCE_EXIT_MINUTES docstring for the full ANGELONE/ICICIPRULI incident

@@ -584,6 +584,25 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
             "expiry_date": str(atm.expiry_date),
         }
 
+    # Option-liquidity entry gate (added 18 Sep 2026, real incident - see
+    # config.LIQUIDITY_ENTRY_GATE_ENABLED's own docstring for the full
+    # SOLARINDS rationale). Checked as soon as the real contract is known,
+    # before the funds check or any real order - the option's OWN
+    # liquidity, which neither the volume-floor nor trend-strength gates
+    # (both underlying-based) can see.
+    if config.LIQUIDITY_ENTRY_GATE_ENABLED:
+        passes, is_illiquid = await reversal_filters.check_option_liquidity(atm.trading_symbol)
+        if not passes:
+            logger.info(
+                "%s: skipped - %s has had zero traded volume for %d+ consecutive completed bars - "
+                "not entering an already-illiquid option",
+                symbol, atm.trading_symbol, config.LIQUIDITY_GUARD_ZERO_VOLUME_BARS,
+            )
+            return {
+                "symbol": symbol, "status": "skipped", "reason": "option_illiquid_at_entry",
+                "option_trading_symbol": atm.trading_symbol,
+            }
+
     quantity = atm.lot_size * config.QUANTITY_LOTS
     tag = _gen_tag(config.ORDER_TAG_PREFIX, symbol)
 

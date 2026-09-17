@@ -442,3 +442,56 @@ async def check_trend_strength(symbol: str) -> tuple[bool, Optional[float], Opti
         if not passes: ... skip the re-entry ..."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, check_trend_strength_sync, symbol)
+
+
+# --------------------------------------------------------------------- #
+# Live option-liquidity entry gate (added 18 Sep 2026) - real incident:
+# SOLARINDS 29 SEP 18750 PUT (Options, 17 Sep 2026) lost Rs 3,995.00 via
+# MAX_LOSS_HIT - the underlying moved only ~0.32% (18840 -> 18780) while
+# the option premium collapsed ~15.5% (580 peak -> 490.05 exit), a pure
+# option-side liquidity/gap event. Investigated at the time and concluded
+# "not preventable by current filters" - every entry-time signal this
+# codebase has (volume floor, ADX, ER via the shadow filters above)
+# measures the UNDERLYING's own price/volume, never the OPTION's. This
+# gate closes that gap by reusing dhan_wrapper.refresh_liquidity_signal/
+# get_cached_illiquid - the option's OWN "last N completed 1-min bars all
+# zero volume" check, already built, tested, and live for EXIT decisions
+# (see that function's own docstring for the CHOLAFIN incident it exists
+# for) - but never previously checked before an entry. Whether it would
+# have caught SOLARINDS specifically is unverifiable after the fact (no
+# option-level volume was captured at that exact entry moment), but this
+# is the only real, targeted signal available for "is the option ITSELF
+# already thin," as opposed to the underlying.
+def check_option_liquidity_sync(option_trading_symbol: str) -> tuple[bool, Optional[bool]]:
+    """Blocking - must be called via run_in_executor. Returns (passes,
+    is_illiquid). Fails OPEN (passes=True) whenever the real answer isn't
+    confidently known (not yet authenticated, fetch failure, or not
+    enough completed bars yet) - same philosophy as check_volume_floor_
+    sync/check_trend_strength_sync: a diagnostic check's own failure or
+    cold-start must never itself cause a missed entry, only a CONFIRMED
+    zero-volume streak does. refresh_liquidity_signal has no pre-existing
+    cache entry for a symbol that isn't an open position yet, so this
+    call always performs a fresh fetch rather than being throttled by a
+    stale cached value."""
+    if dhan_wrapper._client is None:
+        return True, None
+    try:
+        dhan_wrapper.refresh_liquidity_signal(option_trading_symbol)
+        is_illiquid = dhan_wrapper.get_cached_illiquid(option_trading_symbol)
+        if is_illiquid is None:
+            return True, None
+        return (not is_illiquid), is_illiquid
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: option-liquidity entry check failed - failing OPEN (entry proceeds unaffected)",
+                          option_trading_symbol)
+        return True, None
+
+
+async def check_option_liquidity(option_trading_symbol: str) -> tuple[bool, Optional[bool]]:
+    """Async wrapper for check_option_liquidity_sync - call this right
+    after resolving the real contract to enter (e.g. get_atm_option),
+    before placing the real order:
+        passes, is_illiquid = await reversal_filters.check_option_liquidity(atm.trading_symbol)
+        if not passes: ... skip the entry ..."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, check_option_liquidity_sync, option_trading_symbol)

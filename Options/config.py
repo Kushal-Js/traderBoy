@@ -558,6 +558,16 @@ ENABLE_EMA_CROSS_EXIT = os.getenv("ENABLE_EMA_CROSS_EXIT", "false").lower() == "
 LIQUIDITY_GUARD_ZERO_VOLUME_BARS = int(os.getenv("LIQUIDITY_GUARD_ZERO_VOLUME_BARS", "4"))
 LIQUIDITY_GUARD_REFRESH_SECONDS = int(os.getenv("LIQUIDITY_GUARD_REFRESH_SECONDS", "30"))
 
+# Option-liquidity ENTRY gate (added 18 Sep 2026, real incident - see
+# reversal_filters.check_option_liquidity's own docstring for the full
+# SOLARINDS rationale). Reuses the same zero-volume-streak check and the
+# same LIQUIDITY_GUARD_ZERO_VOLUME_BARS/_REFRESH_SECONDS thresholds as
+# the EXIT-side guard above, but checked once BEFORE placing a real
+# order instead of only after a position is already open - the option's
+# OWN illiquidity, not the underlying's, which none of the other entry
+# gates (volume floor, trend-strength) can see.
+LIQUIDITY_ENTRY_GATE_ENABLED = os.getenv("LIQUIDITY_ENTRY_GATE_ENABLED", "true").lower() == "true"
+
 # REMOVED (user request 27 Aug 2026): there used to be two extra "waiting"
 # knobs here - SUPERTREND_ENTRY_GRACE_MINUTES (extra minutes past the
 # entry candle before honoring a reversal) and SUPERTREND_MIN_WARMUP_CANDLES

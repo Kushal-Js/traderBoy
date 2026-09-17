@@ -130,6 +130,10 @@ BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE = float(os.getenv("FUTURES_BROKER_STOP_LOSS_
 # are shared and live in Options/config.py).
 LIQUIDITY_GUARD_ENABLED = os.getenv("FUTURES_LIQUIDITY_GUARD_ENABLED", "true").lower() == "true"
 
+# Option-liquidity ENTRY gate (18 Sep 2026) - see Options/config.py's own
+# LIQUIDITY_ENTRY_GATE_ENABLED comment for the full SOLARINDS rationale.
+LIQUIDITY_ENTRY_GATE_ENABLED = os.getenv("FUTURES_LIQUIDITY_ENTRY_GATE_ENABLED", "true").lower() == "true"
+
 # Forces a market exit once _get_ltp has failed continuously for this many
 # minutes on an open position - see Options/config.py's own LTP_STALE_
 # FORCE_EXIT_MINUTES docstring for the full ANGELONE/ICICIPRULI incident
