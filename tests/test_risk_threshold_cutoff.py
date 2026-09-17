@@ -84,15 +84,25 @@ def test_1_lookup_functions_switch_at_the_cutoff():
     CE. PE was split off from CE on 14 Sep 2026 (user request: tighter
     caps for PE only) to 3500/1600, independently of CE - same convention
     as every other "pinned" test in this suite when a live constant
-    changes. PROFIT_PROTECTION_THRESHOLD_RS is untouched by any of this,
-    still 1500/1000 for all three (and both CE/PE, since that threshold
-    was never split)."""
+    changes.
+
+    PROFIT_PROTECTION_THRESHOLD_RS_BEFORE/AFTER_CUTOFF is read live off
+    each module's own config (not hardcoded) - it moved 1500/1000 ->
+    2000/1500 on 17 Sep 2026 when the local .env was resynced to match
+    the droplet's real live values (see trading-skills' own incident
+    write-ups from that date), which silently broke this test's old
+    hardcoded assumption without anyone noticing until the next full
+    suite run - the exact "pinned test, live constant changed" class of
+    staleness this docstring already warns about for the MAX_LOSS values
+    above, just not applied to this one too at the time."""
     for label, module in (("Options", ote), ("Futures", fte), ("Luxury", lte)):
+        before_pp = module.config.PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF
+        after_pp = module.config.PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF
         restore = _freeze_time(module, BEFORE_CUTOFF)
         try:
             assert module.current_max_loss_per_trade_rs("CE") == 4500, label
             assert module.current_max_loss_per_trade_rs("PE") == 3500, label
-            assert module.current_profit_protection_threshold_rs() == 1500, label
+            assert module.current_profit_protection_threshold_rs() == before_pp, label
         finally:
             restore()
 
@@ -100,12 +110,12 @@ def test_1_lookup_functions_switch_at_the_cutoff():
         try:
             assert module.current_max_loss_per_trade_rs("CE") == 2100, label
             assert module.current_max_loss_per_trade_rs("PE") == 1600, label
-            assert module.current_profit_protection_threshold_rs() == 1000, label
+            assert module.current_profit_protection_threshold_rs() == after_pp, label
         finally:
             restore()
     print("1. current_max_loss_per_trade_rs() returns 4500/2100 (CE) and 3500/1600 (PE) "
-          "before/after 11:30, current_profit_protection_threshold_rs() returns 1500/1000 "
-          "(unaffected by the CE/PE split), for all three packages: PASSED")
+          "before/after 11:30, current_profit_protection_threshold_rs() returns the live "
+          "before/after config values (unaffected by the CE/PE split), for all three packages: PASSED")
 
 
 def test_2_exact_boundary_instant_counts_as_after():
@@ -113,13 +123,17 @@ def test_2_exact_boundary_instant_counts_as_after():
     (is_past_square_off_time, is_past_allowed_trading_time - both use
     `_now_ist() >= cutoff`) - the boundary second itself already gets the
     tighter afternoon values, not the looser morning ones. Checked for
-    both CE and PE since they now carry independent values."""
+    both CE and PE since they now carry independent values.
+    PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF is read live off config -
+    see test_1's own docstring for why (it moved 1000 -> 1500 on 17 Sep
+    2026's .env resync)."""
     for label, module in (("Options", ote), ("Futures", fte), ("Luxury", lte)):
+        after_pp = module.config.PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF
         restore = _freeze_time(module, AT_CUTOFF)
         try:
             assert module.current_max_loss_per_trade_rs("CE") == 2100, label
             assert module.current_max_loss_per_trade_rs("PE") == 1600, label
-            assert module.current_profit_protection_threshold_rs() == 1000, label
+            assert module.current_profit_protection_threshold_rs() == after_pp, label
         finally:
             restore()
     print("2. Exactly 11:30:00 already counts as 'after' for all three packages, both CE and PE, "
@@ -212,24 +226,35 @@ def test_3_exit_reason_for_uses_the_correct_cap_on_each_side():
         finally:
             restore()
 
-        # PROFIT_PROTECTION_HIT: peak profit of Rs 1200 (highest_price set
-        # 1200 above entry), current ltp one rupee below that peak -> not
-        # armed before 11:30 (threshold 1500) but armed after 11:30
-        # (threshold 1000).
-        pos2 = make_position(highest_price=2000.0 + 1200.0)  # peak_profit_rs = 1200
-        ltp2 = pos2.highest_price - 1  # one rupee off the peak, still a large net profit
+        # PROFIT_PROTECTION_HIT: same "straddle" approach as MAX_LOSS_HIT
+        # above (17 Sep 2026 - the old flat Rs 1200/threshold-1500/1000
+        # hardcoding broke the same day the .env values it assumed were
+        # resynced to the droplet's real ones) - a peak profit strictly
+        # between the after-cutoff (tighter) and before-cutoff (looser)
+        # thresholds must NOT arm before 11:30 but MUST arm after,
+        # regardless of what those two values currently are. The giveback
+        # check (ltp past highest_price * (1 - GIVEBACK_PCT), not just "1
+        # rupee off the peak") is also read live - a flat Rs 1 drop only
+        # ever worked by coincidence when GIVEBACK_PCT was 0%; the real
+        # .env has run 3% for all three packages since before this fix.
+        before_pp = module.config.PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF
+        after_pp = module.config.PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF
+        straddle_profit = after_pp + (before_pp - after_pp) / 2
+        pos2 = make_position(highest_price=2000.0 + straddle_profit)
+        giveback_floor = pos2.highest_price * (1 - module.config.PROFIT_PROTECTION_GIVEBACK_PCT)
+        ltp2 = giveback_floor - 1  # one rupee past the real giveback floor, whatever it currently is
 
         restore = _freeze_time(module, BEFORE_CUTOFF)
         try:
             assert module._exit_reason_for(pos2, ltp2) is None, \
-                f"{label}: Rs 1200 peak profit must NOT arm protection before 11:30 (threshold is 1500)"
+                f"{label}: a Rs {straddle_profit:.0f} peak profit must NOT arm protection before 11:30 (threshold is {before_pp:.0f})"
         finally:
             restore()
 
         restore = _freeze_time(module, AFTER_CUTOFF)
         try:
             assert module._exit_reason_for(pos2, ltp2) == "PROFIT_PROTECTION_HIT", \
-                f"{label}: Rs 1200 peak profit MUST arm protection after 11:30 (threshold is 1000)"
+                f"{label}: a Rs {straddle_profit:.0f} peak profit MUST arm protection after 11:30 (threshold is {after_pp:.0f})"
         finally:
             restore()
             module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF = real_enabled

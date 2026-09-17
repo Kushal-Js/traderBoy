@@ -222,19 +222,29 @@ async def test_4_has_sufficient_bucket_funds_core_logic():
     finally:
         restore()
 
-    # (b) Insufficient - secondary bucket is only 15% by default, so even
-    # a modest account balance leaves little room.
-    restore, _ = install_dhan_mocks(available_balance=1000.0, margin_per_leg=1000.0)
+    # (b) Insufficient - a margin requirement LARGER than the account's
+    # entire balance is guaranteed to exceed the secondary bucket's own
+    # share no matter what SECONDARY_BUCKET_PCT currently is (a bucket
+    # can never claim more than 100% of available_balance) - reads live
+    # rather than assuming a specific percentage, since FUND_SECONDARY_
+    # BUCKET_PCT moved 15% -> 100% on 17 Sep 2026's .env resync and broke
+    # this test's old flat "1000 required == 1000 balance" assumption.
+    restore, _ = install_dhan_mocks(available_balance=1000.0, margin_per_leg=1500.0)
     try:
         ok = await fa.has_sufficient_bucket_funds("secondary", "TEST", [("SEC1", "MIS", 100, 50.0)])
         assert ok is False, \
-            f"1000 required > {fa.SECONDARY_BUCKET_PCT}% of 1000 ({fa.SECONDARY_BUCKET_PCT * 10}) must be insufficient"
+            f"1500 required > the whole 1000 balance must be insufficient regardless of " \
+            f"SECONDARY_BUCKET_PCT (currently {fa.SECONDARY_BUCKET_PCT}%)"
     finally:
         restore()
 
     # (c) The optional buffer_rs is applied correctly (same mechanism as
-    # Swing's own FUNDS_CHECK_BUFFER_RS, but usable by any caller).
-    restore, _ = install_dhan_mocks(available_balance=1000.0, margin_per_leg=1000.0)
+    # Swing's own FUNDS_CHECK_BUFFER_RS, but usable by any caller). Same
+    # 1500-required-vs-1000-balance setup as (b) above, for the same
+    # reason (must be insufficient regardless of the live SECONDARY_
+    # BUCKET_PCT) - buffer_rs=5000 is comfortably more than enough to
+    # flip it either way.
+    restore, _ = install_dhan_mocks(available_balance=1000.0, margin_per_leg=1500.0)
     try:
         ok_no_buffer = await fa.has_sufficient_bucket_funds("secondary", "TEST", [("SEC1", "MIS", 100, 50.0)])
         assert ok_no_buffer is False

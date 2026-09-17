@@ -57,6 +57,8 @@ import tempfile
 from datetime import date, timedelta
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -88,6 +90,34 @@ import Swing.watchlist as swl
 from Options.dhan_client import AtmOption, FuturesContract, OrderResult, OrderStatus
 
 FUTURE_EXPIRY = date.today() + timedelta(days=25)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _pin_fund_bucket_percentages():
+    """Real bug, found 17 Sep 2026: this file's own main() (below) already
+    pins fa.PRIMARY_BUCKET_PCT/SECONDARY_BUCKET_PCT/BUCKET_PCTS to a clean
+    85/15 split, with a comment explaining exactly why - "tests 2 and 3's
+    own numbers are hand-worked against a clean 85/15 split... the real
+    .env's SECONDARY_BUCKET_PCT was raised 15->20 on 8 Sep 2026, which
+    would otherwise silently change which of these hand-worked scenarios
+    actually clears the bucket." But `pytest tests/` discovers and calls
+    each test_* function DIRECTLY - it never runs this file's own main(),
+    so that pinning silently never happened under pytest, and the real
+    ambient .env value (SECONDARY_BUCKET_PCT moved all the way to 100% by
+    17 Sep 2026) broke every hand-worked scenario in this file. This
+    fixture reproduces main()'s exact pin/restore so pytest-driven runs
+    get the same clean 85/15 split `python tests/test_fund_allocation_
+    integration.py` already did - both entry points now behave the same."""
+    real_primary_pct = fa.PRIMARY_BUCKET_PCT
+    real_secondary_pct = fa.SECONDARY_BUCKET_PCT
+    real_bucket_pcts = dict(fa.BUCKET_PCTS)
+    fa.PRIMARY_BUCKET_PCT = 85.0
+    fa.SECONDARY_BUCKET_PCT = 15.0
+    fa.BUCKET_PCTS = {"primary": 85.0, "secondary": 15.0}
+    yield
+    fa.PRIMARY_BUCKET_PCT = real_primary_pct
+    fa.SECONDARY_BUCKET_PCT = real_secondary_pct
+    fa.BUCKET_PCTS = real_bucket_pcts
 
 
 def fake_atm_option(symbol: str, option_type: str) -> AtmOption:
@@ -402,6 +432,15 @@ async def test_4_funds_rejected_stock_is_genuinely_retriable_on_a_later_alert():
     om.position_store = store
     ote.position_store = store
     ote.config.MAX_LIVE_POSITIONS_CE = 5
+    # Unlike test_2/3, this test doesn't freeze the clock - pin both
+    # entry-time gates OFF (same reasoning as test_2's own comment) so it
+    # doesn't fail with a gate-rejection {"status": "ignored", ...} shape
+    # (no "entries" key) when run outside config.TRADING_WINDOWS, e.g.
+    # after 15:28 IST - found 17 Sep 2026 running this suite at 15:38 IST.
+    real_time_limit = ote.config.ENABLE_TRADING_TIME_LIMIT
+    real_windows = ote.config.ENABLE_TRADING_WINDOWS
+    ote.config.ENABLE_TRADING_TIME_LIMIT = False
+    ote.config.ENABLE_TRADING_WINDOWS = False
 
     real_rank = om.rank_and_pick_top_stocks
     om.rank_and_pick_top_stocks = fake_ranked
@@ -436,6 +475,8 @@ async def test_4_funds_rejected_stock_is_genuinely_retriable_on_a_later_alert():
     finally:
         restore()
         om.rank_and_pick_top_stocks = real_rank
+        ote.config.ENABLE_TRADING_TIME_LIMIT = real_time_limit
+        ote.config.ENABLE_TRADING_WINDOWS = real_windows
 
 
 async def main():

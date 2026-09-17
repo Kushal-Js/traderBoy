@@ -322,13 +322,25 @@ def test_10_target_exit_disabled_flag_suppresses_target_hit():
         assert fte._exit_reason_for(losing, ltp=8.0) == "MAX_LOSS_HIT", \
             "disabling the target exit must not affect the loss-side checks"
 
-        # And PROFIT_PROTECTION still catches a genuine give-back from a real peak.
+        # And PROFIT_PROTECTION still catches a genuine give-back from a
+        # real peak - reads the live threshold/giveback-% off config
+        # (17 Sep 2026 fix) rather than the old flat "highest_price=12.0,
+        # ltp=11.99" assumption, which silently depended on both
+        # PROFIT_PROTECTION_THRESHOLD_RS being 1500 AND PROFIT_PROTECTION_
+        # GIVEBACK_PCT being 0% - the real .env has since moved the
+        # threshold to 1500 (after-cutoff) and the giveback to 3% for all
+        # three packages, so "1 cent off the peak" no longer clears the
+        # real giveback floor even when the threshold itself is exceeded.
+        threshold = fte.current_profit_protection_threshold_rs()
+        peak_profit_rs = threshold + 500.0  # comfortably exceeds whatever the live threshold is
         protected = Position(
             underlying_symbol="PEAKER", option_trading_symbol="PEAKER 29 SEP 100 CALL",
             option_type="CE", quantity=1000, lot_size=1000, entry_price=10.0, target_price=12.0,
-            highest_price=12.0, hard_stop_loss=1.0, order_id="X", product_type="MARGIN",
-        )  # peak profit (12-10)*1000 = 2000 > 1500 threshold
-        assert fte._exit_reason_for(protected, ltp=11.99) == "PROFIT_PROTECTION_HIT", \
+            highest_price=10.0 + peak_profit_rs / 1000, hard_stop_loss=1.0, order_id="X", product_type="MARGIN",
+        )
+        giveback_floor = protected.highest_price * (1 - fte.config.PROFIT_PROTECTION_GIVEBACK_PCT)
+        ltp = giveback_floor - 0.01  # just past the real giveback floor, whatever it currently is
+        assert fte._exit_reason_for(protected, ltp) == "PROFIT_PROTECTION_HIT", \
             "PROFIT_PROTECTION_HIT is now the primary profit-taking exit and must still fire"
 
         print("10. FUTURES_ENABLE_TARGET_EXIT=false suppresses TARGET_HIT only - a winner rides past target, "
