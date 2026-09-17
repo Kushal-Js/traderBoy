@@ -93,6 +93,17 @@ LOSS_REPEAT_BLOCK_ENABLED = os.getenv("LUXURY_LOSS_REPEAT_BLOCK_ENABLED", "true"
 LOSS_REPEAT_BLOCK_COUNT = int(os.getenv("LUXURY_LOSS_REPEAT_BLOCK_COUNT", "2"))
 LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
 
+# BROADENED 18 Sep 2026 (real incident, user request) - the reason-string
+# scoping above no longer gates this package's own live check (kept only
+# for reference/backward compatibility); see Options/config.py's own
+# LOSS_REPEAT_BLOCK_ENABLED comment for the full rationale (a real
+# ATHERENERG loss via SUPERTREND_EXIT/EMA_CROSS_EXIT that the old scoping
+# never counted). Now counts ANY exit that closed at pnl < 0.
+
+# Loss-re-entry trend-strength check (18 Sep 2026) - see Options/config.py's
+# own LOSS_REENTRY_TREND_CHECK_ENABLED comment for the full rationale.
+LOSS_REENTRY_TREND_CHECK_ENABLED = os.getenv("LUXURY_LOSS_REENTRY_TREND_CHECK_ENABLED", "true").lower() == "true"
+
 # Broker-side stop-loss order (added 8 Sep 2026, user request: "broker-
 # side stop order that fires instantly regardless of polling interval
 # would be a better approach" - a follow-up to the same backtest that

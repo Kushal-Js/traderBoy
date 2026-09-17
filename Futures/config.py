@@ -72,11 +72,21 @@ MAX_DAILY_ENTRIES_PER_SYMBOL = int(os.getenv("FUTURES_MAX_DAILY_ENTRIES_PER_SYMB
 # shared - always reads Options.config, same as SUPERTREND_PERIOD does.
 ENABLE_RSI_LOSS_REENTRY_BLOCK = os.getenv("FUTURES_ENABLE_RSI_LOSS_REENTRY_BLOCK", "true").lower() == "true"
 
-# Repeat-loss same-day block: once a symbol has closed on MAX_LOSS_HIT/
-# STOP_LOSS_HIT this many times today, it's blocked for the rest of the day.
+# Repeat-loss same-day block: once a symbol has closed at a genuine
+# monetary loss this many times today, it's blocked for the rest of the
+# day. BROADENED 18 Sep 2026 (real incident, user request) - see
+# Options/config.py's own LOSS_REPEAT_BLOCK_ENABLED comment for the full
+# rationale (ATHERENERG 17 Sep 2026, two same-day losses via SUPERTREND_
+# EXIT/EMA_CROSS_EXIT that the old MAX_LOSS_HIT/STOP_LOSS_HIT-only scoping
+# never counted). LOSS_REPEAT_BLOCK_EXIT_REASONS kept only for reference/
+# backward compatibility - no longer read by this package's own gate.
 LOSS_REPEAT_BLOCK_ENABLED = os.getenv("FUTURES_LOSS_REPEAT_BLOCK_ENABLED", "true").lower() == "true"
 LOSS_REPEAT_BLOCK_COUNT = int(os.getenv("FUTURES_LOSS_REPEAT_BLOCK_COUNT", "2"))
 LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
+
+# Loss-re-entry trend-strength check (18 Sep 2026) - see Options/config.py's
+# own LOSS_REENTRY_TREND_CHECK_ENABLED comment for the full rationale.
+LOSS_REENTRY_TREND_CHECK_ENABLED = os.getenv("FUTURES_LOSS_REENTRY_TREND_CHECK_ENABLED", "true").lower() == "true"
 
 # Volume-floor entry gate (17 Sep 2026) - same mechanism, threshold, and
 # rationale as Options/config.py's own VOLUME_FLOOR_GATE_ENABLED (ported

@@ -53,10 +53,11 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from trade_history import (
-    attribute_open_broker_position, count_opened_today, loss_exit_count_today,
+    attribute_open_broker_position, count_opened_today, loss_count_today, loss_exit_count_today,
 )
 import cross_strategy_registry
 import fund_allocation
+import reversal_filters
 
 from . import config
 from .dhan_client import OrderStatus, dhan_wrapper
@@ -345,21 +346,43 @@ async def _process_one_entry(symbol: str, option_type: str) -> dict:
     # Repeat-loss same-day block (added 8 Sep 2026) - see config.LOSS_
     # REPEAT_BLOCK_ENABLED's own docstring for how this differs from both
     # guards above. Unlike the timing-based cooldown just above, this one
-    # never expires today once tripped - only a genuine loss-designated
-    # exit reason counts (a symbol that's merely had several trades, or
-    # even several small losing-by-a-hair TRAILING_SL_HIT exits, is not
-    # blocked by this - only real MAX_LOSS_HIT/STOP_LOSS_HIT hits are).
-    if config.LOSS_REPEAT_BLOCK_ENABLED:
-        loss_count = await loop.run_in_executor(
-            None, loss_exit_count_today, "Luxury", symbol, config.LOSS_REPEAT_BLOCK_EXIT_REASONS, datetime.now(),
-        )
-        if loss_count >= config.LOSS_REPEAT_BLOCK_COUNT:
+    # never expires today once tripped. BROADENED 18 Sep 2026 (real
+    # incident, user request): now counts ANY exit that closed at a
+    # genuine monetary loss (trade_history.loss_count_today), not just
+    # MAX_LOSS_HIT/STOP_LOSS_HIT - a real ATHERENERG loss via SUPERTREND_
+    # EXIT/EMA_CROSS_EXIT the old reason-scoped count never saw let a 3rd
+    # same-day entry through after two straight real losses.
+    if config.LOSS_REPEAT_BLOCK_ENABLED or config.LOSS_REENTRY_TREND_CHECK_ENABLED:
+        loss_count = await loop.run_in_executor(None, loss_count_today, "Luxury", symbol, datetime.now())
+
+        if config.LOSS_REPEAT_BLOCK_ENABLED and loss_count >= config.LOSS_REPEAT_BLOCK_COUNT:
             logger.info(
-                "%s: skipped - already hit a loss-based exit %d time(s) today (limit %d), "
+                "%s: skipped - already closed at a real loss %d time(s) today (limit %d), "
                 "blocked for the rest of the day",
                 symbol, loss_count, config.LOSS_REPEAT_BLOCK_COUNT,
             )
             return {"symbol": symbol, "status": "skipped", "reason": "loss_repeat_block_active"}
+
+        # Loss-re-entry trend-strength check (added 18 Sep 2026, same
+        # incident) - once a symbol has lost money >= 1 time today but
+        # hasn't yet hit the hard block above, a re-entry must ALSO show a
+        # genuine trend (ADX or Efficiency Ratio) before proceeding - see
+        # reversal_filters.check_trend_strength's own docstring for the
+        # exact ATHERENERG numbers (ADX=13.24, a choppy reading) that
+        # motivated this. A clean symbol (0 losses today) never pays this
+        # extra REST call.
+        if config.LOSS_REENTRY_TREND_CHECK_ENABLED and loss_count >= 1:
+            passes, adx, er = await reversal_filters.check_trend_strength(symbol)
+            if not passes:
+                logger.info(
+                    "%s: skipped - already lost money %d time(s) today and re-entry trend check failed "
+                    "(ADX=%s < %.1f, ER=%s < %.2f) - not re-entering into a choppy market",
+                    symbol, loss_count, adx, reversal_filters.ADX_MIN, er, reversal_filters.ER_THRESHOLD,
+                )
+                return {
+                    "symbol": symbol, "status": "skipped", "reason": "loss_reentry_trend_check_failed",
+                    "adx": adx, "er": er,
+                }
 
     if not await cross_strategy_registry.try_claim(symbol, "Luxury"):
         logger.info("%s: skipped - another strategy is currently entering it", symbol)

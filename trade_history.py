@@ -385,6 +385,64 @@ def loss_exit_count_today(
     return count
 
 
+def loss_count_today(strategy: str, underlying_symbol: str, now: Optional[datetime] = None) -> int:
+    """Read-only. Counts how many times `strategy` has closed a real trade
+    for `underlying_symbol` TODAY at an actual monetary loss (pnl < 0),
+    regardless of exit_reason - added 18 Sep 2026, broadening loss_exit_
+    count_today's own reason-string scoping after a real incident: a
+    Real ATHERENERG 29 SEP 1540 PUT (Options, 17 Sep 2026) lost Rs 1,537.50
+    via SUPERTREND_EXIT and Rs 2,325.00 via EMA_CROSS_EXIT (neither reason
+    is in any package's LOSS_REPEAT_BLOCK_EXIT_REASONS), so LOSS_REPEAT_
+    BLOCK never engaged despite two real losses on the same underlying the
+    same day, and a 3rd entry followed. User request: LOSS_REPEAT_BLOCK
+    should count ANY losing exit, not just MAX_LOSS_HIT/STOP_LOSS_HIT.
+
+    loss_exit_count_today itself is UNCHANGED and still reason-scoped -
+    ENABLE_RSI_LOSS_REENTRY_BLOCK (a distinct guard) still deliberately
+    only reacts to a MAX_LOSS_HIT specifically, per its own docstring, and
+    is out of scope for this broadening.
+
+    Same efficiency/fail-open pattern as every other daily count in this
+    file - reads only today's own dated `real_trades` file, fails OPEN
+    (returns 0, i.e. "no block") on a read error since this is a secondary
+    risk-management layer, not the primary one (the exit's own exit-
+    reason ladder already ran for every trade counted here)."""
+    now = now or datetime.now()
+    path = dated_path(REAL_TRADES_NAME)
+    if not path.exists():
+        return 0
+    count = 0
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("strategy") != strategy or record.get("underlying_symbol") != underlying_symbol:
+                    continue
+                pnl = record.get("pnl")
+                if pnl is None or pnl >= 0:
+                    continue
+                closed_at = record.get("closed_at")
+                if not closed_at:
+                    continue
+                closed_dt = datetime.fromisoformat(closed_at)
+                if closed_dt.date() == now.date():
+                    count += 1
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Could not read today's %s log for %s %s - treating as 0 losses "
+            "(fail open, same as every other logging-only read in this file).",
+            REAL_TRADES_NAME, strategy, underlying_symbol,
+        )
+        return 0
+    return count
+
+
 # --------------------------------------------------------------------- #
 # Webhook alert log - every incoming Chartink alert, tagged by which
 # endpoint/strategy received it and what happened to it (processed vs

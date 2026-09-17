@@ -74,8 +74,12 @@ os.environ.setdefault("DHAN_CLIENT_ID", "test")
 from dotenv import load_dotenv
 load_dotenv(REPO_ROOT / ".env")
 
+from unittest import mock
+from unittest.mock import AsyncMock
+
 import trade_history
 import cross_strategy_registry
+import reversal_filters
 
 scratch_dir = Path(tempfile.mkdtemp(prefix="dhanboy_options_corrective_actions_test_"))
 trade_history.HISTORY_DIR = scratch_dir
@@ -502,6 +506,182 @@ def test_9_profit_protection_giveback_buffer():
         ote.config.PROFIT_PROTECTION_GIVEBACK_PCT = real
 
 
+async def test_10_real_atherenerg_pattern_supertrend_and_ema_cross_losses_now_block():
+    """Reproduces the real 17 Sep 2026 incident: SUPERTREND_EXIT and
+    EMA_CROSS_EXIT losses - neither in the old LOSS_REPEAT_BLOCK_EXIT_
+    REASONS allow-list - now correctly count toward the repeat-loss
+    block, since it's broadened to any pnl<0 exit. Trend-check gate
+    disabled here so ONLY the repeat-block feature is under test."""
+    store = ops.PositionStore()
+    ote.position_store = store
+    real_rsi_block_enabled = ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    real_trend_check_enabled = ote.config.LOSS_REENTRY_TREND_CHECK_ENABLED
+    real_block_enabled, real_block_count = ote.config.LOSS_REPEAT_BLOCK_ENABLED, ote.config.LOSS_REPEAT_BLOCK_COUNT
+    ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
+    ote.config.LOSS_REENTRY_TREND_CHECK_ENABLED = False
+    ote.config.LOSS_REPEAT_BLOCK_ENABLED = True
+    ote.config.LOSS_REPEAT_BLOCK_COUNT = 2
+    restore, placed_orders = install_all_dhan_mocks()
+    try:
+        symbol = "ATHERENERG"
+        entry_1 = await ote._process_one_entry(symbol, "PE")
+        assert entry_1["status"] == "entered", entry_1
+        await store.close_position(symbol, 46.0, "SUPERTREND_EXIT")  # real loss, signal-driven exit
+        await asyncio.sleep(0.3)
+
+        entry_2 = await ote._process_one_entry(symbol, "PE")
+        assert entry_2["status"] == "entered", \
+            f"only ONE prior loss so far - must still enter normally, got {entry_2}"
+        await store.close_position(symbol, 43.25, "EMA_CROSS_EXIT")  # second real loss, different signal reason
+        await asyncio.sleep(0.3)
+
+        placed_orders.clear()
+        entry_3 = await ote._process_one_entry(symbol, "PE")
+        assert entry_3["status"] == "skipped" and entry_3["reason"] == "loss_repeat_block_active", \
+            f"two real losses via SUPERTREND_EXIT/EMA_CROSS_EXIT must now block a 3rd entry, got {entry_3}"
+        assert placed_orders == [], f"a repeat-loss-blocked symbol must place ZERO orders, got {placed_orders}"
+        print("10. The real ATHERENERG incident is fixed: two same-day real losses via SUPERTREND_EXIT and "
+              "EMA_CROSS_EXIT (neither in the old MAX_LOSS_HIT/STOP_LOSS_HIT allow-list) now correctly block "
+              "a 3rd same-day entry: PASSED")
+    finally:
+        restore()
+        ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_rsi_block_enabled
+        ote.config.LOSS_REENTRY_TREND_CHECK_ENABLED = real_trend_check_enabled
+        ote.config.LOSS_REPEAT_BLOCK_ENABLED = real_block_enabled
+        ote.config.LOSS_REPEAT_BLOCK_COUNT = real_block_count
+
+
+async def test_11_reentry_trend_check_blocks_after_one_loss_when_choppy():
+    store = ops.PositionStore()
+    ote.position_store = store
+    real_rsi_block_enabled = ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    real_repeat_block_enabled = ote.config.LOSS_REPEAT_BLOCK_ENABLED
+    real_trend_check_enabled = ote.config.LOSS_REENTRY_TREND_CHECK_ENABLED
+    ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
+    ote.config.LOSS_REPEAT_BLOCK_ENABLED = False  # isolate the trend-check gate specifically
+    ote.config.LOSS_REENTRY_TREND_CHECK_ENABLED = True
+    restore, placed_orders = install_all_dhan_mocks()
+    try:
+        symbol = "CHOPPYSTOCK"
+        entry_1 = await ote._process_one_entry(symbol, "PE")
+        assert entry_1["status"] == "entered", entry_1
+        await store.close_position(symbol, 46.0, "SUPERTREND_EXIT")  # 1 real loss on record now
+        await asyncio.sleep(0.3)
+
+        placed_orders.clear()
+        with mock.patch.object(reversal_filters, "check_trend_strength",
+                                new=AsyncMock(return_value=(False, 13.24, 0.304))):
+            entry_2 = await ote._process_one_entry(symbol, "PE")
+        assert entry_2["status"] == "skipped" and entry_2["reason"] == "loss_reentry_trend_check_failed", entry_2
+        assert entry_2["adx"] == 13.24 and entry_2["er"] == 0.304
+        assert placed_orders == [], f"a trend-check-failed re-entry must place ZERO orders, got {placed_orders}"
+        print("11. After 1 real loss today, a re-entry with both ADX and ER indicating chop (the real "
+              "ATHERENERG numbers: ADX=13.24, ER=0.304) is correctly blocked: PASSED")
+    finally:
+        restore()
+        ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_rsi_block_enabled
+        ote.config.LOSS_REPEAT_BLOCK_ENABLED = real_repeat_block_enabled
+        ote.config.LOSS_REENTRY_TREND_CHECK_ENABLED = real_trend_check_enabled
+
+
+async def test_12_reentry_trend_check_allows_when_trending():
+    store = ops.PositionStore()
+    ote.position_store = store
+    real_rsi_block_enabled = ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    real_repeat_block_enabled = ote.config.LOSS_REPEAT_BLOCK_ENABLED
+    real_trend_check_enabled = ote.config.LOSS_REENTRY_TREND_CHECK_ENABLED
+    ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
+    ote.config.LOSS_REPEAT_BLOCK_ENABLED = False
+    ote.config.LOSS_REENTRY_TREND_CHECK_ENABLED = True
+    restore, placed_orders = install_all_dhan_mocks()
+    try:
+        symbol = "TRENDINGSTOCK"
+        entry_1 = await ote._process_one_entry(symbol, "PE")
+        assert entry_1["status"] == "entered", entry_1
+        await store.close_position(symbol, 46.0, "SUPERTREND_EXIT")
+        await asyncio.sleep(0.3)
+
+        placed_orders.clear()
+        with mock.patch.object(reversal_filters, "check_trend_strength",
+                                new=AsyncMock(return_value=(True, 28.5, 0.12))):
+            entry_2 = await ote._process_one_entry(symbol, "PE")
+        assert entry_2["status"] == "entered", \
+            f"a strong ADX (even with weak ER) must pass the OR-based check, got {entry_2}"
+        assert len(placed_orders) == 1
+        print("12. After 1 real loss today, a re-entry with ADX alone confirming a genuine trend (28.5, ER "
+              "weak) correctly proceeds - only ONE of ADX/ER needs to pass: PASSED")
+    finally:
+        restore()
+        ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_rsi_block_enabled
+        ote.config.LOSS_REPEAT_BLOCK_ENABLED = real_repeat_block_enabled
+        ote.config.LOSS_REENTRY_TREND_CHECK_ENABLED = real_trend_check_enabled
+
+
+async def test_13_clean_symbol_never_pays_the_trend_check_call():
+    """Efficiency claim in the new gate's own docstring: a symbol with
+    ZERO losses today must never even call check_trend_strength - verified
+    by making the mock raise if it's ever invoked."""
+    store = ops.PositionStore()
+    ote.position_store = store
+    real_rsi_block_enabled = ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    real_repeat_block_enabled = ote.config.LOSS_REPEAT_BLOCK_ENABLED
+    real_trend_check_enabled = ote.config.LOSS_REENTRY_TREND_CHECK_ENABLED
+    ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
+    ote.config.LOSS_REPEAT_BLOCK_ENABLED = False
+    ote.config.LOSS_REENTRY_TREND_CHECK_ENABLED = True
+    restore, placed_orders = install_all_dhan_mocks()
+
+    async def _must_not_be_called(symbol):
+        raise AssertionError(f"check_trend_strength must never be called for a clean (0-loss) symbol: {symbol}")
+
+    try:
+        with mock.patch.object(reversal_filters, "check_trend_strength", new=_must_not_be_called):
+            result = await ote._process_one_entry("NEVERLOSTTODAY", "CE")
+        assert result["status"] == "entered", result
+        assert len(placed_orders) == 1
+        print("13. A symbol with zero losses today never pays the extra trend-check REST call: PASSED")
+    finally:
+        restore()
+        ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_rsi_block_enabled
+        ote.config.LOSS_REPEAT_BLOCK_ENABLED = real_repeat_block_enabled
+        ote.config.LOSS_REENTRY_TREND_CHECK_ENABLED = real_trend_check_enabled
+
+
+async def test_14_trend_check_disabled_flag_bypasses_even_with_a_loss_on_record():
+    store = ops.PositionStore()
+    ote.position_store = store
+    real_rsi_block_enabled = ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    real_repeat_block_enabled = ote.config.LOSS_REPEAT_BLOCK_ENABLED
+    real_trend_check_enabled = ote.config.LOSS_REENTRY_TREND_CHECK_ENABLED
+    ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
+    ote.config.LOSS_REPEAT_BLOCK_ENABLED = False
+    ote.config.LOSS_REENTRY_TREND_CHECK_ENABLED = False
+    restore, placed_orders = install_all_dhan_mocks()
+
+    async def _must_not_be_called(symbol):
+        raise AssertionError("check_trend_strength must never be called when the flag is disabled")
+
+    try:
+        symbol = "FLAGDISABLED"
+        entry_1 = await ote._process_one_entry(symbol, "PE")
+        assert entry_1["status"] == "entered", entry_1
+        await store.close_position(symbol, 46.0, "SUPERTREND_EXIT")
+        await asyncio.sleep(0.3)
+
+        placed_orders.clear()
+        with mock.patch.object(reversal_filters, "check_trend_strength", new=_must_not_be_called):
+            entry_2 = await ote._process_one_entry(symbol, "PE")
+        assert entry_2["status"] == "entered", \
+            f"LOSS_REENTRY_TREND_CHECK_ENABLED=False must bypass the check entirely, got {entry_2}"
+        print("14. LOSS_REENTRY_TREND_CHECK_ENABLED=False cleanly bypasses the re-entry trend check even "
+              "with a real loss already on record today: PASSED")
+    finally:
+        restore()
+        ote.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_rsi_block_enabled
+        ote.config.LOSS_REPEAT_BLOCK_ENABLED = real_repeat_block_enabled
+        ote.config.LOSS_REENTRY_TREND_CHECK_ENABLED = real_trend_check_enabled
+
+
 async def main():
     print("=== Options corrective actions (RSI loss-reentry block + liquidity guard + repeat-loss block) test suite ===\n")
     await test_1_real_loss_plus_rsi_condition_blocks_reentry_other_symbol_unaffected()
@@ -515,6 +695,11 @@ async def main():
     await test_7_real_second_loss_blocks_third_entry_same_day()
     await test_8_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses()
     test_9_profit_protection_giveback_buffer()
+    await test_10_real_atherenerg_pattern_supertrend_and_ema_cross_losses_now_block()
+    await test_11_reentry_trend_check_blocks_after_one_loss_when_choppy()
+    await test_12_reentry_trend_check_allows_when_trending()
+    await test_13_clean_symbol_never_pays_the_trend_check_call()
+    await test_14_trend_check_disabled_flag_bypasses_even_with_a_loss_on_record()
     print("\nALL OPTIONS CORRECTIVE ACTION CHECKS PASSED")
 
 

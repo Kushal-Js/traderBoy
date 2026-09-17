@@ -375,3 +375,70 @@ async def check_volume_floor(symbol: str, min_ratio: float) -> tuple[bool, Optio
         if not passes: ... skip the entry ..."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, check_volume_floor_sync, symbol, min_ratio)
+
+
+# --------------------------------------------------------------------- #
+# Live loss-re-entry trend-strength gate (added 18 Sep 2026) - real
+# incident: ATHERENERG 29 SEP 1540 PUT (Options, 17 Sep 2026) whipsawed
+# out via SUPERTREND_EXIT just 95 seconds after entry (ADX=13.24, well
+# below ADX_MIN - a genuinely choppy/non-trending reading, per this same
+# module's own shadow-mode diagnostic already computed and logged at that
+# exact entry) for a Rs 1,537.50 loss, then a same-day re-entry lost
+# another Rs 2,325.00. Unlike check_volume_floor above (checked on EVERY
+# entry), this is only meant to gate a RE-entry on a symbol that has
+# already lost money for this strategy today - see each package's own
+# _process_one_entry for where trade_history.loss_count_today decides
+# whether to even call this.
+#
+# Passes if EITHER ADX or ER looks like a genuine trend (not both
+# required) - reuses this module's own already-backtested ADX_MIN/
+# ER_THRESHOLD rather than new, untested numbers. ADX alone was found to
+# mostly overlap the cooldown filter's own benefit in the 15-day backtest
+# (see this module's own docstring), and ER's evidence was "thin and
+# lumpy, not yet trustworthy enough to gate anything" as of the 16 Sep
+# review - but requiring only ONE of the two to pass, specifically for a
+# symbol that has ALREADY cost real money today, is a materially
+# different, more conservative bar than gating every single entry on
+# either indicator alone.
+def check_trend_strength_sync(symbol: str) -> tuple[bool, Optional[float], Optional[float]]:
+    """Blocking - must be called via run_in_executor. Returns (passes,
+    adx, er). Fails OPEN (passes=True) whenever the real answer isn't
+    confidently known (not yet authenticated, fetch failure, or
+    insufficient candle history) - same philosophy as check_volume_
+    floor_sync: a diagnostic check's own failure or cold-start must never
+    itself cause a missed entry, only a CONFIRMED choppy reading does."""
+    if dhan_wrapper._client is None:
+        return True, None, None
+    try:
+        security_id = dhan_wrapper._equity_security_id(symbol)
+        now_ist = datetime.now(IST)
+        from_date = (now_ist - timedelta(days=7)).strftime("%Y-%m-%d")
+        to_date = now_ist.strftime("%Y-%m-%d")
+        resp = dhan_wrapper.client.Dhan.intraday_minute_data(
+            security_id=security_id, exchange_segment="NSE_EQ", instrument_type="EQUITY",
+            from_date=from_date, to_date=to_date, interval=5,
+        )
+        data = (resp.get("data") or {}) if isinstance(resp, dict) else {}
+        highs, lows, closes = (data.get("high") or []), (data.get("low") or []), (data.get("close") or [])
+        idx = len(closes) - 1
+        if idx < 40:
+            return True, None, None
+        adx = _compute_adx(highs, lows, closes)[idx]
+        er = _efficiency_ratio_at(closes, idx)
+        if adx is None and er is None:
+            return True, None, None
+        adx_ok = adx is not None and adx >= ADX_MIN
+        er_ok = er is not None and er >= ER_THRESHOLD
+        return (adx_ok or er_ok), adx, er
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: trend-strength re-entry check failed - failing OPEN (entry proceeds unaffected)", symbol)
+        return True, None, None
+
+
+async def check_trend_strength(symbol: str) -> tuple[bool, Optional[float], Optional[float]]:
+    """Async wrapper for check_trend_strength_sync - call this from a
+    re-entry path once a symbol has already lost money today, e.g.:
+        passes, adx, er = await reversal_filters.check_trend_strength(symbol)
+        if not passes: ... skip the re-entry ..."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, check_trend_strength_sync, symbol)

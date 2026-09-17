@@ -77,8 +77,12 @@ os.environ.setdefault("DHAN_CLIENT_ID", "test")
 from dotenv import load_dotenv
 load_dotenv(REPO_ROOT / ".env")
 
+from unittest import mock
+from unittest.mock import AsyncMock
+
 import trade_history
 import cross_strategy_registry
+import reversal_filters
 
 scratch_dir = Path(tempfile.mkdtemp(prefix="dhanboy_futures_corrective_actions_test_"))
 trade_history.HISTORY_DIR = scratch_dir
@@ -636,6 +640,171 @@ def test_12_ema_cross_refresh_runs_on_a_continuous_multi_session_series():
         w._ema_cross_cache.update(_cache)
 
 
+async def test_13_real_atherenerg_pattern_supertrend_and_ema_cross_losses_now_block():
+    """Reproduces the real 17 Sep 2026 ATHERENERG incident (Options, but
+    the identical wiring bug existed here) - SUPERTREND_EXIT/EMA_CROSS_EXIT
+    losses now correctly count toward the repeat-loss block."""
+    store = fps.PositionStore()
+    fte.position_store = store
+    real_rsi_block_enabled = fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    real_trend_check_enabled = fte.config.LOSS_REENTRY_TREND_CHECK_ENABLED
+    real_block_enabled, real_block_count = fte.config.LOSS_REPEAT_BLOCK_ENABLED, fte.config.LOSS_REPEAT_BLOCK_COUNT
+    fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
+    fte.config.LOSS_REENTRY_TREND_CHECK_ENABLED = False
+    fte.config.LOSS_REPEAT_BLOCK_ENABLED = True
+    fte.config.LOSS_REPEAT_BLOCK_COUNT = 2
+    restore, placed_orders = install_all_dhan_mocks()
+    try:
+        symbol = "ATHERENERG"
+        entry_1 = await fte._process_one_entry(symbol, "CE")
+        assert entry_1["status"] == "entered", entry_1
+        await store.close_position(symbol, 46.0, "SUPERTREND_EXIT")
+        await asyncio.sleep(0.3)
+
+        entry_2 = await fte._process_one_entry(symbol, "CE")
+        assert entry_2["status"] == "entered", entry_2
+        await store.close_position(symbol, 43.25, "EMA_CROSS_EXIT")
+        await asyncio.sleep(0.3)
+
+        placed_orders.clear()
+        entry_3 = await fte._process_one_entry(symbol, "CE")
+        assert entry_3["status"] == "skipped" and entry_3["reason"] == "loss_repeat_block_active", entry_3
+        assert placed_orders == []
+        print("13. The real ATHERENERG incident is fixed: two same-day real losses via SUPERTREND_EXIT and "
+              "EMA_CROSS_EXIT now correctly block a 3rd same-day entry: PASSED")
+    finally:
+        restore()
+        fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_rsi_block_enabled
+        fte.config.LOSS_REENTRY_TREND_CHECK_ENABLED = real_trend_check_enabled
+        fte.config.LOSS_REPEAT_BLOCK_ENABLED = real_block_enabled
+        fte.config.LOSS_REPEAT_BLOCK_COUNT = real_block_count
+
+
+async def test_14_reentry_trend_check_blocks_after_one_loss_when_choppy():
+    store = fps.PositionStore()
+    fte.position_store = store
+    real_rsi_block_enabled = fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    real_repeat_block_enabled = fte.config.LOSS_REPEAT_BLOCK_ENABLED
+    real_trend_check_enabled = fte.config.LOSS_REENTRY_TREND_CHECK_ENABLED
+    fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
+    fte.config.LOSS_REPEAT_BLOCK_ENABLED = False
+    fte.config.LOSS_REENTRY_TREND_CHECK_ENABLED = True
+    restore, placed_orders = install_all_dhan_mocks()
+    try:
+        symbol = "CHOPPYSTOCK"
+        entry_1 = await fte._process_one_entry(symbol, "CE")
+        assert entry_1["status"] == "entered", entry_1
+        await store.close_position(symbol, 46.0, "SUPERTREND_EXIT")
+        await asyncio.sleep(0.3)
+
+        placed_orders.clear()
+        with mock.patch.object(reversal_filters, "check_trend_strength",
+                                new=AsyncMock(return_value=(False, 13.24, 0.304))):
+            entry_2 = await fte._process_one_entry(symbol, "CE")
+        assert entry_2["status"] == "skipped" and entry_2["reason"] == "loss_reentry_trend_check_failed", entry_2
+        assert placed_orders == []
+        print("14. After 1 real loss today, a re-entry with both ADX and ER indicating chop is correctly "
+              "blocked: PASSED")
+    finally:
+        restore()
+        fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_rsi_block_enabled
+        fte.config.LOSS_REPEAT_BLOCK_ENABLED = real_repeat_block_enabled
+        fte.config.LOSS_REENTRY_TREND_CHECK_ENABLED = real_trend_check_enabled
+
+
+async def test_15_reentry_trend_check_allows_when_trending():
+    store = fps.PositionStore()
+    fte.position_store = store
+    real_rsi_block_enabled = fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    real_repeat_block_enabled = fte.config.LOSS_REPEAT_BLOCK_ENABLED
+    real_trend_check_enabled = fte.config.LOSS_REENTRY_TREND_CHECK_ENABLED
+    fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
+    fte.config.LOSS_REPEAT_BLOCK_ENABLED = False
+    fte.config.LOSS_REENTRY_TREND_CHECK_ENABLED = True
+    restore, placed_orders = install_all_dhan_mocks()
+    try:
+        symbol = "TRENDINGSTOCK"
+        entry_1 = await fte._process_one_entry(symbol, "CE")
+        assert entry_1["status"] == "entered", entry_1
+        await store.close_position(symbol, 46.0, "SUPERTREND_EXIT")
+        await asyncio.sleep(0.3)
+
+        placed_orders.clear()
+        with mock.patch.object(reversal_filters, "check_trend_strength",
+                                new=AsyncMock(return_value=(True, 28.5, 0.12))):
+            entry_2 = await fte._process_one_entry(symbol, "CE")
+        assert entry_2["status"] == "entered", entry_2
+        assert len(placed_orders) == 1
+        print("15. After 1 real loss today, a re-entry with ADX alone confirming a genuine trend correctly "
+              "proceeds: PASSED")
+    finally:
+        restore()
+        fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_rsi_block_enabled
+        fte.config.LOSS_REPEAT_BLOCK_ENABLED = real_repeat_block_enabled
+        fte.config.LOSS_REENTRY_TREND_CHECK_ENABLED = real_trend_check_enabled
+
+
+async def test_16_clean_symbol_never_pays_the_trend_check_call():
+    store = fps.PositionStore()
+    fte.position_store = store
+    real_rsi_block_enabled = fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    real_repeat_block_enabled = fte.config.LOSS_REPEAT_BLOCK_ENABLED
+    real_trend_check_enabled = fte.config.LOSS_REENTRY_TREND_CHECK_ENABLED
+    fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
+    fte.config.LOSS_REPEAT_BLOCK_ENABLED = False
+    fte.config.LOSS_REENTRY_TREND_CHECK_ENABLED = True
+    restore, placed_orders = install_all_dhan_mocks()
+
+    async def _must_not_be_called(symbol):
+        raise AssertionError(f"check_trend_strength must never be called for a clean (0-loss) symbol: {symbol}")
+
+    try:
+        with mock.patch.object(reversal_filters, "check_trend_strength", new=_must_not_be_called):
+            result = await fte._process_one_entry("NEVERLOSTTODAY", "CE")
+        assert result["status"] == "entered", result
+        assert len(placed_orders) == 1
+        print("16. A symbol with zero losses today never pays the extra trend-check REST call: PASSED")
+    finally:
+        restore()
+        fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_rsi_block_enabled
+        fte.config.LOSS_REPEAT_BLOCK_ENABLED = real_repeat_block_enabled
+        fte.config.LOSS_REENTRY_TREND_CHECK_ENABLED = real_trend_check_enabled
+
+
+async def test_17_trend_check_disabled_flag_bypasses_even_with_a_loss_on_record():
+    store = fps.PositionStore()
+    fte.position_store = store
+    real_rsi_block_enabled = fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    real_repeat_block_enabled = fte.config.LOSS_REPEAT_BLOCK_ENABLED
+    real_trend_check_enabled = fte.config.LOSS_REENTRY_TREND_CHECK_ENABLED
+    fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
+    fte.config.LOSS_REPEAT_BLOCK_ENABLED = False
+    fte.config.LOSS_REENTRY_TREND_CHECK_ENABLED = False
+    restore, placed_orders = install_all_dhan_mocks()
+
+    async def _must_not_be_called(symbol):
+        raise AssertionError("check_trend_strength must never be called when the flag is disabled")
+
+    try:
+        symbol = "FLAGDISABLED"
+        entry_1 = await fte._process_one_entry(symbol, "CE")
+        assert entry_1["status"] == "entered", entry_1
+        await store.close_position(symbol, 46.0, "SUPERTREND_EXIT")
+        await asyncio.sleep(0.3)
+
+        placed_orders.clear()
+        with mock.patch.object(reversal_filters, "check_trend_strength", new=_must_not_be_called):
+            entry_2 = await fte._process_one_entry(symbol, "CE")
+        assert entry_2["status"] == "entered", entry_2
+        print("17. LOSS_REENTRY_TREND_CHECK_ENABLED=False cleanly bypasses the re-entry trend check even "
+              "with a real loss already on record today: PASSED")
+    finally:
+        restore()
+        fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_rsi_block_enabled
+        fte.config.LOSS_REPEAT_BLOCK_ENABLED = real_repeat_block_enabled
+        fte.config.LOSS_REENTRY_TREND_CHECK_ENABLED = real_trend_check_enabled
+
+
 async def main():
     print("=== Futures corrective actions (RSI loss-reentry block + liquidity guard + repeat-loss block) test suite ===\n")
     await test_1_real_loss_plus_rsi_condition_blocks_reentry_other_symbol_unaffected()
@@ -650,6 +819,11 @@ async def main():
     test_10_target_exit_disabled_flag_suppresses_target_hit()
     test_11_ema_cross_exit_signal_and_wiring()
     test_12_ema_cross_refresh_runs_on_a_continuous_multi_session_series()
+    await test_13_real_atherenerg_pattern_supertrend_and_ema_cross_losses_now_block()
+    await test_14_reentry_trend_check_blocks_after_one_loss_when_choppy()
+    await test_15_reentry_trend_check_allows_when_trending()
+    await test_16_clean_symbol_never_pays_the_trend_check_call()
+    await test_17_trend_check_disabled_flag_bypasses_even_with_a_loss_on_record()
     print("\nALL FUTURES CORRECTIVE ACTION CHECKS PASSED")
 
 

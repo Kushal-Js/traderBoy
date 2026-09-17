@@ -145,17 +145,35 @@ ENABLE_RSI_LOSS_REENTRY_BLOCK = os.getenv("ENABLE_RSI_LOSS_REENTRY_BLOCK", "true
 # regardless of outcome (wins count too); ENABLE_RSI_LOSS_REENTRY_BLOCK
 # is a CONDITION gate re-checked on every attempt (RSI recovering re-
 # opens the symbol the same day). This one is a same-day OUTCOME-COUNTING
-# block: once a symbol has closed on a genuine loss-
-# designated exit (MAX_LOSS_HIT/STOP_LOSS_HIT specifically, not every
-# trade that happened to close a little negative for some other reason
-# like SUPERTREND_EXIT/TRAILING_SL_HIT) LOSS_REPEAT_BLOCK_COUNT times
-# today, it's done for the SYMBOL for the rest of the day, no more
-# re-entries regardless of how much time has passed. Backed by trade_
-# history.loss_exit_count_today() - the same durable, restart-surviving
-# real_trades log every other daily count/cooldown here reads.
+# block: once a symbol has closed at a genuine monetary loss
+# LOSS_REPEAT_BLOCK_COUNT times today, it's done for the SYMBOL for the
+# rest of the day, no more re-entries regardless of how much time has
+# passed. Backed by trade_history.loss_count_today() - the same durable,
+# restart-surviving real_trades log every other daily count/cooldown here
+# reads.
+#
+# BROADENED 18 Sep 2026 (real incident, user request): originally only
+# counted MAX_LOSS_HIT/STOP_LOSS_HIT exits (LOSS_REPEAT_BLOCK_EXIT_REASONS,
+# kept below only because Paper01/trading_engine.py still reads it for its
+# own, separate paper-only reason-scoped check - the live gate here no
+# longer uses it). That narrow scoping meant a real ATHERENERG 29 SEP 1540
+# PUT (17 Sep 2026) lost Rs 1,537.50 via SUPERTREND_EXIT and Rs 2,325.00
+# via EMA_CROSS_EXIT - neither reason counted - so this block never
+# engaged despite two real same-day losses, and a 3rd entry followed. Now
+# counts ANY exit that closed at pnl < 0, regardless of reason.
 LOSS_REPEAT_BLOCK_ENABLED = os.getenv("LOSS_REPEAT_BLOCK_ENABLED", "true").lower() == "true"
 LOSS_REPEAT_BLOCK_COUNT = int(os.getenv("LOSS_REPEAT_BLOCK_COUNT", "2"))
 LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
+
+# Loss-re-entry trend-strength check (added 18 Sep 2026, same incident as
+# above) - once a symbol has closed at a loss >= 1 time today (but hasn't
+# yet hit LOSS_REPEAT_BLOCK_COUNT outright), a re-entry attempt must ALSO
+# pass reversal_filters.check_trend_strength (ADX or Efficiency Ratio
+# confirming a genuine trend, not chop) before being allowed through -
+# see that function's own docstring for the exact ATHERENERG numbers
+# (ADX=13.24, well below ADX_MIN) that motivated this. A clean symbol
+# (zero losses today) never pays this extra REST call.
+LOSS_REENTRY_TREND_CHECK_ENABLED = os.getenv("LOSS_REENTRY_TREND_CHECK_ENABLED", "true").lower() == "true"
 
 # Volume-floor entry gate (promoted from shadow-mode logging to a real
 # live gate, 16 Sep 2026) - the single strongest filter across two
