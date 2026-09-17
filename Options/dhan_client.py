@@ -1775,6 +1775,106 @@ class DhanWrapper:
     # ------------------------------------------------------------------ #
     # Portfolio (positions already open at the broker)
     # ------------------------------------------------------------------ #
+    def _true_open_entry_price(
+        self, security_id: str, trading_symbol: str, net_qty: int, fallback_avg_price: float,
+    ) -> float:
+        """The real cost basis of the CURRENTLY open `net_qty`, robust to a
+        same-day close-and-reopen on this exact contract - unlike Dhan's own
+        `buyAvg`/`costPrice` (used directly as every _get_open_*_positions_
+        once's avg_price until 17 Sep 2026), which is a DAY-CUMULATIVE
+        average across every buy fill today and does NOT reset when the
+        position is fully squared off intraday.
+
+        Real incident (17 Sep 2026): a Swing COPPER position was manually
+        opened at 9.0, closed by the bot at 10.14 (PROFIT_PROTECTION_HIT),
+        then manually reopened at 10.6 the same day. On the next restart,
+        reconciliation reported entry_price=9.8 - exactly (9.0+10.6)/2, i.e.
+        Dhan's buyAvg blending BOTH the already-closed lot and the new one -
+        which put target_price/hard_stop_loss on the wrong basis (a wider,
+        more permissive stop than the real 10.6 entry warranted). This
+        function reconstructs the true basis directly from today's own
+        filled orders instead of trusting that field.
+
+        Algorithm: walk every filled order for this security today, in
+        chronological order, tracking running net quantity and a pool of
+        (price, qty) "lots" that make up the CURRENTLY open leg. A fill in
+        the SAME direction as the running position adds a new lot; a fill in
+        the OPPOSITE direction reduces the pool - proportionally shrinking
+        every lot's quantity (mathematically exact for a pure weighted-
+        average cost basis, since which specific lot is "reduced first"
+        doesn't change the remaining average) if it's a partial reduction,
+        or discarding the whole pool (keeping only genuine leftover, for a
+        fill big enough to flip the position's direction) if it closes the
+        leg entirely. Whatever remains once every fill is processed is, by
+        construction, exactly the current open leg - its weighted average
+        is the true entry price.
+
+        Sanity-checked against the broker's own reported `net_qty`: if the
+        reconstructed quantity doesn't match (a data gap, an order missing
+        from the day's list, a non-day-boundary edge case), this falls back
+        to `fallback_avg_price` (the old buyAvg-based value) rather than
+        risk silently computing a WORSE answer than what reconciliation
+        already had. Same fallback on any fetch/parse error - this must
+        never block reconciliation itself."""
+        try:
+            resp = self.client.Dhan.get_order_list()
+            if resp.get("status") != "success":
+                raise RuntimeError(f"get_order_list failed: {resp.get('remarks')}")
+
+            fills = []
+            for o in (resp.get("data") or []):
+                filled_qty = int(o.get("filledQty") or 0)
+                if filled_qty <= 0:
+                    continue
+                symbol_matches = o.get("tradingSymbol") == trading_symbol
+                security_matches = str(o.get("securityId", "")) == str(security_id)
+                if not (symbol_matches or security_matches):
+                    continue
+                price = float(o.get("averageTradedPrice") or 0)
+                if price <= 0:
+                    continue
+                transaction_type = o.get("transactionType")
+                if transaction_type not in ("BUY", "SELL"):
+                    continue
+                signed_qty = filled_qty if transaction_type == "BUY" else -filled_qty
+                fills.append((str(o.get("createTime") or ""), price, signed_qty))
+            fills.sort(key=lambda f: f[0])
+
+            running_qty = 0
+            open_lots: list[list[float]] = []  # [price, qty] pairs, qty always positive
+            for _, price, signed_qty in fills:
+                if running_qty == 0:
+                    open_lots = [[price, abs(signed_qty)]]
+                elif (running_qty > 0) == (signed_qty > 0):
+                    open_lots.append([price, abs(signed_qty)])
+                else:
+                    reduce_qty = abs(signed_qty)
+                    held_qty = abs(running_qty)
+                    if reduce_qty >= held_qty:
+                        leftover = reduce_qty - held_qty
+                        open_lots = [[price, leftover]] if leftover > 0 else []
+                    else:
+                        total_qty = sum(q for _, q in open_lots)
+                        scale = (total_qty - reduce_qty) / total_qty if total_qty else 0.0
+                        open_lots = [[p, q * scale] for p, q in open_lots]
+                running_qty += signed_qty
+
+            total_qty = sum(q for _, q in open_lots)
+            if total_qty <= 0 or round(total_qty) != abs(net_qty):
+                logger.warning(
+                    "Reconstructed open quantity (%.2f) for %s doesn't match broker's own "
+                    "net_qty (%d) - falling back to buyAvg/costPrice (%.4f) rather than trust "
+                    "a possibly-incomplete reconstruction.", total_qty, trading_symbol, net_qty, fallback_avg_price,
+                )
+                return fallback_avg_price
+            return sum(p * q for p, q in open_lots) / total_qty
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Could not reconstruct true entry price for %s from today's order list - "
+                "falling back to buyAvg/costPrice (%.4f).", trading_symbol, fallback_avg_price,
+            )
+            return fallback_avg_price
+
     def get_open_fno_positions(self) -> list[dict]:
         """Every NSE F&O position currently open at Dhan (net quantity != 0).
         avg_price is Dhan's own reported average buy price for the position
@@ -1827,7 +1927,9 @@ class DhanWrapper:
                 "option_type": option_type,
                 "lot_size": meta["lot_size"],
                 "quantity": net_qty,
-                "avg_price": float(p.get("buyAvg") or p.get("costPrice") or 0),
+                "avg_price": self._true_open_entry_price(
+                    security_id, meta["trading_symbol"], net_qty, float(p.get("buyAvg") or p.get("costPrice") or 0),
+                ),
                 # MUST be preserved and used for the exit order later -
                 # confirmed live that a mismatched product_type gets the
                 # SELL RMS-rejected as a fresh naked short rather than
@@ -1867,11 +1969,15 @@ class DhanWrapper:
             net_qty = int(p.get("netQty") or 0)
             if net_qty == 0 or p.get("exchangeSegment") != "NSE_EQ":
                 continue
+            trading_symbol = str(p.get("tradingSymbol", ""))
             open_positions.append({
-                "trading_symbol": str(p.get("tradingSymbol", "")),
-                "underlying_symbol": str(p.get("tradingSymbol", "")),
+                "trading_symbol": trading_symbol,
+                "underlying_symbol": trading_symbol,
                 "quantity": net_qty,
-                "avg_price": float(p.get("buyAvg") or p.get("costPrice") or 0),
+                "avg_price": self._true_open_entry_price(
+                    str(p.get("securityId", "")), trading_symbol, net_qty,
+                    float(p.get("buyAvg") or p.get("costPrice") or 0),
+                ),
                 "product_type": p.get("productType") or "CNC",
             })
         return open_positions
@@ -1926,7 +2032,16 @@ class DhanWrapper:
                 "option_type": option_type,
                 "lot_size": meta["lot_size"],
                 "quantity": net_qty,
-                "avg_price": float(p.get("buyAvg") or p.get("costPrice") or 0),
+                # security_id-based matching inside _true_open_entry_price is
+                # what makes this work despite Dhan's own get_order_list()
+                # echoing an MCX order's tradingSymbol in a different,
+                # hyphenated format ("COPPER-23Sep2026-1400-CE") that never
+                # equals meta["trading_symbol"]'s canonical space-separated
+                # form - see get_pending_order_id's docstring for the same
+                # format mismatch found independently.
+                "avg_price": self._true_open_entry_price(
+                    security_id, meta["trading_symbol"], net_qty, float(p.get("buyAvg") or p.get("costPrice") or 0),
+                ),
                 "product_type": p.get("productType") or "MARGIN",
             })
         return open_positions
