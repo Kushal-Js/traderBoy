@@ -115,6 +115,7 @@ def install_all_dhan_mocks(volumes_sequence=None):
     sees on each successive refresh."""
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
+        "get_liquid_atm_option": odc.dhan_wrapper.get_liquid_atm_option,
         "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
         "get_margin_required": odc.dhan_wrapper.get_margin_required,
         "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
@@ -140,6 +141,17 @@ def install_all_dhan_mocks(volumes_sequence=None):
         "_client": odc.dhan_wrapper._client,
     }
     odc.dhan_wrapper.get_atm_option = fake_atm_option
+    # This file's own _client fake (FakeClientWrapper, below) only defines
+    # .Dhan.intraday_minute_data - enough for refresh_liquidity_signal's own
+    # existing needs, but get_liquid_atm_option's _is_mcx_commodity also
+    # touches self.client.instrument_df, which that fake doesn't have. Every
+    # OTHER test file's real entry flow is safe because _client stays the
+    # true None default (get_liquid_atm_option's own "not authenticated"
+    # bypass short-circuits before ever calling _is_mcx_commodity) - this
+    # file is the one exception that deliberately sets a non-None fake
+    # _client for a different reason, so it needs get_liquid_atm_option
+    # mocked directly too, same as get_atm_option always has been.
+    odc.dhan_wrapper.get_liquid_atm_option = fake_atm_option
     odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 50.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 999.0}
     odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 10_000_000.0}

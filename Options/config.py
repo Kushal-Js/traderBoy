@@ -621,6 +621,32 @@ LIQUIDITY_GUARD_REFRESH_SECONDS = int(os.getenv("LIQUIDITY_GUARD_REFRESH_SECONDS
 # gates (volume floor, trend-strength) can see.
 LIQUIDITY_ENTRY_GATE_ENABLED = os.getenv("LIQUIDITY_ENTRY_GATE_ENABLED", "true").lower() == "true"
 
+# Global liquid-contract resolution (added 18 Sep 2026, real incident -
+# see dhan_client.get_liquid_atm_option's own docstring for the full
+# ATHERENERG 29 SEP 1540 PUT rationale: a broker-side stop-loss REJECTED
+# with "EXCH:17181: Contract not traded" because the natural ATM strike
+# had never printed a single trade before the position was opened). This
+# is the single shared gate all 4 live-trading packages (Options/Futures/
+# Luxury/Swing) route their contract resolution through - one set of
+# thresholds here, consumed by the shared dhan_client.py, same pattern as
+# LIQUIDITY_GUARD_ZERO_VOLUME_BARS/_REFRESH_SECONDS above.
+#
+# LIQUID_CONTRACT_MAX_STRIKE_SEARCH: how many strikes outward (each
+# direction) to try if the ATM strike itself fails either check below,
+# before giving up and skipping the entry entirely.
+#
+# LIQUID_CONTRACT_LOOKBACK_DAYS/_MIN_PRIOR_SESSION_VOLUME: a candidate
+# must have traded at least this much (summed across the last N calendar
+# days, via a real daily-historical-data fetch - see get_daily_volume_sum)
+# to count as "actively traded", not just "not currently silent". 500 is
+# a starting, disclosed judgment call (not backtested against real
+# volume distributions) rather than a value tuned from data - adjust via
+# env if it turns out too strict/loose in practice.
+LIQUID_CONTRACT_GATE_ENABLED = os.getenv("LIQUID_CONTRACT_GATE_ENABLED", "true").lower() == "true"
+LIQUID_CONTRACT_MAX_STRIKE_SEARCH = int(os.getenv("LIQUID_CONTRACT_MAX_STRIKE_SEARCH", "5"))
+LIQUID_CONTRACT_LOOKBACK_DAYS = int(os.getenv("LIQUID_CONTRACT_LOOKBACK_DAYS", "7"))
+LIQUID_CONTRACT_MIN_PRIOR_SESSION_VOLUME = float(os.getenv("LIQUID_CONTRACT_MIN_PRIOR_SESSION_VOLUME", "500"))
+
 # REMOVED (user request 27 Aug 2026): there used to be two extra "waiting"
 # knobs here - SUPERTREND_ENTRY_GRACE_MINUTES (extra minutes past the
 # entry candle before honoring a reversal) and SUPERTREND_MIN_WARMUP_CANDLES

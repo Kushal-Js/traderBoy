@@ -346,12 +346,23 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
                 quantity = lot_size * config.QUANTITY_LOTS
                 pnl_multiplier = quantity
             elif effective_basket_type == "OPTIONS":
-                # get_atm_option is already MCX-capable for a Copper-style
-                # symbol (Tradehull's own ATM_Strike_Selection has a native
-                # commodity_step_dict branch; the only thing that used to
-                # reject the MCX row was _instrument_meta's NSE-only filter,
-                # widened 12 Sep 2026) - same call for NSE and MCX symbols.
-                atm = await loop.run_in_executor(None, dhan_wrapper.get_atm_option, symbol, option_type)
+                # get_liquid_atm_option is already MCX-capable for a
+                # Copper-style symbol (Tradehull's own ATM_Strike_Selection
+                # has a native commodity_step_dict branch; the only thing
+                # that used to reject the MCX row was _instrument_meta's
+                # NSE-only filter, widened 12 Sep 2026) - same call for NSE
+                # and MCX symbols. The liquidity/prior-session checks
+                # themselves are NSE-only (see get_liquid_atm_option's own
+                # docstring) - for an MCX underlying this is a plain
+                # passthrough to get_atm_option, unchanged from before.
+                atm = await loop.run_in_executor(None, dhan_wrapper.get_liquid_atm_option, symbol, option_type)
+                if atm is None:
+                    logger.info(
+                        "%s: skipped - no liquid, actively-traded %s contract found nearby (see "
+                        "get_liquid_atm_option - either currently illiquid or no real prior-session volume)",
+                        symbol, option_type,
+                    )
+                    return {"symbol": symbol, "status": "skipped", "reason": "no_liquid_contract_available"}
                 if atm.expiry_date == _now_ist().date():
                     logger.info("%s: skipped - %s expires today and no later expiry is available yet",
                                 symbol, atm.trading_symbol)

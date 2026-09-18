@@ -476,8 +476,15 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
     loop = asyncio.get_running_loop()
 
     atm = await loop.run_in_executor(
-        None, dhan_wrapper.get_atm_option, symbol, option_type
+        None, dhan_wrapper.get_liquid_atm_option, symbol, option_type
     )
+    if atm is None:
+        logger.info(
+            "%s: skipped - no liquid, actively-traded %s contract found nearby (see "
+            "get_liquid_atm_option - either currently illiquid or no real prior-session volume)",
+            symbol, option_type,
+        )
+        return {"symbol": symbol, "status": "skipped", "reason": "no_liquid_contract_available"}
 
     if atm.expiry_date == _now_ist().date():
         # See Options/trading_engine.py's identical guard (NOTES.md bug #28)

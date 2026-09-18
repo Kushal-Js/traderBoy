@@ -886,6 +886,203 @@ class DhanWrapper:
             expiry_date=meta["expiry_date"],
         )
 
+    def get_liquid_atm_option(self, underlying_symbol: str, option_type: str) -> Optional[AtmOption]:
+        """Global common entry-point for every live-trading package's
+        contract resolution (Options/Futures/Luxury/Swing's own entries) -
+        added 18 Sep 2026 after a real incident: ATHERENERG 29 SEP 1540
+        PUT's broker-side stop-loss was REJECTED with "EXCH:17181:
+        Contract not traded. Market order not allowed" - the natural ATM
+        strike had never printed a single trade before the position was
+        already opened via AMO, so nothing could validate a protective
+        order against it once the market opened, and the position then
+        fell back to an unprotected poll loop that couldn't keep up with
+        a fast opening move (see trading-skills' incident writeup for the
+        full sequence).
+
+        Resolves the natural ATM strike via get_atm_option() first, then
+        requires it to pass TWO independent checks before using it:
+          1. Current-session activity - the existing zero-volume-bars
+             signal (refresh_liquidity_signal/get_cached_illiquid,
+             unchanged, config.LIQUIDITY_GUARD_ZERO_VOLUME_BARS).
+          2. Prior-sessions' real trading activity (NEW) -
+             get_daily_volume_sum over the last config.
+             LIQUID_CONTRACT_LOOKBACK_DAYS calendar days must total at
+             least config.LIQUID_CONTRACT_MIN_PRIOR_SESSION_VOLUME. This
+             is the check that would have caught ATHERENERG: a contract
+             with zero prior-session history is exactly the shape that
+             can get a protective order rejected the moment it finally
+             trades.
+
+        If the ATM strike fails either check, walks outward to the
+        nearest strikes on both sides (up to config.
+        LIQUID_CONTRACT_MAX_STRIKE_SEARCH each way, closest first) for
+        the SAME resolved expiry/option_type/underlying, returning the
+        first candidate that passes both checks instead of just blocking
+        the entry - a nearby, actively-traded substitute strike on the
+        same underlying.
+
+        Returns None if no candidate within the search window passes -
+        callers MUST treat that as "skip this entry" and never fall back
+        to the plain ATM pick themselves, or this gate is pointless.
+        Disabled entirely via config.LIQUID_CONTRACT_GATE_ENABLED
+        (returns the plain get_atm_option() result immediately when off,
+        same as today's behavior).
+
+        MCX commodities (Swing's Copper) run through the SAME two checks
+        and the SAME nearby-strike search as NSE (extended 18 Sep 2026,
+        same day, user follow-up request) - see _is_contract_liquid_and_
+        active/_nearby_option_candidates for the real, empirically-
+        confirmed MCX segment codes this uses (not guessed).
+
+        Same "not authenticated" bypass as check_option_liquidity_sync
+        (self._client is None) - a unit test that mocks get_atm_option
+        directly, without ever authenticating, gets the plain ATM pick
+        straight through with no attempt at a real liquidity/volume
+        fetch, exactly like every existing test's own install_all_dhan_
+        mocks() already expects.
+
+        MCX commodities (Swing's Copper) - extended to this gate 18 Sep
+        2026 (same day, user follow-up request) using the real,
+        empirically-confirmed MCX segment codes (SEM_EXCH_INSTRUMENT_TYPE
+        = "OPTFUT" for every real MCX option row, exchange_segment
+        "MCX_COMM" - the same constant Swing's own order placement
+        already uses), not guessed - the two checks and the nearby-strike
+        search all work identically for MCX, just with MCX's own
+        exchange/segment/instrument-type strings instead of NSE's."""
+        atm = self.get_atm_option(underlying_symbol, option_type)
+        # _client check MUST come before _is_mcx_commodity - that call
+        # touches self.instruments() -> self.client, which lazily
+        # authenticates for real if _client is still None. Ordering this
+        # any other way defeats the whole "not authenticated" bypass and
+        # was a real regression caught by this session's own test run
+        # (26 unrelated tests failing on a genuine Dhan login attempt).
+        if not config.LIQUID_CONTRACT_GATE_ENABLED or self._client is None:
+            return atm
+        is_mcx = self._is_mcx_commodity(underlying_symbol)
+
+        candidates = self._nearby_option_candidates(
+            underlying_symbol, option_type, atm, config.LIQUID_CONTRACT_MAX_STRIKE_SEARCH, is_mcx,
+        )
+        for candidate in candidates:
+            if self._is_contract_liquid_and_active(candidate, is_mcx):
+                if candidate.trading_symbol != atm.trading_symbol:
+                    logger.info(
+                        "%s: ATM strike %s %s was illiquid/untraded - substituted nearby strike %s %s instead",
+                        underlying_symbol, atm.strike, option_type, candidate.strike, option_type,
+                    )
+                return candidate
+        logger.warning(
+            "%s: no liquid, actively-traded %s contract found within %d strikes of ATM (%.2f) - skipping entry",
+            underlying_symbol, option_type, config.LIQUID_CONTRACT_MAX_STRIKE_SEARCH, atm.strike,
+        )
+        return None
+
+    def _is_contract_liquid_and_active(self, candidate: "AtmOption", is_mcx: bool = False) -> bool:
+        """The two checks get_liquid_atm_option requires of every
+        candidate - see that function's own docstring for the full
+        rationale of each."""
+        if is_mcx:
+            self.refresh_liquidity_signal(
+                candidate.trading_symbol, expected_exchange="MCX",
+                exchange_segment="MCX_COMM", instrument_type="OPTFUT",
+            )
+        else:
+            self.refresh_liquidity_signal(candidate.trading_symbol)
+        if self.get_cached_illiquid(candidate.trading_symbol):
+            return False
+        exchange_segment, instrument_type = ("MCX_COMM", "OPTFUT") if is_mcx else ("NSE_FNO", "OPTSTK")
+        volume_sum = self.get_daily_volume_sum(
+            candidate.security_id, exchange_segment, instrument_type, config.LIQUID_CONTRACT_LOOKBACK_DAYS,
+        )
+        if volume_sum is None or volume_sum < config.LIQUID_CONTRACT_MIN_PRIOR_SESSION_VOLUME:
+            return False
+        return True
+
+    def _nearby_option_candidates(
+        self, underlying_symbol: str, option_type: str, atm: "AtmOption", max_search: int, is_mcx: bool = False,
+    ) -> list:
+        """Every other strike, same underlying/expiry/option_type, sorted
+        by distance from the ATM strike - the ATM itself always comes
+        first (distance 0). Queries the instrument master directly rather
+        than Dhan's option-chain endpoint: that endpoint's response has no
+        trading_symbol/security_id field at all (strike+type only), so a
+        second instrument-master lookup per strike would be needed either
+        way - this skips the extra REST call entirely.
+
+        SEM_CUSTOM_SYMBOL.startswith(f"{underlying_symbol} ") (WITH the
+        trailing space) rather than Tradehull's own bare .startswith
+        (see ATM_Strike_Selection in the vendored Dhan_Tradehull package)
+        - CUSTOM_SYMBOL is always "SYMBOL DD MON STRIKE TYPE"
+        space-separated (confirmed for MCX too - "COPPER 23 SEP 1400
+        CALL" - the same format as an NSE stock option), so the trailing
+        space avoids a prefix collision (e.g. "TATA" matching
+        "TATAPOWER") that Tradehull's own matching doesn't bother to
+        guard against.
+
+        For MCX, ALSO requires SM_SYMBOL_NAME == underlying_symbol -
+        Tradehull's own ATM_Strike_Selection adds this exact extra
+        condition only for its MCX branch (commodity naming needs the
+        disambiguation the NSE stock/index branches don't), so this
+        mirrors that rather than inventing a new filter."""
+        df = self.instruments().copy()
+        df["ContractExpiration"] = pd.to_datetime(df["SEM_EXPIRY_DATE"], errors="coerce").dt.date
+        exchange = "MCX" if is_mcx else "NSE"
+        mask = (
+            (df["SEM_EXM_EXCH_ID"] == exchange)
+            & (df["SEM_CUSTOM_SYMBOL"].str.startswith(f"{underlying_symbol.upper()} "))
+            & (df["ContractExpiration"] == atm.expiry_date)
+            & (df["SEM_OPTION_TYPE"] == option_type)
+        )
+        if is_mcx and "SM_SYMBOL_NAME" in df.columns:
+            mask = mask & (df["SM_SYMBOL_NAME"] == underlying_symbol.upper())
+        rows = df[mask].copy()
+        if rows.empty:
+            return [atm]
+        rows["SEM_STRIKE_PRICE"] = rows["SEM_STRIKE_PRICE"].astype(float)
+        rows = rows.drop_duplicates(subset=["SEM_STRIKE_PRICE"])
+        rows["_dist"] = (rows["SEM_STRIKE_PRICE"] - atm.strike).abs()
+        rows = rows.sort_values("_dist").head(max_search * 2 + 1)
+        candidates = [
+            AtmOption(
+                trading_symbol=str(r["SEM_CUSTOM_SYMBOL"]), strike=float(r["SEM_STRIKE_PRICE"]),
+                option_type=option_type, lot_size=int(float(r["SEM_LOT_UNITS"])),
+                security_id=str(int(r["SEM_SMST_SECURITY_ID"])), expiry_date=atm.expiry_date,
+            )
+            for _, r in rows.iterrows()
+        ]
+        return candidates or [atm]
+
+    def get_daily_volume_sum(
+        self, security_id: str, exchange_segment: str, instrument_type: str, lookback_days: int = 7,
+    ) -> Optional[float]:
+        """Sums an option contract's own daily traded volume over the last
+        `lookback_days` CALENDAR days (wide enough to cover a weekend/
+        holiday and still catch a couple of real trading sessions) - a
+        genuinely separate Dhan endpoint (/charts/historical, daily bars)
+        from the 1-min/5-min intraday series refresh_liquidity_signal/
+        refresh_supertrend_signal use. Built for get_liquid_atm_option's
+        own prior-session-activity check.
+
+        Returns None (not an exception, not zero) on any fetch failure -
+        a genuinely zero-volume contract and "couldn't check" must never
+        be conflated: the caller excludes a confirmed zero from this
+        specific candidate and moves to the next one either way, but they
+        mean very different things if this ever needs debugging."""
+        try:
+            to_date = datetime.now(IST).strftime("%Y-%m-%d")
+            from_date = (datetime.now(IST) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+            resp = _retry(
+                self.client.Dhan.historical_daily_data, security_id=security_id,
+                exchange_segment=exchange_segment, instrument_type=instrument_type,
+                from_date=from_date, to_date=to_date,
+            )
+            data = (resp.get("data") or {}) if isinstance(resp, dict) else {}
+            volumes = data.get("volume") or []
+            return float(sum(volumes)) if volumes else 0.0
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not fetch daily volume history for security_id %s", security_id)
+            return None
+
     def get_futures_contract(self, underlying_symbol: str) -> FuturesContract:
         """Finds the nearest-expiry FUTSTK (stock futures) contract for
         underlying_symbol - genuinely new capability, added 31 Aug 2026 for
@@ -1710,7 +1907,10 @@ class DhanWrapper:
     # contract being held, not the underlying stock, so this is keyed by
     # option_trading_symbol.
     # ------------------------------------------------------------------ #
-    def refresh_liquidity_signal(self, option_trading_symbol: str) -> None:
+    def refresh_liquidity_signal(
+        self, option_trading_symbol: str, expected_exchange: str = "NSE",
+        exchange_segment: str = "NSE_FNO", instrument_type: str = "OPTSTK",
+    ) -> None:
         """Fetches the OPTION's own 1-min candles (continuous multi-session
         series) and checks whether the last config.LIQUIDITY_GUARD_ZERO_
         VOLUME_BARS fully-closed bars ALL show exactly zero traded volume - a thinly-traded
@@ -1721,6 +1921,15 @@ class DhanWrapper:
         config.LIQUIDITY_GUARD_REFRESH_SECONDS - same throttling
         reasoning as refresh_supertrend_signal.
 
+        `expected_exchange`/`exchange_segment`/`instrument_type` default to
+        NSE stock options (every existing caller - Options/Futures/Luxury's
+        own exit-time LIQUIDITY_GUARD_ENABLED checks are NSE-only and stay
+        byte-identical). get_liquid_atm_option's own MCX candidates (added
+        18 Sep 2026, extending the liquid-contract gate to Swing's Copper)
+        pass "MCX"/"MCX_COMM"/"OPTFUT" instead - confirmed empirically
+        against the real instrument master (SEM_EXCH_INSTRUMENT_TYPE=
+        "OPTFUT" for every real MCX COPPER option row), not guessed.
+
         Blocking (REST call) - call via run_in_executor from async code,
         and only from the poll loop, never the WebSocket tick path (same
         restriction as refresh_supertrend_signal, for the same reason)."""
@@ -1728,14 +1937,16 @@ class DhanWrapper:
         if cached and (datetime.now(IST) - cached[0]).total_seconds() < config.LIQUIDITY_GUARD_REFRESH_SECONDS:
             return
         try:
-            security_id = self._instrument_meta(option_trading_symbol, expected_exchange="NSE")["security_id"]
+            security_id = self._instrument_meta(
+                option_trading_symbol, expected_exchange=expected_exchange,
+            )["security_id"]
             # Continuous multi-session 1-min series (fetch_continuous_intraday)
             # rather than today-only: the "last N bars all zero volume" check
             # can then fire in the first N minutes of the session too, using
             # the prior session's tail - a contract that stopped trading
             # yesterday afternoon and still isn't trading at today's open is
             # exactly the quiet-then-gap pattern this guard exists to catch.
-            data = self.fetch_continuous_intraday(security_id, "NSE_FNO", "OPTSTK", 1)
+            data = self.fetch_continuous_intraday(security_id, exchange_segment, instrument_type, 1)
             volumes = data.get("volume") or []
             timestamps = data.get("timestamp") or []
             n = config.LIQUIDITY_GUARD_ZERO_VOLUME_BARS
