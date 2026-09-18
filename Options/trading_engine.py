@@ -1373,6 +1373,21 @@ async def _handle_ltp_staleness(symbol: str, position: Position) -> None:
     not itself alarming; this only fires once the position has gone truly
     dark for a sustained stretch."""
     key = (symbol, position.opened_at)
+    # Real incident 18 Sep 2026: without this guard, the failure timer
+    # accumulates through the ordinary pre-market silence (every option
+    # genuinely has zero live quotes before MARKET_OPEN_TIME), so by the
+    # time the market opens the threshold has often ALREADY been crossed -
+    # forcing a false-positive exit within the first tick of the trading
+    # day. OIL was actually closed this way (a real -Rs 280 loss,
+    # misattributed as MAX_LOSS_HIT in the trade log since _exit_position's
+    # own reason string was passed through unchanged) before this guard
+    # existed. Never even start accumulating until the market has genuinely
+    # opened - this mechanism exists for a contract going dark DURING
+    # active trading (the real ANGELONE incident it was built for), not for
+    # the ordinary absence of quotes outside trading hours.
+    if _now_ist() < _parse_hhmm_today(config.MARKET_OPEN_TIME):
+        _ltp_failure_since.pop(key, None)
+        return
     failure_start = _ltp_failure_since.setdefault(key, datetime.now())
     stale_minutes = (datetime.now() - failure_start).total_seconds() / 60
     if stale_minutes < config.LTP_STALE_FORCE_EXIT_MINUTES:

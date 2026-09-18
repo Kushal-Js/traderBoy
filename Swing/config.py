@@ -476,6 +476,22 @@ MONITOR_INTERVAL_SECONDS = int(os.getenv("SWING_MONITOR_INTERVAL_SECONDS", "5"))
 # broker-side SL before placing the fresh exit, so this closes both the
 # position AND its own protective order together.
 LTP_STALE_FORCE_EXIT_MINUTES = float(os.getenv("SWING_LTP_STALE_FORCE_EXIT_MINUTES", "5"))
+
+# Real incident 18 Sep 2026: without a market-hours guard, the LTP-
+# staleness timer above accumulates through the ordinary pre-market
+# silence too (every symbol genuinely has zero live quotes before its own
+# exchange opens), so by the time the market opens the threshold has often
+# ALREADY been crossed - forcing a false-positive exit within the first
+# tick of the trading day. Confirmed live: this exact gap closed OIL
+# (Options) at a real -Rs 280 loss the same morning, mislabeled as
+# MAX_LOSS_HIT in the trade log. Defaults to MCX's own open (09:00, not
+# NSE's 09:15) since Swing trades both (MCX_SYMBOLS) - the earlier of the
+# two is the safe choice: a pure-NSE symbol's timer just starts up to 15
+# minutes earlier than strictly necessary, which is harmless, whereas
+# using 09:15 would leave the same false-positive window open for MCX
+# positions between 09:00-09:15.
+MARKET_OPEN_TIME = os.getenv("SWING_MARKET_OPEN_TIME", "09:00")
+
 # Cooldown before re-attempting entry for the same symbol after a failed
 # (non-TRADED, error, or skipped) entry attempt - added 15 Sep 2026 after a
 # real incident: with no cooldown, a persistent failure (e.g. a genuinely

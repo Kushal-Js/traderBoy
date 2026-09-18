@@ -1065,6 +1065,13 @@ async def _handle_ltp_staleness(symbol: str, position: Position) -> None:
     not itself alarming; this only fires once the position has gone truly
     dark for a sustained stretch."""
     key = (symbol, position.opened_at)
+    # Real incident 18 Sep 2026 - see config.MARKET_OPEN_TIME's own
+    # docstring for the full story (OIL/Options closed at a real -Rs 280
+    # loss the same morning from exactly this gap). Never even start
+    # accumulating until the market has genuinely opened.
+    if _now_ist() < _parse_hhmm_today(config.MARKET_OPEN_TIME):
+        _ltp_failure_since.pop(key, None)
+        return
     failure_start = _ltp_failure_since.setdefault(key, datetime.now())
     stale_minutes = (datetime.now() - failure_start).total_seconds() / 60
     if stale_minutes < config.LTP_STALE_FORCE_EXIT_MINUTES:

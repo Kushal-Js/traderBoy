@@ -335,6 +335,15 @@ LIQUIDITY_ENTRY_GATE_ENABLED = os.getenv("LUXURY_LIQUIDITY_ENTRY_GATE_ENABLED", 
 # being able to CHECK for an exit in the first place).
 LTP_STALE_FORCE_EXIT_MINUTES = float(os.getenv("LUXURY_LTP_STALE_FORCE_EXIT_MINUTES", "5"))
 
+# Real incident 18 Sep 2026: without a market-hours guard, the timer above
+# accumulates through the ordinary pre-market silence too (every option
+# genuinely has zero live quotes before the market opens), so by the time
+# the market opens the threshold has often ALREADY been crossed - forcing
+# a false-positive exit within the first tick of the trading day.
+# Confirmed live: this exact gap closed OIL (Options) at a real -Rs 280
+# loss the same morning, mislabeled as MAX_LOSS_HIT in the trade log.
+MARKET_OPEN_TIME = os.getenv("LUXURY_MARKET_OPEN_TIME", "09:15")
+
 # Fallback default only (used where Dhan's own reported option_type comes
 # back missing/None, e.g. reconciliation/AMO-sync) - both real webhooks
 # below pass their own explicit option_type, same as Options' identical
