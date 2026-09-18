@@ -901,13 +901,39 @@ async def _get_ltp(trading_symbol: str) -> Optional[float]:
     instance/cache (Luxury has no LTP cache of its own). The REST fallback
     is gated by dhan_wrapper.ltp_rest_fallback_semaphore - the SAME
     semaphore Options'/Futures' own _get_ltp uses, since all strategies
-    compete for the same real Dhan rate-limit budget."""
+    compete for the same real Dhan rate-limit budget.
+
+    Added 18 Sep 2026 (real incident - ABB 29 SEP 7200 CALL, Futures): if
+    even get_option_ltp fails, falls back once more to the option's own
+    last historical 1-min close (get_last_historical_close) before giving
+    up. That function resolves the option by security_id, not trading-
+    symbol name - confirmed reliable even when get_option_ltp's name-based
+    get_ltp_data() lookup is flaky: ABB had real trading volume the whole
+    time (verified from its own 1-min candles), but get_ltp_data failed
+    ~144 times across the day, leaving MAX_LOSS_HIT blind for minutes at a
+    stretch while the loss ran well past its configured rupee cap (Rs 2100
+    cap, Rs 2737.50 realized). This fallback value is NOT written back to
+    the cache via note_rest_ltp - it's a one-tick reading only, so the next
+    poll always retries the primary path fresh instead of treating a
+    stale-by-design historical close as an authoritative live price."""
     loop = asyncio.get_running_loop()
     ltp = await loop.run_in_executor(None, dhan_wrapper.get_cached_option_ltp, trading_symbol)
     if ltp is not None:
         return ltp
     async with dhan_wrapper.ltp_rest_fallback_semaphore:
-        ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, trading_symbol)
+        try:
+            ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, trading_symbol)
+        except Exception:
+            fallback = await loop.run_in_executor(
+                None, dhan_wrapper.get_last_historical_close, trading_symbol
+            )
+            if fallback is None:
+                raise
+            logger.warning(
+                "%s: live LTP unavailable - using last historical close %.2f as this tick's "
+                "exit-check price instead of going blind", trading_symbol, fallback,
+            )
+            return fallback
         await loop.run_in_executor(None, dhan_wrapper.note_rest_ltp, trading_symbol, ltp)
     return ltp
 

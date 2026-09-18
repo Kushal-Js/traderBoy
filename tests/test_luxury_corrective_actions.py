@@ -538,6 +538,46 @@ async def test_14_real_second_loss_blocks_third_entry_same_day():
         lte.config.LOSS_REPEAT_BLOCK_COUNT = real_block_count
 
 
+async def test_14b_loss_repeat_block_count_1_blocks_after_the_very_first_loss():
+    """Regression for LOSS_REPEAT_BLOCK_COUNT's default tightening 2->1
+    (18 Sep 2026, user request following the ABB 29 SEP 7200 CALL
+    incident, Futures) - a SINGLE same-day loss-exit must now be enough
+    to block the rest of the day, not the second."""
+    store = lps.PositionStore()
+    lte.position_store = store
+    real_rsi_block_enabled = lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    real_block_enabled, real_block_count = lte.config.LOSS_REPEAT_BLOCK_ENABLED, lte.config.LOSS_REPEAT_BLOCK_COUNT
+    lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
+    lte.config.LOSS_REPEAT_BLOCK_ENABLED = True
+    lte.config.LOSS_REPEAT_BLOCK_COUNT = 1
+    restore, placed_orders = install_all_dhan_mocks()
+    try:
+        symbol = "ABB"
+        entry_1 = await lte._process_one_entry(symbol, "CE")
+        assert entry_1["status"] == "entered", entry_1
+        closed_1 = await store.close_position(symbol, 40.0, "MAX_LOSS_HIT")
+        assert closed_1 is not None
+        await asyncio.sleep(0.3)
+
+        placed_orders.clear()
+        entry_2 = await lte._process_one_entry(symbol, "CE")
+        assert entry_2["status"] == "skipped" and entry_2["reason"] == "loss_repeat_block_active", \
+            f"a single loss with COUNT=1 must block the very next entry, got {entry_2}"
+        assert placed_orders == [], f"a repeat-loss-blocked symbol must place ZERO orders, got {placed_orders}"
+
+        placed_orders.clear()
+        other = await lte._process_one_entry("NMDC", "CE")
+        assert other["status"] == "entered", f"a DIFFERENT symbol must be entirely unaffected, got {other}"
+
+        print("14b. LOSS_REPEAT_BLOCK_COUNT=1 blocks a same-day re-entry after just ONE real MAX_LOSS_HIT "
+              "loss (zero orders placed), while a different symbol is entirely unaffected: PASSED")
+    finally:
+        restore()
+        lte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_rsi_block_enabled
+        lte.config.LOSS_REPEAT_BLOCK_ENABLED = real_block_enabled
+        lte.config.LOSS_REPEAT_BLOCK_COUNT = real_block_count
+
+
 async def test_15_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses():
     store = lps.PositionStore()
     lte.position_store = store
@@ -829,6 +869,7 @@ async def main():
     test_12_loss_exit_count_today_basic()
     test_13_loss_exit_count_today_ignores_non_loss_reasons_and_other_symbols_strategies()
     await test_14_real_second_loss_blocks_third_entry_same_day()
+    await test_14b_loss_repeat_block_count_1_blocks_after_the_very_first_loss()
     await test_15_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses()
     test_16_profit_protection_giveback_buffer()
     test_17_ema_cross_exit_gated_by_its_own_flag()

@@ -1782,13 +1782,20 @@ class DhanWrapper:
         the exact same fetch shape as refresh_liquidity_signal (security_id
         via _instrument_meta, NSE_FNO/OPTSTK, 1-min interval).
 
-        This is ONLY meant as a rough mark for a forced-exit's own logging/
-        pnl estimate, never as something a real order depends on - a market
-        SELL/BUY order needs no price input at all and fills at whatever
-        the exchange's own current best price is regardless of what this
+        Originally scoped to forced-exit logging/pnl estimates only; also
+        used (18 Sep 2026, ABB 29 SEP 7200 CALL incident) as _get_ltp's
+        second-tier fallback for the regular poll-loop exit check itself
+        when get_option_ltp fails - a name-based quote lookup can be flaky
+        even on a genuinely liquid, actively-trading contract, and this
+        security_id-based read keeps MAX_LOSS_HIT/etc. evaluating on SOME
+        real price instead of going completely blind for minutes. Never
+        something a real order depends on either way - a market SELL/BUY
+        order needs no price input at all and fills at whatever the
+        exchange's own current best price is regardless of what this
         function returns. Returns None (not an exception) on any failure -
-        callers should fall back to something else (e.g. position.entry_price)
-        rather than block a forced exit on this being unavailable too."""
+        callers should fall back to something else (e.g. position.entry_price,
+        or re-raising to let the caller's own staleness handling take over)
+        rather than block on this being unavailable too."""
         try:
             security_id = self._instrument_meta(option_trading_symbol, expected_exchange="NSE")["security_id"]
             data = self.fetch_continuous_intraday(security_id, "NSE_FNO", "OPTSTK", 1)

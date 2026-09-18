@@ -420,6 +420,46 @@ async def test_7_real_second_loss_blocks_third_entry_same_day():
         fte.config.LOSS_REPEAT_BLOCK_COUNT = real_block_count
 
 
+async def test_7b_loss_repeat_block_count_1_blocks_after_the_very_first_loss():
+    """Regression for LOSS_REPEAT_BLOCK_COUNT's default tightening 2->1
+    (18 Sep 2026, user request following the ABB 29 SEP 7200 CALL
+    incident, this package) - a SINGLE same-day loss-exit must now be
+    enough to block the rest of the day, not the second."""
+    store = fps.PositionStore()
+    fte.position_store = store
+    real_rsi_block_enabled = fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK
+    real_block_enabled, real_block_count = fte.config.LOSS_REPEAT_BLOCK_ENABLED, fte.config.LOSS_REPEAT_BLOCK_COUNT
+    fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
+    fte.config.LOSS_REPEAT_BLOCK_ENABLED = True
+    fte.config.LOSS_REPEAT_BLOCK_COUNT = 1
+    restore, placed_orders = install_all_dhan_mocks()
+    try:
+        symbol = "ABB"
+        entry_1 = await fte._process_one_entry(symbol, "CE")
+        assert entry_1["status"] == "entered", entry_1
+        closed_1 = await store.close_position(symbol, 40.0, "MAX_LOSS_HIT")
+        assert closed_1 is not None
+        await asyncio.sleep(0.3)
+
+        placed_orders.clear()
+        entry_2 = await fte._process_one_entry(symbol, "CE")
+        assert entry_2["status"] == "skipped" and entry_2["reason"] == "loss_repeat_block_active", \
+            f"a single loss with COUNT=1 must block the very next entry, got {entry_2}"
+        assert placed_orders == [], f"a repeat-loss-blocked symbol must place ZERO orders, got {placed_orders}"
+
+        placed_orders.clear()
+        other = await fte._process_one_entry("NMDC", "CE")
+        assert other["status"] == "entered", f"a DIFFERENT symbol must be entirely unaffected, got {other}"
+
+        print("7b. LOSS_REPEAT_BLOCK_COUNT=1 blocks a same-day re-entry after just ONE real MAX_LOSS_HIT "
+              "loss (zero orders placed), while a different symbol is entirely unaffected: PASSED")
+    finally:
+        restore()
+        fte.config.ENABLE_RSI_LOSS_REENTRY_BLOCK = real_rsi_block_enabled
+        fte.config.LOSS_REPEAT_BLOCK_ENABLED = real_block_enabled
+        fte.config.LOSS_REPEAT_BLOCK_COUNT = real_block_count
+
+
 async def test_8_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses():
     store = fps.PositionStore()
     fte.position_store = store
@@ -814,6 +854,7 @@ async def main():
     test_5_price_threshold_exit_still_takes_priority_over_liquidity_guard()
     test_6_liquidity_guard_disabled_flag_bypasses_the_check()
     await test_7_real_second_loss_blocks_third_entry_same_day()
+    await test_7b_loss_repeat_block_count_1_blocks_after_the_very_first_loss()
     await test_8_a_win_between_two_losses_does_not_reset_the_count_and_disabled_flag_bypasses()
     test_9_profit_protection_giveback_buffer()
     test_10_target_exit_disabled_flag_suppresses_target_hit()

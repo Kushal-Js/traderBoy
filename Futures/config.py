@@ -92,7 +92,11 @@ ENABLE_RSI_LOSS_REENTRY_BLOCK = os.getenv("FUTURES_ENABLE_RSI_LOSS_REENTRY_BLOCK
 # never counted). LOSS_REPEAT_BLOCK_EXIT_REASONS kept only for reference/
 # backward compatibility - no longer read by this package's own gate.
 LOSS_REPEAT_BLOCK_ENABLED = os.getenv("FUTURES_LOSS_REPEAT_BLOCK_ENABLED", "true").lower() == "true"
-LOSS_REPEAT_BLOCK_COUNT = int(os.getenv("FUTURES_LOSS_REPEAT_BLOCK_COUNT", "2"))
+# Tightened 2->1 (18 Sep 2026, user request, same ABB 29 SEP 7200 CALL
+# incident that drove the _get_ltp historical-close fallback fix) - block
+# re-entry into a symbol for the rest of the day after its very first
+# loss-exit today, not the second.
+LOSS_REPEAT_BLOCK_COUNT = int(os.getenv("FUTURES_LOSS_REPEAT_BLOCK_COUNT", "1"))
 LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
 
 # Loss-re-entry trend-strength check (18 Sep 2026) - see Options/config.py's

@@ -196,7 +196,12 @@ ENABLE_RSI_LOSS_REENTRY_BLOCK = os.getenv("ENABLE_RSI_LOSS_REENTRY_BLOCK", "true
 # engaged despite two real same-day losses, and a 3rd entry followed. Now
 # counts ANY exit that closed at pnl < 0, regardless of reason.
 LOSS_REPEAT_BLOCK_ENABLED = os.getenv("LOSS_REPEAT_BLOCK_ENABLED", "true").lower() == "true"
-LOSS_REPEAT_BLOCK_COUNT = int(os.getenv("LOSS_REPEAT_BLOCK_COUNT", "2"))
+# Tightened 2->1 (18 Sep 2026, user request): block re-entry into a symbol
+# for the rest of the day after its VERY FIRST loss-exit today, not the
+# second. loss_count >= LOSS_REPEAT_BLOCK_COUNT is the comparison
+# (trading_engine._process_one_entry) - with COUNT=1 that's true the
+# moment loss_count reaches 1.
+LOSS_REPEAT_BLOCK_COUNT = int(os.getenv("LOSS_REPEAT_BLOCK_COUNT", "1"))
 LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
 
 # Loss-re-entry trend-strength check (added 18 Sep 2026, same incident as

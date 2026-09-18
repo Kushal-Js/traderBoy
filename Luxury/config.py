@@ -101,7 +101,11 @@ ENABLE_RSI_LOSS_REENTRY_BLOCK = os.getenv("LUXURY_ENABLE_RSI_LOSS_REENTRY_BLOCK"
 # trade_history.loss_exit_count_today() - the same durable, restart-
 # surviving real_trades log every other daily count/cooldown here reads.
 LOSS_REPEAT_BLOCK_ENABLED = os.getenv("LUXURY_LOSS_REPEAT_BLOCK_ENABLED", "true").lower() == "true"
-LOSS_REPEAT_BLOCK_COUNT = int(os.getenv("LUXURY_LOSS_REPEAT_BLOCK_COUNT", "2"))
+# Tightened 2->1 (18 Sep 2026, user request, same ABB 29 SEP 7200 CALL
+# incident that drove the _get_ltp historical-close fallback fix) - block
+# re-entry into a symbol for the rest of the day after its very first
+# loss-exit today, not the second.
+LOSS_REPEAT_BLOCK_COUNT = int(os.getenv("LUXURY_LOSS_REPEAT_BLOCK_COUNT", "1"))
 LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
 
 # BROADENED 18 Sep 2026 (real incident, user request) - the reason-string
