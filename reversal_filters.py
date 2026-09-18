@@ -106,6 +106,20 @@ COOLDOWN_MINUTES = 10
 ER_PERIOD = 10
 ER_THRESHOLD = 0.3
 
+# Minimum-underlying-move confirmation gate (added 18 Sep 2026). SUPERTREND_EXIT
+# and EMA_CROSS_EXIT are both computed on the underlying's own candles, but the
+# position being exited is an option - a genuine underlying reversal should
+# show up as at least a small real move against the position, not just
+# option-premium noise (illiquidity, spread widening, a single thin print)
+# tripping the signal. Value derived from a backtest against 18 Sep 2026's 9
+# real SUPERTREND_EXIT/EMA_CROSS_EXIT trades (all 9 losses, all recovered
+# after the forced exit): sweeping 0.05%-0.30% thresholds against realistic
+# MAX_LOSS_HIT/hard-stop backstops (not lookahead-biased ride-to-EOD), 0.10%
+# was the best threshold - tight enough to still exit on real reversals,
+# loose enough to filter out the noise that caused all 9 of that day's
+# premature exits. See trading-skills repo for the full backtest writeup.
+MIN_UNDERLYING_MOVE_CONFIRMATION_PCT = 0.10
+
 # In-memory only, per-process - (strategy, symbol, option_type) -> last
 # SUPERTREND_EXIT time. Resets on restart, same as every other in-process
 # cache in this codebase (dhan_client's own Supertrend/EMA caches included)
@@ -124,6 +138,33 @@ def record_supertrend_exit(strategy: str, symbol: str, option_type: str) -> None
     except Exception:  # noqa: BLE001
         logger.exception("record_supertrend_exit failed for %s %s %s - shadow cooldown filter "
                           "just won't fire for this one, no other effect", strategy, symbol, option_type)
+
+
+def check_underlying_move_confirms_exit(
+    entry_underlying_price: Optional[float],
+    current_underlying_price: Optional[float],
+    option_type: str,
+    min_move_pct: Optional[float] = None,
+) -> bool:
+    """True if the underlying has moved against the position by at least
+    min_move_pct (default MIN_UNDERLYING_MOVE_CONFIRMATION_PCT) since entry -
+    the gate SUPERTREND_EXIT/EMA_CROSS_EXIT must pass before firing (see the
+    constant's docstring above for why). CE is against the position when the
+    underlying falls; PE when it rises.
+
+    Fails OPEN (returns True - "confirmed", don't block the exit) whenever
+    either price is missing, matching this codebase's standing convention
+    that a new safety/filter feature must never delay a real exit just
+    because its own inputs happen to be unavailable (same convention as
+    get_cached_supertrend_bearish/get_cached_ema_cross_bearish returning None
+    on a cold cache - "no data" is never treated as "block the action")."""
+    if entry_underlying_price is None or current_underlying_price is None or not entry_underlying_price:
+        return True
+    threshold = MIN_UNDERLYING_MOVE_CONFIRMATION_PCT if min_move_pct is None else min_move_pct
+    move_pct = (current_underlying_price - entry_underlying_price) / entry_underlying_price * 100
+    if option_type == "CE":
+        return move_pct <= -threshold
+    return move_pct >= threshold
 
 
 # --------------------------------------------------------------------- #

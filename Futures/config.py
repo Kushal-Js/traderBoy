@@ -241,6 +241,14 @@ ENABLE_SUPERTREND_EXIT = os.getenv("FUTURES_ENABLE_SUPERTREND_EXIT", "true").low
 # toggle is per-package. Code default kept "false" for parity; the deployed
 # FUTURES_ENABLE_EMA_CROSS_EXIT=true turns it on (user request 10 Sep 2026).
 ENABLE_EMA_CROSS_EXIT = os.getenv("FUTURES_ENABLE_EMA_CROSS_EXIT", "false").lower() == "true"
+
+# Minimum-underlying-move confirmation gate - see Options/config.py's
+# identical UNDERLYING_MOVE_CONFIRMATION_ENABLED docstring for the full
+# rationale/backtest. Default true per explicit user instruction to enable
+# for Options/Futures/Luxury together.
+UNDERLYING_MOVE_CONFIRMATION_ENABLED = os.getenv(
+    "FUTURES_UNDERLYING_MOVE_CONFIRMATION_ENABLED", "true"
+).lower() == "true"
 # SUPERTREND_ENTRY_GRACE_MINUTES REMOVED entirely (user request 27 Aug
 # 2026) - see Options/config.py's identical removal note. The only
 # remaining delay is trading_engine._supertrend_signal_for() never acting

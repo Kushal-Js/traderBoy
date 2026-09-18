@@ -550,6 +550,20 @@ INTRADAY_CONTINUOUS_LOOKBACK_DAYS = int(os.getenv("INTRADAY_CONTINUOUS_LOOKBACK_
 # as an exit for Futures").
 ENABLE_EMA_CROSS_EXIT = os.getenv("ENABLE_EMA_CROSS_EXIT", "false").lower() == "true"
 
+# Minimum-underlying-move confirmation gate (added 18 Sep 2026) - requires
+# the underlying to have moved against a position by at least
+# reversal_filters.MIN_UNDERLYING_MOVE_CONFIRMATION_PCT (0.10%, backtest-
+# derived) before trusting SUPERTREND_EXIT/EMA_CROSS_EXIT as a genuine
+# reversal rather than option-premium noise. Scoped to those two exits
+# ONLY - MAX_LOSS_HIT/TARGET_HIT/PROFIT_PROTECTION_HIT/TRAILING_SL_HIT/
+# STOP_LOSS_HIT and LIQUIDITY_GUARD_ZERO_VOLUME are untouched hard
+# backstops, never delayed by this gate. Backtest: all 9 real
+# SUPERTREND_EXIT/EMA_CROSS_EXIT trades on 18 Sep 2026 were losses where the
+# underlying never genuinely moved (7/9 recovered after the forced exit) -
+# see trading-skills repo for the full writeup. Default true per explicit
+# user instruction to enable for Options/Futures/Luxury together.
+UNDERLYING_MOVE_CONFIRMATION_ENABLED = os.getenv("UNDERLYING_MOVE_CONFIRMATION_ENABLED", "true").lower() == "true"
+
 # Liquidity guard (added 2 Sep 2026, user's own corrective-action request
 # after investigating a real CHOLAFIN MAX_LOSS_HIT overshoot 3 Sep 2026 -
 # see Luxury/config.py's own LIQUIDITY_GUARD_ENABLED docstring for the

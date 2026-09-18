@@ -797,7 +797,7 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
             None, dhan_wrapper.get_option_ltp, atm.trading_symbol
         )
 
-    entry_candle_start = await _capture_supertrend_entry_candle(loop, symbol)
+    entry_candle_start, entry_underlying_price = await _capture_supertrend_entry_candle(loop, symbol)
 
     stop_loss_order_id = await _place_broker_stop_loss_if_enabled(
         symbol, atm.trading_symbol, quantity, atm.lot_size, fill_price, option_type,
@@ -816,6 +816,7 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
         order_id=order_id,
         product_type=config.OPTIONS_PRODUCT,
         supertrend_entry_candle_start=entry_candle_start,
+        entry_underlying_price=entry_underlying_price,
         stop_loss_order_id=stop_loss_order_id,
     )
     await position_store.add_position(position)
@@ -1139,7 +1140,7 @@ def _exit_on_cooldown(position: Position) -> bool:
     return bool(position.next_exit_retry_at and datetime.now() < position.next_exit_retry_at)
 
 
-async def _capture_supertrend_entry_candle(loop, underlying_symbol: str) -> Optional[datetime]:
+async def _capture_supertrend_entry_candle(loop, underlying_symbol: str) -> tuple[Optional[datetime], Optional[float]]:
     """Best-effort snapshot of the underlying's current Supertrend candle
     boundary, taken once at entry and stored on Position.
     supertrend_entry_candle_start - see _supertrend_signal_for(). A fetch
@@ -1150,17 +1151,26 @@ async def _capture_supertrend_entry_candle(loop, underlying_symbol: str) -> Opti
     Also primes the EMA-cross signal (config.ENABLE_EMA_CROSS_EXIT) and,
     when Supertrend is off but EMA-cross is on, returns the EMA signal's
     own candle start as the entry-candle baseline - both read the same
-    5-min candle grid, so either boundary is the same instant."""
+    5-min candle grid, so either boundary is the same instant.
+
+    Returns (entry_candle_start, entry_underlying_price) - the second value
+    is the underlying's own last-closed-candle price at this same instant,
+    read off the exact same refresh this function already does (no extra
+    Dhan call), stored on Position.entry_underlying_price for the
+    minimum-underlying-move confirmation gate (added 18 Sep 2026 - see
+    reversal_filters.check_underlying_move_confirms_exit)."""
     if not config.ENABLE_SUPERTREND_EXIT and not config.ENABLE_EMA_CROSS_EXIT:
-        return None
+        return None, None
     if config.ENABLE_SUPERTREND_EXIT:
         await loop.run_in_executor(None, dhan_wrapper.refresh_supertrend_signal, underlying_symbol)
     if config.ENABLE_EMA_CROSS_EXIT:
         await loop.run_in_executor(None, dhan_wrapper.refresh_ema_cross_signal, underlying_symbol)
-    return (
+    entry_candle_start = (
         dhan_wrapper.get_cached_supertrend_candle_start(underlying_symbol)
         or dhan_wrapper.get_cached_ema_cross_candle_start(underlying_symbol)
     )
+    entry_underlying_price = dhan_wrapper.get_cached_underlying_close(underlying_symbol)
+    return entry_candle_start, entry_underlying_price
 
 
 def _supertrend_signal_for(position: Position) -> bool:
@@ -1226,6 +1236,24 @@ def _ema_cross_signal_for(position: Position) -> bool:
     if candle_start is None or entry_candle_start is None:
         return True  # no entry-candle baseline captured - don't block on it
     return candle_start > entry_candle_start
+
+
+def _underlying_move_confirms_exit(position: Position) -> bool:
+    """Cache-only, synchronous - gates SUPERTREND_EXIT/EMA_CROSS_EXIT behind
+    a minimum real move in the underlying (see
+    reversal_filters.check_underlying_move_confirms_exit and
+    MIN_UNDERLYING_MOVE_CONFIRMATION_PCT's docstring for why: both signals
+    are computed on the underlying's candles, but a genuine reversal should
+    show up as an actual move against the position, not just option-premium
+    noise tripping the signal). Disabled or missing-data cases both fail
+    OPEN (return True) - this gate must never delay a real exit on its own
+    account."""
+    if not config.UNDERLYING_MOVE_CONFIRMATION_ENABLED:
+        return True
+    current_underlying = dhan_wrapper.get_cached_underlying_close(position.underlying_symbol)
+    return reversal_filters.check_underlying_move_confirms_exit(
+        position.entry_underlying_price, current_underlying, position.option_type,
+    )
 
 
 def _exit_reason_for(
@@ -1445,6 +1473,11 @@ async def _check_one_position(symbol: str, position: Position) -> None:
         await loop.run_in_executor(None, dhan_wrapper.refresh_ema_cross_signal, position.underlying_symbol)
         ema_cross_against_position = _ema_cross_signal_for(position)
 
+    if supertrend_against_position or ema_cross_against_position:
+        confirmed = _underlying_move_confirms_exit(position)
+        supertrend_against_position = supertrend_against_position and confirmed
+        ema_cross_against_position = ema_cross_against_position and confirmed
+
     liquidity_guard_triggered = False
     if config.LIQUIDITY_GUARD_ENABLED:
         loop = asyncio.get_running_loop()
@@ -1492,6 +1525,10 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
         # loop on every tick.
         supertrend_against_position = config.ENABLE_SUPERTREND_EXIT and _supertrend_signal_for(position)
         ema_cross_against_position = config.ENABLE_EMA_CROSS_EXIT and _ema_cross_signal_for(position)
+        if supertrend_against_position or ema_cross_against_position:
+            confirmed = _underlying_move_confirms_exit(position)
+            supertrend_against_position = supertrend_against_position and confirmed
+            ema_cross_against_position = ema_cross_against_position and confirmed
         liquidity_guard_triggered = config.LIQUIDITY_GUARD_ENABLED and bool(
             dhan_wrapper.get_cached_illiquid(position.option_trading_symbol)
         )
@@ -1572,7 +1609,7 @@ async def _sync_pending_orders() -> None:
                 fill_price = await loop.run_in_executor(
                     None, dhan_wrapper.get_option_ltp, order.trading_symbol
                 )
-            entry_candle_start = await _capture_supertrend_entry_candle(loop, order.underlying_symbol)
+            entry_candle_start, entry_underlying_price = await _capture_supertrend_entry_candle(loop, order.underlying_symbol)
             option_type = order.option_type or config.OPTION_TYPE
             lot_size = order.lot_size or config.LOT_SIZE_FALLBACK
             # Real incident 18 Sep 2026 - this promotion path (a BUY order
@@ -1598,6 +1635,7 @@ async def _sync_pending_orders() -> None:
                 order_id=order.order_id,
                 product_type=config.OPTIONS_PRODUCT,
                 supertrend_entry_candle_start=entry_candle_start,
+                entry_underlying_price=entry_underlying_price,
                 stop_loss_order_id=stop_loss_order_id,
             )
             await position_store.add_position(position)
@@ -1654,7 +1692,7 @@ async def _sync_pending_orders() -> None:
 
         if broker_qty > 0:
             fill_price = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, order.trading_symbol)
-            entry_candle_start = await _capture_supertrend_entry_candle(loop, order.underlying_symbol)
+            entry_candle_start, entry_underlying_price = await _capture_supertrend_entry_candle(loop, order.underlying_symbol)
             option_type = order.option_type or config.OPTION_TYPE
             lot_size = order.lot_size or config.LOT_SIZE_FALLBACK
             # See the AMO-promotion branch above's identical comment - same
@@ -1675,6 +1713,7 @@ async def _sync_pending_orders() -> None:
                 order_id=order.order_id,
                 product_type=config.OPTIONS_PRODUCT,
                 supertrend_entry_candle_start=entry_candle_start,
+                entry_underlying_price=entry_underlying_price,
                 stop_loss_order_id=stop_loss_order_id,
             )
             await position_store.add_position(position)

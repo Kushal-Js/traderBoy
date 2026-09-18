@@ -86,6 +86,12 @@ class Position:
     exit_failure_count: int = 0
     next_exit_retry_at: Optional[datetime] = None
     supertrend_entry_candle_start: Optional[datetime] = None
+    # The underlying's own last-closed-candle price at entry - see
+    # reversal_filters.check_underlying_move_confirms_exit (minimum-
+    # underlying-move confirmation gate, added 18 Sep 2026). None if the
+    # cache wasn't warm yet at entry - the gate fails open on a None entry
+    # price.
+    entry_underlying_price: Optional[float] = None
     # Added 8 Sep 2026 (user request: "broker-side stop order that fires
     # instantly regardless of polling interval") - the order_id of a real
     # SELL STOP-LOSS MARKET order resting at Dhan for this exact position,

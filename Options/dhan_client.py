@@ -1263,7 +1263,7 @@ class DhanWrapper:
                 return
             is_bearish = closes[-1] < last_st
             candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST) if timestamps else None
-            self._supertrend_cache[underlying_symbol] = (datetime.now(IST), is_bearish, candle_start)
+            self._supertrend_cache[underlying_symbol] = (datetime.now(IST), is_bearish, candle_start, closes[-1])
         except Exception:  # noqa: BLE001
             logger.exception("Could not refresh Supertrend signal for %s", underlying_symbol)
 
@@ -1286,6 +1286,15 @@ class DhanWrapper:
         entry in the first place."""
         cached = self._supertrend_cache.get(underlying_symbol)
         return cached[2] if cached else None
+
+    def get_cached_supertrend_underlying_close(self, underlying_symbol: str) -> Optional[float]:
+        """The underlying's own last-closed-candle price the cached
+        Supertrend signal was computed from (added 18 Sep 2026 for the
+        minimum-underlying-move confirmation gate - see
+        reversal_filters.check_underlying_move_confirms_exit). Synchronous,
+        cache-only - safe from the WebSocket tick path."""
+        cached = self._supertrend_cache.get(underlying_symbol)
+        return cached[3] if cached else None
 
     # ------------------------------------------------------------------ #
     # EMA-cross exit signal (added 10 Sep 2026 for Futures - see
@@ -1354,7 +1363,7 @@ class DhanWrapper:
             crossed_this_candle = fast_below_slow != prev_fast_below_slow
             candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST) if timestamps else None
             self._ema_cross_cache[underlying_symbol] = (
-                datetime.now(IST), fast_below_slow, crossed_this_candle, candle_start,
+                datetime.now(IST), fast_below_slow, crossed_this_candle, candle_start, closes[-1],
             )
         except Exception:  # noqa: BLE001
             logger.exception("Could not refresh EMA cross signal for %s", underlying_symbol)
@@ -1379,6 +1388,28 @@ class DhanWrapper:
         position's own entry candle)."""
         cached = self._ema_cross_cache.get(underlying_symbol)
         return cached[3] if cached else None
+
+    def get_cached_ema_cross_underlying_close(self, underlying_symbol: str) -> Optional[float]:
+        """The underlying's own last-closed-candle price the cached EMA-cross
+        signal was computed from - see get_cached_supertrend_underlying_close
+        for why this exists."""
+        cached = self._ema_cross_cache.get(underlying_symbol)
+        return cached[4] if cached else None
+
+    def get_cached_underlying_close(self, underlying_symbol: str) -> Optional[float]:
+        """Best-effort current underlying price for the minimum-underlying-
+        move confirmation gate (added 18 Sep 2026 - see
+        reversal_filters.check_underlying_move_confirms_exit). Tries the
+        Supertrend cache first, falls back to the EMA-cross cache - either
+        signal being enabled and warm is enough, and both are refreshed by
+        the same poll loop so they're never more than one refresh cycle
+        apart. Synchronous, cache-only - safe from the WebSocket tick path.
+        None means neither cache has data yet; callers must fail open on
+        that, never treat missing data as a confirmed move."""
+        px = self.get_cached_supertrend_underlying_close(underlying_symbol)
+        if px is not None:
+            return px
+        return self.get_cached_ema_cross_underlying_close(underlying_symbol)
 
     # ------------------------------------------------------------------ #
     # Same-day RSI-gated loss re-entry block (added 11 Sep 2026, replacing

@@ -125,6 +125,15 @@ class Position:
     # trading_engine._supertrend_signal_for), so entering doesn't get
     # immediately reversed by the same breakout candle that triggered it.
     supertrend_entry_candle_start: Optional[datetime] = None
+    # The underlying's own last-closed-candle price at entry - captured
+    # alongside supertrend_entry_candle_start from
+    # dhan_client.get_cached_underlying_close(). Used by the
+    # minimum-underlying-move confirmation gate (see
+    # reversal_filters.check_underlying_move_confirms_exit) to require a
+    # real move in the underlying, not just option-premium noise, before
+    # trusting a SUPERTREND_EXIT/EMA_CROSS_EXIT. None if the cache wasn't
+    # warm yet at entry - the gate fails open on a None entry price.
+    entry_underlying_price: Optional[float] = None
     # Real broker-side SELL STOP-LOSS LIMIT (SL-L) order resting at Dhan
     # for this exact position - added 10 Sep 2026, porting Luxury's own
     # proven-working mechanism (see Luxury/config.py's BROKER_STOP_LOSS_

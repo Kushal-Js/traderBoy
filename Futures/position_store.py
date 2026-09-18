@@ -84,6 +84,12 @@ class Position:
     exit_failure_count: int = 0
     next_exit_retry_at: Optional[datetime] = None
     supertrend_entry_candle_start: Optional[datetime] = None
+    # The underlying's own last-closed-candle price at entry - see
+    # reversal_filters.check_underlying_move_confirms_exit (minimum-
+    # underlying-move confirmation gate, added 18 Sep 2026). None if the
+    # cache wasn't warm yet at entry - the gate fails open on a None entry
+    # price.
+    entry_underlying_price: Optional[float] = None
     # Real broker-side SELL STOP-LOSS LIMIT (SL-L) order resting at Dhan for
     # this position - see Options/position_store.py's identical field.
     # None unless config.BROKER_STOP_LOSS_ENABLED. Cleared implicitly on any
