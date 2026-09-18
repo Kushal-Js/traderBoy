@@ -556,6 +556,69 @@ async def enter_positions_for_stocks(
     ])
 
 
+async def _place_broker_stop_loss_if_enabled(
+    symbol: str, trading_symbol: str, quantity: int, lot_size: int, fill_price: float, option_type: str,
+) -> Optional[str]:
+    """Broker-side SELL stop-loss LIMIT order, placed right after a fresh
+    fill_price is known - see config.BROKER_STOP_LOSS_ENABLED's own
+    docstring for the SL-M->SL-L story and rollout discipline. Extracted
+    (18 Sep 2026, real incident) from _enter_single_position's own inline
+    body so BOTH the promotion branches in _sync_pending_orders below can
+    call the exact same logic - those branches build a Position directly
+    from a BUY order that took longer than the poll budget to confirm
+    (common right at a volatile market open) and were found live to skip
+    stop-loss placement ENTIRELY, not because placement failed but because
+    the code to attempt it only ever existed in this function's own
+    synchronous, fast-fill path. Confirmed live 18 Sep 2026: TATAPOWER/
+    MAHABANK/INDUSINDBK all opened with stop_loss_order_id=None this way,
+    3 of 6 positions open at the time with zero broker-side protection
+    (still covered by the regular poll/tick-driven MAX_LOSS_HIT check the
+    whole time, per this function's own pre-existing fail-open design -
+    not literally unprotected, but missing the broker-side layer that
+    survives even if this process itself goes down).
+
+    A failure to place this is logged loudly but never raises - callers
+    treat None exactly like before (stop_loss_order_id stays None, the
+    poll/tick-driven MAX_LOSS_HIT check is the fallback)."""
+    if not config.BROKER_STOP_LOSS_ENABLED:
+        return None
+    loop = asyncio.get_running_loop()
+    max_loss_cap = current_max_loss_per_trade_rs(option_type)
+    trigger_price = fill_price - (max_loss_cap / quantity)
+    limit_price = trigger_price - (max_loss_cap * config.BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE / quantity)
+    try:
+        stop_tag = _gen_tag("SL", symbol)
+        stop_resp = await loop.run_in_executor(
+            None, dhan_wrapper.place_stop_loss_limit_order,
+            trading_symbol, quantity, "SELL", trigger_price, limit_price, stop_tag, config.OPTIONS_PRODUCT,
+        )
+        stop_loss_order_id = stop_resp["order_id"]
+        logger.info(
+            "%s: broker-side SELL stop-loss LIMIT order %s placed for %s, trigger=%.2f limit=%.2f",
+            symbol, stop_loss_order_id, trading_symbol, trigger_price, limit_price,
+        )
+        await position_store.record_order(OrderRecord(
+            order_id=stop_loss_order_id,
+            underlying_symbol=symbol,
+            trading_symbol=trading_symbol,
+            transaction_type="SELL",
+            quantity=quantity,
+            status=OrderStatus.PENDING,
+            is_amo=False,
+            lot_size=lot_size,
+            option_type=option_type,
+        ))
+        return stop_loss_order_id
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s: could not place the broker-side stop-loss order for %s (trigger would have been "
+            "%.2f, limit %.2f) - proceeding without it, the existing poll/tick-driven MAX_LOSS_HIT "
+            "check still protects this position exactly as before",
+            symbol, trading_symbol, trigger_price, limit_price,
+        )
+        return None
+
+
 async def _enter_single_position(symbol: str, option_type: str = config.OPTION_TYPE) -> dict:
     loop = asyncio.get_running_loop()
 
@@ -736,56 +799,9 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
 
     entry_candle_start = await _capture_supertrend_entry_candle(loop, symbol)
 
-    # Broker-side stop-loss order - ported from Luxury's identical
-    # mechanism (see config.BROKER_STOP_LOSS_ENABLED's own docstring for
-    # the full SL-M->SL-L story and rollout discipline). Placed here,
-    # right after the real fill_price is known, using whichever MAX_LOSS
-    # cutoff value is active RIGHT NOW (same "computed once at entry"
-    # convention as target_price/hard_stop_loss below). A failure to
-    # place this is logged loudly but never blocks the entry itself -
-    # stop_loss_order_id simply stays None, and the position is exactly
-    # as protected as it always was via the existing poll/tick-driven
-    # MAX_LOSS_HIT check.
-    stop_loss_order_id = None
-    if config.BROKER_STOP_LOSS_ENABLED:
-        max_loss_cap = current_max_loss_per_trade_rs(option_type)
-        trigger_price = fill_price - (max_loss_cap / quantity)
-        # Gap sized in RUPEES off the SAME cap used for trigger_price, not a
-        # flat % of price (12 Sep 2026 - see config.BROKER_STOP_LOSS_LIMIT_
-        # GAP_MULTIPLE's own docstring: keeps the SL-L's fillable price band
-        # "in sync" with MAX_LOSS_HIT's own size regardless of the option's
-        # premium level or the position's quantity, replacing the old flat
-        # BROKER_STOP_LOSS_LIMIT_BUFFER_PCT-of-price formula).
-        limit_price = trigger_price - (max_loss_cap * config.BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE / quantity)
-        try:
-            stop_tag = _gen_tag("SL", symbol)
-            stop_resp = await loop.run_in_executor(
-                None, dhan_wrapper.place_stop_loss_limit_order,
-                atm.trading_symbol, quantity, "SELL", trigger_price, limit_price, stop_tag, config.OPTIONS_PRODUCT,
-            )
-            stop_loss_order_id = stop_resp["order_id"]
-            logger.info(
-                "%s: broker-side SELL stop-loss LIMIT order %s placed for %s, trigger=%.2f limit=%.2f",
-                symbol, stop_loss_order_id, atm.trading_symbol, trigger_price, limit_price,
-            )
-            await position_store.record_order(OrderRecord(
-                order_id=stop_loss_order_id,
-                underlying_symbol=symbol,
-                trading_symbol=atm.trading_symbol,
-                transaction_type="SELL",
-                quantity=quantity,
-                status=OrderStatus.PENDING,
-                is_amo=False,
-                lot_size=atm.lot_size,
-                option_type=atm.option_type,
-            ))
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "%s: could not place the broker-side stop-loss order for %s (trigger would have been "
-                "%.2f, limit %.2f) - proceeding without it, the existing poll/tick-driven MAX_LOSS_HIT "
-                "check still protects this position exactly as before",
-                symbol, atm.trading_symbol, trigger_price, limit_price,
-            )
+    stop_loss_order_id = await _place_broker_stop_loss_if_enabled(
+        symbol, atm.trading_symbol, quantity, atm.lot_size, fill_price, option_type,
+    )
 
     position = Position(
         underlying_symbol=symbol,
@@ -1542,12 +1558,24 @@ async def _sync_pending_orders() -> None:
                     None, dhan_wrapper.get_option_ltp, order.trading_symbol
                 )
             entry_candle_start = await _capture_supertrend_entry_candle(loop, order.underlying_symbol)
+            option_type = order.option_type or config.OPTION_TYPE
+            lot_size = order.lot_size or config.LOT_SIZE_FALLBACK
+            # Real incident 18 Sep 2026 - this promotion path (a BUY order
+            # that took longer than _enter_single_position's own poll
+            # budget to confirm) used to skip broker-side stop-loss
+            # placement entirely, not because it failed but because the
+            # code to attempt it only existed in _enter_single_position's
+            # own fast-fill path. See _place_broker_stop_loss_if_enabled's
+            # own docstring for the full incident.
+            stop_loss_order_id = await _place_broker_stop_loss_if_enabled(
+                order.underlying_symbol, order.trading_symbol, order.quantity, lot_size, fill_price, option_type,
+            )
             position = Position(
                 underlying_symbol=order.underlying_symbol,
                 option_trading_symbol=order.trading_symbol,
-                option_type=order.option_type or config.OPTION_TYPE,
+                option_type=option_type,
                 quantity=order.quantity,
-                lot_size=order.lot_size or config.LOT_SIZE_FALLBACK,
+                lot_size=lot_size,
                 entry_price=fill_price,
                 highest_price=fill_price,
                 target_price=fill_price * (1 + config.TARGET_PCT),
@@ -1555,6 +1583,7 @@ async def _sync_pending_orders() -> None:
                 order_id=order.order_id,
                 product_type=config.OPTIONS_PRODUCT,
                 supertrend_entry_candle_start=entry_candle_start,
+                stop_loss_order_id=stop_loss_order_id,
             )
             await position_store.add_position(position)
             logger.info(
@@ -1611,12 +1640,19 @@ async def _sync_pending_orders() -> None:
         if broker_qty > 0:
             fill_price = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, order.trading_symbol)
             entry_candle_start = await _capture_supertrend_entry_candle(loop, order.underlying_symbol)
+            option_type = order.option_type or config.OPTION_TYPE
+            lot_size = order.lot_size or config.LOT_SIZE_FALLBACK
+            # See the AMO-promotion branch above's identical comment - same
+            # 18 Sep 2026 incident/fix.
+            stop_loss_order_id = await _place_broker_stop_loss_if_enabled(
+                order.underlying_symbol, order.trading_symbol, broker_qty, lot_size, fill_price, option_type,
+            )
             position = Position(
                 underlying_symbol=order.underlying_symbol,
                 option_trading_symbol=order.trading_symbol,
-                option_type=order.option_type or config.OPTION_TYPE,
+                option_type=option_type,
                 quantity=broker_qty,
-                lot_size=order.lot_size or config.LOT_SIZE_FALLBACK,
+                lot_size=lot_size,
                 entry_price=fill_price,
                 highest_price=fill_price,
                 target_price=fill_price * (1 + config.TARGET_PCT),
@@ -1624,6 +1660,7 @@ async def _sync_pending_orders() -> None:
                 order_id=order.order_id,
                 product_type=config.OPTIONS_PRODUCT,
                 supertrend_entry_candle_start=entry_candle_start,
+                stop_loss_order_id=stop_loss_order_id,
             )
             await position_store.add_position(position)
             logger.info(
