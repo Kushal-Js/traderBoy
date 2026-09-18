@@ -27,8 +27,10 @@ HOW TO RUN:
     uv run python tests/test_reversal_filters_shadow.py
 """
 import asyncio
+import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 from unittest import mock
 
@@ -38,6 +40,10 @@ sys.path.insert(0, str(REPO_ROOT))
 os.environ.setdefault("DHAN_CLIENT_ID", "test")
 from dotenv import load_dotenv
 load_dotenv(REPO_ROOT / ".env")
+
+import trade_history
+scratch_dir = Path(tempfile.mkdtemp(prefix="dhanboy_reversal_filters_shadow_test_"))
+trade_history.HISTORY_DIR = scratch_dir
 
 import reversal_filters as rf
 from Options.dhan_client import dhan_wrapper
@@ -146,6 +152,127 @@ def test_9_er_blocks_uses_the_conservative_threshold_not_the_in_sample_best():
     print("9. ER_THRESHOLD is wired to the conservative 0.3, not the in-sample-best 0.45: PASSED")
 
 
+def _fake_candle_response(n=45):
+    """A plausible, mildly-trending 5-min candle series - just needs to be
+    long enough (>=40 bars) and varied enough that RSI/ADX/vol_ratio/ER
+    all compute to real numbers, not None."""
+    closes = [100.0 + i * 0.3 + (0.5 if i % 3 == 0 else -0.2) for i in range(n)]
+    highs = [c + 0.4 for c in closes]
+    lows = [c - 0.4 for c in closes]
+    volumes = [1000.0 + (i % 5) * 50 for i in range(n)]
+    return {"status": "success", "data": {"high": highs, "low": lows, "close": closes, "volume": volumes}}
+
+
+def _install_fake_client(per_symbol_response=None, raise_for=None):
+    """per_symbol_response: dict[symbol -> candle response dict] (defaults
+    every symbol to _fake_candle_response()). raise_for: set of symbols
+    whose intraday_minute_data call raises, simulating a per-candidate
+    fetch failure without breaking the whole batch."""
+    per_symbol_response = per_symbol_response or {}
+    raise_for = raise_for or set()
+
+    class FakeDhan:
+        @staticmethod
+        def intraday_minute_data(security_id=None, **kwargs):
+            symbol = security_id  # _equity_security_id is mocked to return the symbol itself
+            if symbol in raise_for:
+                raise RuntimeError(f"simulated fetch failure for {symbol}")
+            return per_symbol_response.get(symbol, _fake_candle_response())
+
+    original_client = dhan_wrapper._client
+    original_sec_id = dhan_wrapper._equity_security_id
+    dhan_wrapper._client = mock.Mock()
+    dhan_wrapper._client.Dhan = FakeDhan()
+    dhan_wrapper._equity_security_id = lambda symbol: symbol
+
+    def restore():
+        dhan_wrapper._client = original_client
+        dhan_wrapper._equity_security_id = original_sec_id
+
+    return restore
+
+
+def test_10_fetch_indicators_returns_none_when_not_authenticated():
+    original = dhan_wrapper._client
+    dhan_wrapper._client = None
+    with mock.patch.object(dhan_wrapper, "authenticate") as fake_auth:
+        try:
+            result = rf._fetch_indicators_sync("RELIANCE")
+            assert result is None
+            fake_auth.assert_not_called()
+            print("10. _fetch_indicators_sync returns None (never triggers real auth) when "
+                  "dhan_wrapper._client is None: PASSED")
+        finally:
+            dhan_wrapper._client = original
+
+
+def test_11_fetch_indicators_returns_real_numbers_on_success():
+    restore = _install_fake_client()
+    try:
+        result = rf._fetch_indicators_sync("RELIANCE")
+        assert result is not None
+        assert all(k in result for k in ("rsi", "adx", "vol_ratio", "er"))
+        assert result["rsi"] is not None and result["vol_ratio"] is not None
+        print("11. _fetch_indicators_sync returns real RSI/ADX/VolRatio/ER numbers on a "
+              "successful fetch with enough history: PASSED")
+    finally:
+        restore()
+
+
+async def test_12_log_alert_candidates_never_authenticates_when_not_ready():
+    original = dhan_wrapper._client
+    dhan_wrapper._client = None
+    with mock.patch.object(dhan_wrapper, "authenticate") as fake_auth:
+        try:
+            await rf.log_alert_candidates("Options", "test-scan", "CE", ["RELIANCE", "TCS"], ["TCS"])
+            fake_auth.assert_not_called()
+            print("12. log_alert_candidates never triggers real authentication when "
+                  "dhan_wrapper._client is None: PASSED")
+        finally:
+            dhan_wrapper._client = original
+
+
+async def test_13_logs_one_row_per_candidate_tagged_correctly():
+    restore = _install_fake_client()
+    with mock.patch.object(dhan_wrapper, "get_day_change_pct", lambda s: {"RELIANCE": 1.2, "TCS": 0.5, "INFY": 3.0}[s]):
+        try:
+            await rf.log_alert_candidates("Options", "test-scan-13", "CE",
+                                           ["RELIANCE", "TCS", "INFY"], ["INFY"])
+            rows = [json.loads(l) for l in open(trade_history.dated_path(rf.ALERT_CANDIDATE_SHADOW_LOG_NAME))
+                    if json.loads(l).get("scan_name") == "test-scan-13"]
+            assert len(rows) == 3, rows
+            by_symbol = {r["symbol"]: r for r in rows}
+            assert by_symbol["RELIANCE"]["was_selected"] is False
+            assert by_symbol["TCS"]["was_selected"] is False
+            assert by_symbol["INFY"]["was_selected"] is True
+            assert by_symbol["RELIANCE"]["day_change_pct"] == 1.2
+            assert by_symbol["INFY"]["rsi"] is not None, "the selected candidate must also get real indicators logged"
+            assert by_symbol["RELIANCE"]["rsi"] is not None, "a REJECTED candidate must get the same indicators logged"
+            print("13. log_alert_candidates logs one row per candidate (selected AND rejected), each "
+                  "correctly tagged was_selected, with day_change_pct and RSI/ADX/VolRatio/ER: PASSED")
+        finally:
+            restore()
+
+
+async def test_14_one_candidates_fetch_failure_does_not_break_the_others():
+    restore = _install_fake_client(raise_for={"TCS"})
+    with mock.patch.object(dhan_wrapper, "get_day_change_pct", lambda s: 1.0):
+        try:
+            await rf.log_alert_candidates("Options", "test-scan-14", "CE",
+                                           ["RELIANCE", "TCS", "INFY"], ["RELIANCE"])
+            rows = [json.loads(l) for l in open(trade_history.dated_path(rf.ALERT_CANDIDATE_SHADOW_LOG_NAME))
+                    if json.loads(l).get("scan_name") == "test-scan-14"]
+            by_symbol = {r["symbol"]: r for r in rows}
+            assert len(rows) == 3, "all 3 candidates must still get a row, even though TCS's own fetch failed"
+            assert by_symbol["TCS"]["rsi"] is None, "TCS's own failed fetch must log None indicators, not raise"
+            assert by_symbol["RELIANCE"]["rsi"] is not None
+            assert by_symbol["INFY"]["rsi"] is not None
+            print("14. A single candidate's indicator-fetch failure doesn't break logging for the "
+                  "other candidates in the same alert: PASSED")
+        finally:
+            restore()
+
+
 async def main():
     print("=== reversal_filters.py shadow-mode filter test suite ===\n")
     await test_1_never_triggers_real_auth_when_not_yet_authenticated()
@@ -157,6 +284,11 @@ async def main():
     test_7_climax_combo_needs_both_conditions()
     test_8_efficiency_ratio_matches_known_reference()
     test_9_er_blocks_uses_the_conservative_threshold_not_the_in_sample_best()
+    test_10_fetch_indicators_returns_none_when_not_authenticated()
+    test_11_fetch_indicators_returns_real_numbers_on_success()
+    await test_12_log_alert_candidates_never_authenticates_when_not_ready()
+    await test_13_logs_one_row_per_candidate_tagged_correctly()
+    await test_14_one_candidates_fetch_failure_does_not_break_the_others()
     print("\nALL reversal_filters shadow-mode tests PASSED")
 
 

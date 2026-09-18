@@ -50,6 +50,7 @@ from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel, field_validator
 
 from trade_history import fire_and_forget, record_webhook_alert
+import reversal_filters
 
 from . import config
 from .dhan_client import dhan_wrapper
@@ -238,6 +239,14 @@ async def _handle_chartink_webhook(
     ranked = await loop.run_in_executor(
         None, rank_and_pick_top_stocks, stocks, config.TOP_N_STOCKS, prefer_highest
     )
+
+    # Alert-candidate shadow logging (added 18 Sep 2026) - see Options/
+    # option_main.py's identical call and reversal_filters.log_alert_
+    # candidates' own docstring for the full rationale.
+    if len(stocks) > 1:
+        asyncio.create_task(reversal_filters.log_alert_candidates(
+            "Luxury", payload.scan_name, option_type, stocks, [s for s, _ in ranked],
+        ))
 
     if not ranked:
         _log_alert("no_action", "could_not_rank_any_stock")

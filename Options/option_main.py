@@ -58,6 +58,7 @@ from pydantic import BaseModel, field_validator
 
 from trade_history import fire_and_forget, record_webhook_alert
 import choppy_stocks
+import reversal_filters
 
 from . import config, paper_webhook
 from .dhan_client import dhan_wrapper
@@ -296,6 +297,18 @@ async def _handle_chartink_webhook(
     ranked = await loop.run_in_executor(
         None, rank_and_pick_top_stocks, stocks, config.TOP_N_STOCKS, prefer_highest
     )
+
+    # Alert-candidate shadow logging (added 18 Sep 2026) - see reversal_
+    # filters.log_alert_candidates' own docstring for why: rank_and_pick_
+    # top_stocks discards every candidate outside the selected slice
+    # without a trace, so there was no way to later compare "what got
+    # picked" against "what got passed over." Fire-and-forget, only when
+    # there was an actual ranking DECISION to log (more than one
+    # candidate) - never awaited, never affects the real entry flow below.
+    if len(stocks) > 1:
+        asyncio.create_task(reversal_filters.log_alert_candidates(
+            "Options", payload.scan_name, option_type, stocks, [s for s, _ in ranked],
+        ))
 
     if not ranked:
         _log_alert("no_action", "could_not_rank_any_stock")

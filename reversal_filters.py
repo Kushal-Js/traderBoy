@@ -87,6 +87,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -225,11 +226,15 @@ def _efficiency_ratio_at(closes: list[float], idx: int, period: int = ER_PERIOD)
     return net_change / path_sum
 
 
-def _evaluate_and_log_sync(strategy: str, symbol: str, option_type: str, entry_price: float, order_id: str) -> None:
-    """Blocking - must be called via run_in_executor, never directly from
-    async code. Never raises - any failure here just means this one
-    entry has no shadow-filter row logged, the real entry itself is
-    always already fully placed and unaffected by the time this runs.
+def _fetch_indicators_sync(symbol: str) -> Optional[dict]:
+    """Shared blocking fetch - the underlying's own 5-min candles (NSE_EQ),
+    RSI/ADX/VolRatio/ER computed from them. Extracted from _evaluate_and_
+    log_sync (18 Sep 2026) so log_alert_candidates below can reuse the
+    identical fetch/indicator logic for candidates that were never
+    entered, not just real entries. Returns None (never raises) whenever
+    the real answer isn't available - not yet authenticated, fetch
+    failure, or fewer than 40 candles of history - callers treat that as
+    "skip this row," same as the pre-refactor behavior.
 
     CRITICAL: dhan_wrapper.client is a LAZY property that calls
     self.authenticate() (a real, live Dhan login) the first time anything
@@ -247,9 +252,7 @@ def _evaluate_and_log_sync(strategy: str, symbol: str, option_type: str, entry_p
     avoids triggering the lazy auth just to check whether it already
     happened."""
     if dhan_wrapper._client is None:
-        logger.debug("%s %s: shadow filters skipped - dhan_wrapper not authenticated yet "
-                     "(expected in tests; should never happen for a real live entry)", strategy, symbol)
-        return
+        return None
     try:
         # Deliberately NOT dhan_wrapper.fetch_continuous_intraday - that
         # helper bakes in _retry (2 retries, 1.5s sleep between each), the
@@ -274,14 +277,30 @@ def _evaluate_and_log_sync(strategy: str, symbol: str, option_type: str, entry_p
         highs, lows, closes, volumes = (data.get("high") or []), (data.get("low") or []), (data.get("close") or []), (data.get("volume") or [])
         idx = len(closes) - 1
         if idx < 40:
-            logger.info("%s %s: shadow filters skipped - only %d candle(s) of history available",
-                        strategy, symbol, idx + 1)
-            return
+            return None
+        return {
+            "rsi": _compute_rsi(closes)[idx],
+            "adx": _compute_adx(highs, lows, closes)[idx],
+            "vol_ratio": _volume_ratio_at(volumes, idx),
+            "er": _efficiency_ratio_at(closes, idx),
+        }
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: indicator fetch failed - shadow logging skips this one row, no other effect", symbol)
+        return None
 
-        rsi = _compute_rsi(closes)[idx]
-        adx = _compute_adx(highs, lows, closes)[idx]
-        vol_ratio = _volume_ratio_at(volumes, idx)
-        er = _efficiency_ratio_at(closes, idx)
+
+def _evaluate_and_log_sync(strategy: str, symbol: str, option_type: str, entry_price: float, order_id: str) -> None:
+    """Blocking - must be called via run_in_executor, never directly from
+    async code. Never raises - any failure here just means this one
+    entry has no shadow-filter row logged, the real entry itself is
+    always already fully placed and unaffected by the time this runs."""
+    indicators = _fetch_indicators_sync(symbol)
+    if indicators is None:
+        logger.info("%s %s: shadow filters skipped - not authenticated, fetch failed, or insufficient history",
+                    strategy, symbol)
+        return
+    try:
+        rsi, adx, vol_ratio, er = indicators["rsi"], indicators["adx"], indicators["vol_ratio"], indicators["er"]
 
         rsi_extreme = rsi is not None and (rsi > RSI_OVERBOUGHT if option_type == "CE" else rsi < RSI_OVERSOLD)
         adx_blocks = adx is not None and adx < ADX_MIN
@@ -323,6 +342,90 @@ async def evaluate_and_log(strategy: str, symbol: str, option_type: str, entry_p
     like record_opened_position already is."""
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _evaluate_and_log_sync, strategy, symbol, option_type, entry_price, order_id)
+
+
+# --------------------------------------------------------------------- #
+# Alert-candidate shadow logging (added 18 Sep 2026, user request after
+# discussing whether a volume-weighted ranking might pick meaningfully
+# different (and better-performing) stocks than the current pure
+# %-change ranking - rank_and_pick_top_stocks() already fetches every
+# candidate's day-change%, ranks them, then DISCARDS every candidate
+# outside the selected top_n/bottom_n slice without a trace. That means
+# there was no way to retroactively compare "what got picked" against
+# "what got passed over" - the exact gap that made looking into today's
+# real alerts impossible (confirmed live: a fresh Dhan login for a
+# standalone analysis script fails outright while the bot's own session
+# is active, so this can't be reconstructed after the fact either).
+#
+# This logs EVERY candidate in a multi-stock alert - selected or not -
+# with the same RSI/ADX/VolRatio/ER already computed for real entries,
+# plus the day-change% the CURRENT ranking actually uses, so a genuine
+# "would a different ranking have done better" comparison becomes
+# possible after enough days accumulate - the same 15-day shadow-mode
+# bar every other filter in this file was held to before being trusted.
+# Deliberately logging-only: never changes rank_and_pick_top_stocks'
+# own return value or the entry flow that follows it.
+# --------------------------------------------------------------------- #
+ALERT_CANDIDATE_SHADOW_LOG_NAME = "alert_candidate_shadow"
+CANDIDATE_FETCH_PACING_SECONDS = 0.35  # matches rank_and_pick_top_stocks' own pacing
+
+
+def _log_alert_candidates_sync(
+    strategy: str, scan_name: Optional[str], option_type: str,
+    candidates: list[str], selected: set[str],
+) -> None:
+    """Blocking - must be called via run_in_executor. Paced the same way
+    rank_and_pick_top_stocks already paces its own day-change% fetch
+    (0.35s between candidates) - this doubles the REST calls a large
+    multi-stock alert makes (one pass for ranking, one here for
+    indicators), so pacing matters even more here to stay clear of
+    Dhan's own rate limit and the shared executor pool real order-
+    placement/monitoring depends on. Never raises - a failure logs
+    nothing for that one candidate, no other effect."""
+    if dhan_wrapper._client is None:
+        return
+    for i, symbol in enumerate(candidates):
+        if i > 0:
+            time.sleep(CANDIDATE_FETCH_PACING_SECONDS)
+        try:
+            day_change_pct = dhan_wrapper.get_day_change_pct(symbol)
+        except Exception:  # noqa: BLE001
+            day_change_pct = None
+        indicators = _fetch_indicators_sync(symbol)
+        record = {
+            "strategy": strategy, "scan_name": scan_name, "symbol": symbol, "option_type": option_type,
+            "was_selected": symbol in selected, "day_change_pct": day_change_pct,
+            "rsi": None, "adx": None, "vol_ratio": None, "er": None,
+            "logged_at": datetime.now().isoformat(),
+        }
+        if indicators is not None:
+            rsi, adx, vol_ratio, er = indicators["rsi"], indicators["adx"], indicators["vol_ratio"], indicators["er"]
+            record["rsi"] = round(rsi, 2) if rsi is not None else None
+            record["adx"] = round(adx, 2) if adx is not None else None
+            record["vol_ratio"] = round(vol_ratio, 2) if vol_ratio is not None else None
+            record["er"] = round(er, 3) if er is not None else None
+        try:
+            append_jsonl(ALERT_CANDIDATE_SHADOW_LOG_NAME, record)
+        except Exception:  # noqa: BLE001
+            logger.exception("%s %s: could not log alert-candidate shadow row - no other effect", strategy, symbol)
+
+
+async def log_alert_candidates(
+    strategy: str, scan_name: Optional[str], option_type: str,
+    candidates: list[str], selected: list[str],
+) -> None:
+    """Async wrapper - call via asyncio.create_task (fire-and-forget,
+    never awaited) right after rank_and_pick_top_stocks returns, from
+    each package's own webhook handler:
+        asyncio.create_task(reversal_filters.log_alert_candidates(
+            "Options", payload.scan_name, option_type, stocks, [s for s, _ in ranked]))
+    Only worth calling when len(candidates) > 1 - a single-candidate
+    alert has no ranking DECISION to compare against, so callers should
+    skip it entirely rather than pay a fetch for nothing."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None, _log_alert_candidates_sync, strategy, scan_name, option_type, candidates, set(selected),
+    )
 
 
 # --------------------------------------------------------------------- #
