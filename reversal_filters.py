@@ -795,8 +795,21 @@ async def log_ribbon_switch_shadow_for_alert(strategy: str, option_type: str, st
             return
         top_symbol, top_score = ranked[0]
         snapshot = await position_store.snapshot()
+        # position_store.snapshot() returns the Position dataclass's raw
+        # __dict__ (vars(p)) when called in-process like this - opened_at
+        # is a real datetime object here, NOT the ISO string it only
+        # becomes after FastAPI's own JSON serialization on the HTTP
+        # endpoints. Found live 18 Sep 2026 (15-minute post-deploy
+        # monitoring check): datetime.fromisoformat(p["opened_at"]) inside
+        # _log_switch_shadow_sync raised TypeError on every single call
+        # since this morning's restart (caught and logged, zero effect on
+        # real trading, but it meant switch-shadow never actually logged
+        # anything all day). Converting explicitly here keeps _log_
+        # switch_shadow_sync's own "opened_at is an ISO string" contract
+        # true regardless of what shape the caller's own position objects
+        # are in.
         open_positions = [
-            {"symbol": p["underlying_symbol"], "opened_at": p["opened_at"]}
+            {"symbol": p["underlying_symbol"], "opened_at": p["opened_at"].isoformat()}
             for p in snapshot["live_positions"] if p.get("option_type") == option_type
         ]
         await log_switch_shadow(strategy, option_type, top_symbol, top_score, open_positions)
