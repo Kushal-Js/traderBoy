@@ -274,7 +274,33 @@ def eval_open_shadows(st):
         entry, qty = pos["entry_price"], pos["quantity"]
         hard_sl, target = entry * (1 - c.STOP_LOSS_PCT), entry * (1 + c.TARGET_PCT)
         entry_ts = datetime.fromisoformat(pos["alert_dt"]).timestamp()
-        highest = pos["highest"]
+        # Rebuilt from `entry`, NOT seeded from the persisted pos["highest"]
+        # (bug fixed 18 Sep 2026, found via a real 2026-09-17 backtest: this
+        # loop below always re-walks the FULL option-tick history from
+        # entry_ts on every invocation - this function is a stateless
+        # oneshot script re-run every 10 min with no incremental "resume
+        # from last tick" tracking, by design. Seeding `highest` from the
+        # persisted value (itself a product of an earlier run's COMPLETE
+        # walk-through) meant that once a position's true high had already
+        # been discovered on a prior run without triggering an exit, the
+        # VERY NEXT run's fresh re-walk would compare its first (near-
+        # entry-price) re-processed tick against that already-elevated
+        # historical high - satisfying the profit-protection giveback
+        # condition immediately and backdating a false exit to ~1 minute
+        # after entry, at ~entry price, regardless of when the real
+        # retracement happened. Confirmed via 12/137 closed shadow
+        # positions on 2026-09-17 all showing exit_dt exactly 1 minute
+        # after alert_dt with exit_price == entry_price despite a much
+        # higher `highest` already on record (e.g. SHRIRAMFIN: entry 18.8,
+        # highest 22.1, but recorded exit 18.8 for pnl 0). Rebuilding
+        # `highest` from `entry` here makes the walk genuinely idempotent -
+        # the same full tick history now always produces the same,
+        # chronologically-correct exit point no matter how many times this
+        # function has evaluated the position before. `pos["highest"]`
+        # itself is still updated/persisted below (line ~330) purely for
+        # reporting - it must never again be read back in as this walk's
+        # own starting point.
+        highest = entry
         reason = ex_px = ex_dt = None
         for t in [x for x in opt["ts"] if x > entry_ts]:
             dt = datetime.fromtimestamp(t, tz=IST)
