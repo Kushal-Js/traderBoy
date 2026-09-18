@@ -47,6 +47,11 @@ TOP_N_STOCKS = int(os.getenv("LUXURY_TOP_N_STOCKS", "4"))
 # tunable bottom-N/top-N selection toggle.
 SELECT_BOTTOM_N_STOCKS = os.getenv("LUXURY_SELECT_BOTTOM_N_STOCKS", "true").lower() == "true"
 
+# See Options/config.py's identical flag's own comment for the full
+# rationale/backtest evidence - this package's own independently-tunable
+# on/off switch for the same MA-ribbon-expansion CE-side ranking.
+RIBBON_RANKING_ENABLED = os.getenv("LUXURY_RIBBON_RANKING_ENABLED", "false").lower() == "true"
+
 # Both CE and PE webhooks are real here (unlike Futures, which only exposes
 # a bullish/CE endpoint) - matching Options' own MAX_LIVE_POSITIONS_CE/_PE
 # split, defaulted to the same values Options currently runs with.

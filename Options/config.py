@@ -68,6 +68,26 @@ TOP_N_STOCKS = int(os.getenv("TOP_N_STOCKS", "4"))
 # ranks MORE than TOP_N_STOCKS candidates - with 3 or fewer, top-N and
 # bottom-N are the same slice.
 SELECT_BOTTOM_N_STOCKS = os.getenv("SELECT_BOTTOM_N_STOCKS", "true").lower() == "true"
+
+# When true, a CE/bullish alert (prefer_highest=True) ranks candidates by
+# reversal_filters.rank_by_ribbon_expansion (MA-ribbon-expansion chart-
+# structure score) instead of rank_and_pick_top_stocks' day-change%-only
+# ranking - see ribbon_score.py's own module docstring for what the score
+# measures. Backtested with a real improvement over day-change% ranking
+# on 2026-09-17's real alerts (+Rs 3,085 vs -Rs 611.75 baseline, CE-side
+# only). A PE/bearish alert (prefer_highest=False) always keeps using
+# rank_and_pick_top_stocks regardless of this flag - there is no
+# validated bearish/PUT-side ribbon score yet.
+#
+# DEFAULTS FALSE (18 Sep 2026): turning this on changes the code path for
+# EVERY CE alert including single-stock ones. The existing test suite was
+# written before this branch existed - 14 tests across 6 files that mock
+# rank_and_pick_top_stocks directly (allowed-trading-time cutoffs, cross-
+# strategy races, fund allocation, Luxury package races, alert-candidate
+# shadow wiring) broke the moment this defaulted true, since none of them
+# anticipated a second ranking path. Flip this on only once those tests
+# have been updated to account for it - do not flip it on live before that.
+RIBBON_RANKING_ENABLED = os.getenv("RIBBON_RANKING_ENABLED", "false").lower() == "true"
 # Separate caps per option type - CE (from /chartink/webhook) and PE (from
 # /chartink/webhook-sell) each get their own budget rather than sharing one
 # pool, so a run of bearish alerts can't crowd out capacity for bullish

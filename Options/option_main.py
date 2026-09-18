@@ -294,9 +294,16 @@ async def _handle_chartink_webhook(
     # module docstring if this is ever wanted back for a specific
     # package.
     loop = asyncio.get_running_loop()
-    ranked = await loop.run_in_executor(
-        None, rank_and_pick_top_stocks, stocks, config.TOP_N_STOCKS, prefer_highest
-    )
+    # MA-ribbon-expansion ranking (added 18 Sep 2026, config.RIBBON_
+    # RANKING_ENABLED) - CE/bullish alerts only, see reversal_filters.
+    # rank_by_ribbon_expansion's own docstring for why PE always keeps the
+    # original day-change% ranking regardless of this flag.
+    if config.RIBBON_RANKING_ENABLED and prefer_highest:
+        ranked = await reversal_filters.rank_by_ribbon_expansion(stocks, config.TOP_N_STOCKS)
+    else:
+        ranked = await loop.run_in_executor(
+            None, rank_and_pick_top_stocks, stocks, config.TOP_N_STOCKS, prefer_highest
+        )
 
     # Alert-candidate shadow logging (added 18 Sep 2026) - see reversal_
     # filters.log_alert_candidates' own docstring for why: rank_and_pick_
@@ -308,6 +315,20 @@ async def _handle_chartink_webhook(
     if len(stocks) > 1:
         asyncio.create_task(reversal_filters.log_alert_candidates(
             "Options", payload.scan_name, option_type, stocks, [s for s, _ in ranked],
+        ))
+
+    # Ribbon switch-shadow monitoring (added 18 Sep 2026, user request:
+    # ranking-only goes live behind config.RIBBON_RANKING_ENABLED above,
+    # but the SWITCHING half of what was backtested - exiting a held
+    # position early for a better one - stays shadow-only pending a full
+    # day's real switch-decision data. Deliberately independent of the
+    # ranking flag and of `ranked` above (self-contained, computes its own
+    # ribbon candidate) so this keeps collecting data even while ranking-
+    # only is off. NEVER touches a real position - see reversal_filters.
+    # log_ribbon_switch_shadow_for_alert's own docstring.
+    if prefer_highest:
+        asyncio.create_task(reversal_filters.log_ribbon_switch_shadow_for_alert(
+            "Options", option_type, stocks, position_store,
         ))
 
     if not ranked:

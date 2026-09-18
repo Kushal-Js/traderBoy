@@ -226,15 +226,14 @@ def _efficiency_ratio_at(closes: list[float], idx: int, period: int = ER_PERIOD)
     return net_change / path_sum
 
 
-def _fetch_indicators_sync(symbol: str) -> Optional[dict]:
-    """Shared blocking fetch - the underlying's own 5-min candles (NSE_EQ),
-    RSI/ADX/VolRatio/ER computed from them. Extracted from _evaluate_and_
-    log_sync (18 Sep 2026) so log_alert_candidates below can reuse the
-    identical fetch/indicator logic for candidates that were never
-    entered, not just real entries. Returns None (never raises) whenever
-    the real answer isn't available - not yet authenticated, fetch
-    failure, or fewer than 40 candles of history - callers treat that as
-    "skip this row," same as the pre-refactor behavior.
+def _fetch_raw_candles_sync(symbol: str, min_bars: int) -> Optional[dict]:
+    """Shared blocking fetch - 7 days of the underlying's own 5-min
+    candles (NSE_EQ). Extracted from _fetch_indicators_sync (18 Sep 2026)
+    so the ribbon-ranking path below can reuse the identical fetch/auth-
+    guard instead of duplicating it a second time. Returns None (never
+    raises) whenever the real answer isn't available - not yet
+    authenticated, fetch failure, or fewer than `min_bars` candles of
+    history - callers treat that as "skip this row."
 
     CRITICAL: dhan_wrapper.client is a LAZY property that calls
     self.authenticate() (a real, live Dhan login) the first time anything
@@ -275,9 +274,26 @@ def _fetch_indicators_sync(symbol: str) -> Optional[dict]:
         )
         data = (resp.get("data") or {}) if isinstance(resp, dict) else {}
         highs, lows, closes, volumes = (data.get("high") or []), (data.get("low") or []), (data.get("close") or []), (data.get("volume") or [])
-        idx = len(closes) - 1
-        if idx < 40:
+        if len(closes) < min_bars:
             return None
+        return {"high": highs, "low": lows, "close": closes, "volume": volumes}
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: candle fetch failed - skipping, no other effect", symbol)
+        return None
+
+
+def _fetch_indicators_sync(symbol: str) -> Optional[dict]:
+    """RSI/ADX/VolRatio/ER as of the last closed 5-min bar. Needs at least
+    41 candles (idx>=40) of history - a much lower bar than ribbon-ranking's
+    own 115-bar requirement, since RSI/ADX only need ~14-20 bars to warm up.
+    See _fetch_raw_candles_sync's own docstring for the fetch/auth-guard
+    details this reuses."""
+    raw = _fetch_raw_candles_sync(symbol, min_bars=41)
+    if raw is None:
+        return None
+    try:
+        closes, highs, lows, volumes = raw["close"], raw["high"], raw["low"], raw["volume"]
+        idx = len(closes) - 1
         return {
             "rsi": _compute_rsi(closes)[idx],
             "adx": _compute_adx(highs, lows, closes)[idx],
@@ -285,7 +301,7 @@ def _fetch_indicators_sync(symbol: str) -> Optional[dict]:
             "er": _efficiency_ratio_at(closes, idx),
         }
     except Exception:  # noqa: BLE001
-        logger.exception("%s: indicator fetch failed - shadow logging skips this one row, no other effect", symbol)
+        logger.exception("%s: indicator computation failed - shadow logging skips this one row, no other effect", symbol)
         return None
 
 
@@ -598,3 +614,191 @@ async def check_option_liquidity(option_trading_symbol: str) -> tuple[bool, Opti
         if not passes: ... skip the entry ..."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, check_option_liquidity_sync, option_trading_symbol)
+
+
+# --------------------------------------------------------------------- #
+# MA-ribbon-expansion ranking + switch-shadow monitoring (added 18 Sep
+# 2026, see ribbon_score.py's own module docstring for what the score
+# measures and design rationale - built after backtesting confirmed a
+# real improvement over the day-change%-only ranking on 2026-09-17's real
+# alerts). `import ribbon_score` is done LOCALLY inside each function
+# below rather than at module level: ribbon_score.py itself imports
+# _compute_adx/_compute_rsi/_efficiency_ratio_at FROM this module, so a
+# top-level import the other way would be a circular import. Same local-
+# import-to-avoid-a-cycle pattern already used in this codebase - see
+# Luxury/luxury_main.py's manual_square_off endpoint.
+# --------------------------------------------------------------------- #
+RIBBON_SWITCH_SHADOW_LOG_NAME = "ribbon_switch_shadow"
+
+# score_ribbon_expansion needs its slowest EMA (100) fully warm plus a
+# lookback margin (ribbon_score.DEFAULT_LOOKBACK_BARS) - a materially
+# higher bar than _fetch_indicators_sync's own 41-bar minimum, since RSI/
+# ADX warm up far faster than a 100-period EMA.
+def _ribbon_min_bars() -> int:
+    import ribbon_score
+    return 100 + ribbon_score.DEFAULT_LOOKBACK_BARS
+
+
+def rank_by_ribbon_expansion_sync(
+    stock_symbols: list[str], top_n: int, min_score: Optional[float] = None,
+) -> list[tuple[str, float]]:
+    """Blocking - CE/bullish-alert-only drop-in alternative to
+    trading_engine.rank_and_pick_top_stocks' day-change%-only ranking.
+    Returns [(symbol, ribbon_score_total), ...], same shape so it's a
+    drop-in swap at call sites - EXCEPT it also enforces a real minimum-
+    quality bar (min_score, defaults to ribbon_score.MIN_ENTRY_SCORE) the
+    day-change% ranking never had: a candidate scoring below this is
+    simply never returned, even if that means returning fewer than top_n
+    symbols (or none at all on a genuinely weak alert) - callers'
+    existing "if not ranked: no_action" handling already covers this.
+
+    CE-side/bullish-alert use ONLY. score_ribbon_expansion only detects
+    BULLISH ribbon expansion (ascending EMA stack, breakout above the
+    ribbon) - there is no validated bearish/PUT-side counterpart yet, so
+    callers must keep using rank_and_pick_top_stocks for a PE/bearish
+    alert regardless of config.RIBBON_RANKING_ENABLED.
+
+    Paced the same 0.35s apart as rank_and_pick_top_stocks' own day-
+    change% fetch - this does one Dhan call per candidate too (5-min
+    candles), same rate-limit consideration."""
+    import ribbon_score  # local import - see this section's own header note
+
+    if min_score is None:
+        min_score = ribbon_score.MIN_ENTRY_SCORE
+
+    scored: list[tuple[str, float]] = []
+    min_bars = _ribbon_min_bars()
+    for i, symbol in enumerate(stock_symbols):
+        if i > 0:
+            time.sleep(CANDIDATE_FETCH_PACING_SECONDS)
+        raw = _fetch_raw_candles_sync(symbol, min_bars=min_bars)
+        if raw is None:
+            continue
+        try:
+            score = ribbon_score.score_ribbon_expansion(raw["high"], raw["low"], raw["close"], symbol=symbol)
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: ribbon score computation failed - excluded from this ranking", symbol)
+            continue
+        if score is not None and score.total >= min_score:
+            scored.append((symbol, score.total))
+
+    scored.sort(key=lambda t: t[1], reverse=True)
+    return scored[:top_n] if top_n > 0 else []
+
+
+async def rank_by_ribbon_expansion(
+    stock_symbols: list[str], top_n: int, min_score: Optional[float] = None,
+) -> list[tuple[str, float]]:
+    """Async wrapper - see rank_by_ribbon_expansion_sync's own docstring."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, rank_by_ribbon_expansion_sync, stock_symbols, top_n, min_score)
+
+
+def _log_switch_shadow_sync(
+    strategy: str, option_type: str, candidate_symbol: str, candidate_total: float,
+    open_positions: list[dict],
+) -> None:
+    """Blocking - must be called via run_in_executor. SHADOW ONLY: scores
+    the strategy's real currently-open positions' CURRENT trend health and
+    asks ribbon_score.decide_switch() what it would recommend for a
+    candidate that just won the (real, ribbon-based) ranking - then just
+    logs the answer. NEVER calls any real exit/entry code and never
+    affects the real webhook response either way.
+
+    `open_positions`: [{"symbol": underlying_symbol, "opened_at": iso str
+    from position_store.snapshot()}, ...] for this strategy/option_type's
+    real live positions right now.
+
+    Added 18 Sep 2026 per user request: ranking-only is going live behind
+    config.RIBBON_RANKING_ENABLED, but the SWITCHING half of what was
+    backtested (actively exiting a held position for a better one) stays
+    shadow-only pending a full day's worth of real switch-decision data to
+    evaluate - see ribbon_score.decide_switch's own docstring for exactly
+    what real live wiring would still need (a new exit_reason, real-time
+    re-scoring of open positions in the monitor loop, and the same
+    explicit sign-off every other live-trading-behavior change here has
+    gone through)."""
+    import ribbon_score  # local import - see this section's own header note
+
+    if dhan_wrapper._client is None or not open_positions:
+        return
+    try:
+        min_bars = _ribbon_min_bars()
+        scored_open = []
+        for p in open_positions:
+            raw = _fetch_raw_candles_sync(p["symbol"], min_bars=min_bars)
+            if raw is None:
+                continue
+            score = ribbon_score.score_ribbon_expansion(raw["high"], raw["low"], raw["close"], symbol=p["symbol"])
+            if score is None:
+                continue
+            opened_at = datetime.fromisoformat(p["opened_at"])
+            if opened_at.tzinfo is None:
+                opened_at = opened_at.replace(tzinfo=IST)
+            held_minutes = (datetime.now(IST) - opened_at.astimezone(IST)).total_seconds() / 60.0
+            scored_open.append(ribbon_score.OpenPositionForSwitch(p["symbol"], score, held_minutes))
+
+        if not scored_open:
+            return
+
+        # Only .total is read off the candidate side by decide_switch - the
+        # other fields are informational-only for a candidate, so a dummy
+        # RibbonScore carrying just the real total is sufficient here.
+        candidate_score = ribbon_score.RibbonScore(
+            total=candidate_total, compression=0.0, trigger=0.0, fanout=0.0,
+            pullback=0.0, confirmation=0.0, bars_since_trigger=None,
+        )
+        decision = ribbon_score.decide_switch(
+            scored_open, candidate_symbol, candidate_score, max_positions=len(open_positions),
+        )
+        record = {
+            "strategy": strategy, "option_type": option_type, "candidate_symbol": candidate_symbol,
+            "candidate_score": round(candidate_total, 2),
+            "open_positions": [{"symbol": p.symbol, "health": round(ribbon_score.held_position_health(p.score), 2),
+                                 "held_minutes": round(p.held_minutes, 1)} for p in scored_open],
+            "would_switch": decision.should_switch, "would_exit_symbol": decision.exit_symbol,
+            "reason": decision.reason, "logged_at": datetime.now().isoformat(),
+        }
+        append_jsonl(RIBBON_SWITCH_SHADOW_LOG_NAME, record)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: switch-shadow logging failed - no other effect", candidate_symbol)
+
+
+async def log_switch_shadow(
+    strategy: str, option_type: str, candidate_symbol: str, candidate_total: float, open_positions: list[dict],
+) -> None:
+    """Async wrapper - call via asyncio.create_task, fire-and-forget, right
+    after rank_by_ribbon_expansion returns a top candidate."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None, _log_switch_shadow_sync, strategy, option_type, candidate_symbol, candidate_total, open_positions,
+    )
+
+
+async def log_ribbon_switch_shadow_for_alert(strategy: str, option_type: str, stocks: list[str], position_store) -> None:
+    """Async, fire-and-forget, self-contained - computes its OWN ribbon-
+    ranking top candidate for `stocks` and shadow-logs what decide_switch()
+    would recommend against the strategy's REAL currently-open positions.
+
+    Deliberately INDEPENDENT of config.RIBBON_RANKING_ENABLED and of
+    whatever the real entry path actually does with `stocks` - call sites
+    should invoke this unconditionally (CE/prefer_highest alerts only) so
+    switch-shadow data keeps accumulating even while ranking-only itself
+    is off (see config.RIBBON_RANKING_ENABLED's own comment on why it
+    currently defaults false). Never touches a real position; never
+    raises into its caller - any failure here has zero effect on the real
+    webhook response, which has typically already been returned by the
+    time this runs anyway."""
+    try:
+        ranked = await rank_by_ribbon_expansion(stocks, top_n=1)
+        if not ranked:
+            return
+        top_symbol, top_score = ranked[0]
+        snapshot = await position_store.snapshot()
+        open_positions = [
+            {"symbol": p["underlying_symbol"], "opened_at": p["opened_at"]}
+            for p in snapshot["live_positions"] if p.get("option_type") == option_type
+        ]
+        await log_switch_shadow(strategy, option_type, top_symbol, top_score, open_positions)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: switch-shadow-for-alert failed - no other effect", strategy)
