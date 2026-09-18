@@ -743,10 +743,36 @@ async def _get_ltp(position: Position) -> float:
     segment - see Swing/config.py's own note on this), so both are plain
     REST always - a 5s poll is adequate for a swing strategy's equity/
     Copper leg (MCX WS support deliberately deferred, 12 Sep 2026 - see
-    Swing/config.py's MCX_SYMBOLS docstring)."""
+    Swing/config.py's MCX_SYMBOLS docstring).
+
+    Added 18 Sep 2026 (same day, user follow-up request): an MCX position
+    (basket_type=="OPTIONS", exchange_segment=="MCX_COMM") falls back to
+    get_last_historical_close (MCX segment codes) if the plain REST
+    get_option_ltp call fails, same second tier Options/Futures/Luxury's
+    own _get_ltp already has for NSE - observed live on COPPER/NATURALGAS
+    the same day: a consistent first-attempt "No LTP returned" that
+    self-healed via get_option_ltp's own internal retry every time so far,
+    but with zero fallback at all if that retry ever doesn't recover.
+    Equity keeps the old plain-REST-no-fallback behavior - out of today's
+    scope, and get_last_historical_close isn't built for an EQUITY
+    instrument_type anyway."""
     loop = asyncio.get_running_loop()
     if position.exchange_segment != "NSE_FNO":
-        return await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, position.trading_symbol)
+        try:
+            return await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, position.trading_symbol)
+        except Exception:
+            if position.exchange_segment == "MCX_COMM":
+                fallback = await loop.run_in_executor(
+                    None, dhan_wrapper.get_last_historical_close, position.trading_symbol,
+                    "MCX", "MCX_COMM", "OPTFUT",
+                )
+                if fallback is not None:
+                    logger.warning(
+                        "%s: live LTP unavailable - using last historical close %.2f as this tick's "
+                        "exit-check price instead of going blind", position.trading_symbol, fallback,
+                    )
+                    return fallback
+            raise
     ltp = await loop.run_in_executor(None, dhan_wrapper.get_cached_option_ltp, position.trading_symbol)
     if ltp is not None:
         return ltp
@@ -765,13 +791,16 @@ async def _handle_ltp_staleness(symbol: str, position: Position) -> None:
     REST calls do occasionally blip) is not itself alarming; this only
     fires once the position has gone truly dark for a sustained stretch.
 
-    The historical-close fallback (get_last_historical_close) only covers
-    the NSE_FNO OPTSTK shape - correct for basket_type=="OPTIONS" (what
-    the real ANGELONE incident was), which is also this package's default
-    and most-used basket_type. For FUTURES/EQUITY it falls back straight
-    to position.entry_price instead of attempting a fetch that function
-    isn't built for - purely a rough logging mark either way (see that
-    function's own docstring: no real order depends on this value)."""
+    The historical-close fallback (get_last_historical_close) covers both
+    the NSE_FNO OPTSTK shape (basket_type=="OPTIONS", the real ANGELONE
+    incident's own shape, and this package's default/most-used basket_
+    type) and, extended 18 Sep 2026, an MCX OPTFUT position (COPPER/
+    NATURALGAS) via the same real, empirically-confirmed MCX segment
+    codes get_liquid_atm_option already uses. For FUTURES/EQUITY it falls
+    back straight to position.entry_price instead of attempting a fetch
+    that function isn't built for - purely a rough logging mark either
+    way (see that function's own docstring: no real order depends on
+    this value)."""
     key = (symbol, position.opened_at)
     # Real incident 18 Sep 2026 - see config.MARKET_OPEN_TIME's own
     # docstring for the full story (OIL/Options closed at a real -Rs 280
@@ -793,9 +822,15 @@ async def _handle_ltp_staleness(symbol: str, position: Position) -> None:
     fallback_price = None
     if position.basket_type == "OPTIONS":
         loop = asyncio.get_running_loop()
-        fallback_price = await loop.run_in_executor(
-            None, dhan_wrapper.get_last_historical_close, position.option_trading_symbol
-        )
+        if position.exchange_segment == "MCX_COMM":
+            fallback_price = await loop.run_in_executor(
+                None, dhan_wrapper.get_last_historical_close, position.option_trading_symbol,
+                "MCX", "MCX_COMM", "OPTFUT",
+            )
+        else:
+            fallback_price = await loop.run_in_executor(
+                None, dhan_wrapper.get_last_historical_close, position.option_trading_symbol
+            )
     if fallback_price is None:
         fallback_price = position.entry_price
     if await position_store.try_start_exit(symbol):

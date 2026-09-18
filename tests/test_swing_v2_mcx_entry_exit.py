@@ -248,6 +248,123 @@ async def test_5_options_only_override_is_scoped_to_copper_not_all_mcx_symbols()
         sc.MCX_SYMBOLS = real_mcx_symbols
 
 
+def _mcx_position(trading_symbol="NATURALGAS 23 SEP 280 CALL", entry_price=6.70):
+    from Swing.position_store import Position
+    return Position(
+        underlying_symbol="NATURALGAS", trading_symbol=trading_symbol, basket_type="OPTIONS",
+        regime="UNKNOWN", instrument_side="LONG", exchange_segment="MCX_COMM", product_type="MARGIN",
+        quantity=1, lot_size=1, entry_price=entry_price, best_price=entry_price,
+        target_price=entry_price * 1.2, hard_stop_loss=entry_price * 0.8, order_id="",
+        pnl_multiplier=1250,
+    )
+
+
+async def test_6_get_ltp_falls_back_to_mcx_historical_close_when_rest_ltp_fails():
+    """Real observation, same day (18 Sep 2026): COPPER/NATURALGAS showed a
+    consistent first-attempt "No LTP returned" during live MCX trading
+    hours, self-healing via get_option_ltp's own internal retry every
+    time so far - but _get_ltp had ZERO fallback tier for MCX at all if
+    that retry ever doesn't recover, unlike the NSE-tuned _get_ltp in
+    Options/Futures/Luxury (built earlier the same day for the ABB
+    incident). This is the MCX equivalent of that same fix."""
+    real_get_ltp = odc.dhan_wrapper.get_option_ltp
+    real_historical = odc.dhan_wrapper.get_last_historical_close
+    calls = []
+    odc.dhan_wrapper.get_option_ltp = lambda ts: (_ for _ in ()).throw(
+        ValueError(f"No LTP returned for {ts}")
+    )
+
+    def fake_historical(trading_symbol, expected_exchange=None, exchange_segment=None, instrument_type=None):
+        calls.append((expected_exchange, exchange_segment, instrument_type))
+        return 6.50
+
+    odc.dhan_wrapper.get_last_historical_close = fake_historical
+    try:
+        pos = _mcx_position()
+        result = await ste._get_ltp(pos)
+        assert result == 6.50, f"expected the MCX historical-close fallback value, got {result}"
+        assert calls == [("MCX", "MCX_COMM", "OPTFUT")], \
+            f"expected the real MCX segment codes passed through, got {calls}"
+        print("6. _get_ltp falls back to the MCX historical close (real MCX_COMM/OPTFUT segment codes) "
+              "when get_option_ltp fails for an MCX position, instead of going blind: PASSED")
+    finally:
+        odc.dhan_wrapper.get_option_ltp = real_get_ltp
+        odc.dhan_wrapper.get_last_historical_close = real_historical
+
+
+async def test_7_get_ltp_still_raises_when_both_mcx_sources_fail():
+    real_get_ltp = odc.dhan_wrapper.get_option_ltp
+    real_historical = odc.dhan_wrapper.get_last_historical_close
+    odc.dhan_wrapper.get_option_ltp = lambda ts: (_ for _ in ()).throw(
+        ValueError(f"No LTP returned for {ts}")
+    )
+    odc.dhan_wrapper.get_last_historical_close = lambda *a, **k: None
+    try:
+        pos = _mcx_position()
+        try:
+            await ste._get_ltp(pos)
+            assert False, "expected _get_ltp to raise when both the live LTP and the MCX historical fallback fail"
+        except ValueError as e:
+            assert "No LTP returned" in str(e), str(e)
+        print("7. _get_ltp still raises (preserving the existing LTP-staleness escalation path) when "
+              "BOTH get_option_ltp AND the MCX historical-close fallback fail: PASSED")
+    finally:
+        odc.dhan_wrapper.get_option_ltp = real_get_ltp
+        odc.dhan_wrapper.get_last_historical_close = real_historical
+
+
+async def test_8_ltp_staleness_uses_mcx_segment_codes_for_an_mcx_position():
+    """Isolates ONLY the fallback-price computation inside _handle_ltp_
+    staleness - _exit_position itself is stubbed out (recording what
+    price it was called with) rather than exercised for real, since this
+    file's own install_mocks() was built for entry-flow tests only and
+    doesn't cover _exit_position's own broker calls (get_pending_order_id
+    etc.) - going through the real exit machinery without those mocked
+    would touch dhan_wrapper.client and attempt a REAL, unmocked Dhan
+    login (caught live while writing this test - see trading-skills'
+    incidents/2026-09-08-test-suite-real-auth-leak.md for why this is
+    exactly the risk this suite's mocking conventions exist to avoid).
+    The real exit-placement path itself is already covered by
+    test_swing_v2_entry_exit.py's own test_14 (the NSE equivalent)."""
+    from datetime import datetime, timedelta
+    real_historical = odc.dhan_wrapper.get_last_historical_close
+    real_try_start_exit = ste.position_store.try_start_exit
+    real_exit_position = ste._exit_position
+    calls = []
+    exit_calls = []
+
+    def fake_historical(trading_symbol, expected_exchange=None, exchange_segment=None, instrument_type=None):
+        calls.append((expected_exchange, exchange_segment, instrument_type))
+        return 6.50
+
+    async def fake_try_start_exit(symbol):
+        return True
+
+    async def fake_exit_position(symbol, position, price, reason):
+        exit_calls.append((symbol, price, reason))
+
+    odc.dhan_wrapper.get_last_historical_close = fake_historical
+    ste.position_store.try_start_exit = fake_try_start_exit
+    ste._exit_position = fake_exit_position
+    ste._ltp_failure_since.clear()
+    try:
+        pos = _mcx_position()
+        key = ("NATURALGAS", pos.opened_at)
+        ste._ltp_failure_since[key] = datetime.now() - timedelta(minutes=sc.LTP_STALE_FORCE_EXIT_MINUTES + 1)
+        await ste._handle_ltp_staleness("NATURALGAS", pos)
+        assert calls == [("MCX", "MCX_COMM", "OPTFUT")], \
+            f"expected _handle_ltp_staleness to use the real MCX segment codes, got {calls}"
+        assert exit_calls == [("NATURALGAS", 6.50, "LTP_STALE_FORCED_EXIT")], \
+            f"expected the forced exit to use the MCX historical-close fallback price, got {exit_calls}"
+        print("8. _handle_ltp_staleness's own historical-close fallback uses the real MCX segment "
+              "codes for an MCX position too (previously NSE-only): PASSED")
+    finally:
+        odc.dhan_wrapper.get_last_historical_close = real_historical
+        ste.position_store.try_start_exit = real_try_start_exit
+        ste._exit_position = real_exit_position
+        ste._ltp_failure_since.clear()
+
+
 async def main():
     print("=== Swing v2 Copper/MCX entry-exit routing test suite ===\n")
     await test_1_copper_options_entry_uses_mcx_routing()
@@ -255,6 +372,9 @@ async def main():
     await test_3_exit_ladder_uses_pnl_multiplier_not_quantity()
     await test_4_ws_never_subscribed_for_a_copper_position()
     await test_5_options_only_override_is_scoped_to_copper_not_all_mcx_symbols()
+    await test_6_get_ltp_falls_back_to_mcx_historical_close_when_rest_ltp_fails()
+    await test_7_get_ltp_still_raises_when_both_mcx_sources_fail()
+    await test_8_ltp_staleness_uses_mcx_segment_codes_for_an_mcx_position()
     print("\nALL SWING V2 MCX ENTRY-EXIT CHECKS PASSED")
 
 

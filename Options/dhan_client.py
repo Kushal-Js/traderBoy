@@ -1982,7 +1982,10 @@ class DhanWrapper:
         cached = self._liquidity_cache.get(option_trading_symbol)
         return cached[1] if cached else None
 
-    def get_last_historical_close(self, option_trading_symbol: str) -> Optional[float]:
+    def get_last_historical_close(
+        self, option_trading_symbol: str, expected_exchange: str = "NSE",
+        exchange_segment: str = "NSE_FNO", instrument_type: str = "OPTSTK",
+    ) -> Optional[float]:
         """Fallback-of-the-fallback price source for when the LIVE LTP path
         (WebSocket + REST get_option_ltp) has been dead for a while - the
         option's own historical 1-min candles, which stay available even
@@ -1991,7 +1994,7 @@ class DhanWrapper:
         whole day the live LTP feed was down - see trading-skills'
         incidents/2026-09-10-icicipruli-unmonitorable-position.md). Reuses
         the exact same fetch shape as refresh_liquidity_signal (security_id
-        via _instrument_meta, NSE_FNO/OPTSTK, 1-min interval).
+        via _instrument_meta, 1-min interval).
 
         Originally scoped to forced-exit logging/pnl estimates only; also
         used (18 Sep 2026, ABB 29 SEP 7200 CALL incident) as _get_ltp's
@@ -2006,10 +2009,24 @@ class DhanWrapper:
         function returns. Returns None (not an exception) on any failure -
         callers should fall back to something else (e.g. position.entry_price,
         or re-raising to let the caller's own staleness handling take over)
-        rather than block on this being unavailable too."""
+        rather than block on this being unavailable too.
+
+        `expected_exchange`/`exchange_segment`/`instrument_type` default to
+        NSE stock options - every existing NSE call site (Options/Futures/
+        Luxury's own _get_ltp fallback) stays byte-identical. Extended to
+        MCX 18 Sep 2026 (same day, user follow-up request after observing a
+        real, consistent first-attempt LTP hiccup on COPPER/NATURALGAS
+        during live MCX trading hours - self-healing via get_option_ltp's
+        own retry so far, but with no fallback tier at all for the case
+        where it doesn't) - pass "MCX"/"MCX_COMM"/"OPTFUT" instead, the
+        same real, empirically-confirmed segment codes get_liquid_atm_
+        option already uses (Swing/trading_engine.py's own _get_ltp and
+        _handle_ltp_staleness now do exactly this for an MCX position)."""
         try:
-            security_id = self._instrument_meta(option_trading_symbol, expected_exchange="NSE")["security_id"]
-            data = self.fetch_continuous_intraday(security_id, "NSE_FNO", "OPTSTK", 1)
+            security_id = self._instrument_meta(
+                option_trading_symbol, expected_exchange=expected_exchange,
+            )["security_id"]
+            data = self.fetch_continuous_intraday(security_id, exchange_segment, instrument_type, 1)
             closes = data.get("close") or []
             timestamps = data.get("timestamp") or []
             if timestamps:
