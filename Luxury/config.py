@@ -64,6 +64,13 @@ RIBBON_RANKING_PE_ENABLED = os.getenv("LUXURY_RIBBON_RANKING_PE_ENABLED", "true"
 MAX_LIVE_POSITIONS_CE = int(os.getenv("LUXURY_MAX_LIVE_POSITIONS_CE", "2"))
 MAX_LIVE_POSITIONS_PE = int(os.getenv("LUXURY_MAX_LIVE_POSITIONS_PE", "2"))
 
+# Opening-burst extra CE capacity - see Options/config.py's own comment on
+# this same setting for the full rationale/backtest reference.
+BURST_CAPACITY_ENABLED = os.getenv("LUXURY_BURST_CAPACITY_ENABLED", "true").lower() == "true"
+BURST_WINDOW_START = os.getenv("LUXURY_BURST_WINDOW_START", "09:15")
+BURST_WINDOW_END = os.getenv("LUXURY_BURST_WINDOW_END", "10:00")
+BURST_EXTRA_SLOTS_CE = int(os.getenv("LUXURY_BURST_EXTRA_SLOTS_CE", "1"))
+
 # See Options/config.py's identical MAX_DAILY_ENTRIES_PER_SYMBOL - this
 # package's own independently-tunable daily re-entry cap (user request
 # 1 Sep 2026), same "same underlying, across the whole day" semantics.

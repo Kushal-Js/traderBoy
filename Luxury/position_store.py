@@ -24,14 +24,17 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time as dtime
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from . import config
 from trade_history import fire_and_forget, record_closed_trade, record_opened_position
 import reversal_filters
 
 logger = logging.getLogger("luxury_position_store")
+
+_IST = ZoneInfo(config.MARKET_TZ)
 
 # Placeholder for Position.pending_exit_order_id while an exit attempt is
 # claimed (via try_start_exit) but doesn't have a real order_id yet.
@@ -131,8 +134,20 @@ class Position:
         return floor
 
 
+def _in_burst_window(now: Optional[datetime] = None) -> bool:
+    now = (now or datetime.now(_IST)).astimezone(_IST)
+    start_h, start_m = (int(x) for x in config.BURST_WINDOW_START.split(":"))
+    end_h, end_m = (int(x) for x in config.BURST_WINDOW_END.split(":"))
+    return dtime(start_h, start_m) <= now.time() <= dtime(end_h, end_m)
+
+
 def _cap_for(option_type: str) -> int:
-    return config.MAX_LIVE_POSITIONS_CE if option_type == "CE" else config.MAX_LIVE_POSITIONS_PE
+    base = config.MAX_LIVE_POSITIONS_CE if option_type == "CE" else config.MAX_LIVE_POSITIONS_PE
+    # Opening-burst extra CE slot - see Options/position_store.py's own
+    # comment on this same mechanism for the full rationale/backtest ref.
+    if option_type == "CE" and config.BURST_CAPACITY_ENABLED and _in_burst_window():
+        base += config.BURST_EXTRA_SLOTS_CE
+    return base
 
 
 class PositionStore:

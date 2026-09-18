@@ -123,6 +123,19 @@ RIBBON_RANKING_PE_ENABLED = os.getenv("RIBBON_RANKING_PE_ENABLED", "true").lower
 MAX_LIVE_POSITIONS_CE = int(os.getenv("MAX_LIVE_POSITIONS_CE", "2"))
 MAX_LIVE_POSITIONS_PE = int(os.getenv("MAX_LIVE_POSITIONS_PE", "2"))
 
+# Opening-burst extra CE capacity (added 19 Sep 2026, backtested against 6
+# days of real alerts/shadow data - see trading-skills' designs/opening-
+# burst-slot-and-sl-target-sensitivity.md). The highest-quality window for
+# alerts we'd otherwise drop for lack of capacity is right after open, and
+# a single extra slot held open a bit longer (09:15-10:00, not just the
+# first 25 min) captures more of that than a second permanent slot would,
+# since it cycles through multiple positions as they resolve. CE only -
+# the backtest never modeled PE (shadow_evaluator itself is CE-only).
+BURST_CAPACITY_ENABLED = os.getenv("BURST_CAPACITY_ENABLED", "true").lower() == "true"
+BURST_WINDOW_START = os.getenv("BURST_WINDOW_START", "09:15")
+BURST_WINDOW_END = os.getenv("BURST_WINDOW_END", "10:00")
+BURST_EXTRA_SLOTS_CE = int(os.getenv("BURST_EXTRA_SLOTS_CE", "1"))
+
 # Daily re-entry cap, added 1 Sep 2026 (user request: "only allow entry
 # into same trade max 3 times a day for Luxury, Options and Future
 # package") - independent of MAX_LIVE_POSITIONS_CE/_PE above (that caps
