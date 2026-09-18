@@ -236,12 +236,14 @@ async def _handle_chartink_webhook(
         }
 
     loop = asyncio.get_running_loop()
-    # MA-ribbon-expansion ranking (added 18 Sep 2026, config.RIBBON_
-    # RANKING_ENABLED) - see Options/option_main.py's identical call and
-    # reversal_filters.rank_by_ribbon_expansion's own docstring for why PE
-    # always keeps the original day-change% ranking regardless of this flag.
-    if config.RIBBON_RANKING_ENABLED and prefer_highest:
+    # MA-ribbon-expansion ranking (CE added 18 Sep 2026, PE extended the
+    # same day) - see Options/option_main.py's identical call and
+    # config.RIBBON_RANKING_PE_ENABLED's own comment for why PE is its own
+    # separate flag (unbacktested, unlike the CE side).
+    if prefer_highest and config.RIBBON_RANKING_ENABLED:
         ranked = await reversal_filters.rank_by_ribbon_expansion(stocks, config.TOP_N_STOCKS)
+    elif not prefer_highest and config.RIBBON_RANKING_PE_ENABLED:
+        ranked = await reversal_filters.rank_by_ribbon_breakdown(stocks, config.TOP_N_STOCKS)
     else:
         ranked = await loop.run_in_executor(
             None, rank_and_pick_top_stocks, stocks, config.TOP_N_STOCKS, prefer_highest
@@ -255,15 +257,15 @@ async def _handle_chartink_webhook(
             "Luxury", payload.scan_name, option_type, stocks, [s for s, _ in ranked],
         ))
 
-    # Ribbon switch-shadow monitoring (added 18 Sep 2026) - see Options/
-    # option_main.py's identical call and reversal_filters.log_ribbon_
-    # switch_shadow_for_alert's own docstring. Independent of the ranking
-    # flag - keeps collecting data even while ranking-only is off. NEVER
+    # Ribbon switch-shadow monitoring (CE added 18 Sep 2026, extended to PE
+    # the same day) - see Options/option_main.py's identical call and
+    # reversal_filters.log_ribbon_switch_shadow_for_alert's own docstring.
+    # Independent of both ranking flags - keeps collecting data for both
+    # CE and PE even while ranking-only is off for that side. NEVER
     # touches a real position.
-    if prefer_highest:
-        asyncio.create_task(reversal_filters.log_ribbon_switch_shadow_for_alert(
-            "Luxury", option_type, stocks, position_store,
-        ))
+    asyncio.create_task(reversal_filters.log_ribbon_switch_shadow_for_alert(
+        "Luxury", option_type, stocks, position_store,
+    ))
 
     if not ranked:
         _log_alert("no_action", "could_not_rank_any_stock")

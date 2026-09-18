@@ -107,6 +107,15 @@ def _is_stacked_bullish(ribbon_values: list[Optional[float]]) -> bool:
     return all(ribbon_values[i] > ribbon_values[i + 1] for i in range(len(ribbon_values) - 1))
 
 
+def _is_stacked_bearish(ribbon_values: list[Optional[float]]) -> bool:
+    """Mirror of _is_stacked_bullish - every EMA strictly BELOW the next-
+    slower one, fastest first: the "ribbon in clean bearish order"
+    condition a fanned-out downtrend produces."""
+    if any(v is None for v in ribbon_values):
+        return False
+    return all(ribbon_values[i] < ribbon_values[i + 1] for i in range(len(ribbon_values) - 1))
+
+
 def score_ribbon_expansion(
     highs: list[float], lows: list[float], closes: list[float],
     *, lookback_bars: int = DEFAULT_LOOKBACK_BARS, symbol: str = "", as_of_label: str = "",
@@ -211,6 +220,130 @@ def score_ribbon_expansion(
         adx_now is not None and adx_now >= ADX_CONFIRM_THRESHOLD,
         er_now is not None and er_now >= ER_CONFIRM_THRESHOLD,
         bullish_cross,
+    ])
+    confirmation_score = 100 * confirms / 3
+
+    raw_total = (
+        0.25 * compression_score + 0.25 * trigger_score + 0.25 * fanout_score
+        + 0.15 * pullback_score + 0.10 * confirmation_score
+    )
+    total = max(0.0, min(100.0, raw_total))
+
+    return RibbonScore(
+        total=round(total, 2), compression=round(compression_score, 2),
+        trigger=round(trigger_score, 2), fanout=round(fanout_score, 2),
+        pullback=round(pullback_score, 2), confirmation=round(confirmation_score, 2),
+        bars_since_trigger=bars_since_trigger,
+        detail={
+            "symbol": symbol, "as_of": as_of_label, "stacked": stacked, "widening": widening,
+            "structure_broken": structure_broken,
+            "adx": round(adx_now, 2) if adx_now is not None else None,
+            "er": round(er_now, 3) if er_now is not None else None,
+            "ribbon_width_pct_now": round(current_w * 100, 3),
+            "ribbon_width_pct_tightest": round(tightest_w * 100, 3),
+            "bars_since_tightest": bars_since_tightest,
+        },
+    )
+
+
+def score_ribbon_breakdown(
+    highs: list[float], lows: list[float], closes: list[float],
+    *, lookback_bars: int = DEFAULT_LOOKBACK_BARS, symbol: str = "", as_of_label: str = "",
+) -> Optional[RibbonScore]:
+    """PE/bearish mirror of score_ribbon_expansion (added 18 Sep 2026, user
+    request to extend ranking-only to PE alerts). Same five components,
+    same weights, same 0-100 scale - every comparison is simply inverted:
+    a tight ribbon that breaks DOWN through the whole ribbon, fans out in
+    DESCENDING (bearish) order, and - if a bounce is under way - holds
+    below the fastest EMA rather than reclaiming it.
+
+    IMPORTANT CAVEAT: unlike score_ribbon_expansion, this function has NOT
+    been backtested against real data - the 2026-09-17 backtest (see
+    backtest_ribbon_expansion_sep17.py) was explicitly CE-only, because
+    shadow_evaluator.py's own simulated fills are always CE-ATM regardless
+    of alert direction. This is built on the reasonable, standard
+    assumption that a ribbon-compression/expansion pattern is direction-
+    symmetric (a well-established idea in technical analysis - the same
+    reasoning already applied when reusing check_trend_strength's ADX/ER
+    thresholds here), not on its own empirical confirmation. Treat its
+    real-world performance as unproven until it has its own trade history
+    to look back on."""
+    n = len(closes)
+    if n < 100 + lookback_bars:
+        return None
+    idx = n - 1
+
+    emas = {p: _compute_ema(closes, p) for p in RIBBON_PERIODS}
+    if any(emas[p][idx] is None for p in RIBBON_PERIODS):
+        return None
+    adx = _compute_adx(highs, lows, closes)
+
+    def ribbon_at(i: int) -> list[Optional[float]]:
+        return [emas[p][i] for p in RIBBON_PERIODS]
+
+    window = range(max(0, idx - lookback_bars), idx + 1)
+    widths = [(i, _ribbon_width_pct(ribbon_at(i), closes[i])) for i in window]
+    widths = [(i, w) for i, w in widths if w is not None]
+    if len(widths) < 5:
+        return None
+
+    # --- 1. compression (direction-agnostic - identical to the bullish version) ---
+    tightest_i, tightest_w = min(widths, key=lambda t: t[1])
+    bars_since_tightest = idx - tightest_i
+    current_w = widths[-1][1]
+    expanded_since = (current_w - tightest_w) / tightest_w if tightest_w > 0 else float("inf")
+
+    compression_score = 0.0
+    if expanded_since >= MIN_EXPANSION_OFF_TROUGH:
+        recency_factor = max(0.0, 1 - bars_since_tightest / lookback_bars)
+        tightness_factor = max(0.0, 1 - min(tightest_w / FULLY_TIGHT_WIDTH_PCT, 1.0))
+        compression_score = 100 * 0.5 * (recency_factor + tightness_factor)
+
+    # --- 2. trigger - latest bar price closed BELOW the whole ribbon, having
+    # not been below it the bar before (a genuine first-breakdown event) ---
+    trigger_i: Optional[int] = None
+    for i in range(tightest_i, idx + 1):
+        vals = ribbon_at(i)
+        if any(v is None for v in vals):
+            continue
+        was_below = i > 0 and all(v is not None for v in ribbon_at(i - 1)) and closes[i - 1] < min(ribbon_at(i - 1))
+        if closes[i] < min(vals) and not was_below:
+            trigger_i = i
+    bars_since_trigger = (idx - trigger_i) if trigger_i is not None else None
+    trigger_score = 100 * max(0.0, 1 - bars_since_trigger / lookback_bars) if bars_since_trigger is not None else 0.0
+
+    # --- 3. fan-out - ribbon stacked bearish, still widening ---
+    stacked = _is_stacked_bearish(ribbon_at(idx))
+    widening = len(widths) >= 3 and widths[-1][1] > widths[-3][1]
+    fanout_score = 0.0
+    if stacked:
+        fanout_score = 100.0 if widening else 60.0
+
+    # --- 4. pullback (bounce)-without-structure-break ---
+    # A "pullback" against a downtrend is an UP bar; healthy if price stays
+    # BELOW the fastest EMA with the ribbon still bearishly stacked.
+    recent_up = idx >= 1 and closes[idx] > closes[idx - 1]
+    fastest_ema_now = emas[RIBBON_PERIODS[0]][idx]
+    below_fast_ema = fastest_ema_now is not None and closes[idx] <= fastest_ema_now
+    pullback_score = 0.0
+    structure_broken = False
+    if recent_up:
+        if stacked and below_fast_ema:
+            pullback_score = 100.0
+        else:
+            structure_broken = True
+            pullback_score = -100.0
+
+    # --- 5. technical-filter confirmation - ADX/ER thresholds unchanged
+    # (trend strength/efficiency are direction-agnostic); the EMA-cross
+    # check inverts to fastest-below-next (a bearish cross). ---
+    adx_now = adx[idx]
+    er_now = _efficiency_ratio_at(closes, idx)
+    bearish_cross = emas[RIBBON_PERIODS[0]][idx] < emas[RIBBON_PERIODS[1]][idx]
+    confirms = sum([
+        adx_now is not None and adx_now >= ADX_CONFIRM_THRESHOLD,
+        er_now is not None and er_now >= ER_CONFIRM_THRESHOLD,
+        bearish_cross,
     ])
     confirmation_score = 100 * confirms / 3
 

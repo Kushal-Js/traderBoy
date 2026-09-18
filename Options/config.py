@@ -89,6 +89,19 @@ SELECT_BOTTOM_N_STOCKS = os.getenv("SELECT_BOTTOM_N_STOCKS", "true").lower() == 
 # of them are actually about ranking) and the full suite re-confirmed
 # clean before this flipped true.
 RIBBON_RANKING_ENABLED = os.getenv("RIBBON_RANKING_ENABLED", "true").lower() == "true"
+
+# Separate flag for PE/bearish alerts (added 18 Sep 2026, user request) -
+# uses reversal_filters.rank_by_ribbon_breakdown (ribbon_score.score_
+# ribbon_breakdown's own bearish/breakdown mirror of the CE logic above).
+# Kept as its OWN flag, independent of RIBBON_RANKING_ENABLED, because the
+# PE/bearish direction has NOT been backtested against real data the way
+# the CE side was (2026-09-17's backtest was explicitly CE-only, since
+# shadow_evaluator.py's simulated fills are always CE-ATM regardless of
+# alert direction) - it's built on the reasonable but unconfirmed
+# assumption that the ribbon pattern is direction-symmetric. Being able to
+# turn this off independently of the CE side (which DOES have backtest
+# evidence behind it) is the whole point of a separate flag.
+RIBBON_RANKING_PE_ENABLED = os.getenv("RIBBON_RANKING_PE_ENABLED", "true").lower() == "true"
 # Separate caps per option type - CE (from /chartink/webhook) and PE (from
 # /chartink/webhook-sell) each get their own budget rather than sharing one
 # pool, so a run of bearish alerts can't crowd out capacity for bullish

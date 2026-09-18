@@ -294,12 +294,15 @@ async def _handle_chartink_webhook(
     # module docstring if this is ever wanted back for a specific
     # package.
     loop = asyncio.get_running_loop()
-    # MA-ribbon-expansion ranking (added 18 Sep 2026, config.RIBBON_
-    # RANKING_ENABLED) - CE/bullish alerts only, see reversal_filters.
-    # rank_by_ribbon_expansion's own docstring for why PE always keeps the
-    # original day-change% ranking regardless of this flag.
-    if config.RIBBON_RANKING_ENABLED and prefer_highest:
+    # MA-ribbon-expansion ranking (CE added 18 Sep 2026 behind config.
+    # RIBBON_RANKING_ENABLED; PE/bearish added the same day behind its own
+    # separate config.RIBBON_RANKING_PE_ENABLED - see that flag's own
+    # comment for why it's independent: the PE/bearish score has NOT been
+    # backtested against real data the way the CE side was).
+    if prefer_highest and config.RIBBON_RANKING_ENABLED:
         ranked = await reversal_filters.rank_by_ribbon_expansion(stocks, config.TOP_N_STOCKS)
+    elif not prefer_highest and config.RIBBON_RANKING_PE_ENABLED:
+        ranked = await reversal_filters.rank_by_ribbon_breakdown(stocks, config.TOP_N_STOCKS)
     else:
         ranked = await loop.run_in_executor(
             None, rank_and_pick_top_stocks, stocks, config.TOP_N_STOCKS, prefer_highest
@@ -317,19 +320,19 @@ async def _handle_chartink_webhook(
             "Options", payload.scan_name, option_type, stocks, [s for s, _ in ranked],
         ))
 
-    # Ribbon switch-shadow monitoring (added 18 Sep 2026, user request:
-    # ranking-only goes live behind config.RIBBON_RANKING_ENABLED above,
-    # but the SWITCHING half of what was backtested - exiting a held
-    # position early for a better one - stays shadow-only pending a full
-    # day's real switch-decision data. Deliberately independent of the
-    # ranking flag and of `ranked` above (self-contained, computes its own
-    # ribbon candidate) so this keeps collecting data even while ranking-
-    # only is off. NEVER touches a real position - see reversal_filters.
-    # log_ribbon_switch_shadow_for_alert's own docstring.
-    if prefer_highest:
-        asyncio.create_task(reversal_filters.log_ribbon_switch_shadow_for_alert(
-            "Options", option_type, stocks, position_store,
-        ))
+    # Ribbon switch-shadow monitoring (CE added 18 Sep 2026, extended to PE
+    # the same day) - ranking-only goes live behind config.RIBBON_RANKING_
+    # ENABLED/RIBBON_RANKING_PE_ENABLED above, but the SWITCHING half of
+    # what was backtested - exiting a held position early for a better one
+    # - stays shadow-only pending a full day's real switch-decision data,
+    # for BOTH CE and PE. Deliberately independent of both ranking flags
+    # and of `ranked` above (self-contained, computes its own ribbon
+    # candidate) so this keeps collecting data even while ranking-only is
+    # off for that side. NEVER touches a real position - see reversal_
+    # filters.log_ribbon_switch_shadow_for_alert's own docstring.
+    asyncio.create_task(reversal_filters.log_ribbon_switch_shadow_for_alert(
+        "Options", option_type, stocks, position_store,
+    ))
 
     if not ranked:
         _log_alert("no_action", "could_not_rank_any_stock")

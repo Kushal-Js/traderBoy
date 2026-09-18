@@ -639,30 +639,17 @@ def _ribbon_min_bars() -> int:
     return 100 + ribbon_score.DEFAULT_LOOKBACK_BARS
 
 
-def rank_by_ribbon_expansion_sync(
-    stock_symbols: list[str], top_n: int, min_score: Optional[float] = None,
-) -> list[tuple[str, float]]:
-    """Blocking - CE/bullish-alert-only drop-in alternative to
-    trading_engine.rank_and_pick_top_stocks' day-change%-only ranking.
-    Returns [(symbol, ribbon_score_total), ...], same shape so it's a
-    drop-in swap at call sites - EXCEPT it also enforces a real minimum-
-    quality bar (min_score, defaults to ribbon_score.MIN_ENTRY_SCORE) the
-    day-change% ranking never had: a candidate scoring below this is
-    simply never returned, even if that means returning fewer than top_n
-    symbols (or none at all on a genuinely weak alert) - callers'
-    existing "if not ranked: no_action" handling already covers this.
-
-    CE-side/bullish-alert use ONLY. score_ribbon_expansion only detects
-    BULLISH ribbon expansion (ascending EMA stack, breakout above the
-    ribbon) - there is no validated bearish/PUT-side counterpart yet, so
-    callers must keep using rank_and_pick_top_stocks for a PE/bearish
-    alert regardless of config.RIBBON_RANKING_ENABLED.
-
-    Paced the same 0.35s apart as rank_and_pick_top_stocks' own day-
-    change% fetch - this does one Dhan call per candidate too (5-min
-    candles), same rate-limit consideration."""
+def _rank_by_ribbon_score_sync(stock_symbols: list[str], top_n: int, min_score: Optional[float], score_fn_name: str) -> list[tuple[str, float]]:
+    """Shared blocking worker behind rank_by_ribbon_expansion_sync (CE) and
+    rank_by_ribbon_breakdown_sync (PE) - identical fetch/pacing/sort logic,
+    parameterized only by which ribbon_score function actually scores each
+    candidate. `score_fn_name` is a string (not the function object) so
+    this can still do the module-level local import once and look the
+    function up off it - see this section's own header note on why
+    `ribbon_score` is imported locally rather than at module scope."""
     import ribbon_score  # local import - see this section's own header note
 
+    score_fn = getattr(ribbon_score, score_fn_name)
     if min_score is None:
         min_score = ribbon_score.MIN_ENTRY_SCORE
 
@@ -675,7 +662,7 @@ def rank_by_ribbon_expansion_sync(
         if raw is None:
             continue
         try:
-            score = ribbon_score.score_ribbon_expansion(raw["high"], raw["low"], raw["close"], symbol=symbol)
+            score = score_fn(raw["high"], raw["low"], raw["close"], symbol=symbol)
         except Exception:  # noqa: BLE001
             logger.exception("%s: ribbon score computation failed - excluded from this ranking", symbol)
             continue
@@ -686,12 +673,47 @@ def rank_by_ribbon_expansion_sync(
     return scored[:top_n] if top_n > 0 else []
 
 
+def rank_by_ribbon_expansion_sync(
+    stock_symbols: list[str], top_n: int, min_score: Optional[float] = None,
+) -> list[tuple[str, float]]:
+    """Blocking - CE/bullish-alert drop-in alternative to trading_engine.
+    rank_and_pick_top_stocks' day-change%-only ranking. Returns [(symbol,
+    ribbon_score_total), ...], same shape so it's a drop-in swap at call
+    sites - EXCEPT it also enforces a real minimum-quality bar (min_score,
+    defaults to ribbon_score.MIN_ENTRY_SCORE) the day-change% ranking
+    never had: a candidate scoring below this is simply never returned,
+    even if that means returning fewer than top_n symbols (or none at all
+    on a genuinely weak alert) - callers' existing "if not ranked:
+    no_action" handling already covers this. See rank_by_ribbon_breakdown_
+    sync for the PE/bearish counterpart (added 18 Sep 2026)."""
+    return _rank_by_ribbon_score_sync(stock_symbols, top_n, min_score, "score_ribbon_expansion")
+
+
 async def rank_by_ribbon_expansion(
     stock_symbols: list[str], top_n: int, min_score: Optional[float] = None,
 ) -> list[tuple[str, float]]:
     """Async wrapper - see rank_by_ribbon_expansion_sync's own docstring."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, rank_by_ribbon_expansion_sync, stock_symbols, top_n, min_score)
+
+
+def rank_by_ribbon_breakdown_sync(
+    stock_symbols: list[str], top_n: int, min_score: Optional[float] = None,
+) -> list[tuple[str, float]]:
+    """PE/bearish mirror of rank_by_ribbon_expansion_sync (added 18 Sep
+    2026, user request to extend ranking-only to PE alerts) - scores each
+    candidate with ribbon_score.score_ribbon_breakdown instead. See that
+    function's own docstring for the important caveat: this direction has
+    NOT been backtested against real data, unlike the CE side."""
+    return _rank_by_ribbon_score_sync(stock_symbols, top_n, min_score, "score_ribbon_breakdown")
+
+
+async def rank_by_ribbon_breakdown(
+    stock_symbols: list[str], top_n: int, min_score: Optional[float] = None,
+) -> list[tuple[str, float]]:
+    """Async wrapper - see rank_by_ribbon_breakdown_sync's own docstring."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, rank_by_ribbon_breakdown_sync, stock_symbols, top_n, min_score)
 
 
 def _log_switch_shadow_sync(
@@ -722,6 +744,10 @@ def _log_switch_shadow_sync(
 
     if dhan_wrapper._client is None or not open_positions:
         return
+    # CE positions score on the bullish (expansion) ribbon; PE on the
+    # bearish (breakdown) one - see ribbon_score.score_ribbon_breakdown's
+    # own docstring for its own, still-unbacktested caveat.
+    score_fn = ribbon_score.score_ribbon_expansion if option_type == "CE" else ribbon_score.score_ribbon_breakdown
     try:
         min_bars = _ribbon_min_bars()
         scored_open = []
@@ -729,7 +755,7 @@ def _log_switch_shadow_sync(
             raw = _fetch_raw_candles_sync(p["symbol"], min_bars=min_bars)
             if raw is None:
                 continue
-            score = ribbon_score.score_ribbon_expansion(raw["high"], raw["low"], raw["close"], symbol=p["symbol"])
+            score = score_fn(raw["high"], raw["low"], raw["close"], symbol=p["symbol"])
             if score is None:
                 continue
             opened_at = datetime.fromisoformat(p["opened_at"])
@@ -777,20 +803,22 @@ async def log_switch_shadow(
 
 async def log_ribbon_switch_shadow_for_alert(strategy: str, option_type: str, stocks: list[str], position_store) -> None:
     """Async, fire-and-forget, self-contained - computes its OWN ribbon-
-    ranking top candidate for `stocks` and shadow-logs what decide_switch()
-    would recommend against the strategy's REAL currently-open positions.
+    ranking top candidate for `stocks` (bullish/expansion ranking for a CE
+    alert, bearish/breakdown for PE - extended to PE 18 Sep 2026, user
+    request) and shadow-logs what decide_switch() would recommend against
+    the strategy's REAL currently-open positions of that same option_type.
 
-    Deliberately INDEPENDENT of config.RIBBON_RANKING_ENABLED and of
-    whatever the real entry path actually does with `stocks` - call sites
-    should invoke this unconditionally (CE/prefer_highest alerts only) so
-    switch-shadow data keeps accumulating even while ranking-only itself
-    is off (see config.RIBBON_RANKING_ENABLED's own comment on why it
-    currently defaults false). Never touches a real position; never
-    raises into its caller - any failure here has zero effect on the real
-    webhook response, which has typically already been returned by the
-    time this runs anyway."""
+    Deliberately INDEPENDENT of config.RIBBON_RANKING_ENABLED/RIBBON_
+    RANKING_PE_ENABLED and of whatever the real entry path actually does
+    with `stocks` - call sites should invoke this unconditionally for
+    every alert (CE and PE both) so switch-shadow data keeps accumulating
+    even while ranking-only itself is off for that side. Never touches a
+    real position; never raises into its caller - any failure here has
+    zero effect on the real webhook response, which has typically already
+    been returned by the time this runs anyway."""
     try:
-        ranked = await rank_by_ribbon_expansion(stocks, top_n=1)
+        rank_fn = rank_by_ribbon_expansion if option_type == "CE" else rank_by_ribbon_breakdown
+        ranked = await rank_fn(stocks, top_n=1)
         if not ranked:
             return
         top_symbol, top_score = ranked[0]
