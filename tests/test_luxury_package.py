@@ -154,6 +154,13 @@ async def test_1_real_concurrent_ce_entry_through_luxury_webhook():
     lte.position_store = store
     lte.config.MAX_LIVE_POSITIONS_CE = 2
 
+    # This test is about concurrent-entry/capacity behavior, not ranking -
+    # force the original day-change% ranking so fake_ranked below actually
+    # takes effect (added 18 Sep 2026: with RIBBON_RANKING_ENABLED on, a CE
+    # alert takes reversal_filters.rank_by_ribbon_expansion instead, which
+    # this mock doesn't touch).
+    real_ribbon_ranking = lte.config.RIBBON_RANKING_ENABLED
+    lte.config.RIBBON_RANKING_ENABLED = False
     real_rank = lm.rank_and_pick_top_stocks
     lm.rank_and_pick_top_stocks = fake_ranked
     restore_time = _freeze_market_hours()
@@ -186,6 +193,7 @@ async def test_1_real_concurrent_ce_entry_through_luxury_webhook():
         restore()
         restore_time()
         lm.rank_and_pick_top_stocks = real_rank
+        lte.config.RIBBON_RANKING_ENABLED = real_ribbon_ranking
 
 
 async def test_2_pe_webhook_ranks_lowest_change_first():
@@ -236,6 +244,10 @@ async def test_3_duplicate_webhook_delivery_race():
     lte.position_store = store
     lte.config.MAX_LIVE_POSITIONS_CE = 10
 
+    # See test_1's identical comment - this test is about concurrency/dedup,
+    # not ranking.
+    real_ribbon_ranking = lte.config.RIBBON_RANKING_ENABLED
+    lte.config.RIBBON_RANKING_ENABLED = False
     real_rank = lm.rank_and_pick_top_stocks
     lm.rank_and_pick_top_stocks = fake_ranked
     restore_time = _freeze_market_hours()
@@ -262,6 +274,7 @@ async def test_3_duplicate_webhook_delivery_race():
         restore()
         restore_time()
         lm.rank_and_pick_top_stocks = real_rank
+        lte.config.RIBBON_RANKING_ENABLED = real_ribbon_ranking
 
 
 async def test_4_real_exit_path_target_and_stoploss():

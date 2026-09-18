@@ -338,6 +338,17 @@ async def test_2_options_futures_luxury_share_one_secondary_bucket_full_pipeline
     om.rank_and_pick_top_stocks = fake_ranked
     fm.rank_and_pick_top_stocks = fake_ranked
     lm.rank_and_pick_top_stocks = fake_ranked
+    # This test is about the shared fund-allocation bucket, not ranking -
+    # force the original day-change% ranking in all 3 packages so
+    # fake_ranked above actually takes effect (added 18 Sep 2026: with
+    # RIBBON_RANKING_ENABLED on, a CE alert takes reversal_filters.rank_
+    # by_ribbon_expansion instead, which this mock doesn't touch).
+    real_options_ribbon = om.config.RIBBON_RANKING_ENABLED
+    real_futures_ribbon = fm.config.RIBBON_RANKING_ENABLED
+    real_luxury_ribbon = lm.config.RIBBON_RANKING_ENABLED
+    om.config.RIBBON_RANKING_ENABLED = False
+    fm.config.RIBBON_RANKING_ENABLED = False
+    lm.config.RIBBON_RANKING_ENABLED = False
     try:
         options_payload = om.ChartinkWebhookPayload(
             stocks="SHAREDBUCKETOPT", trigger_prices="1", triggered_at="9:20 am",
@@ -377,6 +388,9 @@ async def test_2_options_futures_luxury_share_one_secondary_bucket_full_pipeline
         om.rank_and_pick_top_stocks = real_options_rank
         fm.rank_and_pick_top_stocks = real_futures_rank
         lm.rank_and_pick_top_stocks = real_luxury_rank
+        om.config.RIBBON_RANKING_ENABLED = real_options_ribbon
+        fm.config.RIBBON_RANKING_ENABLED = real_futures_ribbon
+        lm.config.RIBBON_RANKING_ENABLED = real_luxury_ribbon
         for cfg, tl, tw in _time_gates_saved:
             cfg.ENABLE_TRADING_TIME_LIMIT, cfg.ENABLE_TRADING_WINDOWS = tl, tw
 
@@ -444,6 +458,11 @@ async def test_4_funds_rejected_stock_is_genuinely_retriable_on_a_later_alert():
 
     real_rank = om.rank_and_pick_top_stocks
     om.rank_and_pick_top_stocks = fake_ranked
+    # This test is about fund-rejection/retry, not ranking - force the
+    # original day-change% ranking so fake_ranked above actually takes
+    # effect (added 18 Sep 2026, same reasoning as test_2's own comment).
+    real_ribbon = om.config.RIBBON_RANKING_ENABLED
+    om.config.RIBBON_RANKING_ENABLED = False
     try:
         payload = om.ChartinkWebhookPayload(
             stocks="RETRYAFTERFUNDS", trigger_prices="1", triggered_at="9:20 am",
@@ -475,6 +494,7 @@ async def test_4_funds_rejected_stock_is_genuinely_retriable_on_a_later_alert():
     finally:
         restore()
         om.rank_and_pick_top_stocks = real_rank
+        om.config.RIBBON_RANKING_ENABLED = real_ribbon
         ote.config.ENABLE_TRADING_TIME_LIMIT = real_time_limit
         ote.config.ENABLE_TRADING_WINDOWS = real_windows
 

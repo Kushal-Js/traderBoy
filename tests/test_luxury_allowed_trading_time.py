@@ -149,9 +149,18 @@ async def test_1_before_cutoff_entry_proceeds_normally():
     real_enabled = lte.config.ENABLE_TRADING_TIME_LIMIT
     real_cutoff = lte.config.ALLOWED_TRADING_TIME
     real_windows = lte.config.ENABLE_TRADING_WINDOWS
+    real_ribbon_ranking = lte.config.RIBBON_RANKING_ENABLED
     lte.config.ENABLE_TRADING_WINDOWS = False  # this suite tests the SINGLE cutoff; windows would supersede it
     lte.config.ENABLE_TRADING_TIME_LIMIT = True
     lte.config.ALLOWED_TRADING_TIME = "11:00"
+    # This suite is about the trading-time cutoff, not ranking - force the
+    # original day-change% ranking so `fake_ranked` below actually takes
+    # effect (added 18 Sep 2026: with RIBBON_RANKING_ENABLED on, a CE alert
+    # takes reversal_filters.rank_by_ribbon_expansion instead, which this
+    # mock doesn't touch, and a test env with no real Dhan client returns
+    # no candidates from it - breaking every assertion here for a reason
+    # unrelated to what this test actually verifies).
+    lte.config.RIBBON_RANKING_ENABLED = False
     real_rank = lm.rank_and_pick_top_stocks
     lm.rank_and_pick_top_stocks = fake_ranked
     restore_time = _freeze_time_at(BEFORE_CUTOFF_INSTANT)  # 10:00 AM, before the 11:00 cutoff
@@ -175,6 +184,7 @@ async def test_1_before_cutoff_entry_proceeds_normally():
         lte.config.ENABLE_TRADING_TIME_LIMIT = real_enabled
         lte.config.ALLOWED_TRADING_TIME = real_cutoff
         lte.config.ENABLE_TRADING_WINDOWS = real_windows
+        lte.config.RIBBON_RANKING_ENABLED = real_ribbon_ranking
 
 
 async def test_2_after_cutoff_entry_ignored_zero_orders():
@@ -237,9 +247,13 @@ async def test_3_disabled_flag_bypasses_even_past_cutoff():
     real_enabled = lte.config.ENABLE_TRADING_TIME_LIMIT
     real_cutoff = lte.config.ALLOWED_TRADING_TIME
     real_windows = lte.config.ENABLE_TRADING_WINDOWS
+    real_ribbon_ranking = lte.config.RIBBON_RANKING_ENABLED
     lte.config.ENABLE_TRADING_WINDOWS = False  # this suite tests the SINGLE cutoff; windows would supersede it
     lte.config.ENABLE_TRADING_TIME_LIMIT = False
     lte.config.ALLOWED_TRADING_TIME = "11:00"
+    # See test_1's identical comment - this suite is about the trading-time
+    # cutoff, not ranking.
+    lte.config.RIBBON_RANKING_ENABLED = False
     real_rank = lm.rank_and_pick_top_stocks
     lm.rank_and_pick_top_stocks = fake_ranked
     restore_time = _freeze_time_at(AFTER_CUTOFF_INSTANT)  # 12:00 PM, past 11:00, but the flag is OFF
@@ -263,6 +277,7 @@ async def test_3_disabled_flag_bypasses_even_past_cutoff():
         lte.config.ENABLE_TRADING_TIME_LIMIT = real_enabled
         lte.config.ALLOWED_TRADING_TIME = real_cutoff
         lte.config.ENABLE_TRADING_WINDOWS = real_windows
+        lte.config.RIBBON_RANKING_ENABLED = real_ribbon_ranking
 
 
 async def main():

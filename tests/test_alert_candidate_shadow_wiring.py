@@ -61,6 +61,13 @@ async def _drive_webhook(module, store_module, store, ranked_result):
     module.position_store = store
     module.config.MAX_LIVE_POSITIONS_CE = 5
     module.config.MAX_LIVE_POSITIONS_PE = 5
+    # This suite is about the shadow-logging WIRING (which candidates get
+    # logged), not which ranking mechanism produced ranked_result - force
+    # the original day-change% ranking path so the rank_and_pick_top_
+    # stocks mock below actually takes effect (added 18 Sep 2026: with
+    # RIBBON_RANKING_ENABLED on, a CE alert takes reversal_filters.rank_
+    # by_ribbon_expansion instead, unmocked here).
+    module.config.RIBBON_RANKING_ENABLED = False
     with mock.patch.object(module, "is_within_trading_windows", lambda: True), \
          mock.patch.object(module, "is_past_allowed_trading_time", lambda: False), \
          mock.patch.object(module, "is_past_square_off_time", lambda: False), \
@@ -81,6 +88,8 @@ async def _drive_webhook_single_stock(module, store_module, store, ranked_result
     module.position_store = store
     module.config.MAX_LIVE_POSITIONS_CE = 5
     module.config.MAX_LIVE_POSITIONS_PE = 5
+    # See _drive_webhook's identical comment.
+    module.config.RIBBON_RANKING_ENABLED = False
     with mock.patch.object(module, "is_within_trading_windows", lambda: True), \
          mock.patch.object(module, "is_past_allowed_trading_time", lambda: False), \
          mock.patch.object(module, "is_past_square_off_time", lambda: False), \

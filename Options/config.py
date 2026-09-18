@@ -79,15 +79,16 @@ SELECT_BOTTOM_N_STOCKS = os.getenv("SELECT_BOTTOM_N_STOCKS", "true").lower() == 
 # rank_and_pick_top_stocks regardless of this flag - there is no
 # validated bearish/PUT-side ribbon score yet.
 #
-# DEFAULTS FALSE (18 Sep 2026): turning this on changes the code path for
-# EVERY CE alert including single-stock ones. The existing test suite was
-# written before this branch existed - 14 tests across 6 files that mock
-# rank_and_pick_top_stocks directly (allowed-trading-time cutoffs, cross-
-# strategy races, fund allocation, Luxury package races, alert-candidate
-# shadow wiring) broke the moment this defaulted true, since none of them
-# anticipated a second ranking path. Flip this on only once those tests
-# have been updated to account for it - do not flip it on live before that.
-RIBBON_RANKING_ENABLED = os.getenv("RIBBON_RANKING_ENABLED", "false").lower() == "true"
+# Went live 18 Sep 2026: turning this on changes the code path for EVERY
+# CE alert including single-stock ones. It briefly defaulted false after
+# a first attempt broke 14 tests across 6 files that mock rank_and_pick_
+# top_stocks directly (allowed-trading-time cutoffs, cross-strategy races,
+# fund allocation, Luxury package races, alert-candidate shadow wiring),
+# none of which anticipated a second ranking path - all 14 were updated
+# (each forces RIBBON_RANKING_ENABLED=False for its own scope, since none
+# of them are actually about ranking) and the full suite re-confirmed
+# clean before this flipped true.
+RIBBON_RANKING_ENABLED = os.getenv("RIBBON_RANKING_ENABLED", "true").lower() == "true"
 # Separate caps per option type - CE (from /chartink/webhook) and PE (from
 # /chartink/webhook-sell) each get their own budget rather than sharing one
 # pool, so a run of bearish alerts can't crowd out capacity for bullish

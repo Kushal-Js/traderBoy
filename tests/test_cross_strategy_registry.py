@@ -359,6 +359,13 @@ async def test_7_full_webhook_level_three_way_race():
 
     real_om_rank, real_fm_rank, real_lm_rank = om.rank_and_pick_top_stocks, fm.rank_and_pick_top_stocks, lm.rank_and_pick_top_stocks
     om.rank_and_pick_top_stocks = fm.rank_and_pick_top_stocks = lm.rank_and_pick_top_stocks = fake_ranked
+    # This test is about the cross-strategy registry race, not ranking -
+    # force the original day-change% ranking in all 3 packages so
+    # fake_ranked above actually takes effect (added 18 Sep 2026: with
+    # RIBBON_RANKING_ENABLED on, a CE alert takes reversal_filters.rank_
+    # by_ribbon_expansion instead, which this mock doesn't touch).
+    real_om_ribbon, real_fm_ribbon, real_lm_ribbon = om.config.RIBBON_RANKING_ENABLED, fm.config.RIBBON_RANKING_ENABLED, lm.config.RIBBON_RANKING_ENABLED
+    om.config.RIBBON_RANKING_ENABLED = fm.config.RIBBON_RANKING_ENABLED = lm.config.RIBBON_RANKING_ENABLED = False
 
     restore_time = _freeze_all_market_hours()
     restore_mocks = install_all_dhan_mocks(entry_delay_seconds=0.05)
@@ -402,6 +409,8 @@ async def test_7_full_webhook_level_three_way_race():
         restore_time()
         om.rank_and_pick_top_stocks, fm.rank_and_pick_top_stocks, lm.rank_and_pick_top_stocks = \
             real_om_rank, real_fm_rank, real_lm_rank
+        om.config.RIBBON_RANKING_ENABLED, fm.config.RIBBON_RANKING_ENABLED, lm.config.RIBBON_RANKING_ENABLED = \
+            real_om_ribbon, real_fm_ribbon, real_lm_ribbon
 
 
 async def test_8_mixed_alert_shared_stock_races_unique_stocks_unaffected():
@@ -440,6 +449,10 @@ async def test_8_mixed_alert_shared_stock_races_unique_stocks_unaffected():
 
     real_om_rank, real_fm_rank, real_lm_rank = om.rank_and_pick_top_stocks, fm.rank_and_pick_top_stocks, lm.rank_and_pick_top_stocks
     om.rank_and_pick_top_stocks = fm.rank_and_pick_top_stocks = lm.rank_and_pick_top_stocks = fake_ranked
+    # See test_7's identical comment - this test is about the registry
+    # race, not ranking.
+    real_om_ribbon, real_fm_ribbon, real_lm_ribbon = om.config.RIBBON_RANKING_ENABLED, fm.config.RIBBON_RANKING_ENABLED, lm.config.RIBBON_RANKING_ENABLED
+    om.config.RIBBON_RANKING_ENABLED = fm.config.RIBBON_RANKING_ENABLED = lm.config.RIBBON_RANKING_ENABLED = False
 
     restore_time = _freeze_all_market_hours()
     restore_mocks = install_all_dhan_mocks(entry_delay_seconds=0.05)
@@ -486,6 +499,8 @@ async def test_8_mixed_alert_shared_stock_races_unique_stocks_unaffected():
         restore_time()
         om.rank_and_pick_top_stocks, fm.rank_and_pick_top_stocks, lm.rank_and_pick_top_stocks = \
             real_om_rank, real_fm_rank, real_lm_rank
+        om.config.RIBBON_RANKING_ENABLED, fm.config.RIBBON_RANKING_ENABLED, lm.config.RIBBON_RANKING_ENABLED = \
+            real_om_ribbon, real_fm_ribbon, real_lm_ribbon
         ote.config.MAX_LIVE_POSITIONS_CE = real_om_cap
         fte.config.MAX_LIVE_POSITIONS_CE = real_fm_cap
         lte.config.MAX_LIVE_POSITIONS_CE = real_lm_cap

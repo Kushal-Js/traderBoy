@@ -47,7 +47,7 @@ SELECT_BOTTOM_N_STOCKS = os.getenv("FUTURES_SELECT_BOTTOM_N_STOCKS", "true").low
 # See Options/config.py's identical flag's own comment for the full
 # rationale/backtest evidence - this package's own independently-tunable
 # on/off switch for the same MA-ribbon-expansion CE-side ranking.
-RIBBON_RANKING_ENABLED = os.getenv("FUTURES_RIBBON_RANKING_ENABLED", "false").lower() == "true"
+RIBBON_RANKING_ENABLED = os.getenv("FUTURES_RIBBON_RANKING_ENABLED", "true").lower() == "true"
 # PE cap exists because position_store.py's capacity gate is generic per
 # option_type - unused today since futures_main.py only exposes a bullish
 # (CE) webhook, kept for parity if a bearish endpoint is added later.
