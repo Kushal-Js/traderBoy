@@ -33,6 +33,29 @@ alert-bucket-switch.md). This module keeps its own per-strategy alert
 record and shares no state with it, so enabling this feature never
 implies anything about that one, and vice versa.
 
+CE and PE are tracked as genuinely SEPARATE watchlists (added 20 Sep
+2026, user request) - two independent `_Watchlist` objects per strategy,
+each with its own persisted file (`history/<date>_breakout_signal_
+<strategy>_<CE|PE>.json`), same one-file-per-option-type convention
+alert_bucket.py already uses. Nothing about CE ever touches PE's state or
+file, and either can be reset independently.
+
+DAILY REFRESH (added 20 Sep 2026, user request): each watchlist resets
+to empty at TWO points, both handled inside `signal_scanner_loop` itself
+so they happen unconditionally every ~60s regardless of market hours or
+whether `BREAKOUT_SIGNAL_ENABLED` is on:
+  1. BEFORE market starts - a fresh calendar date always starts empty
+     (`_ensure_today_locked`, keyed on the date change itself, so the
+     very first loop tick after midnight already resets it - hours
+     before the 09:15 open, not merely "whenever the next alert/scan
+     happens to occur").
+  2. AFTER market ends - once past `BREAKOUT_MARKET_END_TIME` (default
+     15:35 IST, matching this module's own `_market_hours_now` upper
+     bound), the watchlist is explicitly truncated to empty for the rest
+     of the day (`_maybe_clear_after_close`, a once-per-date action) so
+     it doesn't sit around showing the completed day's full signaled
+     state into the evening - it reads as "done for today" immediately.
+
 THE 7 CHECKS (8th - market cap - dropped, no Dhan equivalent; see the
 backtest docs for why this was never binding for this universe anyway),
 evaluated on the most recently completed 5-min candle using a continuous
@@ -95,64 +118,99 @@ def _today() -> date:
 
 
 class _Watchlist:
-    """One strategy's own today's alerted symbols - {"CE": {...}, "PE": {...}},
-    each symbol mapping to {"first_alert_at", "signaled", "signaled_at"}."""
+    """One strategy's own today's alerted symbols for ONE option type -
+    symbol -> {"first_alert_at", "signaled", "signaled_at"}. CE and PE are
+    always separate instances, never share a dict - see module docstring."""
 
-    def __init__(self, strategy: str) -> None:
+    def __init__(self, strategy: str, option_type: str) -> None:
         self.strategy = strategy
+        self.option_type = option_type
         self.day: Optional[date] = None
-        self.items: dict[str, dict[str, dict]] = {"CE": {}, "PE": {}}
+        self.items: dict[str, dict] = {}
+        # Tracks which date's post-close truncation has already run, so
+        # _maybe_clear_after_close only ever fires once per date.
+        self.cleared_after_close_for: Optional[date] = None
 
 
-_WATCHLISTS: dict[str, _Watchlist] = {}
+_WATCHLISTS: dict[tuple[str, str], _Watchlist] = {}
 
 
-def _watchlist(strategy: str) -> _Watchlist:
-    return _WATCHLISTS.setdefault(strategy, _Watchlist(strategy))
+def _watchlist(strategy: str, option_type: str) -> _Watchlist:
+    return _WATCHLISTS.setdefault((strategy, option_type), _Watchlist(strategy, option_type))
 
 
 # ------------------------------------------------------------ persistence ---
-def _path(strategy: str, d: date) -> Path:
-    return trade_history.HISTORY_DIR / f"{d.isoformat()}_breakout_signal_{strategy.lower()}.json"
+def _path(strategy: str, option_type: str, d: date) -> Path:
+    return trade_history.HISTORY_DIR / f"{d.isoformat()}_breakout_signal_{strategy.lower()}_{option_type}.json"
 
 
-def _load_sync(strategy: str, d: date) -> dict[str, dict]:
-    p = _path(strategy, d)
+def _load_sync(strategy: str, option_type: str, d: date) -> dict[str, dict]:
+    p = _path(strategy, option_type, d)
     if not p.exists():
-        return {"CE": {}, "PE": {}}
+        return {}
     try:
         return json.loads(p.read_text())
     except Exception:  # noqa: BLE001
-        logger.exception("Could not read %s - starting today's %s breakout-signal watchlist empty", p, strategy)
-        return {"CE": {}, "PE": {}}
+        logger.exception("Could not read %s - starting today's %s %s breakout-signal watchlist empty",
+                          p, strategy, option_type)
+        return {}
 
 
-def _write_sync(strategy: str, d: date, payload: str) -> None:
-    p = _path(strategy, d)
+def _write_sync(strategy: str, option_type: str, d: date, payload: str) -> None:
+    p = _path(strategy, option_type, d)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(".json.tmp")
         tmp.write_text(payload)
         os.replace(tmp, p)  # atomic
     except Exception:  # noqa: BLE001
-        logger.exception("Could not persist %s breakout-signal watchlist - in-memory state unaffected", strategy)
+        logger.exception("Could not persist %s %s breakout-signal watchlist - in-memory state unaffected",
+                          strategy, option_type)
 
 
 async def _persist(w: _Watchlist) -> None:
     payload, d = json.dumps(w.items), w.day
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, _write_sync, w.strategy, d, payload)
+    await loop.run_in_executor(None, _write_sync, w.strategy, w.option_type, d, payload)
 
 
 def _ensure_today_locked(w: _Watchlist) -> None:
     """Caller holds _LOCK. Restart- and day-rollover-safe, same pattern as
-    alert_bucket.py's own _ensure_today_locked."""
+    alert_bucket.py's own _ensure_today_locked. This is what makes "before
+    market starts" true: the FIRST touch of a new calendar date (which,
+    per signal_scanner_loop below, happens within one tick of midnight,
+    not merely "whenever the next alert/scan occurs") resets to that
+    date's own (empty, unless restored from a same-day restart) file."""
     today = _today()
     if w.day != today:
         w.day = today
-        w.items = _load_sync(w.strategy, today)
-        logger.info("%s breakout-signal watchlist ready for %s (%d CE / %d PE symbol(s) restored)",
-                    w.strategy, today, len(w.items["CE"]), len(w.items["PE"]))
+        w.items = _load_sync(w.strategy, w.option_type, today)
+        w.cleared_after_close_for = None
+        logger.info("%s %s breakout-signal watchlist ready for %s (%d symbol(s) restored)",
+                    w.strategy, w.option_type, today, len(w.items))
+
+
+async def _maybe_clear_after_close(w: _Watchlist, cfg) -> None:
+    """Explicit post-market-close truncation (user request 20 Sep 2026) -
+    once past cfg.BREAKOUT_MARKET_END_TIME, zero the watchlist for the
+    rest of the day so it reads as "done for today" immediately rather
+    than sitting on the completed day's full signaled state until the
+    next calendar date rolls over. Runs at most once per date."""
+    now = datetime.now(IST)
+    end_h, end_m = (int(x) for x in cfg.BREAKOUT_MARKET_END_TIME.split(":"))
+    async with _LOCK:
+        _ensure_today_locked(w)
+        if (now.hour, now.minute) < (end_h, end_m):
+            return
+        if w.cleared_after_close_for == w.day:
+            return
+        had_items = len(w.items)
+        w.items = {}
+        w.cleared_after_close_for = w.day
+        await _persist(w)
+    if had_items:
+        logger.info("%s %s breakout-signal watchlist truncated to zero after market close (%s) - %d symbol(s) cleared.",
+                     w.strategy, w.option_type, cfg.BREAKOUT_MARKET_END_TIME, had_items)
 
 
 # ---------------------------------------------------------------- recording ---
@@ -162,28 +220,32 @@ async def record_alert(strategy: str, option_type: str, stocks: list[str]) -> No
     try:
         if option_type not in ("CE", "PE") or not stocks:
             return
-        w = _watchlist(strategy)
+        w = _watchlist(strategy, option_type)
         now = datetime.now(IST).isoformat()
         async with _LOCK:
             _ensure_today_locked(w)
-            bucket = w.items[option_type]
             for raw in stocks:
                 sym = str(raw).strip().upper()
                 if not sym:
                     continue
-                if sym not in bucket:
-                    bucket[sym] = {"first_alert_at": now, "signaled": False, "signaled_at": None}
+                if sym not in w.items:
+                    w.items[sym] = {"first_alert_at": now, "signaled": False, "signaled_at": None}
             await _persist(w)
     except Exception:  # noqa: BLE001
-        logger.exception("%s: record_alert failed - no effect on trading", strategy)
+        logger.exception("%s %s: record_alert failed - no effect on trading", strategy, option_type)
 
 
 async def snapshot(strategy: str) -> dict:
-    """Read-only view of today's watchlist, for observability."""
-    w = _watchlist(strategy)
-    async with _LOCK:
-        _ensure_today_locked(w)
-        return json.loads(json.dumps(w.items))
+    """Read-only view of today's CE and PE watchlists, for observability -
+    same {"CE": {...}, "PE": {...}} shape as before, now backed by two
+    genuinely separate underlying watchlists."""
+    out = {}
+    for option_type in ("CE", "PE"):
+        w = _watchlist(strategy, option_type)
+        async with _LOCK:
+            _ensure_today_locked(w)
+            out[option_type] = json.loads(json.dumps(w.items))
+    return out
 
 
 # ------------------------------------------------------------------ checks ---
@@ -308,12 +370,13 @@ def _market_hours_now() -> bool:
 
 
 async def _scan_cycle(strategy: str, cfg, entry_fn: Callable[[str, str], Awaitable[dict]]) -> None:
-    w = _watchlist(strategy)
-    async with _LOCK:
-        _ensure_today_locked(w)
-        pending = [
-            (ot, sym) for ot in ("CE", "PE") for sym, it in w.items[ot].items() if not it["signaled"]
-        ]
+    pending: list[tuple[str, str]] = []
+    for option_type in ("CE", "PE"):
+        w = _watchlist(strategy, option_type)
+        async with _LOCK:
+            _ensure_today_locked(w)
+            pending.extend((option_type, sym) for sym, it in w.items.items() if not it["signaled"])
+
     loop = asyncio.get_running_loop()
     checked = 0
     for ot, sym in pending:
@@ -326,11 +389,12 @@ async def _scan_cycle(strategy: str, cfg, entry_fn: Callable[[str, str], Awaitab
         if sig is None:
             continue
 
+        w = _watchlist(strategy, ot)
         # Mark signaled BEFORE attempting entry - at most one attempt per
         # symbol per day even if entry_fn itself fails/skips, matching the
         # backtest's own "first qualifying candle only" design.
         async with _LOCK:
-            it = w.items[ot].get(sym)
+            it = w.items.get(sym)
             if it is None or it["signaled"]:
                 continue
             it["signaled"], it["signaled_at"] = True, sig["detected_at"]
@@ -353,13 +417,21 @@ async def _scan_cycle(strategy: str, cfg, entry_fn: Callable[[str, str], Awaitab
 
 
 async def signal_scanner_loop(strategy: str, cfg, entry_fn: Callable[[str, str], Awaitable[dict]]) -> None:
-    """Started once from the calling package's own lifespan."""
+    """Started once from the calling package's own lifespan. The day-
+    rollover check (via _ensure_today_locked, inside _scan_cycle/_maybe_
+    clear_after_close) and the post-close truncation both run every tick
+    UNCONDITIONALLY - not gated behind BREAKOUT_SIGNAL_ENABLED or market
+    hours - so the watchlist's own daily refresh behavior (see module
+    docstring) is guaranteed regardless of whether scanning itself is on."""
     logger.info(
-        "%s breakout-signal scanner started (enabled=%s, interval=%ss, max %d/cycle).",
-        strategy, cfg.BREAKOUT_SIGNAL_ENABLED, cfg.BREAKOUT_SCAN_INTERVAL_SECONDS, cfg.BREAKOUT_SCAN_MAX_PER_CYCLE,
+        "%s breakout-signal scanner started (enabled=%s, interval=%ss, max %d/cycle, market_end=%s).",
+        strategy, cfg.BREAKOUT_SIGNAL_ENABLED, cfg.BREAKOUT_SCAN_INTERVAL_SECONDS,
+        cfg.BREAKOUT_SCAN_MAX_PER_CYCLE, cfg.BREAKOUT_MARKET_END_TIME,
     )
     while True:
         try:
+            for option_type in ("CE", "PE"):
+                await _maybe_clear_after_close(_watchlist(strategy, option_type), cfg)
             if cfg.BREAKOUT_SIGNAL_ENABLED and _market_hours_now():
                 await _scan_cycle(strategy, cfg, entry_fn)
         except asyncio.CancelledError:

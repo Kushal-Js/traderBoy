@@ -466,3 +466,13 @@ BREAKOUT_DAILY_LOOKBACK_DAYS = int(os.getenv("LUXURY_BREAKOUT_DAILY_LOOKBACK_DAY
 BREAKOUT_SCAN_INTERVAL_SECONDS = float(os.getenv("LUXURY_BREAKOUT_SCAN_INTERVAL_SECONDS", "60"))
 BREAKOUT_SCAN_MAX_PER_CYCLE = int(os.getenv("LUXURY_BREAKOUT_SCAN_MAX_PER_CYCLE", "10"))
 BREAKOUT_SCAN_PACE_SECONDS = float(os.getenv("LUXURY_BREAKOUT_SCAN_PACE_SECONDS", "1.6"))
+
+# Daily watchlist refresh (user request 20 Sep 2026) - see breakout_
+# signal.py's own module docstring for the full mechanism. "Before market
+# starts" is handled by the date-keyed persistence itself (a fresh
+# calendar date always starts empty); this is the explicit "after market
+# ends" half - once past this time, each day's CE/PE watchlist is
+# truncated to zero for the rest of the day rather than sitting on the
+# completed day's full signaled state until the next date rolls over.
+# Matches this module's own _market_hours_now upper bound by default.
+BREAKOUT_MARKET_END_TIME = os.getenv("LUXURY_BREAKOUT_MARKET_END_TIME", "15:35")
