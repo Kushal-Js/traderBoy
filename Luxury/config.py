@@ -432,3 +432,37 @@ ORDER_TAG_PREFIX = os.getenv("LUXURY_ORDER_TAG_PREFIX", "Lux")
 # for the full ICICIPRULI incident writeup (user request 15 Sep 2026).
 # Own independently-tunable value, same default.
 STALE_ENTRY_ORDER_TIMEOUT_SECONDS = int(os.getenv("LUXURY_STALE_ENTRY_ORDER_TIMEOUT_SECONDS", "300"))
+
+# --------------------------------------------------------------------------
+# Breakout-signal live entry trigger (added 20 Sep 2026, user request) - see
+# breakout_signal.py's own module docstring for the full design and
+# trading-skills' designs/breakout-scanner-vs-real-pnl.md + designs/
+# luxury-signal-gated-live-simulation.md for the backtests every threshold
+# below was taken from directly (not re-tuned here). Deliberately kept
+# separate from alert_bucket.py's own loss-triggered switch feature (a
+# different, independently-decided piece of work) - no shared state.
+# --------------------------------------------------------------------------
+BREAKOUT_SIGNAL_ENABLED = os.getenv("LUXURY_BREAKOUT_SIGNAL_ENABLED", "true").lower() == "true"
+
+# Consolidation/breakout shape - same values the backtests validated.
+BREAKOUT_LOOKBACK_CANDLES = int(os.getenv("LUXURY_BREAKOUT_LOOKBACK_CANDLES", "10"))
+BREAKOUT_MAX_CONSOLIDATION_RANGE_PCT = float(os.getenv("LUXURY_BREAKOUT_MAX_CONSOLIDATION_RANGE_PCT", "12"))
+BREAKOUT_CLEARANCE_PCT = float(os.getenv("LUXURY_BREAKOUT_CLEARANCE_PCT", "0.5"))
+BREAKOUT_MIN_BODY_PCT = float(os.getenv("LUXURY_BREAKOUT_MIN_BODY_PCT", "1.0"))
+BREAKOUT_MIN_RELATIVE_VOLUME = float(os.getenv("LUXURY_BREAKOUT_MIN_RELATIVE_VOLUME", "1.5"))
+BREAKOUT_MIN_AVG_DAILY_VOLUME = float(os.getenv("LUXURY_BREAKOUT_MIN_AVG_DAILY_VOLUME", "500000"))
+BREAKOUT_MAX_PCT_FROM_HIGH_LOW = float(os.getenv("LUXURY_BREAKOUT_MAX_PCT_FROM_HIGH_LOW", "10"))
+
+# Data-fetch windows - continuous multi-day, per the standing continuous-
+# candles rule. 5-min needs only ~1-2 trading days of real bars for the
+# 10-candle lookback; the wider default is a safety margin across
+# weekends/holidays, same reasoning as alert_bucket.py's own 7-day pull for
+# a much shorter lookback. Daily needs >=50 real trading days for the
+# 50-day SMA/high/low - 120 calendar days comfortably covers that.
+BREAKOUT_CANDLE_LOOKBACK_DAYS = int(os.getenv("LUXURY_BREAKOUT_CANDLE_LOOKBACK_DAYS", "15"))
+BREAKOUT_DAILY_LOOKBACK_DAYS = int(os.getenv("LUXURY_BREAKOUT_DAILY_LOOKBACK_DAYS", "120"))
+
+# Scan cadence - same shape as alert_bucket.py's own ranker pacing.
+BREAKOUT_SCAN_INTERVAL_SECONDS = float(os.getenv("LUXURY_BREAKOUT_SCAN_INTERVAL_SECONDS", "60"))
+BREAKOUT_SCAN_MAX_PER_CYCLE = int(os.getenv("LUXURY_BREAKOUT_SCAN_MAX_PER_CYCLE", "10"))
+BREAKOUT_SCAN_PACE_SECONDS = float(os.getenv("LUXURY_BREAKOUT_SCAN_PACE_SECONDS", "1.6"))
