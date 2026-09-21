@@ -381,3 +381,20 @@ BREAKOUT_SCAN_PACE_SECONDS = float(os.getenv("FUTURES_BREAKOUT_SCAN_PACE_SECONDS
 # for the full mechanism. "Before market starts" is handled by the date-
 # keyed persistence itself; this is the explicit "after market ends" half.
 BREAKOUT_MARKET_END_TIME = os.getenv("FUTURES_BREAKOUT_MARKET_END_TIME", "15:35")
+
+# Curated-universe watchlist seeding + WebSocket-based candle reconstruction
+# (added 21 Sep 2026, user request - see underlying_candle_feed.py's own
+# module docstring and Options/config.py's identical block for the full
+# rationale; not repeated here). Futures is one of the two packages this
+# is being built for first (the other is Luxury) - still defaults OFF
+# until backtested and explicitly enabled, per the user's own "flag
+# enabled approach after" instruction.
+BREAKOUT_SEED_UNIVERSE_ENABLED = os.getenv("FUTURES_BREAKOUT_SEED_UNIVERSE_ENABLED", "false").lower() == "true"
+BREAKOUT_UNIVERSE_SYMBOLS = [s.strip().upper() for s in os.getenv("FUTURES_BREAKOUT_UNIVERSE_SYMBOLS", "").split(",") if s.strip()]
+BREAKOUT_USE_WS_CANDLES = os.getenv("FUTURES_BREAKOUT_USE_WS_CANDLES", "false").lower() == "true"
+BREAKOUT_WS_STALE_AFTER_SECONDS = float(os.getenv("FUTURES_BREAKOUT_WS_STALE_AFTER_SECONDS", "90"))
+
+# "static" (default, unchanged) or "universe_bucket" (universe_bucket.py's
+# rolling 3-trading-day pool instead of the fixed list above) - see
+# Options/config.py's identical block for the full rationale.
+BREAKOUT_UNIVERSE_SOURCE = os.getenv("FUTURES_BREAKOUT_UNIVERSE_SOURCE", "static").lower()

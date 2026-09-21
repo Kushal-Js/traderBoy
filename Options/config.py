@@ -1018,3 +1018,61 @@ BREAKOUT_SCAN_PACE_SECONDS = float(os.getenv("OPTIONS_BREAKOUT_SCAN_PACE_SECONDS
 # keyed persistence; this is the explicit after-market-close truncation).
 # Matches breakout_signal.py's own _market_hours_now upper bound by default.
 BREAKOUT_MARKET_END_TIME = os.getenv("OPTIONS_BREAKOUT_MARKET_END_TIME", "15:35")
+
+# Curated-universe watchlist seeding + WebSocket-based candle reconstruction
+# (added 21 Sep 2026, user request - see underlying_candle_feed.py's own
+# module docstring and trading-skills' designs/all-fno-universe-breakout-
+# signal-15day-backtest.md for why REST-polling a wide watchlist doesn't
+# scale). ALL FOUR default to inert/off - nothing changes for Options
+# unless these are explicitly set, and per the user's own scoping this
+# feature is being built for Luxury/Futures first, not Options.
+#   BREAKOUT_SEED_UNIVERSE_ENABLED - if true, breakout_signal.py's scanner
+#     loop seeds BOTH the CE and PE watchlists with BREAKOUT_UNIVERSE_
+#     SYMBOLS once per trading day (in addition to, not instead of, real
+#     Chartink alerts still being recorded normally).
+#   BREAKOUT_UNIVERSE_SYMBOLS - comma-separated NSE trading symbols, e.g.
+#     "RELIANCE,TCS,INFY". Empty by default - inert until populated.
+#   BREAKOUT_USE_WS_CANDLES - if true, a symbol's 5-min intraday candles
+#     are read from underlying_candle_feed's locally-reconstructed,
+#     WebSocket-fed bars when fresh, falling back to the existing REST
+#     fetch otherwise (never the sole source of truth - REST polling stays
+#     the correctness fallback, per the user's own framing).
+#   BREAKOUT_WS_STALE_AFTER_SECONDS - a symbol's WS-fed bars are trusted
+#     only if a tick arrived within this many seconds; otherwise REST.
+BREAKOUT_SEED_UNIVERSE_ENABLED = os.getenv("OPTIONS_BREAKOUT_SEED_UNIVERSE_ENABLED", "false").lower() == "true"
+BREAKOUT_UNIVERSE_SYMBOLS = [s.strip().upper() for s in os.getenv("OPTIONS_BREAKOUT_UNIVERSE_SYMBOLS", "").split(",") if s.strip()]
+BREAKOUT_USE_WS_CANDLES = os.getenv("OPTIONS_BREAKOUT_USE_WS_CANDLES", "false").lower() == "true"
+BREAKOUT_WS_STALE_AFTER_SECONDS = float(os.getenv("OPTIONS_BREAKOUT_WS_STALE_AFTER_SECONDS", "90"))
+
+# Where BREAKOUT_SEED_UNIVERSE_ENABLED's symbol list comes from (added 21
+# Sep 2026, user request - see universe_bucket.py's own module docstring):
+#   "static"          (default) - the fixed BREAKOUT_UNIVERSE_SYMBOLS list
+#                       above, re-seeded once per day, unchanged behavior.
+#   "universe_bucket" - universe_bucket.active_symbols("CE"/"PE")'s own
+#                       rolling 3-trading-day window, re-synced EVERY scan
+#                       cycle (not just once/day) so a fresh webhook alert
+#                       reaches the watchlist promptly rather than waiting
+#                       for the next day's seed - see breakout_signal.py's
+#                       own _maybe_seed_universe for the two code paths.
+BREAKOUT_UNIVERSE_SOURCE = os.getenv("OPTIONS_BREAKOUT_UNIVERSE_SOURCE", "static").lower()
+
+# Cross-package universe_bucket signal dispatcher (added 21 Sep 2026, user
+# request - see breakout_signal.py's own "dispatcher" section, right
+# after _maybe_seed_universe, for the full design). Shared/global, not
+# per-package, since it spans whichever packages main.py's own lifespan
+# lists as targets (Luxury+Futures as of 21 Sep 2026, per explicit user
+# scoping) - lives here in the shared config module for that reason, the
+# same place LIQUID_CONTRACT_*/GAP_DOWN_* already live for an identical
+# reason. Default false - nothing changes until this is explicitly
+# enabled AND main.py's lifespan is told which packages to target.
+UNIVERSE_DISPATCHER_ENABLED = os.getenv("UNIVERSE_DISPATCHER_ENABLED", "false").lower() == "true"
+
+# Capacity backlog (added 21 Sep 2026, user request: "once any slot from
+# LUXURY or FUTURES gets free... should be attempted") - how long (from
+# when EVERY dispatcher target first rejected a signal specifically as
+# duplicate_or_capacity_full) a still-in-momentum signal keeps getting
+# retried against freed-up capacity before being dropped as stale. See
+# breakout_signal.py's own "capacity backlog" section for the full
+# mechanism. In-memory only (resets on restart) - same accepted tradeoff
+# as cross_strategy_registry/PositionStore's own reserved_symbols.
+BREAKOUT_CAPACITY_BACKLOG_MAX_AGE_MINUTES = float(os.getenv("BREAKOUT_CAPACITY_BACKLOG_MAX_AGE_MINUTES", "60"))

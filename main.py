@@ -70,12 +70,17 @@ import choppy_stocks
 import cross_strategy_registry
 import fund_allocation
 from Options import option_main
+from Options import config as options_config
 from IndexScalping import index_main
 from Futures import futures_main
+from Futures import config as futures_config
 from K01 import screener_main
 from Luxury import luxury_main
+from Luxury import config as luxury_config
 from Swing import swing_main
 from Paper01 import paper01_main
+import universe_bucket
+import breakout_signal
 
 logging.basicConfig(
     level=logging.INFO,
@@ -136,7 +141,26 @@ async def lifespan(app: FastAPI):
                     async with luxury_main.lifespan(app):
                         async with swing_main.lifespan(app):
                             async with paper01_main.lifespan(app):
-                                yield
+                                dispatcher_task = None
+                                if options_config.UNIVERSE_DISPATCHER_ENABLED:
+                                    # Started here, not inside any one
+                                    # package's own lifespan, since it
+                                    # spans two of them - see breakout_
+                                    # signal.py's own dispatcher-section
+                                    # docstring. By this point every
+                                    # nested lifespan above has already
+                                    # run, so Luxury's/Futures' own
+                                    # _breakout_entry_fn are ready to call.
+                                    dispatcher_task = asyncio.create_task(breakout_signal.universe_dispatcher_loop([
+                                        ("Luxury", luxury_config, luxury_main._breakout_entry_fn),
+                                        ("Futures", futures_config, futures_main._breakout_entry_fn),
+                                    ]))
+                                    logger.info("UniverseDispatcher task started (Luxury + Futures).")
+                                try:
+                                    yield
+                                finally:
+                                    if dispatcher_task:
+                                        dispatcher_task.cancel()
 
 
 app = FastAPI(title="Chartink -> Dhan Algo Bot", lifespan=lifespan)
@@ -147,6 +171,7 @@ app.include_router(screener_main.router)
 app.include_router(luxury_main.router)
 app.include_router(swing_main.router)
 app.include_router(paper01_main.router)
+app.include_router(universe_bucket.router)
 
 
 # --------------------------------------------------------------------------- #

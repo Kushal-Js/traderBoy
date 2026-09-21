@@ -289,6 +289,23 @@ class DhanWrapper:
         # added (see NOTES.md's design-decision entry), fixed before it
         # could actually happen rather than after.
         self._on_price_tick_subscribers: list[Callable[[str, float], None]] = []
+        # underlying-equity security_id (str) -> underlying_symbol, for
+        # every equity we've subscribed in Quote mode (added 21 Sep 2026,
+        # underlying_candle_feed.py's own WS-based candle reconstruction -
+        # see that module's docstring). Kept DELIBERATELY SEPARATE from
+        # _security_id_to_symbol above (which is option/NSE_FNO-only) -
+        # trading-skills' incidents/2026-09-17-copper-mcx-security-id-
+        # collision-and-adoption.md is exactly the failure mode of two
+        # different instrument spaces silently sharing one lookup dict, and
+        # this repo doesn't repeat that mistake twice.
+        self._equity_security_id_to_symbol: dict[str, str] = {}
+        # Fired synchronously from the market-feed's WebSocket thread on
+        # every Quote/Full packet (never Ticker - those have no volume
+        # field), as (underlying_symbol, ltp, day_cumulative_volume,
+        # tick_time). Separate list from _on_price_tick_subscribers above
+        # so existing LTP-only option subscribers are completely
+        # unaffected by this addition - see add_quote_tick_subscriber().
+        self._on_quote_tick_subscribers: list[Callable[[str, float, float, datetime], None]] = []
         # underlying_symbol -> (fetched_at, is_bearish, candle_start) - see
         # refresh_supertrend_signal()/get_cached_supertrend_bearish().
         self._supertrend_cache: dict[str, tuple[datetime, bool, Optional[datetime]]] = {}
@@ -791,6 +808,15 @@ class DhanWrapper:
         for why this is additive rather than a single-slot assignment."""
         self._on_price_tick_subscribers.append(callback)
 
+    def add_quote_tick_subscriber(self, callback: Callable[[str, float, float, datetime], None]) -> None:
+        """Registers a callback to fire on every Quote/Full-mode packet
+        (added 21 Sep 2026 for underlying_candle_feed.py), as
+        (underlying_symbol, ltp, day_cumulative_volume, tick_time). Never
+        fires for a Ticker-mode packet (options remain Ticker-subscribed,
+        no volume field exists there) - see _on_market_tick's own routing.
+        Additive list, same rationale as add_price_tick_subscriber above."""
+        self._on_quote_tick_subscribers.append(callback)
+
     def _on_market_tick(self, _feed, tick: dict) -> None:
         # Runs on the MarketFeed's own background thread, not the asyncio
         # event loop - on_price_tick (if set) is responsible for hopping
@@ -807,8 +833,9 @@ class DhanWrapper:
             return
 
         security_id = str(security_id)
+        now = datetime.now(IST)
         self._ltp_cache[security_id] = ltp_val
-        self._ltp_cache_ts[security_id] = datetime.now(IST)
+        self._ltp_cache_ts[security_id] = now
         self.stats["price_ticks_received"] += 1
 
         if self._on_price_tick_subscribers:
@@ -819,6 +846,27 @@ class DhanWrapper:
                         callback(trading_symbol, ltp_val)
                     except Exception:  # noqa: BLE001
                         logger.exception("on_price_tick subscriber failed for %s", trading_symbol)
+
+        # Quote/Full packets only (process_quote/process_full both set a
+        # "volume" key - Ticker packets, process_ticker, never do) - routed
+        # via the SEPARATE equity lookup dict, never _security_id_to_symbol,
+        # so this can never fire for an option tick or cross-contaminate
+        # the two instrument spaces (see _equity_security_id_to_symbol's
+        # own docstring for the incident that makes this worth being
+        # explicit about).
+        if self._on_quote_tick_subscribers and "volume" in tick:
+            underlying_symbol = self._equity_security_id_to_symbol.get(security_id)
+            if underlying_symbol is not None:
+                try:
+                    volume_val = float(tick["volume"])
+                except (TypeError, ValueError):
+                    volume_val = None
+                if volume_val is not None:
+                    for callback in self._on_quote_tick_subscribers:
+                        try:
+                            callback(underlying_symbol, ltp_val, volume_val, now)
+                        except Exception:  # noqa: BLE001
+                            logger.exception("on_quote_tick subscriber failed for %s", underlying_symbol)
 
     def start_feed(self) -> None:
         """Eagerly opens both socket connections (otherwise they lazily open
@@ -872,6 +920,39 @@ class DhanWrapper:
         self._ltp_cache.pop(security_id, None)
         self._ltp_cache_ts.pop(security_id, None)
         instrument = (MarketFeed.NSE_FNO, security_id, MarketFeed.Ticker)
+        with self._market_feed_lock:
+            self._market_feed_instruments.discard(instrument)
+            feed = self._market_feed
+        if feed is not None:
+            feed.unsubscribe_symbols([instrument])
+
+    def subscribe_equity_quote(self, underlying_symbol: str) -> None:
+        """Equity-segment counterpart to subscribe_option_price (added 21
+        Sep 2026 for underlying_candle_feed.py) - subscribes underlying_
+        symbol's own NSE cash-segment security_id in Quote mode (volume-
+        bearing, unlike option's Ticker mode) on the SAME shared market-
+        feed WebSocket connection, going through the exact same
+        reconnect-safe _market_feed_instruments/subscribe_symbols path as
+        every option subscription already does. Idempotent - resubscribing
+        an already-subscribed symbol is a harmless no-op (dhanhq's own
+        subscribe_symbols de-dupes via a set)."""
+        if not config.ENABLE_WS_FEED:
+            return
+        security_id = self._equity_security_id(underlying_symbol)
+        self._equity_security_id_to_symbol[security_id] = underlying_symbol
+        instrument = (MarketFeed.NSE, security_id, MarketFeed.Quote)
+        with self._market_feed_lock:
+            self._market_feed_instruments.add(instrument)
+            feed = self._market_feed
+        if feed is not None:
+            feed.subscribe_symbols([instrument])
+
+    def unsubscribe_equity_quote(self, underlying_symbol: str) -> None:
+        if not config.ENABLE_WS_FEED:
+            return
+        security_id = self._equity_security_id(underlying_symbol)
+        self._equity_security_id_to_symbol.pop(security_id, None)
+        instrument = (MarketFeed.NSE, security_id, MarketFeed.Quote)
         with self._market_feed_lock:
             self._market_feed_instruments.discard(instrument)
             feed = self._market_feed

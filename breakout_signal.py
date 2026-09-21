@@ -97,7 +97,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 from zoneinfo import ZoneInfo
 
 import trade_history
@@ -266,6 +266,27 @@ def _fetch_5m_sync(symbol: str, lookback_days: int) -> dict:
     return (resp.get("data") or {}) if isinstance(resp, dict) else {}
 
 
+def _fetch_5m_hybrid(symbol: str, cfg) -> dict:
+    """WS-first, REST-fallback (added 21 Sep 2026 - see underlying_candle_
+    feed.py's own module docstring for the full rationale: REST-polling a
+    wide watchlist every scan cycle doesn't scale, but polling stays the
+    correctness fallback rather than being replaced outright, per the
+    user's own framing). Inert unless cfg.BREAKOUT_USE_WS_CANDLES is true
+    (default false) - falls straight through to the original REST-only
+    _fetch_5m_sync otherwise, byte-for-byte the same behavior as before
+    this function existed."""
+    if not getattr(cfg, "BREAKOUT_USE_WS_CANDLES", False):
+        return _fetch_5m_sync(symbol, cfg.BREAKOUT_CANDLE_LOOKBACK_DAYS)
+    import underlying_candle_feed
+    stale_after = getattr(cfg, "BREAKOUT_WS_STALE_AFTER_SECONDS", 90)
+    if underlying_candle_feed.is_fresh(symbol, stale_after):
+        data = underlying_candle_feed.get_candles_dict(symbol)
+        if data:
+            return data
+    # Not subscribed yet, no tick received yet, or gone stale - REST fallback.
+    return _fetch_5m_sync(symbol, cfg.BREAKOUT_CANDLE_LOOKBACK_DAYS)
+
+
 def _fetch_daily_sync(symbol: str, lookback_days: int) -> dict:
     from Options.dhan_client import dhan_wrapper
     if dhan_wrapper._client is None:
@@ -286,7 +307,7 @@ def _evaluate_signal_sync(symbol: str, direction: str, cfg) -> Optional[dict]:
     most recently completed 5-min candle, else None. Never raises -
     caller treats any exception as "no signal yet, try again next cycle"."""
     try:
-        candles = _fetch_5m_sync(symbol, cfg.BREAKOUT_CANDLE_LOOKBACK_DAYS)
+        candles = _fetch_5m_hybrid(symbol, cfg)
         ts = candles.get("timestamp") or []
         opens, highs, lows, closes, vols = (candles.get(k) or [] for k in ("open", "high", "low", "close", "volume"))
         # Drop a still-forming candle and any zero-volume padding bar.
@@ -416,22 +437,411 @@ async def _scan_cycle(strategy: str, cfg, entry_fn: Callable[[str, str], Awaitab
         })
 
 
+_universe_seeded_for: dict[str, date] = {}
+_universe_bucket_synced_count: dict[str, tuple[int, int]] = {}  # strategy -> (CE count, PE count) last synced
+
+
+async def _ws_subscribe_best_effort(strategy: str, symbols: list[str]) -> None:
+    if not symbols:
+        return
+    try:
+        import underlying_candle_feed
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, underlying_candle_feed.subscribe, symbols)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: WS-subscribing the curated universe failed - scan cycle falls back to REST for it", strategy)
+
+
+async def _seed_static_universe(strategy: str, cfg) -> None:
+    """Curated-universe watchlist seeding, "static" source (added 21 Sep
+    2026, user request - see underlying_candle_feed.py's own module
+    docstring and Options/config.py's BREAKOUT_SEED_UNIVERSE_ENABLED
+    block). Inert unless both cfg.BREAKOUT_SEED_UNIVERSE_ENABLED and
+    cfg.BREAKOUT_UNIVERSE_SYMBOLS are set - byte-for-byte the existing
+    alerts-only behavior otherwise. Runs at most once per calendar date
+    per strategy: seeds BOTH the CE and PE watchlists with the same fixed
+    symbol list via record_alert itself (ADDITIVE to, never a replacement
+    for, real Chartink alerts still recording normally - record_alert's
+    own idempotent `if sym not in w.items` check leaves an already-
+    alerted symbol untouched), and - if cfg.BREAKOUT_USE_WS_CANDLES is
+    also on - WS-subscribes the same list so _fetch_5m_hybrid has
+    something fresh to read from the very first scan cycle of the day."""
+    if not (getattr(cfg, "BREAKOUT_SEED_UNIVERSE_ENABLED", False) and getattr(cfg, "BREAKOUT_UNIVERSE_SYMBOLS", None)):
+        return
+    today = _today()
+    if _universe_seeded_for.get(strategy) == today:
+        return
+    symbols = cfg.BREAKOUT_UNIVERSE_SYMBOLS
+    for option_type in ("CE", "PE"):
+        await record_alert(strategy, option_type, symbols)
+    if getattr(cfg, "BREAKOUT_USE_WS_CANDLES", False):
+        await _ws_subscribe_best_effort(strategy, symbols)
+    _universe_seeded_for[strategy] = today
+    logger.warning("%s breakout-signal: seeded STATIC curated universe of %d symbols for %s (ws_candles=%s).",
+                    strategy, len(symbols), today, getattr(cfg, "BREAKOUT_USE_WS_CANDLES", False))
+
+
+async def _sync_universe_bucket_source(strategy: str, cfg) -> None:
+    """Curated-universe watchlist seeding, "universe_bucket" source
+    (added 21 Sep 2026, user request - see universe_bucket.py's own
+    module docstring for the rolling-3-trading-day bucket this reads
+    from). Unlike _seed_static_universe above, this runs EVERY scan
+    cycle, not once/day - a fresh alert posted to universe_bucket's own
+    webhook should reach this package's watchlist within one scan
+    interval, not wait for tomorrow's seed. Cheap even every cycle:
+    record_alert's own idempotent check means re-recording an
+    already-present symbol is a fast no-op; the WS-subscribe call is
+    similarly idempotent (underlying_candle_feed.subscribe skips already-
+    subscribed symbols). CE and PE are synced from universe_bucket's own
+    separate CE/PE buckets, matching this package's own CE/PE watchlist
+    split exactly - never crossed."""
+    if not (getattr(cfg, "BREAKOUT_SEED_UNIVERSE_ENABLED", False) and getattr(cfg, "BREAKOUT_UNIVERSE_SOURCE", "static") == "universe_bucket"):
+        return
+    try:
+        import universe_bucket
+        ce_symbols = sorted(await universe_bucket.active_symbols("CE"))
+        pe_symbols = sorted(await universe_bucket.active_symbols("PE"))
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: reading universe_bucket failed - scan cycle continues with the existing watchlist unchanged", strategy)
+        return
+    if ce_symbols:
+        await record_alert(strategy, "CE", ce_symbols)
+    if pe_symbols:
+        await record_alert(strategy, "PE", pe_symbols)
+    if getattr(cfg, "BREAKOUT_USE_WS_CANDLES", False):
+        await _ws_subscribe_best_effort(strategy, sorted(set(ce_symbols) | set(pe_symbols)))
+    counts = (len(ce_symbols), len(pe_symbols))
+    if _universe_bucket_synced_count.get(strategy) != counts:
+        _universe_bucket_synced_count[strategy] = counts
+        logger.warning("%s breakout-signal: synced from universe_bucket - CE=%d PE=%d symbols (ws_candles=%s).",
+                        strategy, counts[0], counts[1], getattr(cfg, "BREAKOUT_USE_WS_CANDLES", False))
+
+
+async def _maybe_seed_universe(strategy: str, cfg) -> None:
+    """Dispatches to the configured curated-universe source - see
+    Options/config.py's own BREAKOUT_UNIVERSE_SOURCE docstring for the
+    two values ("static", the default/unchanged behavior, or
+    "universe_bucket"). Both underlying functions are already no-ops
+    unless their own preconditions are met, so calling both here
+    unconditionally is safe regardless of which (if either) is active.
+    Skipped entirely for a strategy the universe_dispatcher_loop below
+    already owns - see _dispatcher_owned_strategies' own docstring for
+    why running both at once would double-process every signal."""
+    if strategy in _dispatcher_owned_strategies:
+        return
+    await _seed_static_universe(strategy, cfg)
+    await _sync_universe_bucket_source(strategy, cfg)
+
+
+# =============================================================== dispatcher ===
+# Cross-package signal dispatcher for universe_bucket-sourced symbols
+# (added 21 Sep 2026, user request: "since there would be just one source
+# of signals now (breakout scanner), we... have to design to pass these
+# signals to LUXURY and FUTURES properly so that no trade is left and is
+# divided between 2 without dupes").
+#
+# THE PROBLEM WITH TWO INDEPENDENT SCANNERS ON ONE SHARED SOURCE: with
+# BREAKOUT_UNIVERSE_SOURCE="universe_bucket" (see _sync_universe_bucket_
+# source above), Luxury and Futures would each independently sync the
+# SAME shared universe_bucket symbols into their OWN separate watchlists
+# and independently evaluate the SAME underlying data against the SAME
+# (currently identical) thresholds - meaning both would typically detect
+# the identical signal within a cycle of each other and both attempt
+# entry, relying entirely on cross_strategy_registry's atomic claim to
+# stop a DUPLICATE real order. That part works. What it does NOT solve:
+# each package's own watchlist marks a symbol "signaled" (never retried
+# today) the INSTANT it makes its one entry attempt - including when that
+# attempt fails ONLY because the other package's claim briefly won the
+# race, even though that other package then rejects the trade itself
+# (capacity, a gate, whatever) and releases the claim moments later. The
+# first package never gets a second look, and neither does the trade -
+# genuinely LOST to a race, not to either package's own real risk
+# controls. That's the exact failure mode the user is naming.
+#
+# THE FIX: for any strategy this dispatcher owns (see
+# _dispatcher_owned_strategies below), it - not that strategy's own
+# signal_scanner_loop - is the ONLY thing that reads universe_bucket and
+# evaluates signals for it (_maybe_seed_universe above no-ops for an
+# owned strategy for exactly this reason: two evaluators racing on one
+# signal is the bug, not the fix). Each signal is detected EXACTLY ONCE,
+# then offered to each target package IN TURN, never in parallel - so
+# there is no race between Luxury and Futures for a dispatcher-owned
+# signal to begin with, and no possibility of both attempting the same
+# symbol at once. If a target rejects (any status other than an
+# entered/placed one), the NEXT target gets a real, un-raced attempt at
+# the exact same signal before it's given up on for the day - closing
+# the "lost to a race" gap directly. The starting target ROTATES per
+# option_type (round-robin) so volume is DIVIDED across both packages
+# over time rather than one always getting first (and therefore most)
+# refusal of first look - not a strict 50/50 (that depends on each
+# package's own capacity/gates on the day), but never structurally
+# biased toward whichever package happens to be listed first.
+#
+# cross_strategy_registry still applies exactly as it always does -
+# this dispatcher doesn't bypass or replace it, it just removes the ONE
+# extra race (two packages BOTH independently discovering and attempting
+# the same universe_bucket signal) that sat on top of it.
+
+DISPATCHER_STRATEGY_NAME = "UniverseDispatcher"  # reuses _watchlist()'s existing per-strategy persistence/day-rollover machinery, unmodified, keyed under this synthetic "strategy" name
+_TERMINAL_SUCCESS_STATUSES = ("entered", "amo_placed", "pending_confirmation")  # mirrors alert_bucket.ENTERED_STATUSES - kept local so the two modules stay independent, per this codebase's own "deliberately separate" convention
+_CAPACITY_REJECTION_REASON = "duplicate_or_capacity_full"  # the exact reason string all 3 packages' own _process_one_entry use - see reserve_symbol's own call site in each trading_engine.py
+_dispatcher_owned_strategies: set[str] = set()
+_dispatch_turn: dict[str, int] = {"CE": 0, "PE": 0}
+
+
+async def _dispatch_to_targets(option_type: str, sym: str, sig: dict, targets: list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]]) -> bool:
+    """Tries each (strategy, cfg, entry_fn) in `targets`, SEQUENTIALLY
+    (never concurrently - that would just reintroduce the race this whole
+    dispatcher exists to remove), starting from a rotating position so
+    the offer is DIVIDED across targets over time - see this section's
+    own module-level docstring above. Returns True if EVERY target that
+    declined did so specifically with _CAPACITY_REJECTION_REASON (i.e.
+    this signal is a genuine capacity-backlog candidate - see
+    _dispatch_backlog_cycle below); False if it succeeded OR if at least
+    one decline was for a different reason (a gap-down delay, an RSI
+    block, insufficient funds, ...) - those aren't capacity problems, so
+    a freed slot elsewhere wouldn't fix them, and this signal should NOT
+    be kept waiting on one."""
+    n = len(targets)
+    start = _dispatch_turn[option_type] % n
+    order = targets[start:] + targets[:start]
+    _dispatch_turn[option_type] = (_dispatch_turn[option_type] + 1) % n
+
+    all_capacity_blocked = True
+    for strategy, _cfg, entry_fn in order:
+        try:
+            result = await entry_fn(sym, option_type)
+        except Exception:  # noqa: BLE001
+            logger.exception("UniverseDispatcher: %s entry attempt for %s failed", strategy, sym)
+            result = {"status": "error"}
+        status = (result or {}).get("status")
+        reason = (result or {}).get("reason")
+        trade_history.append_jsonl("universe_dispatch", {
+            "strategy": strategy, "option_type": option_type, "symbol": sym,
+            **{k: v for k, v in sig.items() if k != "symbol"},
+            "entry_result_status": status, "entry_result_reason": reason,
+            "logged_at": datetime.now().isoformat(),
+        })
+        if status in _TERMINAL_SUCCESS_STATUSES:
+            logger.warning("UniverseDispatcher: %s %s %s -> %s took it (%s)", option_type, sym, order, strategy, status)
+            return False
+        if reason != _CAPACITY_REJECTION_REASON:
+            all_capacity_blocked = False
+        logger.info("UniverseDispatcher: %s %s %s declined (%s/%s) - offering to the next target",
+                    strategy, option_type, sym, status, reason)
+    logger.warning("UniverseDispatcher: %s %s declined by EVERY target (%s)%s",
+                    option_type, sym, [t[0] for t in targets],
+                    " - all capacity-blocked, queuing for retry" if all_capacity_blocked else " - not traded today")
+    return all_capacity_blocked
+
+
+# ------------------------------------------------------ capacity backlog ---
+# "Once any slot from LUXURY or FUTURES gets free... [a signal] which
+# couldn't be filled earlier due to max capacity limit (stock still in
+# momentum) should be attempted" (user request, 21 Sep 2026). Scoped
+# NARROWLY to capacity - see _dispatch_to_targets' own docstring for why a
+# non-capacity decline (funds, a gate, a delay) is never backlogged: a
+# freed slot elsewhere doesn't fix those, so retrying would just spend a
+# real order-placement attempt for no reason.
+#
+# "Still in momentum" is checked at EVERY retry, not just once, via
+# reversal_filters.check_underlying_move_confirms_exit - the SAME real,
+# already-backtested 0.10% confirmation threshold this codebase already
+# trusts to decide "has the underlying genuinely moved against a CE/PE
+# position", just pointed the other direction here (against the BREAKOUT
+# rather than against an open position). A backlog entry whose underlying
+# has moved back through its own original close by that much is dropped
+# immediately - no point re-attempting entry into a breakout that's
+# already reversed, capacity or not.
+#
+# In-memory only (resets on restart) - same accepted tradeoff as
+# cross_strategy_registry/PositionStore's own reserved_symbols; a restart
+# just means a currently-backlogged signal quietly stops being retried,
+# never an incorrect trade.
+_capacity_backlog: dict[str, list[dict]] = {"CE": [], "PE": []}  # FIFO, oldest first
+
+
+def _momentum_still_valid_sync(symbol: str, direction: str, original_close: float, cfg) -> Optional[bool]:
+    """Blocking. True = still worth retrying, False = reversed, drop from
+    backlog, None = couldn't verify this cycle (data unavailable) - leave
+    the entry untouched, try again next cycle rather than guessing either
+    way. Reuses _fetch_5m_hybrid (WS-first/REST-fallback, same as a fresh
+    signal check) for the latest COMPLETED candle's close as "current
+    price" - never the still-forming candle, same discipline as every
+    other price read in this module."""
+    try:
+        import reversal_filters
+        candles = _fetch_5m_hybrid(symbol, cfg)
+        closes, vols, ts = candles.get("close") or [], candles.get("volume") or [], candles.get("timestamp") or []
+        now_epoch = time.time()
+        rows = [(e, c) for e, c, v in zip(ts, closes, vols) if v and e + 300 <= now_epoch]
+        if not rows:
+            return None
+        current_close = rows[-1][1]
+        option_type = "CE" if direction == "bullish" else "PE"
+        reversed_against = reversal_filters.check_underlying_move_confirms_exit(original_close, current_close, option_type)
+        return not reversed_against
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: momentum re-check failed - leaving backlog entry untouched this cycle", symbol)
+        return None
+
+
+async def _dispatch_backlog_cycle(cfg, targets: list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]]) -> None:
+    """Drains the capacity backlog - called FIRST each dispatcher tick,
+    BEFORE fresh signals get their own scan budget (user's own ordering:
+    a freed slot should go to "the next signal OR one which couldn't be
+    filled earlier" - backlog entries have already been waiting, so they
+    get first look rather than being perpetually outrun by newer
+    signals). Each entry gets re-tried via the SAME _dispatch_to_targets
+    used for a fresh signal - if it succeeds now, it's removed; if it's
+    still capacity-blocked, it stays queued (subject to the momentum
+    check and max-age below); anything else (a genuine decline, momentum
+    reversed, or aged out) drops it for good."""
+    loop = asyncio.get_running_loop()
+    now = datetime.now(IST)
+    max_age = timedelta(minutes=cfg.BREAKOUT_CAPACITY_BACKLOG_MAX_AGE_MINUTES)
+    for option_type in ("CE", "PE"):
+        direction = "bullish" if option_type == "CE" else "bearish"
+        remaining: list[dict] = []
+        for entry in _capacity_backlog[option_type]:
+            sym, sig, queued_at = entry["symbol"], entry["signal"], entry["queued_at"]
+            if now - queued_at > max_age:
+                logger.info("UniverseDispatcher backlog: %s %s aged out after %.0f min - dropped",
+                            option_type, sym, (now - queued_at).total_seconds() / 60)
+                continue
+            still_valid = await loop.run_in_executor(_SCAN_EXECUTOR, _momentum_still_valid_sync, sym, direction, sig["close"], cfg)
+            if still_valid is False:
+                logger.info("UniverseDispatcher backlog: %s %s momentum reversed - dropped", option_type, sym)
+                continue
+            if still_valid is None:
+                remaining.append(entry)  # inconclusive this cycle - keep waiting, don't spend a real attempt
+                continue
+            still_capacity_blocked = await _dispatch_to_targets(option_type, sym, sig, targets)
+            if still_capacity_blocked:
+                remaining.append(entry)  # entered nothing, still purely capacity-blocked - keep in backlog
+            # else: either entered successfully, or declined for a different
+            # reason this time (already logged by _dispatch_to_targets) -
+            # either way, done with this entry.
+        _capacity_backlog[option_type] = remaining
+
+
+async def _dispatch_scan_cycle(cfg, targets: list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]]) -> None:
+    """Same shape as _scan_cycle, but on a confirmed signal calls
+    _dispatch_to_targets instead of a single package's own entry_fn.
+    `cfg` supplies the SHARED scan-cadence/threshold settings (read from
+    whichever package's config the dispatcher was started with - see
+    universe_dispatcher_loop's own docstring: these are already identical
+    across Options/Luxury/Futures as of 21 Sep 2026, so any one of the
+    target configs is representative)."""
+    pending: list[tuple[str, str]] = []
+    for option_type in ("CE", "PE"):
+        w = _watchlist(DISPATCHER_STRATEGY_NAME, option_type)
+        async with _LOCK:
+            _ensure_today_locked(w)
+            pending.extend((option_type, sym) for sym, it in w.items.items() if not it["signaled"])
+
+    loop = asyncio.get_running_loop()
+    checked = 0
+    for ot, sym in pending:
+        if checked >= cfg.BREAKOUT_SCAN_MAX_PER_CYCLE:
+            break
+        checked += 1
+        direction = "bullish" if ot == "CE" else "bearish"
+        sig = await loop.run_in_executor(_SCAN_EXECUTOR, _evaluate_signal_sync, sym, direction, cfg)
+        await asyncio.sleep(cfg.BREAKOUT_SCAN_PACE_SECONDS)
+        if sig is None:
+            continue
+
+        w = _watchlist(DISPATCHER_STRATEGY_NAME, ot)
+        async with _LOCK:
+            it = w.items.get(sym)
+            if it is None or it["signaled"]:
+                continue
+            it["signaled"], it["signaled_at"] = True, sig["detected_at"]
+            await _persist(w)
+
+        logger.warning(
+            "BREAKOUT SIGNAL [UniverseDispatcher]: %s %s confirmed (range=%.2f%% body=%.2f%% relvol=%.2fx) - dispatching",
+            ot, sym, sig["range_pct"], sig["body_pct"], sig["relative_volume"],
+        )
+        all_capacity_blocked = await _dispatch_to_targets(ot, sym, sig, targets)
+        if all_capacity_blocked:
+            _capacity_backlog[ot].append({"symbol": sym, "signal": sig, "queued_at": datetime.now(IST)})
+
+
+async def universe_dispatcher_loop(targets: list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]]) -> None:
+    """Started ONCE for the whole process (not per-package - see main.py's
+    own lifespan for where), given the list of (strategy, cfg, entry_fn)
+    tuples it should divide universe_bucket-sourced signals between.
+    Registers every listed strategy in _dispatcher_owned_strategies FIRST
+    (before the loop starts touching anything) so _maybe_seed_universe
+    correctly no-ops for all of them from the very first tick - see that
+    function's own docstring for why running both paths at once would
+    double-process every signal.
+
+    Same unconditional-every-tick shape as signal_scanner_loop: day-
+    rollover/post-close truncation for the dispatcher's OWN watchlist
+    (_watchlist(DISPATCHER_STRATEGY_NAME, ...)), syncing fresh symbols
+    from universe_bucket every tick (not just once/day - see
+    _sync_universe_bucket_source's own docstring for why), then a scan
+    cycle - all gated the same way this module's other loop already is."""
+    if len(targets) < 2:
+        logger.warning("UniverseDispatcher: started with only %d target(s) - dispatching still works "
+                        "but there's nothing to divide between.", len(targets))
+    _dispatcher_owned_strategies.update(strategy for strategy, _cfg, _fn in targets)
+    primary_cfg = targets[0][1]
+    logger.info("UniverseDispatcher started for targets=%s (interval=%ss, max %d/cycle).",
+                [t[0] for t in targets], primary_cfg.BREAKOUT_SCAN_INTERVAL_SECONDS, primary_cfg.BREAKOUT_SCAN_MAX_PER_CYCLE)
+    while True:
+        try:
+            for option_type in ("CE", "PE"):
+                await _maybe_clear_after_close(_watchlist(DISPATCHER_STRATEGY_NAME, option_type), primary_cfg)
+            try:
+                import universe_bucket
+                ce_symbols = sorted(await universe_bucket.active_symbols("CE"))
+                pe_symbols = sorted(await universe_bucket.active_symbols("PE"))
+            except Exception:  # noqa: BLE001
+                logger.exception("UniverseDispatcher: reading universe_bucket failed - cycle continues with the existing watchlist unchanged")
+                ce_symbols, pe_symbols = [], []
+            if ce_symbols:
+                await record_alert(DISPATCHER_STRATEGY_NAME, "CE", ce_symbols)
+            if pe_symbols:
+                await record_alert(DISPATCHER_STRATEGY_NAME, "PE", pe_symbols)
+            if primary_cfg.BREAKOUT_SIGNAL_ENABLED and _market_hours_now():
+                await _dispatch_backlog_cycle(primary_cfg, targets)  # backlog gets first look at any freed capacity, see its own docstring
+                await _dispatch_scan_cycle(primary_cfg, targets)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("UniverseDispatcher: scan cycle failed - will retry next interval")
+        await asyncio.sleep(primary_cfg.BREAKOUT_SCAN_INTERVAL_SECONDS)
+
+
 async def signal_scanner_loop(strategy: str, cfg, entry_fn: Callable[[str, str], Awaitable[dict]]) -> None:
     """Started once from the calling package's own lifespan. The day-
     rollover check (via _ensure_today_locked, inside _scan_cycle/_maybe_
     clear_after_close) and the post-close truncation both run every tick
     UNCONDITIONALLY - not gated behind BREAKOUT_SIGNAL_ENABLED or market
     hours - so the watchlist's own daily refresh behavior (see module
-    docstring) is guaranteed regardless of whether scanning itself is on."""
+    docstring) is guaranteed regardless of whether scanning itself is on.
+    Curated-universe seeding (_maybe_seed_universe, added 21 Sep 2026) is
+    the same way - unconditional every tick, itself a no-op unless
+    configured. Its "static" source re-seeds once/day (a no-op the rest
+    of the day); its "universe_bucket" source (added later the same day)
+    re-syncs from universe_bucket.py's own rolling bucket EVERY tick, by
+    design - see _sync_universe_bucket_source's own docstring."""
     logger.info(
-        "%s breakout-signal scanner started (enabled=%s, interval=%ss, max %d/cycle, market_end=%s).",
+        "%s breakout-signal scanner started (enabled=%s, interval=%ss, max %d/cycle, market_end=%s, "
+        "seed_universe=%s, ws_candles=%s).",
         strategy, cfg.BREAKOUT_SIGNAL_ENABLED, cfg.BREAKOUT_SCAN_INTERVAL_SECONDS,
         cfg.BREAKOUT_SCAN_MAX_PER_CYCLE, cfg.BREAKOUT_MARKET_END_TIME,
+        getattr(cfg, "BREAKOUT_SEED_UNIVERSE_ENABLED", False), getattr(cfg, "BREAKOUT_USE_WS_CANDLES", False),
     )
     while True:
         try:
             for option_type in ("CE", "PE"):
                 await _maybe_clear_after_close(_watchlist(strategy, option_type), cfg)
+            await _maybe_seed_universe(strategy, cfg)
             if cfg.BREAKOUT_SIGNAL_ENABLED and _market_hours_now():
                 await _scan_cycle(strategy, cfg, entry_fn)
         except asyncio.CancelledError:

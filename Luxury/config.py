@@ -496,3 +496,20 @@ BREAKOUT_SCAN_PACE_SECONDS = float(os.getenv("LUXURY_BREAKOUT_SCAN_PACE_SECONDS"
 # completed day's full signaled state until the next date rolls over.
 # Matches this module's own _market_hours_now upper bound by default.
 BREAKOUT_MARKET_END_TIME = os.getenv("LUXURY_BREAKOUT_MARKET_END_TIME", "15:35")
+
+# Curated-universe watchlist seeding + WebSocket-based candle reconstruction
+# (added 21 Sep 2026, user request - see underlying_candle_feed.py's own
+# module docstring and Options/config.py's identical block for the full
+# rationale; not repeated here). Luxury is one of the two packages this is
+# being built for first (the other is Futures) - still defaults OFF until
+# backtested and explicitly enabled, per the user's own "flag enabled
+# approach after" instruction.
+BREAKOUT_SEED_UNIVERSE_ENABLED = os.getenv("LUXURY_BREAKOUT_SEED_UNIVERSE_ENABLED", "false").lower() == "true"
+BREAKOUT_UNIVERSE_SYMBOLS = [s.strip().upper() for s in os.getenv("LUXURY_BREAKOUT_UNIVERSE_SYMBOLS", "").split(",") if s.strip()]
+BREAKOUT_USE_WS_CANDLES = os.getenv("LUXURY_BREAKOUT_USE_WS_CANDLES", "false").lower() == "true"
+BREAKOUT_WS_STALE_AFTER_SECONDS = float(os.getenv("LUXURY_BREAKOUT_WS_STALE_AFTER_SECONDS", "90"))
+
+# "static" (default, unchanged) or "universe_bucket" (universe_bucket.py's
+# rolling 3-trading-day pool instead of the fixed list above) - see
+# Options/config.py's identical block for the full rationale.
+BREAKOUT_UNIVERSE_SOURCE = os.getenv("LUXURY_BREAKOUT_UNIVERSE_SOURCE", "static").lower()
