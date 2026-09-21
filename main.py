@@ -64,6 +64,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from pydantic import BaseModel
 
 from trade_history import HISTORY_DIR, read_all_trades, read_all_webhook_alerts
 import choppy_stocks
@@ -81,6 +82,7 @@ from Swing import swing_main
 from Paper01 import paper01_main
 import universe_bucket
 import breakout_signal
+import underlying_candle_feed
 
 logging.basicConfig(
     level=logging.INFO,
@@ -286,3 +288,56 @@ async def funds_buckets():
     100%) without doing the arithmetic by hand."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, fund_allocation.snapshot)
+
+
+# --------------------------------------------------------------------------- #
+# WS-candle-reconstruction observation endpoints (added 21 Sep 2026, user
+# request - see trading-skills' designs/ws-candle-reconstruction-parity-
+# results.md). Deliberately DECOUPLED from BREAKOUT_USE_WS_CANDLES (which
+# stays false for all 3 packages) - subscribing a symbol here has zero
+# effect on any real entry decision. Purpose: let real WS ticks accumulate
+# for underlying_candle_feed.py's own bar reconstruction during a live
+# market session, so its output can be diffed against real REST candles
+# fetched separately after the fact - the only way to settle whether the
+# reconstructed OPEN price (the one metric the REST-replay parity backtest
+# structurally cannot validate) matches a genuine live tick stream, as
+# opposed to the REST-replay's own 1-min-close-as-tick proxy.
+# --------------------------------------------------------------------------- #
+class UnderlyingFeedSubscribeRequest(BaseModel):
+    symbols: list[str]
+
+
+@app.post("/debug/underlying-feed/subscribe")
+async def underlying_feed_subscribe(payload: UnderlyingFeedSubscribeRequest):
+    """Subscribes the given symbols' underlying equities on the live
+    bot's own already-authenticated market-data WebSocket (Quote mode,
+    the same shared connection Options/Luxury/Futures already use for
+    option LTP) so underlying_candle_feed.py starts reconstructing real
+    5-min bars for them from here on. No new session, no order placed,
+    no effect on any package's real entry logic - purely additive
+    observation. See this section's own module-level comment."""
+    symbols = [s.strip().upper() for s in payload.symbols if s.strip()]
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, underlying_candle_feed.subscribe, symbols)
+    return {"subscribed": symbols}
+
+
+@app.get("/debug/underlying-feed/snapshot")
+async def underlying_feed_snapshot():
+    """Read-only: every symbol subscribed via the endpoint above, its
+    completed-bar count, and how long ago its last real tick arrived -
+    see underlying_candle_feed.snapshot()'s own docstring."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, underlying_candle_feed.snapshot)
+
+
+@app.get("/debug/underlying-feed/candles/{symbol}")
+async def underlying_feed_candles(symbol: str):
+    """Read-only: this symbol's completed 5-min bars as reconstructed
+    from real WS ticks so far today - the SAME dict-of-lists shape a REST
+    intraday_minute_data call returns, so it can be diffed directly
+    against one fetched separately after market close for the same
+    symbol/day."""
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(None, underlying_candle_feed.get_candles_dict, symbol.strip().upper())
+    return {"symbol": symbol.strip().upper(), "candles": data}
