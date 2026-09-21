@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -388,6 +389,38 @@ class DhanWrapper:
     def authenticate(self) -> None:
         mode = config.DHAN_AUTH_MODE
         if mode == "pin_totp":
+            # Session-collision guard (added 21 Sep 2026, real incident -
+            # see trading-skills' incidents/2026-09-21-local-backtest-
+            # dhan-session-collision.md). Dhan allows only ONE active
+            # access-token session per account: a local backtest/diagnostic
+            # script calling authenticate() in pin_totp mode mints a
+            # genuinely new token that silently invalidates the LIVE
+            # droplet bot's own current session (and vice versa), causing
+            # a real, confirmed cascade of "could not fetch data" errors
+            # bot-wide (mistaken at the time for a Swing-specific or
+            # WebSocket bug - it wasn't; a WS-based data path depends on
+            # this exact same session token and would collide identically).
+            #
+            # systemd sets INVOCATION_ID for every unit it starts
+            # (unconditionally, no config needed) - a plain local
+            # `python3`/`uv run` invocation never has it set. This is used
+            # ONLY to distinguish "am I the actual deployed service" from
+            # "am I an ad-hoc local script", never as a security boundary.
+            # ALLOW_LOCAL_PIN_TOTP=true is the explicit, deliberate escape
+            # hatch for the rare legitimate case (e.g. confirmed the
+            # droplet is down) - never set this on a whim.
+            running_under_systemd = "INVOCATION_ID" in os.environ
+            allow_override = os.environ.get("ALLOW_LOCAL_PIN_TOTP", "").lower() == "true"
+            if not running_under_systemd and not allow_override:
+                raise RuntimeError(
+                    "Refusing to authenticate via pin_totp from a local (non-systemd) process - "
+                    "this would mint a new Dhan session and silently kick out the live droplet "
+                    "bot's own current one (see incidents/2026-09-21-local-backtest-dhan-session-"
+                    "collision.md). Use DHAN_AUTH_MODE=access_token with a hand-off "
+                    "HANDOFF_DHAN_ACCESS_TOKEN from the user instead. If you have independently "
+                    "confirmed the live bot is not running right now, set "
+                    "ALLOW_LOCAL_PIN_TOTP=true to proceed anyway."
+                )
             if not config.DHAN_CLIENT_ID or not config.DHAN_PIN or not config.DHAN_TOTP_SECRET:
                 raise ValueError("DHAN_CLIENT_ID / DHAN_PIN / DHAN_TOTP_SECRET are not set")
             tsl = Tradehull(config.DHAN_CLIENT_ID, mode="pin_totp",
