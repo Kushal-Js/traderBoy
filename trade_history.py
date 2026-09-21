@@ -123,10 +123,11 @@ REAL_TRADES_NAME = "real_trades"
 
 
 async def record_closed_trade(strategy: str, pos) -> None:
-    """strategy: "Options" or "Futures". pos: a closed
-    Options.position_store.Position or Futures.position_store.Position -
-    both have an identical field set for everything read here (confirmed
-    by reading both dataclasses directly).
+    """strategy: "Options", "Futures", "Luxury", or "Swing". pos: a closed
+    Position from any of those 4 packages' own position_store.py -
+    Options/Futures/Luxury's Position dataclasses have an identical field
+    set for everything read here (confirmed by reading all three
+    directly); Swing's is the odd one out (see pnl_multiplier below).
 
     IMPORTANT (found + fixed 31 Aug 2026, user asked to audit for lag):
     this used to be a plain sync function called directly inside
@@ -138,11 +139,29 @@ async def record_closed_trade(strategy: str, pos) -> None:
     is - call it via `asyncio.create_task(record_closed_trade(...))` and
     do NOT await it (see both position_store.py call sites). The actual
     write still runs in run_in_executor's thread pool, never the event
-    loop, and still can't raise into the caller."""
+    loop, and still can't raise into the caller.
+
+    PNL BUG (found + fixed 21 Sep 2026, user's own live-trade review):
+    this used to multiply by `pos.quantity` unconditionally. That's
+    correct for Options/Futures/Luxury (quantity IS the real rupee
+    multiplier for them), but WRONG for Swing's MCX positions
+    (COPPER/CRUDEOIL/NATURALGAS) - Swing/position_store.py's own
+    Position.pnl_multiplier docstring and Swing/trading_engine.py's own
+    real exit-decision code (lines ~250/725) already establish that MCX
+    needs the real rupee-per-point pnl_multiplier (e.g. 2500 for COPPER),
+    not the tiny lot-count quantity (1) - this function was the one place
+    that never got updated to match, silently understating every MCX
+    trade's logged PnL by orders of magnitude (a real -Rs4,600 loss was
+    logged as -Rs1.84). Options/Futures/Luxury Position objects have no
+    pnl_multiplier attribute at all, so getattr's fallback to pos.quantity
+    keeps their behavior byte-identical to before this fix - only Swing's
+    MCX trades change. See trading-skills/TRADING_JOURNAL.md for the
+    historical PnL correction this required."""
     try:
         pnl = None
+        pnl_qty = getattr(pos, "pnl_multiplier", pos.quantity)
         if pos.exit_price is not None and pos.entry_price is not None:
-            pnl = (pos.exit_price - pos.entry_price) * pos.quantity
+            pnl = (pos.exit_price - pos.entry_price) * pnl_qty
         record = {
             "strategy": strategy,
             "underlying_symbol": pos.underlying_symbol,
