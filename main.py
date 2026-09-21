@@ -62,6 +62,8 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import datetime, date as date_cls
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -83,6 +85,7 @@ from Paper01 import paper01_main
 import universe_bucket
 import breakout_signal
 import underlying_candle_feed
+from Options.dhan_client import dhan_wrapper
 
 logging.basicConfig(
     level=logging.INFO,
@@ -341,3 +344,92 @@ async def underlying_feed_candles(symbol: str):
     loop = asyncio.get_running_loop()
     data = await loop.run_in_executor(None, underlying_candle_feed.get_candles_dict, symbol.strip().upper())
     return {"symbol": symbol.strip().upper(), "candles": data}
+
+
+_UNDERLYING_FEED_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _fetch_rest_5m_candles_sync(symbol: str, day: date_cls) -> dict:
+    """Real REST 5-min candles via the LIVE bot's own already-authenticated
+    connection - deliberately NOT a separate local script, so this needs no
+    hand-off access_token and carries zero session-collision risk (see
+    incidents/2026-09-21-local-backtest-dhan-session-collision.md). Same
+    call shape backtest_ws_candle_reconstruction_parity.py's own
+    fetch_real_5m_candles uses, just routed through the bot's own
+    dhan_wrapper instead of a competing local session."""
+    sec_id = dhan_wrapper._equity_security_id(symbol)
+    resp = dhan_wrapper.client.Dhan.intraday_minute_data(
+        security_id=sec_id, exchange_segment="NSE_EQ", instrument_type="EQUITY",
+        from_date=day.isoformat(), to_date=day.isoformat(), interval=5,
+    )
+    if not isinstance(resp, dict) or resp.get("status") != "success":
+        raise RuntimeError(f"REST fetch failed for {symbol} {day}: {resp}")
+    return resp.get("data") or {}
+
+
+@app.get("/debug/underlying-feed/rest-candles/{symbol}")
+async def underlying_feed_rest_candles(symbol: str, day: str | None = None):
+    """Real REST 5-min candles for `symbol` on `day` (default: today,
+    IST) - the ground-truth side of the WS-candle parity comparison,
+    fetched through the live bot's own connection (see
+    _fetch_rest_5m_candles_sync's own docstring for why this matters)."""
+    d = date_cls.fromisoformat(day) if day else datetime.now(_UNDERLYING_FEED_IST).date()
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(None, _fetch_rest_5m_candles_sync, symbol.strip().upper(), d)
+    return {"symbol": symbol.strip().upper(), "day": d.isoformat(), "candles": data}
+
+
+@app.get("/debug/underlying-feed/parity/{symbol}")
+async def underlying_feed_parity(symbol: str, day: str | None = None):
+    """The full WS-vs-REST comparison for `symbol` on `day` (default:
+    today), computed server-side against the bot's own real WS-
+    reconstructed bars and its own real REST fetch - same tolerance
+    thresholds as backtest_ws_candle_reconstruction_parity.py (close
+    <0.05%, volume <1%, open+close exact <0.01) for a directly comparable
+    result. Unlike that backtest (which replays 1-min REST closes as a
+    proxy tick stream), this compares against GENUINE live WS ticks -
+    the comparison this whole investigation has been building toward.
+    See trading-skills' designs/ws-candle-reconstruction-parity-results.md."""
+    sym = symbol.strip().upper()
+    d = date_cls.fromisoformat(day) if day else datetime.now(_UNDERLYING_FEED_IST).date()
+    loop = asyncio.get_running_loop()
+    real = await loop.run_in_executor(None, _fetch_rest_5m_candles_sync, sym, d)
+    recon = await loop.run_in_executor(None, underlying_candle_feed.get_candles_dict, sym)
+
+    r_ts, r_o, r_h, r_l, r_c, r_v = (real.get(k) or [] for k in ("timestamp", "open", "high", "low", "close", "volume"))
+    real_by_ts = {int(e): {"open": o, "high": h, "low": l, "close": c, "volume": v}
+                  for e, o, h, l, c, v in zip(r_ts, r_o, r_h, r_l, r_c, r_v)}
+    recon_ts, recon_o, recon_h, recon_l, recon_c, recon_v = (recon.get(k) or [] for k in ("timestamp", "open", "high", "low", "close", "volume"))
+    recon_by_ts = {int(e): {"open": o, "high": h, "low": l, "close": c, "volume": v}
+                   for e, o, h, l, c, v in zip(recon_ts, recon_o, recon_h, recon_l, recon_c, recon_v)}
+
+    matched = sorted(set(real_by_ts) & set(recon_by_ts))
+    close_matches = ohlc_exact_matches = vol_matches = 0
+    max_close_diff_pct = max_vol_diff_pct = 0.0
+    rows = []
+    for ts in matched:
+        rb, cb = real_by_ts[ts], recon_by_ts[ts]
+        close_diff_pct = abs(rb["close"] - cb["close"]) / rb["close"] * 100 if rb["close"] else 0.0
+        vol_diff_pct = (abs(rb["volume"] - cb["volume"]) / rb["volume"] * 100) if rb["volume"] else (100.0 if cb["volume"] else 0.0)
+        exact = abs(rb["open"] - cb["open"]) < 0.01 and abs(rb["close"] - cb["close"]) < 0.01
+        max_close_diff_pct = max(max_close_diff_pct, close_diff_pct)
+        max_vol_diff_pct = max(max_vol_diff_pct, vol_diff_pct)
+        if close_diff_pct < 0.05:
+            close_matches += 1
+        if exact:
+            ohlc_exact_matches += 1
+        if vol_diff_pct < 1.0:
+            vol_matches += 1
+        rows.append({
+            "time": datetime.fromtimestamp(ts, tz=_UNDERLYING_FEED_IST).strftime("%H:%M"),
+            "real": rb, "recon": cb, "close_diff_pct": round(close_diff_pct, 3), "vol_diff_pct": round(vol_diff_pct, 3),
+        })
+
+    return {
+        "symbol": sym, "day": d.isoformat(),
+        "real_bar_count": len(real_by_ts), "recon_bar_count": len(recon_by_ts), "matched_bars": len(matched),
+        "close_matches_within_0.05pct": close_matches, "open_and_close_exact_matches": ohlc_exact_matches,
+        "volume_matches_within_1pct": vol_matches,
+        "max_close_diff_pct": round(max_close_diff_pct, 3), "max_volume_diff_pct": round(max_vol_diff_pct, 3),
+        "rows": rows,
+    }

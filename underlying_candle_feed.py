@@ -92,8 +92,10 @@ IST = ZoneInfo("Asia/Kolkata")
 # Bars kept per symbol - comfortably more than any real signal check's own
 # lookback (BREAKOUT_LOOKBACK_CANDLES=10) plus the 20d/50d DAILY checks
 # (which stay on REST regardless - see module docstring; only the 5-min
-# intraday series is WS-sourced). 120 bars = 10 trading hours, i.e. two
-# full sessions of headroom even though this resets at day rollover anyway.
+# intraday series is WS-sourced). 120 bars = 10 trading hours = TWO full
+# sessions genuinely kept continuous across the day boundary (see _on_tick's
+# own comment, corrected 22 Sep 2026 - this used to wipe bars at rollover,
+# which was wrong per the standing continuous-candles rule).
 MAX_BARS_KEPT = 120
 
 
@@ -167,14 +169,26 @@ def _on_tick(underlying_symbol: str, ltp: float, cum_volume: float, t: datetime)
     with _lock:
         st = _state.setdefault(underlying_symbol, _SymbolState())
         if st.day != today:
-            # Day rollover (or first tick ever for this symbol) - a fresh
-            # trading day's cumulative volume baseline is 0, and any prior
-            # day's bars are stale for the 10-candle lookback (continuous-
-            # candle rule is about never RESETTING a lookback mid-window,
-            # not about carrying yesterday's session into today's).
+            # Day rollover (or first tick ever for this symbol) - CORRECTED
+            # 22 Sep 2026 (user's own standing continuous-candles rule,
+            # restated explicitly: "candles spanning across last few days
+            # to current timestamp like all brokers and charting platforms
+            # do"). This used to wipe st.bars here on the theory that
+            # "continuous-candle rule is about never resetting a lookback
+            # mid-window, not about carrying yesterday's session into
+            # today's" - that reasoning was simply wrong: a real chart's
+            # 5-min series does NOT reset at midnight, so the FIRST candle
+            # right after today's 09:15 open must still see yesterday's
+            # closing bars for a 10-candle consolidation lookback, exactly
+            # like breakout_signal.py's own REST path (_fetch_5m_sync)
+            # already does by fetching BREAKOUT_CANDLE_LOOKBACK_DAYS of
+            # continuous history. Only the intra-day CUMULATIVE VOLUME
+            # baseline genuinely needs a day-boundary reset (Dhan's
+            # Quote-tick cum_volume is day-relative, not truly cumulative
+            # forever) - st.bars itself is left untouched here, still
+            # trimmed to MAX_BARS_KEPT by the append step below.
             st.day = today
             st.current_bar_start = None
-            st.bars = []
             st.cum_volume_at_bar_start = 0.0
             st.cum_volume_now = 0.0
         completed = _update_bar(st, ltp, cum_volume, t)
