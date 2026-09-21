@@ -72,18 +72,6 @@ BURST_WINDOW_START = os.getenv("FUTURES_BURST_WINDOW_START", "09:15")
 BURST_WINDOW_END = os.getenv("FUTURES_BURST_WINDOW_END", "10:00")
 BURST_EXTRA_SLOTS_CE = int(os.getenv("FUTURES_BURST_EXTRA_SLOTS_CE", "1"))
 
-# Loss-triggered alert-bucket switch - see Options/config.py's identical
-# block for the full rationale. The shared bucket/ranker settings live only
-# in Options/config.py (one ranker for all packages).
-BUCKET_SWITCH_ENABLED = os.getenv("FUTURES_BUCKET_SWITCH_ENABLED", "true").lower() == "true"
-BUCKET_SWITCH_LOSS_RS = float(os.getenv("FUTURES_BUCKET_SWITCH_LOSS_RS", "600"))
-BUCKET_SWITCH_MIN_SCORE = float(os.getenv("FUTURES_BUCKET_SWITCH_MIN_SCORE", "50"))
-BUCKET_SWITCH_MAX_PER_DAY = int(os.getenv("FUTURES_BUCKET_SWITCH_MAX_PER_DAY", "8"))
-BUCKET_SWITCH_RETRY_SECONDS = float(os.getenv("FUTURES_BUCKET_SWITCH_RETRY_SECONDS", "60"))
-BUCKET_SWITCH_CANDIDATES_TRIED = int(os.getenv("FUTURES_BUCKET_SWITCH_CANDIDATES_TRIED", "3"))
-BUCKET_SWITCH_MAX_SCORE_AGE_SECONDS = float(os.getenv("FUTURES_BUCKET_SWITCH_MAX_SCORE_AGE_SECONDS", "900"))
-BUCKET_SWITCH_CANDIDATE_BLOCK_SECONDS = float(os.getenv("FUTURES_BUCKET_SWITCH_CANDIDATE_BLOCK_SECONDS", "300"))
-
 # See Options/config.py's identical MAX_DAILY_ENTRIES_PER_SYMBOL - this
 # package's own independently-tunable daily re-entry cap (user request
 # 1 Sep 2026), same "same underlying, across the whole day" semantics.

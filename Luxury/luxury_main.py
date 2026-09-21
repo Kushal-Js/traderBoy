@@ -50,7 +50,6 @@ from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel, field_validator
 
 from trade_history import fire_and_forget, record_webhook_alert
-import alert_bucket
 import breakout_signal
 import reversal_filters
 
@@ -191,10 +190,9 @@ async def _handle_chartink_webhook(
     "the breakout-signal scanner has to be main entry path... webhook path
     will feed the signals to breakout-signal scanner and it will decide
     which trades to be placed") - a raw alert no longer triggers an
-    immediate ranked entry. This handler's only remaining jobs are to
-    record the alert into alert_bucket (ranking/observability bookkeeping
-    only now) and breakout_signal (the scanner's own watchlist - THIS is
-    what actually leads to a real trade), then return. See Options/
+    immediate ranked entry. This handler's only remaining job is to record
+    the alert into breakout_signal (the scanner's own watchlist - THIS is
+    what actually leads to a real trade) and return. See Options/
     option_main.py's identical rewrite for the full rationale -
     rank_and_pick_top_stocks/the ribbon-ranking functions/enter_positions_
     for_stocks are UNCHANGED and still defined in trading_engine.py, kept
@@ -203,7 +201,6 @@ async def _handle_chartink_webhook(
     _breakout_entry_fn instead of per-ALERT here."""
     await position_store.maybe_reset_for_new_day()
     stocks = payload.stock_list()
-    fire_and_forget(alert_bucket.record_alert(option_type, stocks, "Luxury", payload.scan_name))
     fire_and_forget(breakout_signal.record_alert("Luxury", option_type, stocks))
 
     logger.info(

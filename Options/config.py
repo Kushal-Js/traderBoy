@@ -168,28 +168,6 @@ BURST_WINDOW_START = os.getenv("BURST_WINDOW_START", "09:15")
 BURST_WINDOW_END = os.getenv("BURST_WINDOW_END", "10:00")
 BURST_EXTRA_SLOTS_CE = int(os.getenv("BURST_EXTRA_SLOTS_CE", "1"))
 
-# Alert buckets + loss-triggered bucket switch (user request 19 Sep 2026) -
-# see alert_bucket.py's module docstring for the full design and
-# trading-skills' designs/alert-bucket-switch.md for the backtest.
-# BUCKET_SWITCH_ENABLED gates the SWITCH for this package only; recording
-# alerts into the buckets and ranking them is pure bookkeeping and runs
-# whenever BUCKET_RANKER_ENABLED is on, regardless of any package's switch flag.
-BUCKET_SWITCH_ENABLED = os.getenv("BUCKET_SWITCH_ENABLED", "true").lower() == "true"
-BUCKET_SWITCH_LOSS_RS = float(os.getenv("BUCKET_SWITCH_LOSS_RS", "600"))            # unrealized loss that triggers a switch attempt
-BUCKET_SWITCH_MIN_SCORE = float(os.getenv("BUCKET_SWITCH_MIN_SCORE", "50"))         # = ribbon_score.MIN_ENTRY_SCORE; below this = "no good alternative"
-BUCKET_SWITCH_MAX_PER_DAY = int(os.getenv("BUCKET_SWITCH_MAX_PER_DAY", "8"))        # per strategy - a brake on churn, not part of the original spec
-BUCKET_SWITCH_RETRY_SECONDS = float(os.getenv("BUCKET_SWITCH_RETRY_SECONDS", "60")) # re-try cadence while the position stays under water with no candidate
-BUCKET_SWITCH_CANDIDATES_TRIED = int(os.getenv("BUCKET_SWITCH_CANDIDATES_TRIED", "3"))
-BUCKET_SWITCH_MAX_SCORE_AGE_SECONDS = float(os.getenv("BUCKET_SWITCH_MAX_SCORE_AGE_SECONDS", "900"))
-BUCKET_SWITCH_CANDIDATE_BLOCK_SECONDS = float(os.getenv("BUCKET_SWITCH_CANDIDATE_BLOCK_SECONDS", "300"))  # after a failed entry attempt
-
-# Shared ranker (one loop for all packages, started from Options' lifespan).
-BUCKET_RANKER_ENABLED = os.getenv("BUCKET_RANKER_ENABLED", "true").lower() == "true"
-BUCKET_RANK_INTERVAL_SECONDS = float(os.getenv("BUCKET_RANK_INTERVAL_SECONDS", "60"))
-BUCKET_RESCORE_MAX_AGE_SECONDS = float(os.getenv("BUCKET_RESCORE_MAX_AGE_SECONDS", "300"))   # one 5-min bar
-BUCKET_RANK_MAX_FETCHES_PER_CYCLE = int(os.getenv("BUCKET_RANK_MAX_FETCHES_PER_CYCLE", "10"))
-BUCKET_RANK_PACE_SECONDS = float(os.getenv("BUCKET_RANK_PACE_SECONDS", "1.6"))
-
 # Daily re-entry cap, added 1 Sep 2026 (user request: "only allow entry
 # into same trade max 3 times a day for Luxury, Options and Future
 # package") - independent of MAX_LIVE_POSITIONS_CE/_PE above (that caps
@@ -984,37 +962,25 @@ STALE_ENTRY_ORDER_TIMEOUT_SECONDS = int(os.getenv("STALE_ENTRY_ORDER_TIMEOUT_SEC
 
 # --------------------------------------------------------------------------
 # Breakout-signal live entry trigger, CE+PE, SOLE real entry path for
-# Options (added 21 Sep 2026, widened same day - user request) - reuses
-# breakout_signal.py unchanged (already generic per-strategy/per-
-# direction, same module Luxury/Futures already use). Originally wired
-# PE-only against the PE backtest (designs/options-pe-breakout-signal-
-# gated-live-full-real-gates.md, +Rs41,172.87 delta/17 trades), then
-# widened to CE+PE and promoted to the SOLE entry path THE SAME DAY on
-# explicit user direction: "the breakout-signal scanner has to be main
-# entry path... webhook path will feed the signals to breakout-signal
-# scanner and it will decide which trades to be placed" - applied
-# identically to Luxury/Futures too (see each package's own
-# _handle_chartink_webhook, which no longer calls enter_positions_for_
-# stocks at all). Thresholds default to the SAME values already deployed
-# live on Luxury (clearance=0.3%, body=0.5%, relvol=1.2x - the 27-way
-# sweep's #1 combo, see trading-skills' designs/luxury-breakout-
+# Options (added 21 Sep 2026, user request) - reuses breakout_signal.py
+# unchanged (already generic per-strategy/per-direction, same module
+# Luxury/Futures already use). Originally backtested PE-only (designs/
+# options-pe-breakout-signal-gated-live-full-real-gates.md, +Rs41,172.87
+# delta/17 trades), then widened to CE+PE and promoted to the SOLE entry
+# path the same day on explicit user direction: "the breakout-signal
+# scanner has to be main entry path... webhook path will feed the signals
+# to breakout-signal scanner and it will decide which trades to be
+# placed" - applied identically to Luxury/Futures too (see each package's
+# own _handle_chartink_webhook, which no longer calls enter_positions_
+# for_stocks at all). Thresholds default to the SAME values already
+# deployed live on Luxury (clearance=0.3%, body=0.5%, relvol=1.2x - the
+# 27-way sweep's #1 combo, see trading-skills' designs/luxury-breakout-
 # detection-parameter-sweep.md).
 #
-# DEFAULTS TRUE, unlike this flag's own original same-day version (which
-# defaulted false, on the reasoning that a brand-new live path should
-# ship inert until explicitly armed). That reasoning no longer applies -
-# once _handle_chartink_webhook stops calling enter_positions_for_stocks,
-# this IS the only remaining way Options places a real trade at all;
-# defaulting it off would mean Options places zero trades, not "a
-# cautious rollout." Deployed together with the market-feed backoff fix
-# (dhan_client.py's _run_market_feed_forever) and the identical Luxury/
-# Futures webhook rewrite, live, mid-session, on explicit user
-# instruction after being warned this hasn't been validated as a SOLE
-# gate (only as a retrospective "what if" backtest) and that today's
-# scanner activity (1 signal all session, skipped as a duplicate) implies
-# a large drop in trade frequency versus the direct-entry path it
-# replaces - see trading-skills' incidents/2026-09-21-breakout-signal-
-# promoted-to-sole-entry-path.md for the full decision record.
+# DEFAULTS TRUE - once _handle_chartink_webhook stops calling enter_
+# positions_for_stocks, this IS the only remaining way Options places a
+# real trade at all; defaulting it off would mean Options places zero
+# trades, not "a cautious rollout."
 BREAKOUT_SIGNAL_ENABLED = os.getenv("OPTIONS_BREAKOUT_SIGNAL_ENABLED", "true").lower() == "true"
 
 # Consolidation/breakout shape - same values the backtest validated.
@@ -1033,7 +999,7 @@ BREAKOUT_MAX_PCT_FROM_HIGH_LOW = float(os.getenv("OPTIONS_BREAKOUT_MAX_PCT_FROM_
 BREAKOUT_CANDLE_LOOKBACK_DAYS = int(os.getenv("OPTIONS_BREAKOUT_CANDLE_LOOKBACK_DAYS", "15"))
 BREAKOUT_DAILY_LOOKBACK_DAYS = int(os.getenv("OPTIONS_BREAKOUT_DAILY_LOOKBACK_DAYS", "120"))
 
-# Scan cadence - same shape as alert_bucket.py's own ranker pacing.
+# Scan cadence.
 BREAKOUT_SCAN_INTERVAL_SECONDS = float(os.getenv("OPTIONS_BREAKOUT_SCAN_INTERVAL_SECONDS", "60"))
 BREAKOUT_SCAN_MAX_PER_CYCLE = int(os.getenv("OPTIONS_BREAKOUT_SCAN_MAX_PER_CYCLE", "10"))
 BREAKOUT_SCAN_PACE_SECONDS = float(os.getenv("OPTIONS_BREAKOUT_SCAN_PACE_SECONDS", "1.6"))

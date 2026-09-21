@@ -45,7 +45,6 @@ from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel, field_validator
 
 from trade_history import fire_and_forget, record_webhook_alert
-import alert_bucket
 import breakout_signal
 import reversal_filters
 
@@ -189,7 +188,6 @@ async def _handle_chartink_webhook(
     per-SIGNAL inside _breakout_entry_fn instead of per-ALERT here."""
     await position_store.maybe_reset_for_new_day()
     stocks = payload.stock_list()
-    fire_and_forget(alert_bucket.record_alert(option_type, stocks, "Futures", payload.scan_name))
     fire_and_forget(breakout_signal.record_alert("Futures", option_type, stocks))
 
     logger.info(
