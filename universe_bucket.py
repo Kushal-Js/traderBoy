@@ -2,19 +2,28 @@
 Rolling CE/PE universe bucket (added 21 Sep 2026, user request) - a
 dedicated, standalone webhook target for a NEW Chartink screener
 ("continuously feeding data" once integrated) whose picks become the
-breakout-signal scanner's own watchlist, across the last
-WINDOW_TRADING_DAYS trading days (today included) - not just today's own
-alerts, unlike alert_bucket.py or a package's own direct webhook.
+breakout-signal scanner's own watchlist, across the last N trading days
+(today included) - not just today's own alerts, unlike alert_bucket.py
+or a package's own direct webhook.
 
-WINDOW_TRADING_DAYS lowered 3->1 (user request 22 Sep 2026) after the
-real 3-day window produced a 134-symbol bucket (44 CE + 90 PE) that the
-breakout dispatcher's own scan cadence (BREAKOUT_SCAN_MAX_PER_CYCLE=10
-per BREAKOUT_SCAN_INTERVAL_SECONDS=60) couldn't keep up with - a full
-pass took ~13.4 minutes, long enough for a genuine breakout candle to go
-stale before its symbol's turn came up again. Configurable via
-UNIVERSE_BUCKET_WINDOW_TRADING_DAYS if a wider window is ever wanted
-again once the scan-cadence bottleneck itself is addressed (see trading-
-skills' designs/ws-candle-reconstruction-parity-results.md).
+WINDOW SIZE IS PER OPTION TYPE (WINDOW_TRADING_DAYS_CE/_PE, see
+_window_for), NOT ONE SHARED CONSTANT - split 22 Sep 2026 (user request)
+after CE and PE ended up needing genuinely different answers on the same
+day: the original shared window (3, then briefly 1) produced a 134-symbol
+bucket (44 CE + 90 PE) that the breakout dispatcher's own scan cadence
+(BREAKOUT_SCAN_MAX_PER_CYCLE=10 per BREAKOUT_SCAN_INTERVAL_SECONDS=60)
+couldn't keep up with - a full pass took ~13.4 minutes, long enough for a
+genuine breakout candle to go stale before its symbol's turn came up
+again. Investigating that number surfaced a SEPARATE, real data-quality
+bug (a manual backfill had merged 18-Sep's and 21-Sep's alerts into one
+mislabeled file - see TRADING_JOURNAL.md's 22 Sep entry): once the
+user's own real Chartink CSV export let CE's prior-day entries be cross-
+checked and corrected to their true count, CE's window was raised back
+to 2 (today + yesterday) with confidence in what "yesterday" actually
+contains. PE was never individually verified against a CSV the same
+way, so it stays at 1 (today only) per the user's own separate, explicit
+instruction - each is independently configurable via
+UNIVERSE_BUCKET_WINDOW_TRADING_DAYS_CE/_PE.
 
 WHY A SEPARATE MODULE, NOT alert_bucket.py: that module is a single-day
 (today-only), per-symbol SCORED pool feeding the loss-triggered bucket-
@@ -35,11 +44,12 @@ already uses (real_trades.log, webhook_alerts.log, alert_bucket's own
 files). These per-day files are NEVER deleted - this repo's own standing
 convention is that historical logs are an append-only audit trail, never
 pruned - so the "rolling window" is implemented as a READ-side merge of
-the last WINDOW_TRADING_DAYS days' own files (active_symbols()), not as
-a mutation that destroys older data. Lowering WINDOW_TRADING_DAYS takes
-effect on the very next read with NO backfill/cleanup step needed - the
-already-persisted older files simply stop being included in the merge,
-even though they stay on disk for anyone who wants the historical record.
+the last N days' own files (active_symbols()), not as a mutation that
+destroys older data. Changing either window constant takes effect on the
+very next read with NO backfill/cleanup step needed - the already-
+persisted older files simply stop (or start) being included in the
+merge, even though they stay on disk for anyone who wants the historical
+record.
 
 TRADING-DAY AWARENESS, HONESTLY SCOPED: Saturday/Sunday are excluded
 deterministically (calendar weekday check). NSE market HOLIDAYS ARE NOT -
@@ -51,7 +61,7 @@ its "trading days" even though nothing real happened - harmless in
 effect (an empty/missing file for that date just contributes zero
 symbols, the same as a real trading day where the screener found
 nothing), but it means the active window can sometimes cover fewer than
-WINDOW_TRADING_DAYS REAL trading sessions' worth of picks during a
+its configured number of REAL trading sessions' worth of picks during a
 holiday week. Fixing this properly needs a real NSE holiday list, which
 this module does not fabricate.
 
@@ -88,14 +98,28 @@ IST = ZoneInfo("Asia/Kolkata")
 # BREAKOUT_SCAN_MAX_PER_CYCLE(10) symbols per BREAKOUT_SCAN_INTERVAL_
 # SECONDS(60), so a 134-symbol bucket meant ~13.4 minutes for a full pass
 # (134/10 cycles x 60s) - a genuine breakout candle could go stale (2-3
-# candles old) before its symbol's turn came up again. 1 = today's alerts
-# only, same effective scope alert_bucket.py's own single-day pool already
-# uses - no code change needed to shrink the ALREADY-accumulated bucket
-# either: active_symbols() re-reads the last WINDOW_TRADING_DAYS' worth of
-# already-persisted daily files fresh every call (never mutates/deletes
-# them, see module docstring), so lowering this constant takes effect on
-# the very next read, no backfill/cleanup step required.
-WINDOW_TRADING_DAYS = int(os.getenv("UNIVERSE_BUCKET_WINDOW_TRADING_DAYS", "1"))
+# candles old) before its symbol's turn came up again.
+#
+# SPLIT PER OPTION TYPE 22 Sep 2026 (user request) - CE raised back to 2
+# (today + yesterday) once yesterday's own CE entries were cross-checked
+# against the user's real Chartink CSV export and corrected to the true
+# 19 symbols (see TRADING_JOURNAL.md's 22 Sep entry - the old 44 was a
+# manual-backfill contamination, not real volume). PE stays at 1 (today
+# only) per the user's own explicit, separate instruction earlier the
+# same day ("let them come tomorrow only when market starts for PE") -
+# no CSV cross-check was done for PE's own multi-day history, so there
+# is no verified basis yet to trust a 2-day PE window the way CE's was
+# just individually verified. No code change needed to apply either
+# window immediately: active_symbols() re-reads the last N days' already-
+# persisted files fresh every call (never mutates/deletes them, see
+# module docstring), so changing either constant takes effect on the
+# very next read, no backfill/cleanup step required.
+WINDOW_TRADING_DAYS_CE = int(os.getenv("UNIVERSE_BUCKET_WINDOW_TRADING_DAYS_CE", "2"))
+WINDOW_TRADING_DAYS_PE = int(os.getenv("UNIVERSE_BUCKET_WINDOW_TRADING_DAYS_PE", "1"))
+
+
+def _window_for(option_type: str) -> int:
+    return WINDOW_TRADING_DAYS_CE if option_type == "CE" else WINDOW_TRADING_DAYS_PE
 
 
 def _today() -> date:
@@ -204,9 +228,10 @@ async def record_alert(option_type: str, stocks: list[str], scan_name: Optional[
 # --------------------------------------------------------------------- read ---
 async def active_symbols(option_type: str, as_of: Optional[date] = None) -> set[str]:
     """The rolling window itself: union of symbols recorded on any of the
-    last WINDOW_TRADING_DAYS trading days (today included). This is what
-    breakout_signal.py's curated-universe seeding reads from when a
-    package's own cfg.BREAKOUT_UNIVERSE_SOURCE == "universe_bucket"."""
+    last _window_for(option_type) trading days (today included) - CE and
+    PE can have different window sizes, see _window_for's own comment.
+    This is what breakout_signal.py's curated-universe seeding reads from
+    when a package's own cfg.BREAKOUT_UNIVERSE_SOURCE == "universe_bucket"."""
     today = as_of or _today()
     out: set[str] = set()
     async with _LOCK:
@@ -214,7 +239,7 @@ async def active_symbols(option_type: str, as_of: Optional[date] = None) -> set[
         if b is None:
             return out
         _ensure_today_locked(b)
-        for d in _trading_days_back(WINDOW_TRADING_DAYS, today):
+        for d in _trading_days_back(_window_for(option_type), today):
             items = b.items if d == b.day else _load_sync(option_type, d)
             out.update(items.keys())
     return out
@@ -222,10 +247,15 @@ async def active_symbols(option_type: str, as_of: Optional[date] = None) -> set[
 
 async def snapshot() -> dict:
     """Read-only observability - both buckets' active rolling-window
-    symbol sets, plus the individual trading days they're drawn from."""
+    symbol sets, plus the individual trading days each is drawn from
+    (CE and PE can differ - see _window_for's own comment)."""
     today = _today()
-    days = [d.isoformat() for d in _trading_days_back(WINDOW_TRADING_DAYS, today)]
-    out: dict = {"window_trading_days": days}
+    out: dict = {
+        "window_trading_days": {
+            "CE": [d.isoformat() for d in _trading_days_back(_window_for("CE"), today)],
+            "PE": [d.isoformat() for d in _trading_days_back(_window_for("PE"), today)],
+        }
+    }
     for ot in ("CE", "PE"):
         out[ot] = sorted(await active_symbols(ot, today))
     return out
