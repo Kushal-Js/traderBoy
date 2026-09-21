@@ -807,6 +807,17 @@ async def universe_dispatcher_loop(targets: list[tuple[str, Any, Callable[[str, 
                 await record_alert(DISPATCHER_STRATEGY_NAME, "CE", ce_symbols)
             if pe_symbols:
                 await record_alert(DISPATCHER_STRATEGY_NAME, "PE", pe_symbols)
+            # WS-subscribe (added 22 Sep 2026, user request: turning on
+            # BREAKOUT_USE_WS_CANDLES should need a flag flip + restart,
+            # never a fresh deployment). Without this, the dispatcher path
+            # (Luxury/Futures' real watchlist source today) never called
+            # _ws_subscribe_best_effort at all - only the older per-package
+            # _sync_universe_bucket_source did, which no-ops for any
+            # strategy this dispatcher owns (see this function's own
+            # docstring) - so flipping the flag on would have silently done
+            # nothing for the two strategies actually using this universe.
+            if getattr(primary_cfg, "BREAKOUT_USE_WS_CANDLES", False):
+                await _ws_subscribe_best_effort(DISPATCHER_STRATEGY_NAME, sorted(set(ce_symbols) | set(pe_symbols)))
             if primary_cfg.BREAKOUT_SIGNAL_ENABLED and _market_hours_now():
                 await _dispatch_backlog_cycle(primary_cfg, targets)  # backlog gets first look at any freed capacity, see its own docstring
                 await _dispatch_scan_cycle(primary_cfg, targets)

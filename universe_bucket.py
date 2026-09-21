@@ -1,20 +1,31 @@
 """
-Rolling 3-trading-day CE/PE universe bucket (added 21 Sep 2026, user
-request) - a dedicated, standalone webhook target for a NEW Chartink
-screener ("continuously feeding data" once integrated) whose picks become
-the breakout-signal scanner's own watchlist, ACROSS today plus the 2 prior
-trading days - not just today's own alerts, unlike alert_bucket.py or a
-package's own direct webhook.
+Rolling CE/PE universe bucket (added 21 Sep 2026, user request) - a
+dedicated, standalone webhook target for a NEW Chartink screener
+("continuously feeding data" once integrated) whose picks become the
+breakout-signal scanner's own watchlist, across the last
+WINDOW_TRADING_DAYS trading days (today included) - not just today's own
+alerts, unlike alert_bucket.py or a package's own direct webhook.
+
+WINDOW_TRADING_DAYS lowered 3->1 (user request 22 Sep 2026) after the
+real 3-day window produced a 134-symbol bucket (44 CE + 90 PE) that the
+breakout dispatcher's own scan cadence (BREAKOUT_SCAN_MAX_PER_CYCLE=10
+per BREAKOUT_SCAN_INTERVAL_SECONDS=60) couldn't keep up with - a full
+pass took ~13.4 minutes, long enough for a genuine breakout candle to go
+stale before its symbol's turn came up again. Configurable via
+UNIVERSE_BUCKET_WINDOW_TRADING_DAYS if a wider window is ever wanted
+again once the scan-cadence bottleneck itself is addressed (see trading-
+skills' designs/ws-candle-reconstruction-parity-results.md).
 
 WHY A SEPARATE MODULE, NOT alert_bucket.py: that module is a single-day
 (today-only), per-symbol SCORED pool feeding the loss-triggered bucket-
 switch feature - a different, still-undecided piece of work (see
 trading-skills' designs/alert-bucket-switch.md). This one is unscored,
-rolls over a 3-trading-day window instead of resetting daily, and feeds
-breakout_signal.py's watchlist rather than a switch candidate list.
-Deliberately separate state, deliberately separate purpose - enabling one
-implies nothing about the other, same reasoning alert_bucket.py's own
-docstring already gives for staying separate from THIS kind of feature.
+rolls over a configurable multi-day window instead of always resetting
+daily, and feeds breakout_signal.py's watchlist rather than a switch
+candidate list. Deliberately separate state, deliberately separate
+purpose - enabling one implies nothing about the other, same reasoning
+alert_bucket.py's own docstring already gives for staying separate from
+THIS kind of feature.
 
 DATA MODEL: two independent buckets, CE and PE (never shared state,
 matching every other CE/PE split in this codebase). Each is persisted ONE
@@ -23,29 +34,26 @@ following the exact convention every other daily log in this repo
 already uses (real_trades.log, webhook_alerts.log, alert_bucket's own
 files). These per-day files are NEVER deleted - this repo's own standing
 convention is that historical logs are an append-only audit trail, never
-pruned - so "3-day rolling window" is implemented as a READ-side merge of
-the last 3 TRADING days' own files (active_symbols()), not as a mutation
-that destroys older data. The practical effect the user asked for -
-"clears for last 3rd day entry" - happens naturally: once a 4th day
-starts, day N-3's file simply stops being included in the merge, so the
-breakout scanner's own watchlist (re-seeded fresh every day from
-active_symbols(), see breakout_signal.py's own _maybe_seed_universe) never
-sees it again, even though the file itself is still on disk for anyone
-who wants the historical record.
+pruned - so the "rolling window" is implemented as a READ-side merge of
+the last WINDOW_TRADING_DAYS days' own files (active_symbols()), not as
+a mutation that destroys older data. Lowering WINDOW_TRADING_DAYS takes
+effect on the very next read with NO backfill/cleanup step needed - the
+already-persisted older files simply stop being included in the merge,
+even though they stay on disk for anyone who wants the historical record.
 
 TRADING-DAY AWARENESS, HONESTLY SCOPED: Saturday/Sunday are excluded
 deterministically (calendar weekday check). NSE market HOLIDAYS ARE NOT -
 this repo has no maintained forward-looking holiday calendar anywhere
 (confirmed by grep before writing this; every other mention of "holiday"
 in this codebase is a passing comment, never an actual date list), so a
-weekday holiday inside the 3-day lookback is silently counted as one of
-the 3 "trading days" even though nothing real happened - harmless in
+weekday holiday inside the lookback window is silently counted as one of
+its "trading days" even though nothing real happened - harmless in
 effect (an empty/missing file for that date just contributes zero
 symbols, the same as a real trading day where the screener found
 nothing), but it means the active window can sometimes cover fewer than
-3 REAL trading sessions' worth of picks during a holiday week. Fixing
-this properly needs a real NSE holiday list, which this module does not
-fabricate.
+WINDOW_TRADING_DAYS REAL trading sessions' worth of picks during a
+holiday week. Fixing this properly needs a real NSE holiday list, which
+this module does not fabricate.
 
 WEBHOOK: POST /universe-bucket/webhook (bullish -> CE) and /universe-
 bucket/webhook-sell (bearish -> PE), same Chartink payload shape as
@@ -74,7 +82,20 @@ import trade_history
 logger = logging.getLogger("universe_bucket")
 
 IST = ZoneInfo("Asia/Kolkata")
-WINDOW_TRADING_DAYS = 3  # today + last 2 - see module docstring's "n+2 days"
+# Lowered 3->1 (user request 22 Sep 2026), straight off the real universe
+# size this produced (44 CE + 90 PE = 134 symbols) once real Chartink
+# alerts had fed it for a few days - the breakout dispatcher only checks
+# BREAKOUT_SCAN_MAX_PER_CYCLE(10) symbols per BREAKOUT_SCAN_INTERVAL_
+# SECONDS(60), so a 134-symbol bucket meant ~13.4 minutes for a full pass
+# (134/10 cycles x 60s) - a genuine breakout candle could go stale (2-3
+# candles old) before its symbol's turn came up again. 1 = today's alerts
+# only, same effective scope alert_bucket.py's own single-day pool already
+# uses - no code change needed to shrink the ALREADY-accumulated bucket
+# either: active_symbols() re-reads the last WINDOW_TRADING_DAYS' worth of
+# already-persisted daily files fresh every call (never mutates/deletes
+# them, see module docstring), so lowering this constant takes effect on
+# the very next read, no backfill/cleanup step required.
+WINDOW_TRADING_DAYS = int(os.getenv("UNIVERSE_BUCKET_WINDOW_TRADING_DAYS", "1"))
 
 
 def _today() -> date:

@@ -17,10 +17,10 @@ Run every 5 min via a systemd timer (droplet-side, not tracked in git,
 same pattern as shadow-evaluator.timer) - self-contained via a per-date
 JSON state file, so each invocation is idempotent and safe to run
 repeatedly:
-  1. At/after SUBSCRIBE_TIME_IST (11:00 - "less trade frequency", user's
-     own framing), if not already done today: POST /debug/underlying-
-     feed/subscribe with TEST_SYMBOLS, so real WS ticks start
-     accumulating for them.
+  1. At/after SUBSCRIBE_TIME_IST (10:00, moved up from an initial 11:00 -
+     user request 22 Sep 2026), if not already done today: POST
+     /debug/underlying-feed/subscribe with TEST_SYMBOLS, so real WS
+     ticks start accumulating for them.
   2. At/after REPORT_TIME_IST (15:40 - 10 min past the 15:30 close, well
      past NSE's last trade), if not already done today: GET
      /debug/underlying-feed/parity/{symbol} for each test symbol
@@ -53,7 +53,7 @@ IST = ZoneInfo("Asia/Kolkata")
 
 BASE_URL = "http://localhost:8000"
 TEST_SYMBOLS = ["RELIANCE", "TCS", "MAHABANK", "IDEA", "HDFCBANK", "ICICIBANK", "SBIN", "ITC"]
-SUBSCRIBE_TIME_IST = dtime(11, 0)
+SUBSCRIBE_TIME_IST = dtime(10, 0)
 REPORT_TIME_IST = dtime(15, 40)
 
 
