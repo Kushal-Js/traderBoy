@@ -63,6 +63,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, date as date_cls
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
@@ -356,15 +357,35 @@ def _fetch_rest_5m_candles_sync(symbol: str, day: date_cls) -> dict:
     incidents/2026-09-21-local-backtest-dhan-session-collision.md). Same
     call shape backtest_ws_candle_reconstruction_parity.py's own
     fetch_real_5m_candles uses, just routed through the bot's own
-    dhan_wrapper instead of a competing local session."""
+    dhan_wrapper instead of a competing local session.
+
+    Retries with backoff (same discipline the standalone parity script
+    needed - added after ICICIBANK/SBIN/ITC transiently 500'd on the
+    first real run of ws_candle_parity_check.py, back-to-back with zero
+    pacing, a textbook DH-904-shaped rate-limit blip): Dhan's REST
+    endpoint intermittently returns a bare failure envelope under back-
+    to-back load, not something a single attempt should ever trust."""
+    import time
     sec_id = dhan_wrapper._equity_security_id(symbol)
-    resp = dhan_wrapper.client.Dhan.intraday_minute_data(
-        security_id=sec_id, exchange_segment="NSE_EQ", instrument_type="EQUITY",
-        from_date=day.isoformat(), to_date=day.isoformat(), interval=5,
-    )
-    if not isinstance(resp, dict) or resp.get("status") != "success":
-        raise RuntimeError(f"REST fetch failed for {symbol} {day}: {resp}")
-    return resp.get("data") or {}
+    delay = 3.0
+    last_exc: Optional[Exception] = None
+    for attempt in range(4):
+        try:
+            resp = dhan_wrapper.client.Dhan.intraday_minute_data(
+                security_id=sec_id, exchange_segment="NSE_EQ", instrument_type="EQUITY",
+                from_date=day.isoformat(), to_date=day.isoformat(), interval=5,
+            )
+            if not isinstance(resp, dict) or resp.get("status") != "success":
+                raise RuntimeError(f"REST fetch failed for {symbol} {day}: {resp}")
+            return resp.get("data") or {}
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < 3:
+                logger.warning("_fetch_rest_5m_candles_sync(%s, %s) attempt %d/4 failed: %s - retrying in %.0fs",
+                                symbol, day, attempt + 1, exc, delay)
+                time.sleep(delay)
+                delay = min(delay * 2, 15.0)
+    raise last_exc
 
 
 @app.get("/debug/underlying-feed/rest-candles/{symbol}")

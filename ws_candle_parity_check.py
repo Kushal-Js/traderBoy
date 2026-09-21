@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, time as dtime
@@ -102,9 +103,19 @@ def maybe_report(now_ist: datetime, today: str, state: dict) -> bool:
         return False
     results = {}
     all_ok = True
-    for sym in TEST_SYMBOLS:
+    for i, sym in enumerate(TEST_SYMBOLS):
+        if i > 0:
+            # Same rate-limit discipline as backtest_ws_candle_reconstruction_
+            # parity.py's own CALL_PACE_SECONDS - the first real run of this
+            # script hit a transient 500 on 3/8 symbols with zero pacing
+            # between them (the endpoint itself now retries too, but pacing
+            # here means most requests never need to).
+            time.sleep(1.5)
         try:
-            results[sym] = _http_json("GET", f"/debug/underlying-feed/parity/{sym}?day={today}")
+            # 60s timeout, not the default 30s - the endpoint itself now
+            # retries up to 4x with backoff (3s/6s/12s/15s) on a transient
+            # Dhan rate-limit blip, which can push a single call past 30s.
+            results[sym] = _http_json("GET", f"/debug/underlying-feed/parity/{sym}?day={today}", timeout=60.0)
         except urllib.error.HTTPError as exc:
             results[sym] = {"error": f"HTTP {exc.code}: {exc.read().decode(errors='replace')[:300]}"}
             all_ok = False
