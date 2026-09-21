@@ -787,7 +787,9 @@ ENABLE_SQUARE_OFF = os.getenv("ENABLE_SQUARE_OFF", "true").lower() == "true"
 # effect Monday-Thursday, and no effect at all if ENABLE_SQUARE_OFF is
 # already true (that already covers every day, Friday included).
 ENABLE_FRIDAY_SQUARE_OFF = os.getenv("ENABLE_FRIDAY_SQUARE_OFF", "true").lower() == "true"
-FRIDAY_SQUARE_OFF_TIME = os.getenv("FRIDAY_SQUARE_OFF_TIME", "15:20")
+# Moved 15:20 -> 15:25 (user request 21 Sep 2026: "not carry forward any
+# position after Friday 15:25 PM, square them off").
+FRIDAY_SQUARE_OFF_TIME = os.getenv("FRIDAY_SQUARE_OFF_TIME", "15:25")
 
 # Restricts NEW entries to before a cutoff time - independent of
 # SQUARE_OFF_TIME above, which governs closing EXISTING positions, not

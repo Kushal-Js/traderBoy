@@ -585,6 +585,29 @@ async def _place_broker_stop_loss_if_enabled(
     loop = asyncio.get_running_loop()
     max_loss_cap = current_max_loss_per_trade_rs(option_type)
     trigger_price = fill_price - (max_loss_cap / quantity)
+    # Real incident, 21 Sep 2026 (LICI, Options): for a cheap-premium,
+    # large-quantity position whose entire notional value (fill_price *
+    # quantity) is already BELOW the rupee MAX_LOSS cap, this formula
+    # computes a NEGATIVE trigger price (confirmed live: fill=0.70,
+    # qty=1400, max_loss_cap=3500 -> trigger=-1.80) - Dhan correctly
+    # rejects it (no order_id returned), logged as an ERROR even though
+    # nothing is actually broken: the rupee cap can never bind for a
+    # position whose worst case (the option going to zero) already loses
+    # less than the cap, so there is nothing for a rupee-based broker
+    # order to protect here in the first place - the percentage-based
+    # STOP_LOSS_PCT hard stop (enforced by the regular poll/tick
+    # MAX_LOSS_HIT/STOP_LOSS_HIT check below, same as always) is what
+    # actually bounds this position's downside. Skip cleanly instead of
+    # attempting an order that can only ever fail.
+    if trigger_price <= 0:
+        logger.info(
+            "%s: skipping broker-side stop-loss order for %s - this position's own notional value "
+            "(fill=%.2f x qty=%d = Rs%.2f) is already below the Rs%.0f MAX_LOSS cap, so the cap can "
+            "never bind here; the percentage-based STOP_LOSS_PCT hard stop (poll/tick-driven) protects "
+            "this position instead",
+            symbol, trading_symbol, fill_price, quantity, fill_price * quantity, max_loss_cap,
+        )
+        return None
     limit_price = trigger_price - (max_loss_cap * config.BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE / quantity)
     try:
         stop_tag = _gen_tag("SL", symbol)

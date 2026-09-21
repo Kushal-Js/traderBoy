@@ -295,7 +295,9 @@ ENABLE_SQUARE_OFF = os.getenv("FUTURES_ENABLE_SQUARE_OFF", "true").lower() == "t
 # See Options/config.py's identical flags - this package's own independently-
 # tunable Friday carve-out (applies regardless of ENABLE_SQUARE_OFF above).
 ENABLE_FRIDAY_SQUARE_OFF = os.getenv("FUTURES_ENABLE_FRIDAY_SQUARE_OFF", "true").lower() == "true"
-FRIDAY_SQUARE_OFF_TIME = os.getenv("FUTURES_FRIDAY_SQUARE_OFF_TIME", "15:20")
+# Moved 15:20 -> 15:25 (user request 21 Sep 2026: "not carry forward any
+# position after Friday 15:25 PM, square them off").
+FRIDAY_SQUARE_OFF_TIME = os.getenv("FUTURES_FRIDAY_SQUARE_OFF_TIME", "15:25")
 
 # See Options/config.py's identical flag - this package's own independently-
 # tunable cutoff for NEW entries only.
