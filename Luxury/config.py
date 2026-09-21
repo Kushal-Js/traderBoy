@@ -443,13 +443,25 @@ STALE_ENTRY_ORDER_TIMEOUT_SECONDS = int(os.getenv("LUXURY_STALE_ENTRY_ORDER_TIME
 # different, independently-decided piece of work) - no shared state.
 # --------------------------------------------------------------------------
 # Promoted from "an additional confirmatory layer alongside the normal
-# webhook-driven entry" to THE SOLE real entry path (21 Sep 2026, user
-# request: "the breakout-signal scanner has to be main entry path...
-# webhook path will feed the signals to breakout-signal scanner and it
-# will decide which trades to be placed") - luxury_main.py's own
-# _handle_chartink_webhook no longer calls enter_positions_for_stocks at
-# all; it only records into this watchlist now. With this flag off,
-# Luxury would place zero real trades.
+# webhook-driven entry" to a genuine TWO-WAY switch controlling WHICH
+# entry path is live (21 Sep 2026, user request: "the breakout-signal
+# scanner has to be main entry path... webhook path will feed the
+# signals to breakout-signal scanner and it will decide which trades to
+# be placed", then same-day follow-up: "once this flag is false the
+# signals directly reach for being placed as trade and not being parsed
+# via breakout scanner"). luxury_main.py's own _handle_chartink_webhook
+# branches on this:
+#   True (default)  - a raw alert only records into the watchlist;
+#                      _breakout_entry_fn (via the scanner loop) decides
+#                      whether/when to actually enter.
+#   False            - falls through to _enter_directly_from_webhook, the
+#                      restored pre-21-Sep-2026 direct ranked-entry path
+#                      (rank_and_pick_top_stocks + enter_positions_for_
+#                      stocks) - bypasses the breakout scanner's
+#                      filtering entirely, same as before that date.
+# Kept true by default per explicit user instruction - "unless I
+# explicitly ask the breakout scanner is only used for filtering out the
+# signals" i.e. this should default to filtering ON, not off.
 BREAKOUT_SIGNAL_ENABLED = os.getenv("LUXURY_BREAKOUT_SIGNAL_ENABLED", "true").lower() == "true"
 
 # Consolidation/breakout shape - same values the backtests validated.

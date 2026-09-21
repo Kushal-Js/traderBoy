@@ -344,12 +344,18 @@ STALE_ENTRY_ORDER_TIMEOUT_SECONDS = int(os.getenv("FUTURES_STALE_ENTRY_ORDER_TIM
 # 8-trade sample, not a guarantee). Deliberately separate from
 # alert_bucket.py's own loss-triggered switch feature - no shared state.
 # Promoted from "an additional confirmatory layer alongside the normal
-# webhook-driven entry" to THE SOLE real entry path (21 Sep 2026, user
-# request - same change applied to Luxury/Options the same day, see
-# Luxury/config.py's own identical comment). futures_main.py's own
-# _handle_chartink_webhook no longer calls enter_positions_for_stocks at
-# all; it only records into this watchlist now. With this flag off,
-# Futures would place zero real trades.
+# webhook-driven entry" to a genuine TWO-WAY switch the same day (same
+# change applied to Luxury/Options, see Luxury/config.py's own identical
+# comment for the full history). futures_main.py's own _handle_chartink_
+# webhook branches on this:
+#   True (default)  - a raw alert only records into the watchlist;
+#                      _breakout_entry_fn (via the scanner loop) decides
+#                      whether/when to actually enter.
+#   False            - falls through to _enter_directly_from_webhook, the
+#                      restored pre-21-Sep-2026 direct ranked-entry path -
+#                      bypasses the breakout scanner's filtering entirely.
+# DEFAULTS TRUE per explicit user instruction - "unless I explicitly ask
+# the breakout scanner is only used for filtering out the signals."
 BREAKOUT_SIGNAL_ENABLED = os.getenv("FUTURES_BREAKOUT_SIGNAL_ENABLED", "true").lower() == "true"
 
 # Consolidation/breakout shape - same values the backtest validated.

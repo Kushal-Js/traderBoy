@@ -977,10 +977,19 @@ STALE_ENTRY_ORDER_TIMEOUT_SECONDS = int(os.getenv("STALE_ENTRY_ORDER_TIMEOUT_SEC
 # 27-way sweep's #1 combo, see trading-skills' designs/luxury-breakout-
 # detection-parameter-sweep.md).
 #
-# DEFAULTS TRUE - once _handle_chartink_webhook stops calling enter_
-# positions_for_stocks, this IS the only remaining way Options places a
-# real trade at all; defaulting it off would mean Options places zero
-# trades, not "a cautious rollout."
+# Made a genuine TWO-WAY switch the same day (follow-up user request:
+# "once this flag is false the signals directly reach for being placed
+# as trade and not being parsed via breakout scanner") - option_main.py's
+# own _handle_chartink_webhook branches on this:
+#   True (default)  - a raw alert only records into the watchlist;
+#                      _breakout_entry_fn (via the scanner loop) decides
+#                      whether/when to actually enter.
+#   False            - falls through to _enter_directly_from_webhook, the
+#                      restored pre-21-Sep-2026 direct ranked-entry path -
+#                      bypasses the breakout scanner's filtering entirely.
+# DEFAULTS TRUE per explicit user instruction - "unless I explicitly ask
+# the breakout scanner is only used for filtering out the signals" i.e.
+# this should default to filtering ON, not off.
 BREAKOUT_SIGNAL_ENABLED = os.getenv("OPTIONS_BREAKOUT_SIGNAL_ENABLED", "true").lower() == "true"
 
 # Consolidation/breakout shape - same values the backtest validated.
