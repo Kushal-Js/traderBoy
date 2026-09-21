@@ -329,3 +329,42 @@ ORDER_TAG_PREFIX = os.getenv("FUTURES_ORDER_TAG_PREFIX", "Fut")
 # for the full ICICIPRULI incident writeup (user request 15 Sep 2026).
 # Own independently-tunable value, same default.
 STALE_ENTRY_ORDER_TIMEOUT_SECONDS = int(os.getenv("FUTURES_STALE_ENTRY_ORDER_TIMEOUT_SECONDS", "300"))
+
+# --------------------------------------------------------------------------
+# Breakout-signal live entry trigger (added 21 Sep 2026, user request) - see
+# breakout_signal.py's own module docstring for the full design; ported from
+# Luxury's identical feature (Luxury/config.py's own BREAKOUT_* block, added
+# 20 Sep 2026). Defaults here are Luxury's CURRENTLY DEPLOYED values (post
+# 21 Sep 2026 parameter-sweep raise - clearance/body/relvol - see trading-
+# skills' designs/luxury-breakout-detection-parameter-sweep.md), not
+# Luxury's original launch defaults, since that's the combo Futures was
+# itself backtested against (designs/futures-breakout-signal-gated-live-
+# full-real-gates.md: 13 raw signals, 8 entered, +Rs13,359.10 vs real
+# Futures' -Rs11,943.55 over the same 14-day window - flagged there as an
+# 8-trade sample, not a guarantee). Deliberately separate from
+# alert_bucket.py's own loss-triggered switch feature - no shared state.
+BREAKOUT_SIGNAL_ENABLED = os.getenv("FUTURES_BREAKOUT_SIGNAL_ENABLED", "true").lower() == "true"
+
+# Consolidation/breakout shape - same values the backtest validated.
+BREAKOUT_LOOKBACK_CANDLES = int(os.getenv("FUTURES_BREAKOUT_LOOKBACK_CANDLES", "10"))
+BREAKOUT_MAX_CONSOLIDATION_RANGE_PCT = float(os.getenv("FUTURES_BREAKOUT_MAX_CONSOLIDATION_RANGE_PCT", "12"))
+BREAKOUT_CLEARANCE_PCT = float(os.getenv("FUTURES_BREAKOUT_CLEARANCE_PCT", "0.3"))
+BREAKOUT_MIN_BODY_PCT = float(os.getenv("FUTURES_BREAKOUT_MIN_BODY_PCT", "0.5"))
+BREAKOUT_MIN_RELATIVE_VOLUME = float(os.getenv("FUTURES_BREAKOUT_MIN_RELATIVE_VOLUME", "1.2"))
+BREAKOUT_MIN_AVG_DAILY_VOLUME = float(os.getenv("FUTURES_BREAKOUT_MIN_AVG_DAILY_VOLUME", "500000"))
+BREAKOUT_MAX_PCT_FROM_HIGH_LOW = float(os.getenv("FUTURES_BREAKOUT_MAX_PCT_FROM_HIGH_LOW", "10"))
+
+# Data-fetch windows - continuous multi-day, per the standing continuous-
+# candles rule. Same reasoning as Luxury's own identical settings.
+BREAKOUT_CANDLE_LOOKBACK_DAYS = int(os.getenv("FUTURES_BREAKOUT_CANDLE_LOOKBACK_DAYS", "15"))
+BREAKOUT_DAILY_LOOKBACK_DAYS = int(os.getenv("FUTURES_BREAKOUT_DAILY_LOOKBACK_DAYS", "120"))
+
+# Scan cadence - same shape as Luxury's own ranker pacing.
+BREAKOUT_SCAN_INTERVAL_SECONDS = float(os.getenv("FUTURES_BREAKOUT_SCAN_INTERVAL_SECONDS", "60"))
+BREAKOUT_SCAN_MAX_PER_CYCLE = int(os.getenv("FUTURES_BREAKOUT_SCAN_MAX_PER_CYCLE", "10"))
+BREAKOUT_SCAN_PACE_SECONDS = float(os.getenv("FUTURES_BREAKOUT_SCAN_PACE_SECONDS", "1.6"))
+
+# Daily watchlist refresh - see breakout_signal.py's own module docstring
+# for the full mechanism. "Before market starts" is handled by the date-
+# keyed persistence itself; this is the explicit "after market ends" half.
+BREAKOUT_MARKET_END_TIME = os.getenv("FUTURES_BREAKOUT_MARKET_END_TIME", "15:35")

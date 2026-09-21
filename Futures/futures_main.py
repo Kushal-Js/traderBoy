@@ -45,9 +45,11 @@ from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel, field_validator
 
 from trade_history import fire_and_forget, record_webhook_alert
+import breakout_signal
 import reversal_filters
 
 from . import config
+from . import trading_engine
 from .dhan_client import dhan_wrapper
 from .position_store import position_store
 from .trading_engine import (
@@ -66,6 +68,7 @@ logger = logging.getLogger("futures_main")
 router = APIRouter()
 
 _monitor_task: Optional[asyncio.Task] = None
+_breakout_signal_task: Optional[asyncio.Task] = None
 
 
 @asynccontextmanager
@@ -81,7 +84,7 @@ async def lifespan(app: FastAPI):
     own data can't tell the two apart. See trading_engine.py's module
     docstring and reconcile_broker_positions' own docstring for the full
     mechanism."""
-    global _monitor_task
+    global _monitor_task, _breakout_signal_task
     loop = asyncio.get_running_loop()
 
     def _on_price_tick(trading_symbol: str, ltp: float) -> None:
@@ -101,10 +104,43 @@ async def lifespan(app: FastAPI):
         logger.exception("Could not reconcile broker positions at startup - continuing without them.")
 
     _monitor_task = asyncio.create_task(monitor_loop())
-    logger.info("Futures strategy startup complete: monitor loop running (reusing Options' Dhan connection).")
+    # Breakout-signal scanner (21 Sep 2026) - see breakout_signal.py's own
+    # module docstring. Calls _breakout_entry_fn below, which wraps the
+    # real _process_one_entry with the same pre-entry window/square-off/
+    # gap-down checks the webhook handler itself applies before ever
+    # reaching it.
+    _breakout_signal_task = asyncio.create_task(
+        breakout_signal.signal_scanner_loop("Futures", config, _breakout_entry_fn)
+    )
+    logger.info("Futures strategy startup complete: monitor loop + breakout-signal scanner running (reusing Options' Dhan connection).")
     yield
     if _monitor_task:
         _monitor_task.cancel()
+    if _breakout_signal_task:
+        _breakout_signal_task.cancel()
+
+
+async def _breakout_entry_fn(symbol: str, option_type: str) -> dict:
+    """Entry point breakout_signal.py calls once a signal is confirmed -
+    applies the SAME pre-entry gates _handle_chartink_webhook itself
+    checks before ever reaching _process_one_entry, then defers to the
+    real, unmodified _process_one_entry for everything else (daily
+    re-entry cap, RSI-loss-reentry block, loss-repeat block + trend
+    check, volume-floor gate, cross-strategy claim, capacity + the
+    opening-burst slot, liquid-contract resolution, funds check - all
+    inherited automatically, nothing reimplemented here). Ported from
+    Luxury's identical function - see designs/futures-breakout-signal-
+    gated-live-full-real-gates.md for the backtest this was validated
+    against."""
+    if not is_within_trading_windows():
+        return {"symbol": symbol, "status": "skipped", "reason": "outside_trading_windows"}
+    if is_past_allowed_trading_time():
+        return {"symbol": symbol, "status": "skipped", "reason": "past_allowed_trading_time"}
+    if is_past_square_off_time():
+        return {"symbol": symbol, "status": "skipped", "reason": "past_square_off_time"}
+    if option_type == "CE" and config.ENABLE_GAP_DOWN_CE_DELAY and dhan_wrapper.should_delay_ce_entry():
+        return {"symbol": symbol, "status": "skipped", "reason": "nifty_gap_down_ce_delay"}
+    return await trading_engine._process_one_entry(symbol, option_type)
 
 
 # --------------------------------------------------------------------------- #
@@ -142,6 +178,10 @@ async def _handle_chartink_webhook(
 ):
     await position_store.maybe_reset_for_new_day()
     stocks = payload.stock_list()
+    # Breakout-signal watchlist (21 Sep 2026) - see breakout_signal.py's own
+    # module docstring. Deliberately separate bookkeeping from alert_bucket
+    # (a different, independently-decided feature).
+    fire_and_forget(breakout_signal.record_alert("Futures", option_type, stocks))
 
     def _log_alert(status: str, reason: Optional[str] = None) -> None:
         fire_and_forget(record_webhook_alert(
@@ -258,6 +298,14 @@ async def get_positions():
 async def get_orders():
     snapshot = await position_store.snapshot()
     return {"orders": snapshot["orders_today"]}
+
+
+@router.get("/futures/breakout-signal")
+async def get_breakout_signal_status():
+    """Today's CE/PE breakout-signal watchlists (symbol -> alert time,
+    whether it's signaled yet, and when). Read-only, see breakout_
+    signal.py's own module docstring."""
+    return await breakout_signal.snapshot("Futures")
 
 
 @router.post("/futures/square-off-now")
