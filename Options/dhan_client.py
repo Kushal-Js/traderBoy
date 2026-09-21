@@ -246,7 +246,22 @@ class DhanWrapper:
     def __init__(self) -> None:
         self._client: Optional[Tradehull] = None
         self._order_update: Optional[OrderUpdate] = None
+        # See _run_market_feed_forever()'s own docstring (21 Sep 2026
+        # incident fix) for why this is no longer set via a simple lazy
+        # property + feed.start() - a supervisor thread now owns its
+        # entire lifecycle, so this can be None between reconnect attempts
+        # even after the feed has been "started" once.
         self._market_feed: Optional[MarketFeed] = None
+        self._market_feed_lock = threading.Lock()
+        self._market_feed_thread_started = False
+        # Our OWN authoritative subscribed-instrument set, independent of
+        # any single MarketFeed instance's own `.instruments` - since a
+        # reconnect now constructs a BRAND NEW MarketFeed object each time
+        # (see _run_market_feed_forever), this is what gets handed to its
+        # constructor so a reconnect automatically resubscribes everything
+        # already subscribed before the drop, without needing to replay
+        # subscribe_symbols() calls after the fact.
+        self._market_feed_instruments: set[tuple] = set()
         # order_id (str) -> latest order-update dict pushed over the socket
         self._order_updates: dict[str, dict] = {}
         # security_id (str) -> last LTP pushed over the socket
@@ -316,15 +331,18 @@ class DhanWrapper:
             "order_status_rest_calls": 0,
             "price_ticks_received": 0,
             # Feed resilience visibility - added 31 Aug 2026 (user request).
-            # dhanhq's MarketFeed already self-heals on disconnect (its own
-            # _run_async loop reconnects and re-subscribes automatically -
-            # verified against the actual installed library source, not
-            # assumed) but we were never wiring on_connect/on_close/on_error,
-            # so a real disconnect/reconnect cycle produced zero log trace
-            # and zero visibility here. These counters don't change the
-            # feed's behavior at all - purely observability, so a real
-            # infra problem (frequent reconnects) is visible instead of
-            # silently self-healed and forgotten.
+            # CORRECTED 21 Sep 2026 (real incident, trading-skills'
+            # incidents/2026-09-21-market-feed-thread-death-on-429.md):
+            # this comment used to claim dhanhq's MarketFeed "already
+            # self-heals on disconnect" - true only for its OWN internal
+            # while-loop, reached only AFTER a first successful connect,
+            # and even then with no backoff of its own. Its FIRST connect
+            # attempt is unprotected (MarketFeed.run() only catches
+            # KeyboardInterrupt) and a single failure there silently
+            # killed the whole background thread forever - confirmed
+            # live, twice. _run_market_feed_forever/_market_feed_
+            # watchdog_forever now own resilience for both failure modes;
+            # these counters remain pure observability on top of that.
             "feed_connects": 0,
             "feed_disconnects": 0,
             "feed_errors": 0,
@@ -631,9 +649,7 @@ class DhanWrapper:
 
     def _on_market_close(self, _feed) -> None:
         self.stats["feed_disconnects"] += 1
-        logger.warning("Dhan market-data WebSocket disconnected (disconnect #%d this run) - "
-                        "dhanhq's own MarketFeed auto-reconnects internally, expect a "
-                        "matching feed_connects increment shortly if the network recovers.",
+        logger.warning("Dhan market-data WebSocket disconnected (disconnect #%d this run).",
                         self.stats["feed_disconnects"])
 
     def _on_market_error(self, _feed, exc) -> None:
@@ -641,17 +657,132 @@ class DhanWrapper:
         logger.warning("Dhan market-data WebSocket error (#%d this run): %s",
                         self.stats["feed_errors"], exc)
 
-    @property
-    def market_feed(self) -> MarketFeed:
-        if self._market_feed is None:
-            feed = MarketFeed(
-                self.client.dhan_context, [], version="v2", on_ticks=self._on_market_tick,
-                on_connect=self._on_market_connect, on_close=self._on_market_close,
-                on_error=self._on_market_error,
+    def _run_market_feed_forever(self) -> None:
+        """Owns the market-data WebSocket's entire connection lifecycle,
+        including its very FIRST connection attempt - added 21 Sep 2026
+        after a real incident (trading-skills' incidents/2026-09-21-
+        market-feed-thread-death-on-429.md). dhanhq's own MarketFeed.run()
+        only catches KeyboardInterrupt, and its _run_async()'s first
+        `await self.connect()` call sits OUTSIDE the while loop's own
+        try/except - so a single HTTP 429 on that very first attempt
+        silently killed the whole background thread forever, zero further
+        retries, confirmed live twice the same day. The comment that used
+        to sit on _on_market_close ("dhanhq's own MarketFeed auto-
+        reconnects internally") was true only for a session that had
+        already connected once - it was never true of the very first
+        attempt, and that gap is exactly what bit us.
+
+        This method wraps the ENTIRE blocking feed.run() call in its own
+        infinite retry loop with exponential backoff
+        (config.MARKET_FEED_BACKOFF_BASE_SECONDS, doubling up to
+        config.MARKET_FEED_BACKOFF_MAX_SECONDS) - the same "own the whole
+        call, don't trust the SDK's internals" discipline
+        _run_order_update_forever already uses for the order-update feed,
+        just with backoff instead of a flat retry delay since a fixed
+        short delay is exactly what turned one 429 into a sustained
+        multi-hundred-error storm the OTHER failure mode seen the same
+        incident (see _market_feed_watchdog_forever for why that second
+        mode needs its own separate handling - it happens INSIDE a
+        feed.run() call that never returns control here).
+
+        A brand new MarketFeed is constructed on every attempt, seeded
+        with self._market_feed_instruments (our own authoritative
+        subscribed-instrument set) so a reconnect automatically
+        resubscribes everything already subscribed before the drop - see
+        connect()'s own subscribe_instruments() call in the vendored SDK,
+        which sends the constructor's own instrument list fresh on every
+        successful open."""
+        delay = config.MARKET_FEED_BACKOFF_BASE_SECONDS
+        while True:
+            started_at = time.monotonic()
+            try:
+                with self._market_feed_lock:
+                    instruments = list(self._market_feed_instruments)
+                feed = MarketFeed(
+                    self.client.dhan_context, instruments, version="v2", on_ticks=self._on_market_tick,
+                    on_connect=self._on_market_connect, on_close=self._on_market_close,
+                    on_error=self._on_market_error,
+                )
+                with self._market_feed_lock:
+                    self._market_feed = feed
+                feed.run()  # blocking - returns/raises only once the feed's own loop has died
+                logger.warning("Market-data WebSocket feed exited cleanly (unexpected) - reconnecting in %.0fs.", delay)
+            except Exception:  # noqa: BLE001
+                logger.exception("Market-data WebSocket feed thread died - reconnecting in %.0fs.", delay)
+            with self._market_feed_lock:
+                self._market_feed = None
+            if time.monotonic() - started_at >= config.MARKET_FEED_BACKOFF_RESET_AFTER_SECONDS:
+                delay = config.MARKET_FEED_BACKOFF_BASE_SECONDS
+            time.sleep(delay)
+            delay = min(delay * 2, config.MARKET_FEED_BACKOFF_MAX_SECONDS)
+
+    def _market_feed_watchdog_forever(self) -> None:
+        """Handles the OTHER failure mode from the same 21 Sep 2026
+        incident: once dhanhq's MarketFeed gets PAST its first connect,
+        its own internal loop (_run_async's `while self._running:`) DOES
+        reconnect on its own on disconnect/error - but at a fixed ~1s
+        cadence with no backoff of its own, so once Dhan's WS endpoint
+        starts rate-limiting reconnects, the SDK just hammers it
+        continuously instead of ever leaving the endpoint a quiet gap to
+        clear (confirmed live: feed_errors climbed ~1/sec for 25+ minutes
+        straight, feed_connects frozen, zero ticks the entire time).
+        feed.run() never returns control to _run_market_feed_forever
+        while stuck this way - that inner loop lives entirely inside the
+        vendored SDK - so this watchdog polls self.stats["feed_errors"]
+        from OUTSIDE instead, and force-closes the feed if the error rate
+        looks like a stuck storm rather than an occasional blip. Closing
+        it makes feed.run() return (not raise), which hands control back
+        to _run_market_feed_forever's own outer loop - THAT loop is what
+        actually applies the backoff delay before the next attempt, since
+        this watchdog has no delay logic of its own."""
+        last_errors = self.stats["feed_errors"]
+        while True:
+            time.sleep(config.MARKET_FEED_WATCHDOG_INTERVAL_SECONDS)
+            if not config.ENABLE_WS_FEED:
+                continue
+            errors_now = self.stats["feed_errors"]
+            error_rate = errors_now - last_errors
+            last_errors = errors_now
+            if error_rate < config.MARKET_FEED_WATCHDOG_ERROR_THRESHOLD:
+                continue
+            with self._market_feed_lock:
+                feed = self._market_feed
+            if feed is None:
+                continue
+            logger.warning(
+                "Market-data WebSocket watchdog: %d error(s) in the last %.0fs looks like a stuck "
+                "reconnect storm - force-closing so the supervisor's own backoff can take over.",
+                error_rate, config.MARKET_FEED_WATCHDOG_INTERVAL_SECONDS,
             )
-            feed.start()  # spawns its own background thread; non-blocking
-            self._market_feed = feed
-            logger.info("Dhan market-data WebSocket connecting in the background.")
+            try:
+                feed.close_connection()
+            except Exception:  # noqa: BLE001
+                logger.exception("Market-data WebSocket watchdog: force-close itself failed")
+
+    @property
+    def market_feed(self) -> Optional[MarketFeed]:
+        """Returns the CURRENT MarketFeed instance, or None if the
+        supervisor thread (_run_market_feed_forever) hasn't constructed
+        one yet - briefly, right after the very first access, or any time
+        it's between reconnect attempts. Callers (subscribe_option_price/
+        unsubscribe_option_price) tolerate None - see their own
+        docstrings for why that's safe (the authoritative instrument set
+        those two update is what actually drives resubscription on the
+        NEXT reconnect, not a direct call on whatever instance happens to
+        exist right now).
+
+        Lazily starts BOTH the supervisor thread and its watchdog on
+        first access. Unlike before 21 Sep 2026, this does NOT call
+        feed.start() / trust dhanhq's own MarketFeed to survive its own
+        first connection attempt - see _run_market_feed_forever's own
+        docstring for the incident that made that trust look misplaced."""
+        if not self._market_feed_thread_started:
+            self._market_feed_thread_started = True
+            threading.Thread(target=self._run_market_feed_forever, daemon=True,
+                              name="market-feed-supervisor").start()
+            threading.Thread(target=self._market_feed_watchdog_forever, daemon=True,
+                              name="market-feed-watchdog").start()
+            logger.info("Dhan market-data WebSocket supervisor + watchdog starting in the background.")
         return self._market_feed
 
     def add_price_tick_subscriber(self, callback: Callable[[str, float], None]) -> None:
@@ -707,7 +838,18 @@ class DhanWrapper:
         # MCX row (see _instrument_meta's own docstring) can never win here.
         meta = self._instrument_meta(trading_symbol, expected_exchange="NSE")
         self._security_id_to_symbol[meta["security_id"]] = trading_symbol
-        self.market_feed.subscribe_symbols([(MarketFeed.NSE_FNO, meta["security_id"], MarketFeed.Ticker)])
+        instrument = (MarketFeed.NSE_FNO, meta["security_id"], MarketFeed.Ticker)
+        # Update our OWN authoritative set first (21 Sep 2026 - see
+        # _run_market_feed_forever's docstring) - this is what a FUTURE
+        # reconnect resubscribes from, independent of whether a feed
+        # instance currently exists. Then, if a feed happens to be live
+        # right now, also push the subscription immediately rather than
+        # waiting for the next reconnect cycle.
+        with self._market_feed_lock:
+            self._market_feed_instruments.add(instrument)
+            feed = self._market_feed
+        if feed is not None:
+            feed.subscribe_symbols([instrument])
 
     def unsubscribe_option_price(self, trading_symbol: str) -> None:
         if not config.ENABLE_WS_FEED:
@@ -729,7 +871,12 @@ class DhanWrapper:
         # a memory-constrained droplet.
         self._ltp_cache.pop(security_id, None)
         self._ltp_cache_ts.pop(security_id, None)
-        self.market_feed.unsubscribe_symbols([(MarketFeed.NSE_FNO, security_id, MarketFeed.Ticker)])
+        instrument = (MarketFeed.NSE_FNO, security_id, MarketFeed.Ticker)
+        with self._market_feed_lock:
+            self._market_feed_instruments.discard(instrument)
+            feed = self._market_feed
+        if feed is not None:
+            feed.unsubscribe_symbols([instrument])
 
     def get_cached_option_ltp(self, trading_symbol: str) -> Optional[float]:
         """Returns the last price pushed over the WebSocket feed for this

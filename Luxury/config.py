@@ -71,6 +71,18 @@ BURST_WINDOW_START = os.getenv("LUXURY_BURST_WINDOW_START", "09:15")
 BURST_WINDOW_END = os.getenv("LUXURY_BURST_WINDOW_END", "10:00")
 BURST_EXTRA_SLOTS_CE = int(os.getenv("LUXURY_BURST_EXTRA_SLOTS_CE", "1"))
 
+# Loss-triggered alert-bucket switch - see Options/config.py's identical
+# block for the full rationale. The shared bucket/ranker settings live only
+# in Options/config.py (one ranker for all packages).
+BUCKET_SWITCH_ENABLED = os.getenv("LUXURY_BUCKET_SWITCH_ENABLED", "true").lower() == "true"
+BUCKET_SWITCH_LOSS_RS = float(os.getenv("LUXURY_BUCKET_SWITCH_LOSS_RS", "600"))
+BUCKET_SWITCH_MIN_SCORE = float(os.getenv("LUXURY_BUCKET_SWITCH_MIN_SCORE", "50"))
+BUCKET_SWITCH_MAX_PER_DAY = int(os.getenv("LUXURY_BUCKET_SWITCH_MAX_PER_DAY", "8"))
+BUCKET_SWITCH_RETRY_SECONDS = float(os.getenv("LUXURY_BUCKET_SWITCH_RETRY_SECONDS", "60"))
+BUCKET_SWITCH_CANDIDATES_TRIED = int(os.getenv("LUXURY_BUCKET_SWITCH_CANDIDATES_TRIED", "3"))
+BUCKET_SWITCH_MAX_SCORE_AGE_SECONDS = float(os.getenv("LUXURY_BUCKET_SWITCH_MAX_SCORE_AGE_SECONDS", "900"))
+BUCKET_SWITCH_CANDIDATE_BLOCK_SECONDS = float(os.getenv("LUXURY_BUCKET_SWITCH_CANDIDATE_BLOCK_SECONDS", "300"))
+
 # See Options/config.py's identical MAX_DAILY_ENTRIES_PER_SYMBOL - this
 # package's own independently-tunable daily re-entry cap (user request
 # 1 Sep 2026), same "same underlying, across the whole day" semantics.
@@ -442,6 +454,14 @@ STALE_ENTRY_ORDER_TIMEOUT_SECONDS = int(os.getenv("LUXURY_STALE_ENTRY_ORDER_TIME
 # separate from alert_bucket.py's own loss-triggered switch feature (a
 # different, independently-decided piece of work) - no shared state.
 # --------------------------------------------------------------------------
+# Promoted from "an additional confirmatory layer alongside the normal
+# webhook-driven entry" to THE SOLE real entry path (21 Sep 2026, user
+# request: "the breakout-signal scanner has to be main entry path...
+# webhook path will feed the signals to breakout-signal scanner and it
+# will decide which trades to be placed") - luxury_main.py's own
+# _handle_chartink_webhook no longer calls enter_positions_for_stocks at
+# all; it only records into this watchlist now. With this flag off,
+# Luxury would place zero real trades.
 BREAKOUT_SIGNAL_ENABLED = os.getenv("LUXURY_BREAKOUT_SIGNAL_ENABLED", "true").lower() == "true"
 
 # Consolidation/breakout shape - same values the backtests validated.

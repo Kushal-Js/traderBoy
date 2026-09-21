@@ -43,6 +43,38 @@ WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "")
 # if the socket connection is unavailable/misbehaving.
 ENABLE_WS_FEED = os.getenv("ENABLE_WS_FEED", "true").lower() == "true"
 
+# Market-data WebSocket reconnect backoff (added 21 Sep 2026, real incident -
+# see trading-skills' incidents/2026-09-21-market-feed-thread-death-on-429.md).
+# dhanhq's own MarketFeed.run() only catches KeyboardInterrupt, so a single
+# HTTP 429 on its very FIRST connection attempt silently killed the whole
+# background thread forever, zero further retries - confirmed live, twice,
+# on 21 Sep 2026. dhan_client._run_market_feed_forever() now owns the entire
+# retry loop itself (never trusting the SDK's own internal one to survive
+# its own first attempt), backing off exponentially instead of hammering
+# Dhan's rate limiter at a fixed cadence the way the SDK's own internal
+# mid-session reconnect loop does once past that first connect.
+MARKET_FEED_BACKOFF_BASE_SECONDS = float(os.getenv("MARKET_FEED_BACKOFF_BASE_SECONDS", "2"))
+MARKET_FEED_BACKOFF_MAX_SECONDS = float(os.getenv("MARKET_FEED_BACKOFF_MAX_SECONDS", "60"))
+# A connection that stayed up at least this long before dying is treated as
+# "the problem had actually cleared" - the NEXT reconnect starts back at the
+# base delay instead of continuing to escalate from wherever a much older,
+# unrelated bad patch had left it.
+MARKET_FEED_BACKOFF_RESET_AFTER_SECONDS = float(os.getenv("MARKET_FEED_BACKOFF_RESET_AFTER_SECONDS", "120"))
+
+# Watchdog for the OTHER failure mode seen the same incident: once dhanhq's
+# MarketFeed gets PAST its first connect, its own internal loop reconnects
+# on disconnect/error just fine - but at a fixed ~1s cadence with NO backoff
+# of its own, so a rate-limited endpoint just gets hammered continuously
+# (confirmed live: feed_errors climbed ~1/sec for 25+ minutes straight,
+# feed_connects frozen, zero ticks the entire time) instead of ever getting
+# the quiet gap it needs to actually clear. That inner loop lives inside the
+# vendored SDK and isn't something dhan_client.py's own outer retry wrapper
+# ever sees return control - so this watchdog polls the error counter from
+# OUTSIDE instead, and force-closes+recycles the feed if it looks stuck,
+# handing control back to the outer backoff loop above.
+MARKET_FEED_WATCHDOG_INTERVAL_SECONDS = float(os.getenv("MARKET_FEED_WATCHDOG_INTERVAL_SECONDS", "30"))
+MARKET_FEED_WATCHDOG_ERROR_THRESHOLD = int(os.getenv("MARKET_FEED_WATCHDOG_ERROR_THRESHOLD", "5"))
+
 # ---------------------------------------------------------------------------
 # Strategy parameters
 # ---------------------------------------------------------------------------
@@ -135,6 +167,28 @@ BURST_CAPACITY_ENABLED = os.getenv("BURST_CAPACITY_ENABLED", "true").lower() == 
 BURST_WINDOW_START = os.getenv("BURST_WINDOW_START", "09:15")
 BURST_WINDOW_END = os.getenv("BURST_WINDOW_END", "10:00")
 BURST_EXTRA_SLOTS_CE = int(os.getenv("BURST_EXTRA_SLOTS_CE", "1"))
+
+# Alert buckets + loss-triggered bucket switch (user request 19 Sep 2026) -
+# see alert_bucket.py's module docstring for the full design and
+# trading-skills' designs/alert-bucket-switch.md for the backtest.
+# BUCKET_SWITCH_ENABLED gates the SWITCH for this package only; recording
+# alerts into the buckets and ranking them is pure bookkeeping and runs
+# whenever BUCKET_RANKER_ENABLED is on, regardless of any package's switch flag.
+BUCKET_SWITCH_ENABLED = os.getenv("BUCKET_SWITCH_ENABLED", "true").lower() == "true"
+BUCKET_SWITCH_LOSS_RS = float(os.getenv("BUCKET_SWITCH_LOSS_RS", "600"))            # unrealized loss that triggers a switch attempt
+BUCKET_SWITCH_MIN_SCORE = float(os.getenv("BUCKET_SWITCH_MIN_SCORE", "50"))         # = ribbon_score.MIN_ENTRY_SCORE; below this = "no good alternative"
+BUCKET_SWITCH_MAX_PER_DAY = int(os.getenv("BUCKET_SWITCH_MAX_PER_DAY", "8"))        # per strategy - a brake on churn, not part of the original spec
+BUCKET_SWITCH_RETRY_SECONDS = float(os.getenv("BUCKET_SWITCH_RETRY_SECONDS", "60")) # re-try cadence while the position stays under water with no candidate
+BUCKET_SWITCH_CANDIDATES_TRIED = int(os.getenv("BUCKET_SWITCH_CANDIDATES_TRIED", "3"))
+BUCKET_SWITCH_MAX_SCORE_AGE_SECONDS = float(os.getenv("BUCKET_SWITCH_MAX_SCORE_AGE_SECONDS", "900"))
+BUCKET_SWITCH_CANDIDATE_BLOCK_SECONDS = float(os.getenv("BUCKET_SWITCH_CANDIDATE_BLOCK_SECONDS", "300"))  # after a failed entry attempt
+
+# Shared ranker (one loop for all packages, started from Options' lifespan).
+BUCKET_RANKER_ENABLED = os.getenv("BUCKET_RANKER_ENABLED", "true").lower() == "true"
+BUCKET_RANK_INTERVAL_SECONDS = float(os.getenv("BUCKET_RANK_INTERVAL_SECONDS", "60"))
+BUCKET_RESCORE_MAX_AGE_SECONDS = float(os.getenv("BUCKET_RESCORE_MAX_AGE_SECONDS", "300"))   # one 5-min bar
+BUCKET_RANK_MAX_FETCHES_PER_CYCLE = int(os.getenv("BUCKET_RANK_MAX_FETCHES_PER_CYCLE", "10"))
+BUCKET_RANK_PACE_SECONDS = float(os.getenv("BUCKET_RANK_PACE_SECONDS", "1.6"))
 
 # Daily re-entry cap, added 1 Sep 2026 (user request: "only allow entry
 # into same trade max 3 times a day for Luxury, Options and Future
@@ -927,3 +981,65 @@ ORDER_TAG_PREFIX = os.getenv("ORDER_TAG_PREFIX", "Cti")  # correlation id prefix
 # times out, the entry is abandoned (reservation released) rather than
 # retried indefinitely.
 STALE_ENTRY_ORDER_TIMEOUT_SECONDS = int(os.getenv("STALE_ENTRY_ORDER_TIMEOUT_SECONDS", "300"))
+
+# --------------------------------------------------------------------------
+# Breakout-signal live entry trigger, CE+PE, SOLE real entry path for
+# Options (added 21 Sep 2026, widened same day - user request) - reuses
+# breakout_signal.py unchanged (already generic per-strategy/per-
+# direction, same module Luxury/Futures already use). Originally wired
+# PE-only against the PE backtest (designs/options-pe-breakout-signal-
+# gated-live-full-real-gates.md, +Rs41,172.87 delta/17 trades), then
+# widened to CE+PE and promoted to the SOLE entry path THE SAME DAY on
+# explicit user direction: "the breakout-signal scanner has to be main
+# entry path... webhook path will feed the signals to breakout-signal
+# scanner and it will decide which trades to be placed" - applied
+# identically to Luxury/Futures too (see each package's own
+# _handle_chartink_webhook, which no longer calls enter_positions_for_
+# stocks at all). Thresholds default to the SAME values already deployed
+# live on Luxury (clearance=0.3%, body=0.5%, relvol=1.2x - the 27-way
+# sweep's #1 combo, see trading-skills' designs/luxury-breakout-
+# detection-parameter-sweep.md).
+#
+# DEFAULTS TRUE, unlike this flag's own original same-day version (which
+# defaulted false, on the reasoning that a brand-new live path should
+# ship inert until explicitly armed). That reasoning no longer applies -
+# once _handle_chartink_webhook stops calling enter_positions_for_stocks,
+# this IS the only remaining way Options places a real trade at all;
+# defaulting it off would mean Options places zero trades, not "a
+# cautious rollout." Deployed together with the market-feed backoff fix
+# (dhan_client.py's _run_market_feed_forever) and the identical Luxury/
+# Futures webhook rewrite, live, mid-session, on explicit user
+# instruction after being warned this hasn't been validated as a SOLE
+# gate (only as a retrospective "what if" backtest) and that today's
+# scanner activity (1 signal all session, skipped as a duplicate) implies
+# a large drop in trade frequency versus the direct-entry path it
+# replaces - see trading-skills' incidents/2026-09-21-breakout-signal-
+# promoted-to-sole-entry-path.md for the full decision record.
+BREAKOUT_SIGNAL_ENABLED = os.getenv("OPTIONS_BREAKOUT_SIGNAL_ENABLED", "true").lower() == "true"
+
+# Consolidation/breakout shape - same values the backtest validated.
+BREAKOUT_LOOKBACK_CANDLES = int(os.getenv("OPTIONS_BREAKOUT_LOOKBACK_CANDLES", "10"))
+BREAKOUT_MAX_CONSOLIDATION_RANGE_PCT = float(os.getenv("OPTIONS_BREAKOUT_MAX_CONSOLIDATION_RANGE_PCT", "12"))
+BREAKOUT_CLEARANCE_PCT = float(os.getenv("OPTIONS_BREAKOUT_CLEARANCE_PCT", "0.3"))
+BREAKOUT_MIN_BODY_PCT = float(os.getenv("OPTIONS_BREAKOUT_MIN_BODY_PCT", "0.5"))
+BREAKOUT_MIN_RELATIVE_VOLUME = float(os.getenv("OPTIONS_BREAKOUT_MIN_RELATIVE_VOLUME", "1.2"))
+BREAKOUT_MIN_AVG_DAILY_VOLUME = float(os.getenv("OPTIONS_BREAKOUT_MIN_AVG_DAILY_VOLUME", "500000"))
+BREAKOUT_MAX_PCT_FROM_HIGH_LOW = float(os.getenv("OPTIONS_BREAKOUT_MAX_PCT_FROM_HIGH_LOW", "10"))
+
+# Data-fetch windows - continuous multi-day, per the standing continuous-
+# candles rule. Same defaults as Luxury/Futures' own blocks - see those
+# files' own comments for the sizing rationale (50-day SMA/high/low needs
+# >=50 real trading days; 120 calendar days comfortably covers that).
+BREAKOUT_CANDLE_LOOKBACK_DAYS = int(os.getenv("OPTIONS_BREAKOUT_CANDLE_LOOKBACK_DAYS", "15"))
+BREAKOUT_DAILY_LOOKBACK_DAYS = int(os.getenv("OPTIONS_BREAKOUT_DAILY_LOOKBACK_DAYS", "120"))
+
+# Scan cadence - same shape as alert_bucket.py's own ranker pacing.
+BREAKOUT_SCAN_INTERVAL_SECONDS = float(os.getenv("OPTIONS_BREAKOUT_SCAN_INTERVAL_SECONDS", "60"))
+BREAKOUT_SCAN_MAX_PER_CYCLE = int(os.getenv("OPTIONS_BREAKOUT_SCAN_MAX_PER_CYCLE", "10"))
+BREAKOUT_SCAN_PACE_SECONDS = float(os.getenv("OPTIONS_BREAKOUT_SCAN_PACE_SECONDS", "1.6"))
+
+# Daily watchlist refresh - see breakout_signal.py's own module docstring
+# for the full mechanism (before-market-open reset is automatic via date-
+# keyed persistence; this is the explicit after-market-close truncation).
+# Matches breakout_signal.py's own _market_hours_now upper bound by default.
+BREAKOUT_MARKET_END_TIME = os.getenv("OPTIONS_BREAKOUT_MARKET_END_TIME", "15:35")

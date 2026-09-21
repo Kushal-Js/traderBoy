@@ -50,6 +50,7 @@ from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel, field_validator
 
 from trade_history import fire_and_forget, record_webhook_alert
+import alert_bucket
 import breakout_signal
 import reversal_filters
 
@@ -108,14 +109,16 @@ async def lifespan(app: FastAPI):
         logger.exception("Could not reconcile broker positions at startup - continuing without them.")
 
     _monitor_task = asyncio.create_task(monitor_loop())
-    # Breakout-signal scanner (20 Sep 2026) - see breakout_signal.py's own
-    # module docstring. Calls _breakout_entry_fn below, which wraps the
-    # real _process_one_entry with the same pre-entry window/gap-down
-    # checks the webhook handler itself applies before ever reaching it.
+    # Breakout-signal scanner (20 Sep 2026, promoted to SOLE entry path 21
+    # Sep 2026, user request) - see breakout_signal.py's own module
+    # docstring. Calls _breakout_entry_fn below, which wraps the real
+    # _process_one_entry with the same pre-entry window/gap-down checks
+    # the webhook handler used to apply before ever reaching
+    # enter_positions_for_stocks (now retired from that handler).
     _breakout_signal_task = asyncio.create_task(
         breakout_signal.signal_scanner_loop("Luxury", config, _breakout_entry_fn)
     )
-    logger.info("Luxury strategy startup complete: monitor loop + breakout-signal scanner running (reusing Options' Dhan connection).")
+    logger.info("Luxury strategy startup complete: monitor loop + breakout-signal scanner (SOLE entry path) running (reusing Options' Dhan connection).")
     yield
     if _monitor_task:
         _monitor_task.cancel()
@@ -125,12 +128,14 @@ async def lifespan(app: FastAPI):
 
 async def _breakout_entry_fn(symbol: str, option_type: str) -> dict:
     """Entry point breakout_signal.py calls once a signal is confirmed -
-    applies the SAME pre-entry gates _handle_chartink_webhook itself
-    checks before ever reaching enter_positions_for_stocks, then defers to
-    the real, unmodified _process_one_entry for everything else (daily
-    re-entry cap, loss-repeat block, cross-strategy claim, capacity + the
-    opening-burst slot, liquid-contract resolution, funds check - all
-    inherited automatically, nothing reimplemented here)."""
+    THE only place a real Luxury entry now originates from (21 Sep 2026 -
+    _handle_chartink_webhook above no longer calls enter_positions_for_
+    stocks directly). Applies the SAME pre-entry gates that handler used
+    to check before ranking/entering, then defers to the real, unmodified
+    _process_one_entry for everything else (daily re-entry cap, loss-
+    repeat block, cross-strategy claim, capacity + the opening-burst slot,
+    liquid-contract resolution, funds check - all inherited automatically,
+    nothing reimplemented here)."""
     if not is_within_trading_windows():
         return {"symbol": symbol, "status": "skipped", "reason": "outside_trading_windows"}
     if is_past_allowed_trading_time():
@@ -182,137 +187,38 @@ class ChartinkWebhookPayload(BaseModel):
 async def _handle_chartink_webhook(
     payload: ChartinkWebhookPayload, option_type: str, prefer_highest: bool,
 ) -> dict:
-    """Shared by both webhooks below - only the ATM leg (CE/PE) and which
-    end of the %change ranking counts as "strongest" differ. See
-    Options/option_main.py's identical function - same design, minus the
-    choppy_stocks pre-ranking filter (not part of this package's scope)."""
+    """Shared by both webhooks below. REWRITTEN 21 Sep 2026 (user request:
+    "the breakout-signal scanner has to be main entry path... webhook path
+    will feed the signals to breakout-signal scanner and it will decide
+    which trades to be placed") - a raw alert no longer triggers an
+    immediate ranked entry. This handler's only remaining jobs are to
+    record the alert into alert_bucket (ranking/observability bookkeeping
+    only now) and breakout_signal (the scanner's own watchlist - THIS is
+    what actually leads to a real trade), then return. See Options/
+    option_main.py's identical rewrite for the full rationale -
+    rank_and_pick_top_stocks/the ribbon-ranking functions/enter_positions_
+    for_stocks are UNCHANGED and still defined in trading_engine.py, kept
+    not deleted, but nothing calls them from this path anymore. Every real
+    entry gate that used to run here now runs per-SIGNAL inside
+    _breakout_entry_fn instead of per-ALERT here."""
     await position_store.maybe_reset_for_new_day()
     stocks = payload.stock_list()
-    # Breakout-signal watchlist (20 Sep 2026) - see breakout_signal.py's own
-    # module docstring. Deliberately separate bookkeeping from alert_bucket
-    # above - a different, independently-decided feature.
+    fire_and_forget(alert_bucket.record_alert(option_type, stocks, "Luxury", payload.scan_name))
     fire_and_forget(breakout_signal.record_alert("Luxury", option_type, stocks))
 
-    def _log_alert(status: str, reason: Optional[str] = None) -> None:
-        """Fire-and-forget - see trade_history.py's own docstring for why
-        this MUST go through fire_and_forget (never awaited) in the
-        entry-order-placement path."""
-        fire_and_forget(record_webhook_alert(
-            "Luxury", payload.scan_name, payload.alert_name, stocks, status, reason,
-        ))
-
-    if not is_within_trading_windows():
-        logger.info(
-            "Ignoring alert (%s) - outside today's allowed trading windows (%s), not opening new positions.",
-            option_type, config.TRADING_WINDOWS,
-        )
-        _log_alert("ignored", "outside_trading_windows")
-        return {
-            "status": "ignored",
-            "reason": "outside_trading_windows",
-            "trading_windows": config.TRADING_WINDOWS,
-        }
-
-    if is_past_allowed_trading_time():
-        logger.info(
-            "Ignoring alert (%s) - past today's allowed trading cutoff (%s), not opening new positions.",
-            option_type, config.ALLOWED_TRADING_TIME,
-        )
-        _log_alert("ignored", "past_allowed_trading_time")
-        return {
-            "status": "ignored",
-            "reason": "past_allowed_trading_time",
-            "allowed_trading_time": config.ALLOWED_TRADING_TIME,
-        }
-
-    if is_past_square_off_time():
-        logger.info(
-            "Ignoring alert (%s) - past today's %s square-off time, not opening new positions.",
-            option_type, config.SQUARE_OFF_TIME,
-        )
-        _log_alert("ignored", "past_square_off_time")
-        return {
-            "status": "ignored",
-            "reason": "past_square_off_time",
-            "square_off_time": config.SQUARE_OFF_TIME,
-        }
-
     logger.info(
-        "Luxury webhook received (%s): scan=%s alert=%s stocks=%s",
+        "Luxury webhook received (%s): scan=%s alert=%s stocks=%s - queued for the breakout-signal "
+        "scanner (direct ranked entry retired 21 Sep 2026, see breakout_signal.py).",
         option_type, payload.scan_name, payload.alert_name, stocks,
     )
-
-    if option_type == "CE" and config.ENABLE_GAP_DOWN_CE_DELAY and dhan_wrapper.should_delay_ce_entry():
-        # See Options/dhan_client.py's evaluate_nifty_open_condition/
-        # should_delay_ce_entry - shared, market-wide check. PE untouched.
-        cond = dhan_wrapper.evaluate_nifty_open_condition()
-        logger.info(
-            "Ignoring CE alert - Nifty50 gap-down/sharp-fall cool-off active until %s "
-            "(gap=%.1f pts, fall=%.2f%% from open).",
-            cond["delay_until"].strftime("%H:%M"), cond["gap_points"], cond["fall_pct"],
-        )
-        _log_alert("ignored", "nifty_gap_down_ce_delay")
-        return {
-            "status": "ignored",
-            "reason": "nifty_gap_down_ce_delay",
-            "nifty_open_condition": {k: v for k, v in cond.items() if k != "date"},
-        }
-
-    cap = config.MAX_LIVE_POSITIONS_CE if option_type == "CE" else config.MAX_LIVE_POSITIONS_PE
-    remaining = await position_store.remaining_capacity(option_type)
-    if remaining == 0:
-        logger.info("No %s capacity left (%s live/in-flight already) - ignoring alert.", option_type, cap)
-        _log_alert("ignored", "max_live_positions_reached")
-        return {
-            "status": "ignored",
-            "reason": "max_live_positions_reached",
-            "option_type": option_type,
-            "max_live_positions": cap,
-        }
-
-    loop = asyncio.get_running_loop()
-    # MA-ribbon-expansion ranking (CE added 18 Sep 2026, PE extended the
-    # same day) - see Options/option_main.py's identical call and
-    # config.RIBBON_RANKING_PE_ENABLED's own comment for why PE is its own
-    # separate flag (unbacktested, unlike the CE side).
-    if prefer_highest and config.RIBBON_RANKING_ENABLED:
-        ranked = await reversal_filters.rank_by_ribbon_expansion(stocks, config.TOP_N_STOCKS)
-    elif not prefer_highest and config.RIBBON_RANKING_PE_ENABLED:
-        ranked = await reversal_filters.rank_by_ribbon_breakdown(stocks, config.TOP_N_STOCKS)
-    else:
-        ranked = await loop.run_in_executor(
-            None, rank_and_pick_top_stocks, stocks, config.TOP_N_STOCKS, prefer_highest
-        )
-
-    # Alert-candidate shadow logging (added 18 Sep 2026) - see Options/
-    # option_main.py's identical call and reversal_filters.log_alert_
-    # candidates' own docstring for the full rationale.
-    if len(stocks) > 1:
-        asyncio.create_task(reversal_filters.log_alert_candidates(
-            "Luxury", payload.scan_name, option_type, stocks, [s for s, _ in ranked],
-        ))
-
-    # Ribbon switch-shadow monitoring (CE added 18 Sep 2026, extended to PE
-    # the same day) - see Options/option_main.py's identical call and
-    # reversal_filters.log_ribbon_switch_shadow_for_alert's own docstring.
-    # Independent of both ranking flags - keeps collecting data for both
-    # CE and PE even while ranking-only is off for that side. NEVER
-    # touches a real position.
-    asyncio.create_task(reversal_filters.log_ribbon_switch_shadow_for_alert(
-        "Luxury", option_type, stocks, position_store,
+    fire_and_forget(record_webhook_alert(
+        "Luxury", payload.scan_name, payload.alert_name, stocks, "queued_for_breakout_signal", None,
     ))
-
-    if not ranked:
-        _log_alert("no_action", "could_not_rank_any_stock")
-        return {"status": "no_action", "reason": "could_not_rank_any_stock"}
-
-    results = await enter_positions_for_stocks(ranked, option_type)
-    _log_alert("processed")
-
     return {
-        "status": "processed",
-        "ranked_by_day_change_pct": ranked,
-        "entries": results,
+        "status": "queued_for_breakout_signal",
+        "option_type": option_type,
+        "stocks": stocks,
+        "breakout_signal_enabled": config.BREAKOUT_SIGNAL_ENABLED,
     }
 
 
