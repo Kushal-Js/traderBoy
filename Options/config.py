@@ -1046,6 +1046,15 @@ BREAKOUT_UNIVERSE_SYMBOLS = [s.strip().upper() for s in os.getenv("OPTIONS_BREAK
 BREAKOUT_USE_WS_CANDLES = os.getenv("OPTIONS_BREAKOUT_USE_WS_CANDLES", "false").lower() == "true"
 BREAKOUT_WS_STALE_AFTER_SECONDS = float(os.getenv("OPTIONS_BREAKOUT_WS_STALE_AFTER_SECONDS", "90"))
 
+# Breakout-scanner paper-trading-only mode (added 22 Sep 2026, user request -
+# see breakout_paper_engine.py's own module docstring for the full design).
+# Default false (real trading, unchanged). When true, EVERY breakout-scanner
+# signal for THIS package is simulated (real entry/exit rules, real contract
+# resolution, zero real orders) instead of traded for real - this REPLACES
+# real trading for this package, it does not run alongside it, per the
+# user's own explicit clarification.
+BREAKOUT_PAPER_MODE_ENABLED = os.getenv("OPTIONS_BREAKOUT_PAPER_MODE_ENABLED", "false").lower() == "true"
+
 # Where BREAKOUT_SEED_UNIVERSE_ENABLED's symbol list comes from (added 21
 # Sep 2026, user request - see universe_bucket.py's own module docstring):
 #   "static"          (default) - the fixed BREAKOUT_UNIVERSE_SYMBOLS list

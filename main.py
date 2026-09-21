@@ -85,6 +85,7 @@ from Swing import swing_main
 from Paper01 import paper01_main
 import universe_bucket
 import breakout_signal
+import breakout_paper_engine
 import underlying_candle_feed
 from Options.dhan_client import dhan_wrapper
 
@@ -162,11 +163,19 @@ async def lifespan(app: FastAPI):
                                         ("Futures", futures_config, futures_main._breakout_entry_fn),
                                     ]))
                                     logger.info("UniverseDispatcher task started (Luxury + Futures).")
+                                # Started unconditionally (cheap no-op when no
+                                # package has BREAKOUT_PAPER_MODE_ENABLED on -
+                                # see breakout_paper_engine.py's own docstring),
+                                # same reasoning as the dispatcher_task above:
+                                # it spans Options/Luxury/Futures, so it can't
+                                # live inside any one package's own lifespan.
+                                paper_engine_task = asyncio.create_task(breakout_paper_engine.paper_engine_monitor_loop())
                                 try:
                                     yield
                                 finally:
                                     if dispatcher_task:
                                         dispatcher_task.cancel()
+                                    paper_engine_task.cancel()
 
 
 app = FastAPI(title="Chartink -> Dhan Algo Bot", lifespan=lifespan)

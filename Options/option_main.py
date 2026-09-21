@@ -68,6 +68,7 @@ from pydantic import BaseModel, field_validator
 
 from trade_history import fire_and_forget, record_webhook_alert
 import breakout_signal
+import breakout_paper_engine
 import choppy_stocks
 import reversal_filters
 
@@ -195,6 +196,11 @@ async def _breakout_entry_fn(symbol: str, option_type: str) -> dict:
         return {"symbol": symbol, "status": "skipped", "reason": "past_square_off_time"}
     if option_type == "CE" and config.ENABLE_GAP_DOWN_CE_DELAY and dhan_wrapper.should_delay_ce_entry():
         return {"symbol": symbol, "status": "skipped", "reason": "nifty_gap_down_ce_delay"}
+    if config.BREAKOUT_PAPER_MODE_ENABLED:
+        # Paper-mode REPLACES real trading for this package (22 Sep 2026,
+        # explicit user instruction) - see breakout_paper_engine.py's own
+        # docstring. Real entry never runs while this flag is true.
+        return await breakout_paper_engine.process_paper_entry("Options", symbol, option_type)
     return await trading_engine._process_one_entry(symbol, option_type)
 
 

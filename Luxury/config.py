@@ -511,6 +511,15 @@ BREAKOUT_UNIVERSE_SYMBOLS = [s.strip().upper() for s in os.getenv("LUXURY_BREAKO
 BREAKOUT_USE_WS_CANDLES = os.getenv("LUXURY_BREAKOUT_USE_WS_CANDLES", "false").lower() == "true"
 BREAKOUT_WS_STALE_AFTER_SECONDS = float(os.getenv("LUXURY_BREAKOUT_WS_STALE_AFTER_SECONDS", "90"))
 
+# Breakout-scanner paper-trading-only mode (added 22 Sep 2026, user request -
+# see breakout_paper_engine.py's own module docstring for the full design).
+# Default false (real trading, unchanged). When true, EVERY breakout-scanner
+# signal for THIS package is simulated (real entry/exit rules, real contract
+# resolution, zero real orders) instead of traded for real - this REPLACES
+# real trading for this package, it does not run alongside it, per the
+# user's own explicit clarification.
+BREAKOUT_PAPER_MODE_ENABLED = os.getenv("LUXURY_BREAKOUT_PAPER_MODE_ENABLED", "false").lower() == "true"
+
 # "static" (default, unchanged) or "universe_bucket" (universe_bucket.py's
 # rolling 3-trading-day pool instead of the fixed list above) - see
 # Options/config.py's identical block for the full rationale.
