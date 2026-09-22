@@ -112,6 +112,47 @@ IST = ZoneInfo("Asia/Kolkata")
 _SCAN_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="breakout-signal")
 _LOCK = asyncio.Lock()
 
+# Round-robin position for _scan_cycle/_dispatch_scan_cycle, keyed by
+# strategy (DISPATCHER_STRATEGY_NAME for the dispatcher) - see
+# _rotate_pending_from_cursor's own docstring for the starvation bug this
+# fixes (real incident, 22 Sep 2026).
+_scan_cursor: dict[str, str] = {}
+
+
+def _rotate_pending_from_cursor(strategy: str, pending: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Rotates `pending` (rebuilt fresh every cycle, in stable watchlist
+    insertion order - CE items then PE items) so a cycle resumes scanning
+    right after wherever the previous cycle left off, instead of always
+    restarting from the front.
+
+    Without this, a fixed per-cycle budget (BREAKOUT_SCAN_MAX_PER_CYCLE)
+    starves every symbol past the first batch forever: a symbol that's
+    checked and shows no signal stays unsignaled, so it lands right back
+    in the exact same front-of-list position next cycle, and anything
+    after the first MAX_PER_CYCLE entries is never reached at all - not
+    "slow", genuinely never scanned. Real incident, 22 Sep 2026: with 38
+    CE + 45 PE symbols tracked by UniverseDispatcher and MAX_PER_CYCLE=10,
+    only the first ~10 CE symbols (in original alert-insertion order) were
+    EVER evaluated all session; PE was never reached even once, since CE
+    alone already exhausted the per-cycle budget every single tick.
+
+    Tracks the last symbol NAME examined (not a raw index), so this is
+    naturally resilient to symbols being added/signaled/removed between
+    cycles - if that symbol is no longer in `pending` (it got signaled,
+    the day rolled over, or post-close truncation cleared the watchlist),
+    this simply falls back to starting from the front, which is always a
+    safe default."""
+    if not pending:
+        return pending
+    last_sym = _scan_cursor.get(strategy)
+    if last_sym is None:
+        return pending
+    for i, (_ot, sym) in enumerate(pending):
+        if sym == last_sym:
+            start = (i + 1) % len(pending)
+            return pending[start:] + pending[:start]
+    return pending
+
 
 def _today() -> date:
     return datetime.now(IST).date()
@@ -397,13 +438,16 @@ async def _scan_cycle(strategy: str, cfg, entry_fn: Callable[[str, str], Awaitab
         async with _LOCK:
             _ensure_today_locked(w)
             pending.extend((option_type, sym) for sym, it in w.items.items() if not it["signaled"])
+    pending = _rotate_pending_from_cursor(strategy, pending)
 
     loop = asyncio.get_running_loop()
     checked = 0
+    last_examined: Optional[str] = None
     for ot, sym in pending:
         if checked >= cfg.BREAKOUT_SCAN_MAX_PER_CYCLE:
             break
         checked += 1
+        last_examined = sym
         direction = "bullish" if ot == "CE" else "bearish"
         sig = await loop.run_in_executor(_SCAN_EXECUTOR, _evaluate_signal_sync, sym, direction, cfg)
         await asyncio.sleep(cfg.BREAKOUT_SCAN_PACE_SECONDS)
@@ -435,6 +479,8 @@ async def _scan_cycle(strategy: str, cfg, entry_fn: Callable[[str, str], Awaitab
             "entry_result_status": (result or {}).get("status"), "entry_result_reason": (result or {}).get("reason"),
             "logged_at": datetime.now().isoformat(),
         })
+    if last_examined is not None:
+        _scan_cursor[strategy] = last_examined
 
 
 _universe_seeded_for: dict[str, date] = {}
@@ -739,13 +785,16 @@ async def _dispatch_scan_cycle(cfg, targets: list[tuple[str, Any, Callable[[str,
         async with _LOCK:
             _ensure_today_locked(w)
             pending.extend((option_type, sym) for sym, it in w.items.items() if not it["signaled"])
+    pending = _rotate_pending_from_cursor(DISPATCHER_STRATEGY_NAME, pending)
 
     loop = asyncio.get_running_loop()
     checked = 0
+    last_examined: Optional[str] = None
     for ot, sym in pending:
         if checked >= cfg.BREAKOUT_SCAN_MAX_PER_CYCLE:
             break
         checked += 1
+        last_examined = sym
         direction = "bullish" if ot == "CE" else "bearish"
         sig = await loop.run_in_executor(_SCAN_EXECUTOR, _evaluate_signal_sync, sym, direction, cfg)
         await asyncio.sleep(cfg.BREAKOUT_SCAN_PACE_SECONDS)
@@ -767,6 +816,8 @@ async def _dispatch_scan_cycle(cfg, targets: list[tuple[str, Any, Callable[[str,
         all_capacity_blocked = await _dispatch_to_targets(ot, sym, sig, targets)
         if all_capacity_blocked:
             _capacity_backlog[ot].append({"symbol": sym, "signal": sig, "queued_at": datetime.now(IST)})
+    if last_examined is not None:
+        _scan_cursor[DISPATCHER_STRATEGY_NAME] = last_examined
 
 
 async def universe_dispatcher_loop(targets: list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]]) -> None:
