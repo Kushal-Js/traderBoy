@@ -129,6 +129,12 @@ async def test_5_monitor_tick_skips_a_symbol_in_cooldown():
             return "BULLISH"
 
         ste._evaluate_entry_signal = _fake_evaluate
+        # This test is about the cooldown gate in isolation, not the 22 Sep
+        # 2026 market-hours gate (see Swing/signals.py's _symbol_market_open) -
+        # stub it open so the test doesn't depend on the wall-clock time it
+        # happens to run at.
+        original_market_open = ste.signals._symbol_market_open
+        ste.signals._symbol_market_open = lambda symbol: True
         try:
             await ste._monitor_tick()
             assert len(placed) == 1, "first tick should attempt (and fail) the entry once"
@@ -141,6 +147,7 @@ async def test_5_monitor_tick_skips_a_symbol_in_cooldown():
                   "(the actual hot-retry-storm regression this fix prevents): PASSED")
         finally:
             ste._evaluate_entry_signal = original_evaluate
+            ste.signals._symbol_market_open = original_market_open
             watchlist_store.symbols = original_symbols
     finally:
         restore()

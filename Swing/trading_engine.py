@@ -105,6 +105,18 @@ def _parse_hhmm_today(hhmm: str) -> datetime:
     return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
+def _is_friday_square_off_time() -> bool:
+    """See Swing/config.py's FRIDAY_SQUARE_OFF_TIME docstring - weekday()
+    == 4 is Friday. Stays True for the rest of Friday once crossed (there's
+    no next-Monday reset needed here since Monday's weekday() is 0, not 4),
+    so _monitor_tick's square-off call fires - harmlessly, _square_off_all
+    is a no-op once positions are actually flat - on every remaining tick
+    of the day, and the entry-evaluation section it gates out alongside
+    stays skipped for the rest of Friday too."""
+    now = _now_ist()
+    return now.weekday() == 4 and now >= _parse_hhmm_today(config.FRIDAY_SQUARE_OFF_TIME)
+
+
 def _gen_tag(prefix: str, symbol: str) -> str:
     """See Options/trading_engine.py's identical helper - same DH-905
     special-character rationale (GVT&D)."""
@@ -1048,6 +1060,16 @@ async def _sync_pending_exit_orders() -> None:
 # Monitor loop
 # --------------------------------------------------------------------------- #
 async def _monitor_tick() -> None:
+    if config.FRIDAY_SQUARE_OFF_ENABLED and _is_friday_square_off_time():
+        # Weekly, not daily - see config.FRIDAY_SQUARE_OFF_TIME's own
+        # docstring. Skips the ordinary exit-check/entry-scan below
+        # entirely for the rest of Friday: _square_off_all is itself the
+        # exit path once this fires (retried harmlessly every tick until
+        # actually flat), and there is no point evaluating new entries
+        # that would just have to carry over the weekend anyway.
+        await _square_off_all("FRIDAY_SQUARE_OFF")
+        return
+
     # Exits first - more urgent than looking for new entries.
     for symbol, position in list(position_store.live_positions.items()):
         await _check_one_position(symbol, position)
@@ -1064,6 +1086,8 @@ async def _monitor_tick() -> None:
         if symbol in position_store.reserved_symbols:
             continue
         if await position_store.is_in_entry_cooldown(symbol):
+            continue
+        if not signals._symbol_market_open(symbol):
             continue
         if i:
             await asyncio.sleep(config.SYMBOL_PACING_SECONDS)

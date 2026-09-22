@@ -539,6 +539,21 @@ LTP_STALE_FORCE_EXIT_MINUTES = float(os.getenv("SWING_LTP_STALE_FORCE_EXIT_MINUT
 # positions between 09:00-09:15.
 MARKET_OPEN_TIME = os.getenv("SWING_MARKET_OPEN_TIME", "09:00")
 
+# Weekly square-off (user request 22/23 Sep 2026): Swing positions are
+# meant to carry across DAYS by design (see this module's own docstring),
+# but never across a WEEKEND - a Friday-evening MCX position in particular
+# would otherwise sit unmonitored (no live ticks, no exit-signal refresh -
+# see _symbol_market_open's own docstring) through two full non-trading
+# days of gap risk before Monday. Every open Swing position (NSE and MCX
+# alike) gets force-closed at this time every Friday, and no new entry is
+# taken for the rest of the week (see trading_engine.py's _monitor_tick) -
+# 15:25, 5 minutes before NSE's own 15:30 close, deliberately EARLIER than
+# MCX's own much-later 23:30 close since the point is avoiding the
+# weekend gap entirely, not trading MCX's Friday evening session right up
+# to its own close.
+FRIDAY_SQUARE_OFF_ENABLED = os.getenv("SWING_FRIDAY_SQUARE_OFF_ENABLED", "true").lower() == "true"
+FRIDAY_SQUARE_OFF_TIME = os.getenv("SWING_FRIDAY_SQUARE_OFF_TIME", "15:25")
+
 # Cooldown before re-attempting entry for the same symbol after a failed
 # (non-TRADED, error, or skipped) entry attempt - added 15 Sep 2026 after a
 # real incident: with no cooldown, a persistent failure (e.g. a genuinely

@@ -37,6 +37,27 @@ def _now_ist() -> datetime:
     return datetime.now(IST)
 
 
+def _symbol_market_open(symbol: str) -> bool:
+    """Per-symbol market-hours gate (22 Sep 2026 fix): before this, Swing's
+    entry-evaluation path and this module's own structure-break refresh
+    loop both polled Dhan for regime/Supertrend/structure-break data
+    unconditionally, 24/7 - including nights and weekends, when no new
+    candle can possibly form and no order could fill anyway. Confirmed
+    live: 39 DH-904 rate-limit hits in under an hour, overnight, entirely
+    from this. MCX's session runs materially longer than NSE's (see
+    Options/config.py's MCX_MARKET_OPEN_TIME/_CLOSE_TIME), so this checks
+    the RIGHT session per symbol - a blanket NSE-hours cutoff would wrongly
+    block a live MCX symbol for hours it's genuinely still open, and a
+    blanket MCX-hours cutoff would leave the same overnight polling problem
+    for NSE symbols mostly unfixed. Weekday check first since is_market_
+    open() itself only checks time-of-day, not day-of-week."""
+    now = _now_ist()
+    if now.weekday() >= 5:  # Saturday/Sunday - neither exchange trades
+        return False
+    segment = "MCX_COMM" if symbol in config.MCX_SYMBOLS else "NSE_EQ"
+    return dhan_wrapper.is_market_open(exchange_segment=segment)
+
+
 # Resolved MCX futures contract's security_id, cached per calendar day
 # (added 12 Sep 2026, Swing v2's Copper support) - re-resolving on every
 # tick would be wasteful and the contract only changes when a monthly
@@ -637,6 +658,8 @@ async def structure_break_refresh_loop(symbols: list) -> None:
     logger.info("Structure-break refresh loop started for: %s", symbols)
     while True:
         for symbol in symbols:
+            if not _symbol_market_open(symbol):
+                continue
             cached = _structure_break_cache.get(symbol)
             streak = _structure_break_fail_streak.get(symbol, 0)
             effective_refresh = min(config.STRUCTURE_BREAK_REFRESH_SECONDS * (2 ** streak), MAX_FETCH_BACKOFF_SECONDS)
