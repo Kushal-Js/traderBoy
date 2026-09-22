@@ -91,18 +91,38 @@ mutate state" sequence atomic against a tick landing mid-update from the
 same background thread re-entering - can't happen with a single feed
 thread today, but costs nothing to make explicit rather than relying on
 that single-thread assumption forever).
+
+DISK RECONCILIATION (added 22 Sep 2026, real incident): this module used
+to be pure in-memory, the one store in this codebase that wasn't - every
+other one (position_store, universe_bucket, breakout_signal's own
+watchlists) already persists to history/. An unplanned mid-session
+restart wiped an already-running live dry-run's entire accumulated state,
+and separately made the automated daily parity check report a false
+"recon_bar_count: 0" for every symbol - indistinguishable from a
+genuinely broken feed, when the real cause was just an ordinary restart.
+Every completed bar is now appended to `history/<date>_underlying_
+candles_<symbol>.log` (JSONL, matching this codebase's own webhook_
+alerts.log/breakout_signals.log/real_trades.log convention) - see
+_persist_bar (write, outside `_lock`, best-effort) and
+_restore_from_disk (read, called from `subscribe()` before the first
+live tick for a symbol can arrive in a fresh process, covering the last
+3 calendar days so MAX_BARS_KEPT's own multi-session continuity survives
+a restart instead of starting cold).
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("underlying_candle_feed")
 
 IST = ZoneInfo("Asia/Kolkata")
+HISTORY_DIR = Path("history")
 
 # Bars kept per symbol - comfortably more than any real signal check's own
 # lookback (BREAKOUT_LOOKBACK_CANDLES=10) plus the 20d/50d DAILY checks
@@ -135,6 +155,101 @@ _lock = threading.Lock()
 _state: dict[str, _SymbolState] = {}
 _subscribed: set[str] = set()
 _tick_subscriber_registered = False
+
+# --------------------------------------------------------------------------- #
+# Disk reconciliation (added 22 Sep 2026, real incident: an unplanned restart
+# mid-session wiped this module's in-memory state entirely, silently zeroing
+# out an already-running live dry-run AND the automated daily parity check's
+# own comparison - "recon_bar_count: 0" for every symbol, same failure shape
+# as a genuinely broken feed, when the actual cause was just a restart no
+# different from any other this bot already survives cleanly for every OTHER
+# store (position_store, universe_bucket, breakout_signal's own watchlists -
+# all persist to `history/` already). This module was the one exception,
+# purely in-memory. Every completed bar is now appended to a per-symbol,
+# per-day JSONL log under history/ (matching this codebase's own established
+# append-only convention - webhook_alerts.log, breakout_signals.log,
+# real_trades.log all use the identical shape), and `subscribe()` restores
+# from those logs before the first live tick can arrive, so a restart mid-
+# session picks up exactly where it left off instead of starting cold.
+# --------------------------------------------------------------------------- #
+def _persist_path(symbol: str, day: date) -> Path:
+    return HISTORY_DIR / f"{day.isoformat()}_underlying_candles_{symbol}.log"
+
+
+def _persist_bar(symbol: str, day: date, bar: dict) -> None:
+    """Appends one completed bar to disk - called once per symbol per
+    completed 5-min bar (a few times an hour per symbol, not per tick),
+    and deliberately OUTSIDE `_lock` (see _on_tick) so a slow disk write
+    never blocks tick processing for every other subscribed symbol.
+    Best-effort: a write failure is logged, not raised - the in-memory
+    state (what every live signal check actually reads) is unaffected
+    either way, this only protects against a FUTURE restart losing this
+    one bar."""
+    try:
+        HISTORY_DIR.mkdir(exist_ok=True)
+        row = {**bar, "candle_start": bar["candle_start"].isoformat()}
+        with open(_persist_path(symbol, day), "a") as f:
+            f.write(json.dumps(row) + "\n")
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "underlying_candle_feed: failed to persist a completed bar for %s to disk - in-memory "
+            "state is still correct, but a restart before the next successful write would lose it", symbol,
+        )
+
+
+def _load_persisted_bars(symbol: str, as_of: date, lookback_days: int = 3) -> list[dict]:
+    """Restores completed bars from disk across the last `lookback_days`
+    calendar days (including `as_of` itself) - so MAX_BARS_KEPT's own
+    "two full sessions continuous" intent survives a restart instead of
+    starting from a cold, empty state. 3 days comfortably covers a
+    weekend gap (Friday + Monday) without needing trading-day-aware
+    logic - a missing file for any one day (weekend, holiday, or a day
+    before this reconciliation feature existed) is silently skipped, not
+    an error. Best-effort: a corrupt line/file is skipped and logged,
+    never fatal to the restore as a whole."""
+    bars: list[dict] = []
+    for i in range(lookback_days, -1, -1):
+        day = as_of - timedelta(days=i)
+        path = _persist_path(symbol, day)
+        if not path.exists():
+            continue
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    row = json.loads(line)
+                    row["candle_start"] = datetime.fromisoformat(row["candle_start"])
+                    bars.append(row)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "underlying_candle_feed: failed to restore persisted bars for %s from %s - skipping "
+                "that file, reconstruction continues from live ticks only", symbol, path,
+            )
+    bars.sort(key=lambda b: b["candle_start"])
+    return bars[-MAX_BARS_KEPT:]
+
+
+def _restore_from_disk(symbol: str) -> None:
+    """Called once per symbol, the first time `subscribe()` sees it in
+    THIS process's lifetime - i.e. exactly the "did we just restart"
+    moment. A no-op if this symbol already has in-memory bars (can't
+    happen on a genuine fresh process start, only guards against a
+    theoretical double-call)."""
+    today = datetime.now(IST).date()
+    bars = _load_persisted_bars(symbol, today)
+    if not bars:
+        return
+    with _lock:
+        st = _state.setdefault(symbol, _SymbolState())
+        if st.bars:
+            return
+        st.bars = bars
+    logger.info(
+        "underlying_candle_feed: restored %d persisted bar(s) for %s from disk - reconciliation after "
+        "a possible restart, not starting cold", len(bars), symbol,
+    )
 
 
 def _candle_start_for(t: datetime) -> datetime:
@@ -195,6 +310,7 @@ def _update_bar(st: _SymbolState, ltp: float, cum_volume: float, t: datetime) ->
 
 def _on_tick(underlying_symbol: str, ltp: float, cum_volume: float, t: datetime) -> None:
     today = t.date()
+    completed = None
     with _lock:
         st = _state.setdefault(underlying_symbol, _SymbolState())
         if st.day != today:
@@ -226,12 +342,22 @@ def _on_tick(underlying_symbol: str, ltp: float, cum_volume: float, t: datetime)
             if len(st.bars) > MAX_BARS_KEPT:
                 del st.bars[: len(st.bars) - MAX_BARS_KEPT]
         st.last_tick_at = t
+    if completed is not None:
+        # Deliberately outside _lock - this is disk I/O (see _persist_bar's
+        # own docstring for why it must never block tick processing for
+        # every other subscribed symbol sharing the same lock).
+        _persist_bar(underlying_symbol, today, completed)
 
 
 def subscribe(symbols: list[str]) -> None:
     """Idempotent - subscribes each symbol's underlying equity in Quote
     mode. Safe to call repeatedly (e.g. once per day at universe-seed
-    time) with the same list; already-subscribed symbols are a no-op."""
+    time) with the same list; already-subscribed symbols are a no-op.
+
+    Restores this symbol's persisted bars from disk BEFORE subscribing
+    to live ticks, the first time this process sees it - so a restart
+    mid-session reconciles from history/ instead of starting cold (see
+    _restore_from_disk's own docstring for the incident this fixes)."""
     from Options.dhan_client import dhan_wrapper
     global _tick_subscriber_registered  # noqa: PLW0603
     if not _tick_subscriber_registered:
@@ -240,6 +366,7 @@ def subscribe(symbols: list[str]) -> None:
     for sym in symbols:
         if sym in _subscribed:
             continue
+        _restore_from_disk(sym)
         try:
             dhan_wrapper.subscribe_equity_quote(sym)
             _subscribed.add(sym)

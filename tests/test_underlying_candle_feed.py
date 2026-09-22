@@ -22,11 +22,23 @@ which always starts from the beginning of a symbol's day (cum_volume
 naturally ~0 at the first synthetic tick either way, the one condition
 under which the old buggy assumption happened to be correct).
 
+Also covers the 22 Sep 2026 disk-reconciliation feature (_persist_bar /
+_load_persisted_bars / _restore_from_disk): a real unplanned restart that
+day wiped this module's entire in-memory state, silently zeroing out a
+live dry-run and making the automated parity check report a false
+"recon_bar_count: 0" for every symbol - indistinguishable from a
+genuinely broken feed. Every completed bar is now appended to
+history/<date>_underlying_candles_<symbol>.log, and subscribe() restores
+from those logs before the first live tick can arrive in a fresh
+process.
+
 HOW TO RUN:
     uv run python tests/test_underlying_candle_feed.py
 """
+import shutil
 import sys
-from datetime import datetime, timedelta
+import tempfile
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -128,13 +140,104 @@ def test_4_day_rollover_resets_baseline_same_as_a_fresh_subscribe():
           "_update_bar directly): PASSED")
 
 
+def test_5_persist_bar_writes_a_restorable_jsonl_line():
+    """_persist_bar/_load_persisted_bars round-trip: a completed bar
+    written to disk must come back byte-for-byte the same (datetime
+    included) via the read path, not just "some data"."""
+    bar = {"candle_start": _t(10, 30, 0), "open": 100.0, "high": 101.0, "low": 99.5, "close": 100.5, "volume": 12345.0}
+    ucf._persist_bar("ROUNDTRIP", date(2026, 9, 22), bar)
+    loaded = ucf._load_persisted_bars("ROUNDTRIP", date(2026, 9, 22), lookback_days=0)
+    assert len(loaded) == 1, f"expected exactly 1 restored bar, got {len(loaded)}"
+    assert loaded[0]["candle_start"] == bar["candle_start"]
+    assert loaded[0]["open"] == 100.0 and loaded[0]["close"] == 100.5 and loaded[0]["volume"] == 12345.0
+    print("5. _persist_bar/_load_persisted_bars round-trip a completed bar exactly: PASSED")
+
+
+def test_6_load_persisted_bars_spans_multiple_days_and_trims_to_max_kept():
+    """Covers the 3-day lookback and the MAX_BARS_KEPT trim, both real
+    behavior _load_persisted_bars promises, not just the single-day
+    round-trip above."""
+    sym = "MULTIDAY"
+    day0 = date(2026, 9, 20)
+    for i in range(3):
+        ucf._persist_bar(sym, day0, {"candle_start": _t(9, 15 + i * 5, 0).replace(day=20),
+                                      "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 100.0})
+    day1 = date(2026, 9, 22)  # 2 days later, still within the default 3-day lookback
+    for i in range(200):  # deliberately more than MAX_BARS_KEPT
+        ucf._persist_bar(sym, day1, {"candle_start": _t(9, 15, 0).replace(day=22) + timedelta(minutes=5 * i),
+                                      "open": 2.0, "high": 2.0, "low": 2.0, "close": 2.0, "volume": 200.0})
+    loaded = ucf._load_persisted_bars(sym, day1, lookback_days=3)
+    assert len(loaded) == ucf.MAX_BARS_KEPT, f"expected trimmed to MAX_BARS_KEPT ({ucf.MAX_BARS_KEPT}), got {len(loaded)}"
+    assert all(b["close"] == 2.0 for b in loaded), (
+        "the oldest (day0) bars should have been trimmed away by MAX_BARS_KEPT, keeping only the "
+        "most recent ones from day1 - if any close==1.0 bars survived, trimming kept the wrong end"
+    )
+    print("6. _load_persisted_bars spans multiple days and trims to the most recent MAX_BARS_KEPT: PASSED")
+
+
+def test_7_restart_reconciliation_end_to_end():
+    """THE actual regression test for the 22 Sep 2026 incident: ticks
+    complete real bars (persisted to disk as they go), then _state is
+    wiped (simulating a process restart), then subscribe() is called
+    again - the symbol's bars must come back from disk before any new
+    tick arrives, not start cold."""
+    sym = "RESTARTSYM"
+    today = datetime.now(IST).date()
+    ucf._on_tick(sym, ltp=500.0, cum_volume=50_000.0, t=_t(9, 15, 1))
+    ucf._on_tick(sym, ltp=500.5, cum_volume=51_000.0, t=_t(9, 19, 0))
+    ucf._on_tick(sym, ltp=501.0, cum_volume=52_000.0, t=_t(9, 20, 1))  # closes 09:15 bar, volume=1000
+    assert len(ucf._state[sym].bars) == 1
+    pre_restart_bars = list(ucf._state[sym].bars)
+
+    # Simulate a process restart: wipe ALL in-memory state, same as a fresh process start.
+    ucf._state.clear()
+    ucf._subscribed.clear()
+    ucf._tick_subscriber_registered = True  # skip the real dhan_wrapper subscribe call in this test
+
+    class _FakeDhanWrapper:
+        @staticmethod
+        def subscribe_equity_quote(symbol):
+            pass
+
+    import Options.dhan_client as dhan_client_module
+    saved = dhan_client_module.dhan_wrapper
+    dhan_client_module.dhan_wrapper = _FakeDhanWrapper()
+    try:
+        ucf.subscribe([sym])
+    finally:
+        dhan_client_module.dhan_wrapper = saved
+
+    assert sym in ucf._state, "subscribe() must restore state for a symbol with persisted history"
+    restored_bars = ucf._state[sym].bars
+    assert len(restored_bars) == 1, f"expected the 1 pre-restart bar restored, got {len(restored_bars)}"
+    assert restored_bars[0]["volume"] == pre_restart_bars[0]["volume"] == 1_000.0
+    assert restored_bars[0]["candle_start"] == pre_restart_bars[0]["candle_start"]
+
+    # A new tick after "restart" must continue correctly - not duplicate the restored bar,
+    # and must use the mid-day-subscribe-safe baseline (test_2) since current_bar_start is None again.
+    ucf._on_tick(sym, ltp=502.0, cum_volume=52_500.0, t=_t(9, 21, 0))
+    assert len(ucf._state[sym].bars) == 1, "a same-bar tick must not fabricate a new completed bar"
+    print("7. Restart reconciliation end-to-end: persisted bars survive a full _state wipe, and new "
+          "ticks after 'restart' continue correctly, no duplication: PASSED")
+
+
 def main():
-    print("=== underlying_candle_feed._update_bar volume-baseline test suite ===\n")
-    test_1_true_day_open_subscribe_first_bar_volume_is_correct()
-    test_2_mid_day_subscribe_first_bar_volume_excludes_pre_subscription_volume()
-    test_3_second_and_later_bars_unaffected_by_the_fix()
-    test_4_day_rollover_resets_baseline_same_as_a_fresh_subscribe()
-    print("\nALL UNDERLYING_CANDLE_FEED TESTS PASSED")
+    tmp_history = Path(tempfile.mkdtemp(prefix="ucf_test_history_"))
+    saved_history_dir = ucf.HISTORY_DIR
+    ucf.HISTORY_DIR = tmp_history  # redirect ALL disk I/O in this run to a throwaway dir, never the real history/
+    try:
+        print("=== underlying_candle_feed._update_bar volume-baseline test suite ===\n")
+        test_1_true_day_open_subscribe_first_bar_volume_is_correct()
+        test_2_mid_day_subscribe_first_bar_volume_excludes_pre_subscription_volume()
+        test_3_second_and_later_bars_unaffected_by_the_fix()
+        test_4_day_rollover_resets_baseline_same_as_a_fresh_subscribe()
+        test_5_persist_bar_writes_a_restorable_jsonl_line()
+        test_6_load_persisted_bars_spans_multiple_days_and_trims_to_max_kept()
+        test_7_restart_reconciliation_end_to_end()
+        print("\nALL UNDERLYING_CANDLE_FEED TESTS PASSED")
+    finally:
+        ucf.HISTORY_DIR = saved_history_dir
+        shutil.rmtree(tmp_history, ignore_errors=True)
 
 
 if __name__ == "__main__":
