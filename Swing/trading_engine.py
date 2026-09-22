@@ -782,6 +782,11 @@ def _exit_on_cooldown(position: Position) -> bool:
     return bool(position.next_exit_retry_at and datetime.now() < position.next_exit_retry_at)
 
 
+# Bounds _get_ltp's worst-case wait - see that function's own docstring
+# for the real incident (22 Sep 2026) this fixes.
+_LTP_FETCH_TIMEOUT_SECONDS = 10.0
+
+
 async def _get_ltp(position: Position) -> float:
     """FNO positions use the same WS-cache-then-REST-fallback pattern as
     Options/Futures/Luxury (_get_ltp there). Equity and MCX have no WS
@@ -801,16 +806,40 @@ async def _get_ltp(position: Position) -> float:
     but with zero fallback at all if that retry ever doesn't recover.
     Equity keeps the old plain-REST-no-fallback behavior - out of today's
     scope, and get_last_historical_close isn't built for an EQUITY
-    instrument_type anyway."""
+    instrument_type anyway.
+
+    _LTP_FETCH_TIMEOUT_SECONDS (added 22 Sep 2026, real incident): every
+    REST call below (get_option_ltp, get_last_historical_close) goes
+    through dhanhq's shared HTTP client, whose default timeout is 60s;
+    get_option_ltp additionally retries up to 3 times internally - a
+    genuinely slow/rate-limited stretch could take up to ~3 minutes for
+    ONE call. Since _get_ltp is awaited directly inside monitor_loop's
+    own single sequential tick (_check_one_position -> _monitor_tick),
+    that froze the ENTIRE loop for as long as it took - confirmed live
+    (COPPER position, ~9 minutes then again after a first attempted fix).
+    asyncio.wait_for bounds the wait: on timeout it raises (caught by the
+    existing except blocks here / _check_one_position's own fail-open
+    _handle_ltp_staleness), so monitor_loop can always move on to the
+    next symbol/tick within a few seconds, never held hostage by one
+    slow fetch. Note this does NOT stop the underlying blocking call
+    itself (it keeps running in its executor thread in the background,
+    same as any other run_in_executor cancellation) - it only stops
+    monitor_loop's own critical path from waiting on it."""
     loop = asyncio.get_running_loop()
     if position.exchange_segment != "NSE_FNO":
         try:
-            return await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, position.trading_symbol)
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, dhan_wrapper.get_option_ltp, position.trading_symbol),
+                timeout=_LTP_FETCH_TIMEOUT_SECONDS,
+            )
         except Exception:
             if position.exchange_segment == "MCX_COMM":
-                fallback = await loop.run_in_executor(
-                    None, dhan_wrapper.get_last_historical_close, position.trading_symbol,
-                    "MCX", "MCX_COMM", "OPTFUT",
+                fallback = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, dhan_wrapper.get_last_historical_close, position.trading_symbol,
+                        "MCX", "MCX_COMM", "OPTFUT",
+                    ),
+                    timeout=_LTP_FETCH_TIMEOUT_SECONDS,
                 )
                 if fallback is not None:
                     logger.warning(
@@ -823,7 +852,10 @@ async def _get_ltp(position: Position) -> float:
     if ltp is not None:
         return ltp
     async with dhan_wrapper.ltp_rest_fallback_semaphore:
-        ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, position.trading_symbol)
+        ltp = await asyncio.wait_for(
+            loop.run_in_executor(None, dhan_wrapper.get_option_ltp, position.trading_symbol),
+            timeout=_LTP_FETCH_TIMEOUT_SECONDS,
+        )
         await loop.run_in_executor(None, dhan_wrapper.note_rest_ltp, position.trading_symbol, ltp)
     return ltp
 
