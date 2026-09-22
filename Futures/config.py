@@ -409,3 +409,8 @@ BREAKOUT_PAPER_MODE_ENABLED = os.getenv("FUTURES_BREAKOUT_PAPER_MODE_ENABLED", "
 # rolling 3-trading-day pool instead of the fixed list above) - see
 # Options/config.py's identical block for the full rationale.
 BREAKOUT_UNIVERSE_SOURCE = os.getenv("FUTURES_BREAKOUT_UNIVERSE_SOURCE", "static").lower()
+
+# Shared with Options/config.py - see Luxury/config.py's identical block
+# for the full incident this fixes (AttributeError crashing every
+# dispatcher scan cycle from market open, 22 Sep 2026).
+BREAKOUT_CAPACITY_BACKLOG_MAX_AGE_MINUTES = float(os.getenv("BREAKOUT_CAPACITY_BACKLOG_MAX_AGE_MINUTES", "60"))

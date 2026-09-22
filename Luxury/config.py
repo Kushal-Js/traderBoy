@@ -524,3 +524,18 @@ BREAKOUT_PAPER_MODE_ENABLED = os.getenv("LUXURY_BREAKOUT_PAPER_MODE_ENABLED", "f
 # rolling 3-trading-day pool instead of the fixed list above) - see
 # Options/config.py's identical block for the full rationale.
 BREAKOUT_UNIVERSE_SOURCE = os.getenv("LUXURY_BREAKOUT_UNIVERSE_SOURCE", "static").lower()
+
+# Shared with Options/config.py - deliberately the SAME env var name (not
+# LUXURY_-prefixed) across all three packages, since this is one value the
+# dispatcher reads once via whichever target ends up `primary_cfg`
+# (breakout_signal.universe_dispatcher_loop: `targets[0][1]`), not a
+# per-package setting. Was only defined in Options/config.py until 22 Sep
+# 2026 - real incident: with Luxury as targets[0] (main.py's own ordering),
+# _dispatch_backlog_cycle crashed on AttributeError every single scan cycle
+# from market open, silently blocking ALL dispatcher-sourced entries to
+# both Luxury and Futures for the whole session (universe_bucket kept
+# accumulating real alerts - 27 CE/26 PE by the time this was caught - none
+# of them ever reached an entry attempt). Defining it identically in all
+# three configs makes the dispatcher's behavior independent of which
+# target happens to be primary_cfg.
+BREAKOUT_CAPACITY_BACKLOG_MAX_AGE_MINUTES = float(os.getenv("BREAKOUT_CAPACITY_BACKLOG_MAX_AGE_MINUTES", "60"))
