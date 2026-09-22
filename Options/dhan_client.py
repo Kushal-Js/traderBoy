@@ -271,6 +271,23 @@ class AtmOption:
     expiry_date: Optional[date] = None
 
 
+class MissingOptionLegError(ValueError):
+    """Raised by _get_atm_option_once when Tradehull's own ATM_Strike_
+    Selection computes a strike but has no matching trading_symbol for
+    the requested option_type at that strike (real incident, 22 Sep
+    2026: COPPER CE at strike 1415 - Tradehull returned the strike but an
+    empty ce_symbol). Carries `.strike` so get_liquid_atm_option can seed
+    its nearby-strike search from a real, independently-useful number
+    instead of just failing the whole lookup - see that function's own
+    docstring for how this differs from an ATM strike that resolves fine
+    but turns out illiquid (the case every other exception path here
+    already handled before this one existed). Subclasses ValueError so
+    any existing `except ValueError` catch site is unaffected."""
+    def __init__(self, underlying_symbol: str, option_type: str, strike: float):
+        super().__init__(f"No {option_type} leg found for {underlying_symbol} at strike {strike}")
+        self.strike = strike
+
+
 @dataclass
 class FuturesContract:
     """A stock's nearest-expiry FUTSTK contract - see get_futures_contract()."""
@@ -1184,7 +1201,7 @@ class DhanWrapper:
         ce_symbol, pe_symbol, strike = result
         trading_symbol = ce_symbol if option_type == "CE" else pe_symbol
         if not trading_symbol:
-            raise ValueError(f"No {option_type} leg found for {underlying_symbol} at strike {strike}")
+            raise MissingOptionLegError(underlying_symbol, option_type, strike)
 
         expected_exchange = "MCX" if self._is_mcx_commodity(underlying_symbol) else "NSE"
         meta = self._instrument_meta(trading_symbol, expected_exchange=expected_exchange)
@@ -1259,8 +1276,30 @@ class DhanWrapper:
         "MCX_COMM" - the same constant Swing's own order placement
         already uses), not guessed - the two checks and the nearby-strike
         search all work identically for MCX, just with MCX's own
-        exchange/segment/instrument-type strings instead of NSE's."""
-        atm = self.get_atm_option(underlying_symbol, option_type)
+        exchange/segment/instrument-type strings instead of NSE's.
+
+        MissingOptionLegError handling (added 22 Sep 2026, real incident:
+        COPPER CE at strike 1415 - Tradehull's ATM_Strike_Selection
+        computed the strike but had no ce_symbol for it, so get_atm_option
+        raised BEFORE any of the nearby-strike search below ever ran,
+        defeating this whole function's purpose for exactly the failure
+        shape it exists to route around). When that happens and the gate
+        is enabled, this now seeds the SAME nearby-strike search from the
+        strike Tradehull DID compute plus an expiry read directly from our
+        own instrument master (_nearest_listed_expiry - independent of
+        Tradehull's per-leg resolution, so it works even when Tradehull's
+        own lookup for this specific leg came back empty). Gate-disabled
+        callers keep the old behavior exactly (the exception still
+        propagates - see the gate-check below, unchanged position)."""
+        try:
+            atm = self.get_atm_option(underlying_symbol, option_type)
+        except MissingOptionLegError as exc:
+            if not config.LIQUID_CONTRACT_GATE_ENABLED or self._client is None:
+                raise  # gate disabled - preserve the old "let it raise" behavior exactly
+            atm = None
+            missing_leg_strike = exc.strike
+        else:
+            missing_leg_strike = None
         # _client check MUST come before _is_mcx_commodity - that call
         # touches self.instruments() -> self.client, which lazily
         # authenticates for real if _client is still None. Ordering this
@@ -1271,20 +1310,42 @@ class DhanWrapper:
             return atm
         is_mcx = self._is_mcx_commodity(underlying_symbol)
 
-        candidates = self._nearby_option_candidates(
-            underlying_symbol, option_type, atm, config.LIQUID_CONTRACT_MAX_STRIKE_SEARCH, is_mcx,
-        )
+        if atm is not None:
+            reference = atm
+        else:
+            expiry_date = self._nearest_listed_expiry(underlying_symbol, option_type, is_mcx)
+            if expiry_date is None:
+                logger.warning(
+                    "%s: no listed %s expiry found at all (ATM strike %s had no valid leg either) - skipping entry",
+                    underlying_symbol, option_type, missing_leg_strike,
+                )
+                return None
+            # Placeholder seed for _nearby_option_candidates' distance-sort
+            # only - trading_symbol/security_id/lot_size are never trusted
+            # or returned; a real instrument-master row always replaces
+            # this before anything reaches the caller (filtered below).
+            reference = AtmOption(trading_symbol="", strike=missing_leg_strike, option_type=option_type,
+                                   lot_size=0, security_id="", expiry_date=expiry_date)
+
+        candidates = [
+            c for c in self._nearby_option_candidates(
+                underlying_symbol, option_type, reference, config.LIQUID_CONTRACT_MAX_STRIKE_SEARCH, is_mcx,
+            )
+            if c.trading_symbol   # drop the placeholder itself if it ever comes back as its own "candidate"
+        ]
         for candidate in candidates:
             if self._is_contract_liquid_and_active(candidate, is_mcx):
-                if candidate.trading_symbol != atm.trading_symbol:
+                if atm is None or candidate.trading_symbol != atm.trading_symbol:
                     logger.info(
-                        "%s: ATM strike %s %s was illiquid/untraded - substituted nearby strike %s %s instead",
-                        underlying_symbol, atm.strike, option_type, candidate.strike, option_type,
+                        "%s: ATM strike %s %s %s - substituted nearby strike %s %s instead",
+                        underlying_symbol, reference.strike, option_type,
+                        "had no valid contract" if atm is None else "was illiquid/untraded",
+                        candidate.strike, option_type,
                     )
                 return candidate
         logger.warning(
-            "%s: no liquid, actively-traded %s contract found within %d strikes of ATM (%.2f) - skipping entry",
-            underlying_symbol, option_type, config.LIQUID_CONTRACT_MAX_STRIKE_SEARCH, atm.strike,
+            "%s: no liquid, actively-traded %s contract found within %d strikes of %.2f - skipping entry",
+            underlying_symbol, option_type, config.LIQUID_CONTRACT_MAX_STRIKE_SEARCH, reference.strike,
         )
         return None
 
@@ -1308,6 +1369,35 @@ class DhanWrapper:
         if volume_sum is None or volume_sum < config.LIQUID_CONTRACT_MIN_PRIOR_SESSION_VOLUME:
             return False
         return True
+
+    def _nearest_listed_expiry(self, underlying_symbol: str, option_type: str, is_mcx: bool) -> Optional[date]:
+        """Nearest (>= today) listed expiry for underlying_symbol/
+        option_type, read directly from the instrument master - added 22
+        Sep 2026 for get_liquid_atm_option's MissingOptionLegError
+        fallback (see that function's own docstring). Deliberately
+        independent of Tradehull's own ATM_Strike_Selection, which is what
+        failed to resolve a specific leg in the first place - the expiry
+        itself is still perfectly discoverable from our own data even
+        when Tradehull's per-leg lookup came back empty. Same filter
+        columns/logic as _nearby_option_candidates below, just without an
+        already-known expiry_date to filter by (that's the whole point -
+        this is how it gets discovered)."""
+        df = self.instruments().copy()
+        df["ContractExpiration"] = pd.to_datetime(df["SEM_EXPIRY_DATE"], errors="coerce").dt.date
+        exchange = "MCX" if is_mcx else "NSE"
+        today = datetime.now(IST).date()
+        mask = (
+            (df["SEM_EXM_EXCH_ID"] == exchange)
+            & (df["SEM_CUSTOM_SYMBOL"].str.startswith(f"{underlying_symbol.upper()} "))
+            & (df["SEM_OPTION_TYPE"] == option_type)
+            & (df["ContractExpiration"] >= today)
+        )
+        if is_mcx and "SM_SYMBOL_NAME" in df.columns:
+            mask = mask & (df["SM_SYMBOL_NAME"] == underlying_symbol.upper())
+        rows = df[mask]
+        if rows.empty:
+            return None
+        return rows["ContractExpiration"].min()
 
     def _nearby_option_candidates(
         self, underlying_symbol: str, option_type: str, atm: "AtmOption", max_search: int, is_mcx: bool = False,

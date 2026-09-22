@@ -43,6 +43,21 @@ Covers, against the REAL production functions (not reimplemented):
       not just present in isolation (each package keeps its own
       trading_engine.py, so a wiring mistake in one wouldn't be caught
       by another's tests).
+  14-16. Added 22 Sep 2026, real incident: get_atm_option RAISING
+      MissingOptionLegError (Tradehull's ATM_Strike_Selection computed a
+      strike but had no trading_symbol for that specific option_type
+      there - happened live for COPPER CE at strike 1415) used to
+      propagate straight out of get_liquid_atm_option, aborting the
+      WHOLE liquid-contract search before it ever got a chance to try a
+      nearby strike - defeating this function's entire purpose for
+      exactly the failure shape it was built to route around. 14: falls
+      back to _nearest_listed_expiry (read directly from the instrument
+      master, independent of Tradehull) + the same nearby-strike search
+      every other failure mode already gets, seeded from the strike
+      Tradehull DID successfully compute. 15: no listed expiry at all
+      (a genuinely dead option chain) returns None cleanly. 16: gate
+      disabled preserves the OLD behavior exactly - the exception still
+      propagates, never silently swallowed.
 
 HOW TO RUN:
     uv run python tests/test_liquid_contract_resolution.py
@@ -462,6 +477,89 @@ async def test_13_swing_enter_position_for_stock_skips_cleanly_when_no_liquid_co
         sc.BASKET_TYPE = real_basket_type
 
 
+def test_14_atm_leg_completely_missing_falls_back_to_nearby_search():
+    """The actual bug fixed 22 Sep 2026: get_atm_option RAISING
+    MissingOptionLegError (Tradehull computed a strike but had no
+    trading_symbol for this option_type there - real incident: COPPER CE
+    at strike 1415) must NOT propagate straight out of get_liquid_atm_
+    option and abort the whole liquid-contract search - it must fall back
+    to _nearest_listed_expiry + the same nearby-strike search every other
+    failure mode already gets, seeded from the strike Tradehull DID
+    compute."""
+    wrapper = _wrapper_with_gate_active()
+    nearby = make_atm(1420.0)
+
+    def raise_missing_leg(sym, ot):
+        raise odc.MissingOptionLegError(sym, ot, 1415.0)
+
+    wrapper.get_atm_option = raise_missing_leg
+    wrapper._is_mcx_commodity = lambda sym: True
+    wrapper._nearest_listed_expiry = lambda sym, ot, is_mcx: FUTURE_EXPIRY
+    captured = {}
+
+    def fake_nearby(sym, ot, reference, max_search, is_mcx):
+        captured["reference"] = reference
+        captured["is_mcx"] = is_mcx
+        return [reference, nearby]
+
+    wrapper._nearby_option_candidates = fake_nearby
+    wrapper._is_contract_liquid_and_active = lambda candidate, is_mcx=False: candidate.trading_symbol == nearby.trading_symbol
+    odc.config.LIQUID_CONTRACT_GATE_ENABLED = True
+
+    result = wrapper.get_liquid_atm_option("COPPER", "CE")
+    assert result is nearby, f"expected the substitute strike found via the fallback search, got {result}"
+    assert captured["reference"].strike == 1415.0, (
+        f"fallback search must seed from the strike Tradehull DID compute, got {captured['reference'].strike}"
+    )
+    assert captured["reference"].expiry_date == FUTURE_EXPIRY
+    assert captured["is_mcx"] is True
+    print("14. get_atm_option raising MissingOptionLegError (the natural strike has no listed leg at "
+          "all) correctly falls back to the nearby-strike search instead of aborting the whole lookup: PASSED")
+
+
+def test_15_atm_leg_missing_and_no_listed_expiry_returns_none_cleanly():
+    """If even the independent instrument-master expiry lookup comes back
+    empty (a genuinely dead option chain), the fallback must return None,
+    never raise and never fall through with a bogus reference."""
+    wrapper = _wrapper_with_gate_active()
+
+    def raise_missing_leg(sym, ot):
+        raise odc.MissingOptionLegError(sym, ot, 1415.0)
+
+    wrapper.get_atm_option = raise_missing_leg
+    wrapper._is_mcx_commodity = lambda sym: True
+    wrapper._nearest_listed_expiry = lambda sym, ot, is_mcx: None
+    odc.config.LIQUID_CONTRACT_GATE_ENABLED = True
+
+    result = wrapper.get_liquid_atm_option("COPPER", "CE")
+    assert result is None, f"expected a clean None when no expiry is listed at all, got {result}"
+    print("15. MissingOptionLegError with no listed expiry at all (dead option chain) returns None "
+          "cleanly rather than raising or guessing: PASSED")
+
+
+def test_16_atm_leg_missing_with_gate_disabled_still_raises():
+    """Preserves the OLD behavior exactly when the gate is off - an
+    exception on a missing leg must still propagate, not be silently
+    swallowed into a None (a caller depending on the exception to know
+    something's wrong should keep seeing it when they've explicitly
+    turned the safety net off)."""
+    wrapper = _wrapper_with_gate_active()
+
+    def raise_missing_leg(sym, ot):
+        raise odc.MissingOptionLegError(sym, ot, 1415.0)
+
+    wrapper.get_atm_option = raise_missing_leg
+    odc.config.LIQUID_CONTRACT_GATE_ENABLED = False
+    try:
+        wrapper.get_liquid_atm_option("COPPER", "CE")
+        assert False, "expected MissingOptionLegError to propagate when the gate is disabled"
+    except odc.MissingOptionLegError:
+        pass
+    finally:
+        odc.config.LIQUID_CONTRACT_GATE_ENABLED = True
+    print("16. Gate disabled: MissingOptionLegError still propagates unchanged (old behavior preserved): PASSED")
+
+
 def main():
     print("=== Liquid-contract-resolution gate test suite ===\n")
     test_1_get_daily_volume_sum_sums_success_and_returns_none_on_failure()
@@ -479,6 +577,9 @@ def main():
     asyncio.run(test_11_options_process_one_entry_skips_cleanly_when_no_liquid_contract())
     asyncio.run(test_12_luxury_process_one_entry_skips_cleanly_when_no_liquid_contract())
     asyncio.run(test_13_swing_enter_position_for_stock_skips_cleanly_when_no_liquid_contract())
+    test_14_atm_leg_completely_missing_falls_back_to_nearby_search()
+    test_15_atm_leg_missing_and_no_listed_expiry_returns_none_cleanly()
+    test_16_atm_leg_missing_with_gate_disabled_still_raises()
     print("\nALL LIQUID-CONTRACT-RESOLUTION CHECKS PASSED")
 
 
