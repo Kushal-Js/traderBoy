@@ -18,12 +18,17 @@ again. Investigating that number surfaced a SEPARATE, real data-quality
 bug (a manual backfill had merged 18-Sep's and 21-Sep's alerts into one
 mislabeled file - see TRADING_JOURNAL.md's 22 Sep entry): once the
 user's own real Chartink CSV export let CE's prior-day entries be cross-
-checked and corrected to their true count, CE's window was raised back
-to 2 (today + yesterday) with confidence in what "yesterday" actually
-contains. PE was never individually verified against a CSV the same
-way, so it stays at 1 (today only) per the user's own separate, explicit
-instruction - each is independently configurable via
-UNIVERSE_BUCKET_WINDOW_TRADING_DAYS_CE/_PE.
+checked and corrected to their true count, CE's window was raised to 2
+(today + yesterday) with confidence in what "yesterday" actually
+contained at the time. PE was never individually verified against a CSV
+the same way, so it stayed at 1 (today only) per the user's own
+separate, explicit instruction. CE brought back down to 1, same day
+(later, user request) - matching PE again, same scan-cadence/capacity
+reasoning that motivated the original 3->1 shared-window cut still
+applies to CE's own count once its own alerts accumulate through a
+session. Each side stays independently configurable via
+UNIVERSE_BUCKET_WINDOW_TRADING_DAYS_CE/_PE regardless of what today's
+particular values are.
 
 WHY A SEPARATE MODULE, NOT alert_bucket.py: that module is a single-day
 (today-only), per-symbol SCORED pool feeding the loss-triggered bucket-
@@ -114,7 +119,7 @@ IST = ZoneInfo("Asia/Kolkata")
 # persisted files fresh every call (never mutates/deletes them, see
 # module docstring), so changing either constant takes effect on the
 # very next read, no backfill/cleanup step required.
-WINDOW_TRADING_DAYS_CE = int(os.getenv("UNIVERSE_BUCKET_WINDOW_TRADING_DAYS_CE", "2"))
+WINDOW_TRADING_DAYS_CE = int(os.getenv("UNIVERSE_BUCKET_WINDOW_TRADING_DAYS_CE", "1"))
 WINDOW_TRADING_DAYS_PE = int(os.getenv("UNIVERSE_BUCKET_WINDOW_TRADING_DAYS_PE", "1"))
 
 
