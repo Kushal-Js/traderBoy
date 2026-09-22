@@ -50,6 +50,21 @@ function and compares the resulting 5-min bars against Dhan's own real
 5-min REST candles for the same symbols/day. Run that BEFORE trusting this
 module's output for any real signal.
 
+CAUGHT LIVE, NOT BY THAT REPLAY (22 Sep 2026): the mid-day-subscribe
+volume bug fixed in `_update_bar` (see its own comment) was invisible to
+backtest_ws_candle_reconstruction_parity.py by construction - a REST
+replay always starts from the beginning of a symbol's day, so
+`cum_volume` is naturally near 0 at the first synthetic tick either way,
+the exact condition under which the old bug's assumption happened to be
+correct. Only a genuine live dry-run (subscribing mid-session, as
+production actually does) could have caught it, and did - see
+tests/test_underlying_candle_feed.py::test_mid_day_subscribe_first_bar_
+volume_excludes_pre_subscription_volume for a regression test that
+specifically covers the case the REST-replay method structurally cannot.
+`BREAKOUT_USE_WS_CANDLES` stays off until a fresh live dry-run confirms
+this fix and open-price accuracy (a separate, still-open gap - see
+trading-skills' incidents/designs for the live parity numbers).
+
 FRESHNESS / FALLBACK: `is_fresh(symbol)` reports whether a tick for this
 symbol has arrived within BREAKOUT_WS_STALE_AFTER_SECONDS (per-package
 config, read by breakout_signal.py's own hybrid fetch path) - a thin/dead
@@ -139,14 +154,28 @@ def _update_bar(st: _SymbolState, ltp: float, cum_volume: float, t: datetime) ->
     bar_start = _candle_start_for(t)
     completed = None
     if st.current_bar_start is None:
-        # First tick ever for this symbol/day - open a bar, no completed
-        # bar to emit, and volume baseline starts at this tick's own
-        # cumulative reading (a fresh trading day's cumulative volume is
-        # 0 immediately before the first tick, so the first bar's own
-        # volume is simply cum_volume itself once it closes).
+        # First tick ever for this symbol/subscription - open a bar, no
+        # completed bar to emit yet. Real incident (22 Sep 2026, live
+        # parity check): this used to hardcode the volume baseline to 0.0
+        # here, on the assumption a "fresh" first tick always means the
+        # trading day has just opened (cum_volume genuinely near 0). That
+        # assumption only holds if the subscription itself starts at
+        # 09:15 - it does NOT for a symbol subscribed mid-day (confirmed
+        # live: the parity check subscribes at 10:00 IST, and in
+        # production the dispatcher subscribes a symbol whenever it first
+        # enters its pool, any time in the session). With a 0.0 baseline,
+        # the first bar's "volume" became cum_volume_now - 0 = the
+        # ENTIRE day's cumulative volume so far, not that one bar's
+        # volume - confirmed live as a 25-60x overshoot on every test
+        # symbol's first reconstructed bar. Seeding the baseline from
+        # THIS tick's own cum_volume instead means the first (partial)
+        # bar only ever counts volume from the moment we started
+        # listening onward - correct for a mid-day subscribe, and no
+        # different from before for a true day-open subscribe (where
+        # cum_volume is already ~0 at the first tick anyway).
         st.current_bar_start = bar_start
         st.bar_open = st.bar_high = st.bar_low = st.bar_close = ltp
-        st.cum_volume_at_bar_start = 0.0
+        st.cum_volume_at_bar_start = cum_volume
     elif bar_start != st.current_bar_start:
         completed = {
             "candle_start": st.current_bar_start, "open": st.bar_open, "high": st.bar_high,
