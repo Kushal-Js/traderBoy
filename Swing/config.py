@@ -153,6 +153,17 @@ PROFIT_PROTECTION_RS_OPTIONS = float(os.getenv("SWING_PROFIT_PROTECTION_RS_OPTIO
 PROFIT_PROTECTION_GIVEBACK_PCT_OPTIONS = float(
     os.getenv("SWING_PROFIT_PROTECTION_GIVEBACK_PCT_OPTIONS", str(PROFIT_PROTECTION_GIVEBACK_PCT))
 )
+# MCX-only OPTIONS override (user request 22 Sep 2026) - scoped to MCX
+# (COPPER/NATURALGAS) specifically, NOT every OPTIONS position: ASHOKLEY
+# (NSE OPTIONS) keeps reading PROFIT_PROTECTION_RS_OPTIONS above,
+# unchanged. Falls back to the general OPTIONS value if unset, same
+# fallback-chain convention as that value falling back to the plain
+# PROFIT_PROTECTION_RS. See Swing/trading_engine.py's current_profit_
+# protection_rs/_giveback_pct for where is_mcx gets threaded in.
+PROFIT_PROTECTION_RS_MCX = float(os.getenv("SWING_PROFIT_PROTECTION_RS_MCX", str(PROFIT_PROTECTION_RS_OPTIONS)))
+PROFIT_PROTECTION_GIVEBACK_PCT_MCX = float(
+    os.getenv("SWING_PROFIT_PROTECTION_GIVEBACK_PCT_MCX", str(PROFIT_PROTECTION_GIVEBACK_PCT_OPTIONS))
+)
 TARGET_PCT = float(os.getenv("SWING_TARGET_PCT", "0.20"))
 HARD_STOP_LOSS_PCT = float(os.getenv("SWING_HARD_STOP_LOSS_PCT", "0.20"))
 ENABLE_TARGET_EXIT = os.getenv("SWING_ENABLE_TARGET_EXIT", "true").lower() == "true"

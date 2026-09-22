@@ -264,14 +264,21 @@ async def _evaluate_exit_signal(symbol: str, position: Position) -> Optional[str
     return None
 
 
-def current_profit_protection_rs(basket_type: str) -> float:
-    """OPTIONS gets its own override (see config.py's own comment on
-    PROFIT_PROTECTION_RS_OPTIONS) - falls back to the shared
-    PROFIT_PROTECTION_RS for FUTURES/EQUITY, unchanged."""
+def current_profit_protection_rs(basket_type: str, is_mcx: bool = False) -> float:
+    """MCX OPTIONS gets its own override (user request 22 Sep 2026 -
+    scoped to MCX only, NOT every OPTIONS symbol - ASHOKLEY, an NSE
+    OPTIONS position, must keep reading PROFIT_PROTECTION_RS_OPTIONS
+    unchanged, not this one), checked before the general OPTIONS
+    override. Falls back to the shared PROFIT_PROTECTION_RS for
+    FUTURES/EQUITY, unchanged."""
+    if basket_type == "OPTIONS" and is_mcx:
+        return config.PROFIT_PROTECTION_RS_MCX
     return config.PROFIT_PROTECTION_RS_OPTIONS if basket_type == "OPTIONS" else config.PROFIT_PROTECTION_RS
 
 
-def current_profit_protection_giveback_pct(basket_type: str) -> float:
+def current_profit_protection_giveback_pct(basket_type: str, is_mcx: bool = False) -> float:
+    if basket_type == "OPTIONS" and is_mcx:
+        return config.PROFIT_PROTECTION_GIVEBACK_PCT_MCX
     return (
         config.PROFIT_PROTECTION_GIVEBACK_PCT_OPTIONS if basket_type == "OPTIONS"
         else config.PROFIT_PROTECTION_GIVEBACK_PCT
@@ -299,8 +306,9 @@ def _exit_reason_for(position: Position, ltp: float) -> Optional[str]:
     if config.ENABLE_TARGET_EXIT and price_past_target(side, ltp, position.target_price):
         return "TARGET_HIT"
     peak_profit_rs = unrealized_pnl_rs(side, position.entry_price, position.best_price, position.pnl_multiplier)
-    if peak_profit_rs > current_profit_protection_rs(position.basket_type):
-        floor = giveback_floor(side, position.best_price, current_profit_protection_giveback_pct(position.basket_type))
+    is_mcx = position.exchange_segment == "MCX_COMM"
+    if peak_profit_rs > current_profit_protection_rs(position.basket_type, is_mcx):
+        floor = giveback_floor(side, position.best_price, current_profit_protection_giveback_pct(position.basket_type, is_mcx))
         if price_past_giveback_floor(side, ltp, floor):
             return "PROFIT_PROTECTION_HIT"
     if price_past_hard_stop(side, ltp, position.hard_stop_loss):
