@@ -178,7 +178,7 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
     before touching regime/Supertrend at all, so this path never
     incurs the v1/v2 fetches for COPPER while the flag is on.
 
-    Reads via peek_structure_break_signal (cache-only, synchronous) -
+    Reads via structure_break_entry_signal (cache-only, synchronous) -
     NEVER awaits a live fetch here. A real incident, 22 Sep 2026: this
     used to await signals.get_structure_break_signal directly, which
     could block for minutes on a slow/rate-limited fetch - since this
@@ -186,12 +186,26 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
     the ENTIRE loop (every symbol's exit/entry check, not just COPPER's)
     for as long as the fetch was stuck. See Swing/signals.py's own
     module-level comment on the structure-break section for the full
-    fix (an independent background refresh task instead)."""
+    fix (an independent background refresh task instead).
+
+    structure_break_entry_signal (not the raw peek) also enforces the
+    user-requested "wait for the agreement to break and reform, don't
+    re-enter instantly on a still-persisting one" rule (added 22 Sep
+    2026, same day, after a profit-protection exit immediately re-
+    entered at a worse price and a stop-loss exit repeatedly re-
+    attempted entry for 15+ minutes straight, blocked only by the
+    volume-floor gate - neither incident involved the signal itself
+    changing). The actual "mark this formation as used" call happens in
+    enter_position_for_stock, only once a real position is confirmed
+    OPEN - never here, since this function can return a signal
+    repeatedly while genuinely blocked downstream (that repeated-
+    blocking IS the volume-floor incident above) and those retries must
+    keep happening."""
     if symbol == "COPPER" and config.COPPER_STRUCTURE_BREAK_ENABLED:
-        sig = signals.peek_structure_break_signal(symbol)
-        if sig is None or sig.combined == 0:
+        combined = signals.structure_break_entry_signal(symbol)
+        if combined is None:
             return None
-        return "BULLISH" if sig.combined == 1 else "BEARISH"
+        return "BULLISH" if combined == 1 else "BEARISH"
     regime = await signals.get_regime_state(symbol)
     if regime is None:
         return None
@@ -581,6 +595,12 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
             "basket_type": effective_basket_type, "regime": regime, "instrument_side": side,
             "trading_symbol": trading_symbol, "entry_price": fill_price, "quantity": quantity,
         })
+        if symbol == "COPPER" and config.COPPER_STRUCTURE_BREAK_ENABLED:
+            # Marks THIS agreement as used, now that a real position is
+            # confirmed open - see structure_break_entry_signal's own
+            # docstring for why this only happens here, at confirmed
+            # success, never at signal-evaluation time.
+            signals.mark_structure_break_consumed(symbol, 1 if regime == "BULLISH" else -1)
         return {"symbol": symbol, "status": "entered", "trading_symbol": trading_symbol, "entry_price": fill_price}
     except Exception:  # noqa: BLE001
         logger.exception("%s: unexpected error entering position", symbol)

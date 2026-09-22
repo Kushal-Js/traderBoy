@@ -539,6 +539,62 @@ def peek_structure_break_signal(symbol: str) -> Optional[StructureBreakSignal]:
     return cached[1] if cached else None
 
 
+# "Wait for the agreement to break and reform, don't re-enter instantly on
+# a still-persisting one" (user request 22 Sep 2026, after two real same-
+# day incidents: a profit-protection exit immediately re-entering COPPER
+# at a worse price 9 seconds later, and a stop-loss exit repeatedly
+# re-attempting entry every ~5s for 15+ minutes, blocked only by the MCX
+# volume-floor gate - neither incident involved the combined signal
+# itself ever changing). Maps symbol -> the combined value (+1/-1) a
+# position was already ENTERED for (not just signalled - see
+# mark_structure_break_consumed's own docstring for why that distinction
+# matters). structure_break_entry_signal suppresses returning that same
+# value again until it's observed the signal leave it first.
+_structure_break_consumed: dict[str, int] = {}
+
+
+def structure_break_entry_signal(symbol: str) -> Optional[int]:
+    """The gated read _evaluate_entry_signal's COPPER branch actually
+    uses (peek_structure_break_signal underneath). Returns None when
+    there's no signal yet, no agreement (combined==0), OR the agreement
+    is the same one a position was already entered for and hasn't broken
+    since. Clears the "consumed" mark the first time it observes the
+    signal at anything other than the consumed value - from that point
+    on, reaching that value again is a FRESH formation, not a repeat.
+
+    The "did it break" check runs BEFORE the combined==0 early return
+    (not after) - a real bug caught in testing: combined dropping to 0
+    (agreement lapses without a clean reversal) IS the break signal, and
+    clearing consumed must happen on that transition too, not only on a
+    direct flip to the opposite side. Returning early before checking
+    would leave a stale consumed value in place forever if the agreement
+    only ever lapses to neutral rather than flipping cleanly."""
+    sig = peek_structure_break_signal(symbol)
+    if sig is None:
+        return None
+    consumed = _structure_break_consumed.get(symbol)
+    if consumed is not None and sig.combined != consumed:
+        _structure_break_consumed[symbol] = None  # observed it break - next match is a fresh formation
+        consumed = None
+    if sig.combined == 0:
+        return None
+    if consumed is not None and sig.combined == consumed:
+        return None  # same agreement a position already used - still waiting for it to break
+    return sig.combined
+
+
+def mark_structure_break_consumed(symbol: str, side: int) -> None:
+    """Called ONLY once a real position has actually been OPENED for
+    `side` (see Swing/trading_engine.py's enter_position_for_stock, its
+    one call site) - deliberately NOT called merely when the signal
+    fires, since a signal can fire repeatedly while genuinely blocked by
+    a downstream gate (the MCX volume-floor gate did exactly this for
+    15+ minutes straight in the real incident this whole mechanism
+    fixes) - marking it consumed at signal-time instead of entry-time
+    would have wrongly suppressed every one of those legitimate retries."""
+    _structure_break_consumed[symbol] = side
+
+
 async def refresh_structure_break_signal(symbol: str) -> None:
     """Does the actual fetch + cache update - called ONLY from
     structure_break_refresh_loop's own independent background task, NEVER
