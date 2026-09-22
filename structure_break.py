@@ -40,7 +40,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -100,6 +100,13 @@ class StructureBreakResult:
     bull_retest: list
     bear_retest: list
     strength: list          # signed trend-strength gauge, -1..1
+
+    # Raw per-bar series, carried through for multi-series/backtest
+    # consumers (e.g. aligning 5m/15m/1h regimes by timestamp) - empty on
+    # the error-path constructors below, which never had bars to carry.
+    close: list = field(default_factory=list)
+    open: list = field(default_factory=list)
+    timestamps: list = field(default_factory=list)   # epoch seconds, one per bar
 
     last_close: Optional[float] = None
     last_regime: int = 0
@@ -218,12 +225,16 @@ def _tanh(x: float) -> float:
 
 def compute_structure_break(
     opens: list, highs: list, lows: list, closes: list, volumes: list,
+    timestamps: Optional[list] = None,
     params: Optional[StructureBreakParams] = None,
 ) -> StructureBreakResult:
     """Pure function - takes plain OHLCV lists (already trimmed of any
     still-forming candle by the caller), returns one StructureBreakResult.
     No network I/O, so this is independently unit-testable exactly like
-    dhan_client.py's _compute_supertrend."""
+    dhan_client.py's _compute_supertrend. `timestamps` is optional (epoch
+    seconds, one per bar) - carried through unchanged for callers that
+    need to align this timeframe's regime against another's (e.g. a
+    multi-timeframe backtest); the math itself never reads it."""
     params = params or StructureBreakParams()
     n = len(closes)
     if n == 0:
@@ -326,6 +337,8 @@ def compute_structure_break(
         n=n, basis=basis_close, upper=upper, lower=lower, regime=regime,
         switch_up=switch_up, switch_down=switch_down,
         bull_retest=bull_retest, bear_retest=bear_retest, strength=strength,
+        close=list(closes), open=list(opens),
+        timestamps=list(timestamps) if timestamps else [],
     )
 
     last = n - 1
@@ -359,7 +372,7 @@ def compute_structure_break(
 # Live data fetch - same DhanClient path every real signal in this repo
 # uses. Blocking (REST); call from a sync context or run_in_executor.
 # --------------------------------------------------------------------- #
-def _drop_forming_candle(data: dict, interval_minutes: int) -> tuple[list, list, list, list, list]:
+def _drop_forming_candle(data: dict, interval_minutes: int) -> tuple[list, list, list, list, list, list]:
     opens = list(data.get("open") or [])
     highs = list(data.get("high") or [])
     lows = list(data.get("low") or [])
@@ -369,8 +382,10 @@ def _drop_forming_candle(data: dict, interval_minutes: int) -> tuple[list, list,
     if timestamps:
         last_start = datetime.fromtimestamp(timestamps[-1], tz=IST)
         if datetime.now(IST) < last_start + timedelta(minutes=interval_minutes):
-            opens, highs, lows, closes, volumes = opens[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1]
-    return opens, highs, lows, closes, volumes
+            opens, highs, lows, closes, volumes, timestamps = (
+                opens[:-1], highs[:-1], lows[:-1], closes[:-1], volumes[:-1], timestamps[:-1]
+            )
+    return opens, highs, lows, closes, volumes, timestamps
 
 
 def _ensure_authenticated() -> None:
@@ -426,18 +441,19 @@ def fetch_timeframe(symbol: str, timeframe: str, params: Optional[StructureBreak
             lows = list(data.get("low") or [])
             closes = list(data.get("close") or [])
             volumes = list(data.get("volume") or [])
+            timestamps = list(data.get("timestamp") or [])
         else:
             data = dhan_wrapper.fetch_continuous_intraday(
                 security_id, "NSE_EQ", "EQUITY", interval,
                 lookback_days_override=_INTRADAY_LOOKBACK_DAYS[interval],
             )
-            opens, highs, lows, closes, volumes = _drop_forming_candle(data, interval)
+            opens, highs, lows, closes, volumes, timestamps = _drop_forming_candle(data, interval)
 
         if len(closes) < params.atr_len + 1:
             return StructureBreakResult(n=0, basis=[], upper=[], lower=[], regime=[], switch_up=[],
                                          switch_down=[], bull_retest=[], bear_retest=[], strength=[],
                                          error=f"not enough {timeframe} candles ({len(closes)})")
-        return compute_structure_break(opens, highs, lows, closes, volumes, params)
+        return compute_structure_break(opens, highs, lows, closes, volumes, timestamps, params)
     except Exception as exc:  # noqa: BLE001
         return StructureBreakResult(n=0, basis=[], upper=[], lower=[], regime=[], switch_up=[],
                                      switch_down=[], bull_retest=[], bear_retest=[], strength=[],
