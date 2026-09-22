@@ -114,6 +114,26 @@ class RegimeState:
         return bool(self.prev_is_bullish is True and self.is_bullish is False)
 
 
+# Consecutive-failure backoff (added 22 Sep 2026, real incident) - the
+# throttle-on-failure fix earlier today (stamping the cache even on
+# failure) stopped a persistently-failing symbol from being retried on
+# EVERY 5s monitor tick, but it still retried at the same fixed cadence
+# forever regardless of how many times in a row it had already failed.
+# MCX symbols hit this hardest: confirmed live, 113 DH-904 rate-limit
+# failures in the 16 minutes right after a restart, 60 of them on
+# NATURALGAS alone - Supertrend's own 15s base interval means up to 4
+# retry attempts/minute per (symbol, interval) pair, on an endpoint
+# that's failing for account-wide rate-limit reasons having nothing to
+# do with that specific symbol. Doubling the effective wait on each
+# consecutive failure (capped at MAX_FETCH_BACKOFF_SECONDS) means a
+# genuinely rate-limited symbol backs off and stops adding to that same
+# account-wide pressure, while resetting to the base interval the moment
+# a fetch succeeds again means a recovered symbol goes straight back to
+# full-speed refresh - no lingering penalty once Dhan is responding again.
+MAX_FETCH_BACKOFF_SECONDS = 300
+_regime_fail_streak: dict[str, int] = {}
+_supertrend_fail_streak: dict[tuple[str, int], int] = {}
+
 _regime_cache: dict[str, tuple[datetime, Optional[RegimeState]]] = {}
 
 
@@ -264,18 +284,24 @@ def peek_regime_state(symbol: str) -> Optional[RegimeState]:
 
 
 async def get_regime_state(symbol: str) -> Optional[RegimeState]:
-    """Cached, throttled (config.REGIME_REFRESH_SECONDS), fail-open - see
-    this module's own docstring for why a fetch exception here keeps the
-    last good cached value rather than writing None over it."""
+    """Cached, throttled (config.REGIME_REFRESH_SECONDS, doubling on each
+    consecutive failure up to MAX_FETCH_BACKOFF_SECONDS - see that
+    constant's own comment), fail-open - see this module's own docstring
+    for why a fetch exception here keeps the last good cached value
+    rather than writing None over it."""
     cached = _regime_cache.get(symbol)
-    if cached and (_now_ist() - cached[0]).total_seconds() < config.REGIME_REFRESH_SECONDS:
+    streak = _regime_fail_streak.get(symbol, 0)
+    effective_refresh = min(config.REGIME_REFRESH_SECONDS * (2 ** streak), MAX_FETCH_BACKOFF_SECONDS)
+    if cached and (_now_ist() - cached[0]).total_seconds() < effective_refresh:
         return cached[1]
     loop = asyncio.get_running_loop()
     try:
         state = await loop.run_in_executor(None, _fetch_regime_state_once, symbol)
+        _regime_fail_streak[symbol] = 0
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not fetch regime state - keeping last cached value", symbol)
         state = cached[1] if cached else None
+        _regime_fail_streak[symbol] = streak + 1
     # Stamp the cache even on failure - otherwise a persistent fetch failure
     # never satisfies the "fresh enough" check above and every 5s monitor
     # tick retries immediately instead of waiting REGIME_REFRESH_SECONDS,
@@ -409,24 +435,30 @@ def peek_supertrend_state(symbol: str, interval_minutes: Optional[int] = None) -
 
 
 async def get_supertrend_state(symbol: str, interval_minutes: Optional[int] = None) -> Optional[SupertrendState]:
-    """Cached, throttled (config.SUPERTREND_REFRESH_SECONDS), fail-open -
-    same "keep the last good value" discipline as get_regime_state above.
-    interval_minutes defaults to config.SUPERTREND_INTERVAL_MINUTES (5),
-    same backward-compatibility note as peek_supertrend_state above - the
-    v2 combined entry strategy is the only caller that ever passes a
-    different value (config.REGIME_SLOW_INTERVAL_MINUTES, 15)."""
+    """Cached, throttled (config.SUPERTREND_REFRESH_SECONDS, doubling on
+    each consecutive failure up to MAX_FETCH_BACKOFF_SECONDS - see that
+    constant's own comment), fail-open - same "keep the last good value"
+    discipline as get_regime_state above. interval_minutes defaults to
+    config.SUPERTREND_INTERVAL_MINUTES (5), same backward-compatibility
+    note as peek_supertrend_state above - the v2 combined entry strategy
+    is the only caller that ever passes a different value
+    (config.REGIME_SLOW_INTERVAL_MINUTES, 15)."""
     interval_minutes = interval_minutes if interval_minutes is not None else config.SUPERTREND_INTERVAL_MINUTES
     cache_key = (symbol, interval_minutes)
     cached = _supertrend_cache.get(cache_key)
-    if cached and (_now_ist() - cached[0]).total_seconds() < config.SUPERTREND_REFRESH_SECONDS:
+    streak = _supertrend_fail_streak.get(cache_key, 0)
+    effective_refresh = min(config.SUPERTREND_REFRESH_SECONDS * (2 ** streak), MAX_FETCH_BACKOFF_SECONDS)
+    if cached and (_now_ist() - cached[0]).total_seconds() < effective_refresh:
         return cached[1]
     loop = asyncio.get_running_loop()
     try:
         state = await loop.run_in_executor(None, _fetch_supertrend_state_once, symbol, interval_minutes)
+        _supertrend_fail_streak[cache_key] = 0
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not fetch Supertrend state (%smin) - keeping last cached value",
                           symbol, interval_minutes)
         state = cached[1] if cached else None
+        _supertrend_fail_streak[cache_key] = streak + 1
     # Stamp the cache even on failure - see the matching comment in
     # get_regime_state above; same bug, same fix, same live incident.
     _supertrend_cache[cache_key] = (_now_ist(), state)
