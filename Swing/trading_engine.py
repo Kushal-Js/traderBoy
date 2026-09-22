@@ -176,9 +176,19 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
     of the above entirely and uses the structure-break signal instead
     (see that flag's own docstring in Swing/config.py) - checked first,
     before touching regime/Supertrend at all, so this path never
-    incurs the v1/v2 fetches for COPPER while the flag is on."""
+    incurs the v1/v2 fetches for COPPER while the flag is on.
+
+    Reads via peek_structure_break_signal (cache-only, synchronous) -
+    NEVER awaits a live fetch here. A real incident, 22 Sep 2026: this
+    used to await signals.get_structure_break_signal directly, which
+    could block for minutes on a slow/rate-limited fetch - since this
+    runs inside monitor_loop's own single sequential tick, that froze
+    the ENTIRE loop (every symbol's exit/entry check, not just COPPER's)
+    for as long as the fetch was stuck. See Swing/signals.py's own
+    module-level comment on the structure-break section for the full
+    fix (an independent background refresh task instead)."""
     if symbol == "COPPER" and config.COPPER_STRUCTURE_BREAK_ENABLED:
-        sig = await signals.get_structure_break_signal(symbol)
+        sig = signals.peek_structure_break_signal(symbol)
         if sig is None or sig.combined == 0:
             return None
         return "BULLISH" if sig.combined == 1 else "BEARISH"
@@ -225,9 +235,15 @@ async def _evaluate_exit_signal(symbol: str, position: Position) -> Optional[str
     _evaluate_entry_signal picks up the fresh opposite-side entry on the
     very same monitor tick (exits run before the entry scan - see
     _monitor_tick), so a clean reversal closes and reopens back-to-back,
-    same as the backtest's fill-on-next-bar-open reversal handling."""
+    same as the backtest's fill-on-next-bar-open reversal handling.
+
+    Reads via peek_structure_break_signal (cache-only) - same reasoning
+    as _evaluate_entry_signal's matching branch: never await a live
+    fetch from inside monitor_loop's own tick (real incident, 22 Sep
+    2026 - see Swing/signals.py's module-level comment on the
+    structure-break section)."""
     if symbol == "COPPER" and config.COPPER_STRUCTURE_BREAK_ENABLED:
-        sig = await signals.get_structure_break_signal(symbol)
+        sig = signals.peek_structure_break_signal(symbol)
         if sig is None:
             return None
         current_side = 1 if position.resolved_option_type == "CE" else -1

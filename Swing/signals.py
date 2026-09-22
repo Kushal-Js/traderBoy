@@ -473,6 +473,34 @@ async def get_supertrend_state(symbol: str, interval_minutes: Optional[int] = No
 # backtest_swing_structure_break_mtf.py's own agree_bull/agree_bear
 # combination logic - this IS the signal that was backtested, not a
 # reimplementation of it.
+#
+# ARCHITECTURE (rewritten 22 Sep 2026, real incident): the first version
+# had _evaluate_entry_signal/_evaluate_exit_signal AWAIT the live fetch
+# directly. Those two functions run INSIDE monitor_loop's own single,
+# sequential tick (position exits and entry scans for every symbol, one
+# after another, no concurrency). dhanhq's own HTTP timeout is 60s; the
+# fetch needs 3 timeframes, each with structure_break.py's own internal
+# retry-on-empty (up to 2 attempts) - a genuinely slow/rate-limited
+# stretch could take up to ~6 minutes for ONE call. Confirmed live: the
+# whole monitor loop went silent for ~9 minutes straight after enabling
+# this - not just COPPER's own check, EVERY symbol's, because the loop
+# never got past the single await that was stuck.
+#
+# Fix: the fetch now runs on its OWN independent background task
+# (structure_break_refresh_loop, started once at Swing startup - see
+# Swing/swing_main.py), decoupled entirely from monitor_loop's tick.
+# _evaluate_entry_signal/_evaluate_exit_signal read the cache ONLY
+# (peek_structure_break_signal - synchronous, instant, never awaits a
+# live fetch) - a slow refresh now means a briefly stale signal, never a
+# frozen monitor loop. Second, independent fix: each of the 3 timeframe
+# fetches now gets its OWN run_in_executor dispatch, with the 1.6s
+# inter-call pacing done via `await asyncio.sleep()` (releases the
+# executor thread and yields the event loop) instead of a blocking
+# time.sleep() held INSIDE one long-running executor call - this app's
+# default executor has only 5 workers total, shared by every live-
+# trading package's own blocking Dhan calls, so holding one for the
+# whole multi-call sequence was its own, independent way to starve the
+# pool under load.
 # ------------------------------------------------------------------ #
 @dataclass
 class StructureBreakSignal:
@@ -485,54 +513,80 @@ _structure_break_fail_streak: dict[str, int] = {}
 _STRUCTURE_BREAK_FETCH_PACE_SECONDS = 1.6   # same back-to-back-REST-call pacing bt_fetch.py/the backtest script use
 
 
-def _fetch_structure_break_signal_once(symbol: str) -> StructureBreakSignal:
-    """Blocking - always call via run_in_executor. Raises on any fetch
-    failure or not-yet-warm timeframe (never returns a partial/best-
-    effort signal) so get_structure_break_signal's try/except keeps the
-    last good cached value instead of trusting an incomplete read - same
-    fail-open discipline as every other function in this file. mcx=True
-    unconditionally: this signal is currently only ever evaluated for
-    COPPER (see config.COPPER_STRUCTURE_BREAK_ENABLED's own docstring on
-    why it's hardcoded to that one symbol)."""
+def _fetch_one_structure_break_timeframe(symbol: str, timeframe: str) -> int:
+    """Blocking, ONE timeframe only - always call via run_in_executor.
+    Deliberately split out from a combined multi-fetch function (see this
+    section's own module-level comment above) so the executor thread is
+    released back to the shared pool between calls, not held through the
+    whole sequence. Raises on any fetch failure or not-yet-warm timeframe -
+    never returns a partial/best-effort regime."""
     import structure_break as sb
-    import time as _time
-
-    results = {}
-    for i, tf in enumerate(("5m", "15m", "1h")):
-        if i:
-            _time.sleep(_STRUCTURE_BREAK_FETCH_PACE_SECONDS)
-        r = sb.fetch_timeframe(symbol, tf, mcx=True)
-        if r.error or not r.warm:
-            raise RuntimeError(f"{symbol}: structure-break {tf} fetch failed/not warm: {r.error}")
-        results[tf] = r
-
-    agree_bull = all(results[tf].last_regime == 1 for tf in ("5m", "15m", "1h"))
-    agree_bear = all(results[tf].last_regime == -1 for tf in ("5m", "15m", "1h"))
-    combined = 1 if agree_bull else -1 if agree_bear else 0
-    return StructureBreakSignal(combined=combined, computed_at=_now_ist())
+    r = sb.fetch_timeframe(symbol, timeframe, mcx=True)
+    if r.error or not r.warm:
+        raise RuntimeError(f"{symbol}: structure-break {timeframe} fetch failed/not warm: {r.error}")
+    return r.last_regime
 
 
 def peek_structure_break_signal(symbol: str) -> Optional[StructureBreakSignal]:
+    """Cache-only, synchronous, instant - the ONLY way _evaluate_entry_
+    signal/_evaluate_exit_signal are allowed to read this signal (see this
+    section's own module-level comment for why awaiting a live fetch from
+    there froze the whole monitor loop). None means no successful refresh
+    has completed yet (e.g. right after startup, before
+    structure_break_refresh_loop's first iteration) - callers must treat
+    that as "no signal yet," never force anything off a missing read."""
     cached = _structure_break_cache.get(symbol)
     return cached[1] if cached else None
 
 
-async def get_structure_break_signal(symbol: str) -> Optional[StructureBreakSignal]:
-    """Cached, throttled (config.STRUCTURE_BREAK_REFRESH_SECONDS, doubling
-    on each consecutive failure up to MAX_FETCH_BACKOFF_SECONDS - identical
-    pattern to get_supertrend_state above), fail-open."""
+async def refresh_structure_break_signal(symbol: str) -> None:
+    """Does the actual fetch + cache update - called ONLY from
+    structure_break_refresh_loop's own independent background task, NEVER
+    from the entry/exit evaluators directly. Fail-open, same discipline as
+    every other refresh in this file: a failure keeps the last good cached
+    value and stamps the cache anyway (so a persistently-failing symbol
+    doesn't get retried every single loop iteration - see get_regime_
+    state's own comment on this exact bug/fix elsewhere in this file)."""
     cached = _structure_break_cache.get(symbol)
     streak = _structure_break_fail_streak.get(symbol, 0)
-    effective_refresh = min(config.STRUCTURE_BREAK_REFRESH_SECONDS * (2 ** streak), MAX_FETCH_BACKOFF_SECONDS)
-    if cached and (_now_ist() - cached[0]).total_seconds() < effective_refresh:
-        return cached[1]
     loop = asyncio.get_running_loop()
     try:
-        state = await loop.run_in_executor(None, _fetch_structure_break_signal_once, symbol)
+        regimes: dict[str, int] = {}
+        for i, tf in enumerate(("5m", "15m", "1h")):
+            if i:
+                await asyncio.sleep(_STRUCTURE_BREAK_FETCH_PACE_SECONDS)
+            regimes[tf] = await loop.run_in_executor(None, _fetch_one_structure_break_timeframe, symbol, tf)
+        agree_bull = all(v == 1 for v in regimes.values())
+        agree_bear = all(v == -1 for v in regimes.values())
+        combined = 1 if agree_bull else -1 if agree_bear else 0
+        state = StructureBreakSignal(combined=combined, computed_at=_now_ist())
         _structure_break_fail_streak[symbol] = 0
     except Exception:  # noqa: BLE001
-        logger.exception("%s: could not fetch structure-break signal - keeping last cached value", symbol)
+        logger.exception("%s: could not refresh structure-break signal - keeping last cached value", symbol)
         state = cached[1] if cached else None
         _structure_break_fail_streak[symbol] = streak + 1
     _structure_break_cache[symbol] = (_now_ist(), state)
-    return state
+
+
+async def structure_break_refresh_loop(symbols: list) -> None:
+    """Independent background task, started once at Swing startup
+    (Swing/swing_main.py, alongside monitor_loop itself) - keeps the
+    structure-break cache warm on its own timer, completely decoupled
+    from monitor_loop's own tick. Checks cache age every 5s (cheap, no
+    I/O) but only actually FETCHES when a symbol's cache has aged past
+    its effective refresh interval (config.STRUCTURE_BREAK_REFRESH_
+    SECONDS, doubling on each consecutive failure up to MAX_FETCH_
+    BACKOFF_SECONDS - identical backoff shape to get_supertrend_state's
+    own, just applied here instead of inline in the read path)."""
+    logger.info("Structure-break refresh loop started for: %s", symbols)
+    while True:
+        for symbol in symbols:
+            cached = _structure_break_cache.get(symbol)
+            streak = _structure_break_fail_streak.get(symbol, 0)
+            effective_refresh = min(config.STRUCTURE_BREAK_REFRESH_SECONDS * (2 ** streak), MAX_FETCH_BACKOFF_SECONDS)
+            if not cached or (_now_ist() - cached[0]).total_seconds() >= effective_refresh:
+                try:
+                    await refresh_structure_break_signal(symbol)
+                except Exception:  # noqa: BLE001
+                    logger.exception("%s: structure-break refresh loop iteration failed", symbol)
+        await asyncio.sleep(5)

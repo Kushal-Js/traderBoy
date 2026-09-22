@@ -33,6 +33,7 @@ logger = logging.getLogger("swing_main")
 router = APIRouter()
 
 _monitor_task: Optional[asyncio.Task] = None
+_structure_break_task: Optional[asyncio.Task] = None
 
 
 @asynccontextmanager
@@ -43,7 +44,7 @@ async def lifespan(app: FastAPI):
     position from before a restart needs to be picked back up whether or
     not NEW entries are currently allowed, and flipping STRATEGY_ENABLED
     should never need a restart to take effect."""
-    global _monitor_task
+    global _monitor_task, _structure_break_task
 
     try:
         await watchlist_store.sync_from_file()
@@ -71,14 +72,30 @@ async def lifespan(app: FastAPI):
     dhan_wrapper.add_price_tick_subscriber(_on_price_tick)
 
     _monitor_task = asyncio.create_task(monitor_loop())
+
+    # Structure-break signal refresh runs on its OWN independent task,
+    # deliberately separate from monitor_loop - see Swing/signals.py's
+    # module-level comment on the structure-break section for the real
+    # incident (22 Sep 2026) this decoupling fixes: awaiting the fetch
+    # directly from inside monitor_loop's own tick could freeze the
+    # WHOLE loop (every symbol, not just COPPER) for minutes on a slow/
+    # rate-limited fetch. Only started when the flag is actually on -
+    # no point polling MCX data nobody's reading.
+    if config.COPPER_STRUCTURE_BREAK_ENABLED:
+        _structure_break_task = asyncio.create_task(signals.structure_break_refresh_loop(["COPPER"]))
+
     logger.info(
         "Swing v2 startup complete: monitor loop running (reusing Options' Dhan connection). "
-        "strategy_enabled=%s basket_type=%s broker_stop_loss_enabled=%s max_concurrent_trades=%s",
+        "strategy_enabled=%s basket_type=%s broker_stop_loss_enabled=%s max_concurrent_trades=%s "
+        "copper_structure_break_enabled=%s",
         config.STRATEGY_ENABLED, config.BASKET_TYPE, config.BROKER_STOP_LOSS_ENABLED, config.MAX_CONCURRENT_TRADES,
+        config.COPPER_STRUCTURE_BREAK_ENABLED,
     )
     yield
     if _monitor_task:
         _monitor_task.cancel()
+    if _structure_break_task:
+        _structure_break_task.cancel()
 
 
 class WatchlistPayload(BaseModel):
