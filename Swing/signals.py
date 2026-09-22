@@ -275,7 +275,13 @@ async def get_regime_state(symbol: str) -> Optional[RegimeState]:
         state = await loop.run_in_executor(None, _fetch_regime_state_once, symbol)
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not fetch regime state - keeping last cached value", symbol)
-        return cached[1] if cached else None
+        state = cached[1] if cached else None
+    # Stamp the cache even on failure - otherwise a persistent fetch failure
+    # never satisfies the "fresh enough" check above and every 5s monitor
+    # tick retries immediately instead of waiting REGIME_REFRESH_SECONDS,
+    # turning one bad fetch into a continuous full-speed hammering of
+    # Dhan's REST endpoint (confirmed live 21 Sep 2026: ~22k failed calls
+    # across market hours after one early failure never got throttled).
     _regime_cache[symbol] = (_now_ist(), state)
     return state
 
@@ -420,6 +426,8 @@ async def get_supertrend_state(symbol: str, interval_minutes: Optional[int] = No
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not fetch Supertrend state (%smin) - keeping last cached value",
                           symbol, interval_minutes)
-        return cached[1] if cached else None
+        state = cached[1] if cached else None
+    # Stamp the cache even on failure - see the matching comment in
+    # get_regime_state above; same bug, same fix, same live incident.
     _supertrend_cache[cache_key] = (_now_ist(), state)
     return state
