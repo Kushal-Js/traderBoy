@@ -85,13 +85,31 @@ def _save_state(today: str, state: dict) -> None:
 
 
 def maybe_subscribe(now_ist: datetime, today: str, state: dict) -> bool:
-    if state["subscribed"] or now_ist.time() < SUBSCRIBE_TIME_IST:
+    """Re-subscribes on EVERY tick from SUBSCRIBE_TIME_IST to REPORT_TIME_IST,
+    not once (fixed 22 Sep 2026, real incident). underlying_candle_feed.
+    subscribe() is idempotent and, per its own docstring, restores this
+    symbol's persisted bars from disk + resumes live ticks the FIRST time
+    a given PROCESS sees it. The original one-shot gate here (skip once
+    state["subscribed"] is True) meant that after the single daily
+    subscribe call succeeded, a bot restart - which happens routinely for
+    unrelated deploys/fixes, 5 times after the 10:00 IST subscribe on
+    22 Sep alone - silently left these symbols unsubscribed in the NEW
+    process for the rest of the day, since this script never called
+    subscribe again. Result: recon_bar_count=0 for all 8 symbols by the
+    15:40 IST report that day - the WS reconstruction itself was never
+    actually exercised past the first ~8 minutes; this script just never
+    told the (repeatedly restarted) process to resume capturing ticks.
+    Calling this every ~5-min tick is cheap (a no-op for symbols already
+    subscribed in the current process) and self-heals across any number
+    of restarts during the day."""
+    if now_ist.time() < SUBSCRIBE_TIME_IST or now_ist.time() >= REPORT_TIME_IST:
         return False
     try:
         result = _http_json("POST", "/debug/underlying-feed/subscribe", {"symbols": TEST_SYMBOLS})
-        print(f"[ws-parity] subscribed: {result}")
-        state["subscribed"] = True
-        _save_state(today, state)
+        if not state["subscribed"]:
+            print(f"[ws-parity] subscribed: {result}")
+            state["subscribed"] = True
+            _save_state(today, state)
         return True
     except Exception as exc:  # noqa: BLE001
         print(f"[ws-parity] subscribe FAILED (will retry next tick): {exc}")
