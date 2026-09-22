@@ -463,3 +463,76 @@ async def get_supertrend_state(symbol: str, interval_minutes: Optional[int] = No
     # get_regime_state above; same bug, same fix, same live incident.
     _supertrend_cache[cache_key] = (_now_ist(), state)
     return state
+
+
+# ------------------------------------------------------------------ #
+# COPPER-only structure-break signal (config.COPPER_STRUCTURE_BREAK_
+# ENABLED) - see that flag's own docstring in Swing/config.py for the
+# full backtest/rationale. Combines structure_break.py's 5m/15m/1h regime
+# into one +1/-1/0 agreement state, exactly mirroring
+# backtest_swing_structure_break_mtf.py's own agree_bull/agree_bear
+# combination logic - this IS the signal that was backtested, not a
+# reimplementation of it.
+# ------------------------------------------------------------------ #
+@dataclass
+class StructureBreakSignal:
+    combined: int   # +1 = all 3 timeframes agree bullish, -1 = agree bearish, 0 = no agreement
+    computed_at: datetime
+
+
+_structure_break_cache: dict[str, tuple[datetime, Optional[StructureBreakSignal]]] = {}
+_structure_break_fail_streak: dict[str, int] = {}
+_STRUCTURE_BREAK_FETCH_PACE_SECONDS = 1.6   # same back-to-back-REST-call pacing bt_fetch.py/the backtest script use
+
+
+def _fetch_structure_break_signal_once(symbol: str) -> StructureBreakSignal:
+    """Blocking - always call via run_in_executor. Raises on any fetch
+    failure or not-yet-warm timeframe (never returns a partial/best-
+    effort signal) so get_structure_break_signal's try/except keeps the
+    last good cached value instead of trusting an incomplete read - same
+    fail-open discipline as every other function in this file. mcx=True
+    unconditionally: this signal is currently only ever evaluated for
+    COPPER (see config.COPPER_STRUCTURE_BREAK_ENABLED's own docstring on
+    why it's hardcoded to that one symbol)."""
+    import structure_break as sb
+    import time as _time
+
+    results = {}
+    for i, tf in enumerate(("5m", "15m", "1h")):
+        if i:
+            _time.sleep(_STRUCTURE_BREAK_FETCH_PACE_SECONDS)
+        r = sb.fetch_timeframe(symbol, tf, mcx=True)
+        if r.error or not r.warm:
+            raise RuntimeError(f"{symbol}: structure-break {tf} fetch failed/not warm: {r.error}")
+        results[tf] = r
+
+    agree_bull = all(results[tf].last_regime == 1 for tf in ("5m", "15m", "1h"))
+    agree_bear = all(results[tf].last_regime == -1 for tf in ("5m", "15m", "1h"))
+    combined = 1 if agree_bull else -1 if agree_bear else 0
+    return StructureBreakSignal(combined=combined, computed_at=_now_ist())
+
+
+def peek_structure_break_signal(symbol: str) -> Optional[StructureBreakSignal]:
+    cached = _structure_break_cache.get(symbol)
+    return cached[1] if cached else None
+
+
+async def get_structure_break_signal(symbol: str) -> Optional[StructureBreakSignal]:
+    """Cached, throttled (config.STRUCTURE_BREAK_REFRESH_SECONDS, doubling
+    on each consecutive failure up to MAX_FETCH_BACKOFF_SECONDS - identical
+    pattern to get_supertrend_state above), fail-open."""
+    cached = _structure_break_cache.get(symbol)
+    streak = _structure_break_fail_streak.get(symbol, 0)
+    effective_refresh = min(config.STRUCTURE_BREAK_REFRESH_SECONDS * (2 ** streak), MAX_FETCH_BACKOFF_SECONDS)
+    if cached and (_now_ist() - cached[0]).total_seconds() < effective_refresh:
+        return cached[1]
+    loop = asyncio.get_running_loop()
+    try:
+        state = await loop.run_in_executor(None, _fetch_structure_break_signal_once, symbol)
+        _structure_break_fail_streak[symbol] = 0
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not fetch structure-break signal - keeping last cached value", symbol)
+        state = cached[1] if cached else None
+        _structure_break_fail_streak[symbol] = streak + 1
+    _structure_break_cache[symbol] = (_now_ist(), state)
+    return state

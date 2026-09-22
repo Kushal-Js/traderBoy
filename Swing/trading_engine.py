@@ -170,7 +170,18 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
       AND 5-min close crossed the 5-min Supertrend -> the entry. Still
       strictly more permissive than v1 (v1's own level-only filter is
       still one of the three ORed legs), just with two additional,
-      more-deliberate ways in as well."""
+      more-deliberate ways in as well.
+
+    COPPER, when config.COPPER_STRUCTURE_BREAK_ENABLED is true, skips all
+    of the above entirely and uses the structure-break signal instead
+    (see that flag's own docstring in Swing/config.py) - checked first,
+    before touching regime/Supertrend at all, so this path never
+    incurs the v1/v2 fetches for COPPER while the flag is on."""
+    if symbol == "COPPER" and config.COPPER_STRUCTURE_BREAK_ENABLED:
+        sig = await signals.get_structure_break_signal(symbol)
+        if sig is None or sig.combined == 0:
+            return None
+        return "BULLISH" if sig.combined == 1 else "BEARISH"
     regime = await signals.get_regime_state(symbol)
     if regime is None:
         return None
@@ -203,7 +214,26 @@ async def _evaluate_exit_signal(symbol: str, position: Position) -> Optional[str
     (position.supertrend_entry_candle_start), so the very breakout candle
     that triggered entry can't immediately "reverse" it. Identical
     reasoning to Options/trading_engine.py's own _supertrend_signal_for
-    guard."""
+    guard.
+
+    COPPER, when config.COPPER_STRUCTURE_BREAK_ENABLED is true, uses the
+    structure-break signal instead (see _evaluate_entry_signal's matching
+    branch and Swing/config.py's flag docstring). User-confirmed semantics
+    (22 Sep 2026): the agreement breaking WITHOUT a clean opposite signal
+    squares off to flat ("STRUCTURE_BREAK_SQUARE_OFF"); a clean flip to
+    the opposite agreement also exits here as "STRUCTURE_BREAK_REVERSAL" -
+    _evaluate_entry_signal picks up the fresh opposite-side entry on the
+    very same monitor tick (exits run before the entry scan - see
+    _monitor_tick), so a clean reversal closes and reopens back-to-back,
+    same as the backtest's fill-on-next-bar-open reversal handling."""
+    if symbol == "COPPER" and config.COPPER_STRUCTURE_BREAK_ENABLED:
+        sig = await signals.get_structure_break_signal(symbol)
+        if sig is None:
+            return None
+        current_side = 1 if position.resolved_option_type == "CE" else -1
+        if sig.combined == current_side:
+            return None
+        return "STRUCTURE_BREAK_REVERSAL" if sig.combined == -current_side else "STRUCTURE_BREAK_SQUARE_OFF"
     if not config.ENABLE_SUPERTREND_EXIT:
         return None
     st = await signals.get_supertrend_state(symbol)

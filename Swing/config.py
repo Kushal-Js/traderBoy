@@ -271,6 +271,42 @@ SUPERTREND_INTERVAL_MINUTES = int(os.getenv("SWING_SUPERTREND_INTERVAL_MINUTES",
 SUPERTREND_REFRESH_SECONDS = int(os.getenv("SWING_SUPERTREND_REFRESH_SECONDS", "15"))
 ENABLE_SUPERTREND_EXIT = os.getenv("SWING_ENABLE_SUPERTREND_EXIT", "true").lower() == "true"
 
+# COPPER-only alternate entry/exit signal (user request 22 Sep 2026):
+# structure_break.py's 5m+15m+1h "Smart Money Flow Cloud" band-cross
+# agreement (see .claude/skills/structure-break/SKILL.md), backtested the
+# same day via backtest_swing_structure_break_mtf.py against 10 days of
+# real COPPER data before being wired in here - +Rs 2,51,000/12 trades/
+# 75% win rate vs the same window's 2-timeframe (no 1h) variant's
+# +Rs 1,82,750/19 trades/47% - see trading-skills' designs/structure-
+# break-indicator.md for the full comparison, including the important
+# caveat that PnL was modeled on COPPER's FUTURES price move, never a
+# real option premium (no theta/IV). User explicitly chose to enable this
+# live immediately despite that gap and the thin (single-symbol,
+# 10-day) sample - NOT validated on ASHOKLEY/NATURALGAS (both showed a
+# much smaller, statistically-insignificant edge either way for the same
+# rule, see the same design doc).
+#
+# BULLISH (all 3 timeframes agree bullish) -> close any open PE, buy ATM
+# CE. BEARISH -> close any open CE, buy ATM PE. If the agreement breaks
+# WITHOUT a clean opposite signal, squares off to flat and waits for the
+# next fresh agreement (either direction) - user-confirmed semantics,
+# exactly what the backtest above measured.
+#
+# When false (the default - existing Swing v2 Supertrend/regime logic
+# below is completely UNCHANGED for every symbol, including COPPER, which
+# still uses it until this is explicitly turned on). Scoped to COPPER
+# ONLY, hardcoded in Swing/trading_engine.py's _evaluate_entry_signal/
+# _evaluate_exit_signal - not a general multi-symbol switch, since
+# nothing beyond COPPER has been backtested against this rule.
+COPPER_STRUCTURE_BREAK_ENABLED = os.getenv("SWING_COPPER_STRUCTURE_BREAK_ENABLED", "false").lower() == "true"
+# 3 REST calls (5m/15m/1h) per refresh, unlike Supertrend's single call -
+# kept well above SUPERTREND_REFRESH_SECONDS(15) to limit the extra load
+# on the shared account-wide Dhan rate limit (see [[f915d98]]'s own
+# exponential-backoff fix for why REST pressure here is a real, already-
+# incident-producing concern, not a hypothetical one). A 5-min-bar signal
+# has no real information gain from refreshing faster than this anyway.
+STRUCTURE_BREAK_REFRESH_SECONDS = int(os.getenv("SWING_STRUCTURE_BREAK_REFRESH_SECONDS", "60"))
+
 # Entry-signal strategy version (user request 14 Sep 2026: "mark current
 # deployed EMA-regime strategy with a version and then add another
 # version to this Combined (15min ST OR EMA) strategy"). Two entry
