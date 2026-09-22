@@ -1649,7 +1649,23 @@ class DhanWrapper:
             to_date=to_date,
             interval=interval_minutes,
         )
-        return (resp.get("data") or {}) if isinstance(resp, dict) else {}
+        data = (resp.get("data") or {}) if isinstance(resp, dict) else {}
+        if not data.get("close"):
+            # Diagnostic only (added 22 Sep 2026) - callers already treat an
+            # empty result as a fetch failure and fall back to cache; this
+            # just captures WHAT Dhan actually said instead of only "empty",
+            # since the generic {} return here is indistinguishable between
+            # a rate limit, a genuinely out-of-range request (e.g. a request
+            # predating an MCX contract's own listing date), and anything
+            # else - see the still-open question in
+            # incidents/2026-09-22-swing-signal-cache-never-throttled-on-failure.md.
+            logger.warning(
+                "fetch_continuous_intraday(security_id=%s, segment=%s, instrument=%s, "
+                "interval=%s, from=%s, to=%s) returned no close data - raw response: %s",
+                security_id, exchange_segment, instrument_type, interval_minutes,
+                from_date, to_date, resp,
+            )
+        return data
 
     # ------------------------------------------------------------------ #
     # Supertrend exit signal (computed on the underlying stock, not the
