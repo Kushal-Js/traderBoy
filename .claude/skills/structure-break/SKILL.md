@@ -45,6 +45,11 @@ python3 structure_break.py RELIANCE --timeframes 5m,1h
 Symbol must be an NSE equity trading symbol resolvable via
 `dhan_wrapper._equity_security_id` (same lookup Supertrend/EMA-cross
 signals use) — indices and options aren't supported by that lookup.
+For an MCX commodity (e.g. COPPER), pass `mcx=True` to `fetch_timeframe`
+(not exposed on the CLI yet) — it resolves the symbol's current MCX
+futures contract instead, the same way `Swing/signals.py`'s own
+`_underlying_reference` does. `fetch_timeframe` also takes an optional
+`lookback_days_override` to widen history for a longer backtest window.
 
 Programmatic use (e.g. to build a report across several symbols in one
 Python session):

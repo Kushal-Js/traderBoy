@@ -410,11 +410,39 @@ def _ensure_authenticated() -> None:
     dhan_wrapper.authenticate()
 
 
-def fetch_timeframe(symbol: str, timeframe: str, params: Optional[StructureBreakParams] = None) -> StructureBreakResult:
+_mcx_contract_cache: dict = {}   # symbol -> (date, security_id), day-cached like Swing/signals.py's own
+
+
+def _underlying_reference(symbol: str, mcx: bool) -> tuple:
+    """(security_id, exchange_segment, instrument_type) for `symbol`.
+    Mirrors Swing/signals.py's own _underlying_reference exactly (same
+    reasoning: an MCX commodity has no continuous NSE cash-segment
+    series, so its regime reference is its current MCX futures contract
+    instead) - duplicated rather than imported to keep structure_break.py
+    usable standalone, outside the Swing package."""
+    from Options.dhan_client import dhan_wrapper
+    if not mcx:
+        return dhan_wrapper._equity_security_id(symbol), "NSE_EQ", "EQUITY"
+    today = datetime.now(IST).date()
+    cached = _mcx_contract_cache.get(symbol)
+    if not cached or cached[0] != today:
+        contract = dhan_wrapper.get_mcx_futures_contract(symbol)
+        _mcx_contract_cache[symbol] = (today, contract.security_id)
+    return _mcx_contract_cache[symbol][1], "MCX_COMM", "FUTCOM"
+
+
+def fetch_timeframe(symbol: str, timeframe: str, params: Optional[StructureBreakParams] = None,
+                     mcx: bool = False, lookback_days_override: Optional[int] = None) -> StructureBreakResult:
     """Fetches `symbol`'s candles for one timeframe ("5m"/"15m"/"1h"/"1d")
-    and returns its StructureBreakResult. Equities only (NSE_EQ/EQUITY).
-    Blocking REST call(s) via the shared dhan_wrapper - never call this
-    from the WebSocket tick path."""
+    and returns its StructureBreakResult. NSE equities by default; pass
+    `mcx=True` for an MCX commodity (e.g. COPPER) - resolves its current
+    futures contract instead of an equity security_id, same as Swing's
+    own regime/Supertrend fetch does. `lookback_days_override` widens the
+    default per-interval history window (useful for a backtest spanning
+    more trading days than the default warm-up buffer comfortably covers -
+    see backtest_swing_structure_break_mtf.py). Blocking REST call(s) via
+    the shared dhan_wrapper - never call this from the WebSocket tick
+    path."""
     if timeframe not in TIMEFRAMES:
         return StructureBreakResult(n=0, basis=[], upper=[], lower=[], regime=[], switch_up=[],
                                      switch_down=[], bull_retest=[], bear_retest=[], strength=[],
@@ -424,12 +452,12 @@ def fetch_timeframe(symbol: str, timeframe: str, params: Optional[StructureBreak
     params = params or StructureBreakParams()
     try:
         _ensure_authenticated()
-        security_id = dhan_wrapper._equity_security_id(symbol)
+        security_id, exchange_segment, instrument_type = _underlying_reference(symbol, mcx)
         interval = TIMEFRAMES[timeframe]
         if interval is None:  # daily
             now = datetime.now(IST)
             resp = dhan_wrapper.client.Dhan.historical_daily_data(
-                security_id=security_id, exchange_segment="NSE_EQ", instrument_type="EQUITY",
+                security_id=security_id, exchange_segment=exchange_segment, instrument_type=instrument_type,
                 from_date=(now - timedelta(days=_DAILY_LOOKBACK_DAYS)).strftime("%Y-%m-%d"),
                 # yesterday - today's daily bar isn't closed yet, same
                 # look-ahead-avoidance breakout_signal.py's _fetch_daily_sync uses.
@@ -444,8 +472,8 @@ def fetch_timeframe(symbol: str, timeframe: str, params: Optional[StructureBreak
             timestamps = list(data.get("timestamp") or [])
         else:
             data = dhan_wrapper.fetch_continuous_intraday(
-                security_id, "NSE_EQ", "EQUITY", interval,
-                lookback_days_override=_INTRADAY_LOOKBACK_DAYS[interval],
+                security_id, exchange_segment, instrument_type, interval,
+                lookback_days_override=lookback_days_override or _INTRADAY_LOOKBACK_DAYS[interval],
             )
             opens, highs, lows, closes, volumes, timestamps = _drop_forming_candle(data, interval)
 
