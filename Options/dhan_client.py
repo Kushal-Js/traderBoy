@@ -37,6 +37,46 @@ logger = logging.getLogger("dhan_client")
 IST = ZoneInfo(config.MARKET_TZ)
 
 
+def _tick_time_from_ltt(raw_ltt, received_at: datetime) -> datetime:
+    """Parses a Quote/Full packet's own `LTT` (Last Trade Time) into a
+    real datetime, for bucketing a tick by when the trade actually
+    happened on the exchange rather than by when our process happened to
+    receive/process the packet.
+
+    Real incident (22 Sep 2026): underlying_candle_feed.py's 5-min bar
+    reconstruction used local receipt time for bucketing, which showed a
+    confirmed live open-price mismatch (up to 75% of bars wrong on some
+    symbols) while close/volume stayed accurate - exactly the pattern a
+    boundary-timing bug produces (a trade processed just after a 5-min
+    boundary due to network/processing latency gets misbucketed into the
+    NEXT bar, corrupting that bar's open specifically - the first
+    attributed tick sets it - while close/volume, built from many ticks,
+    mostly self-correct). `LTT` is parsed by the SDK (dhanhq's own
+    process_quote/process_full) but was never read anywhere in this
+    codebase until now.
+
+    Timezone, empirically confirmed live (not guessed): the SDK formats
+    LTT via `datetime.utcfromtimestamp(epoch).strftime('%H:%M:%S')` -
+    named "utc_time" but a live comparison (22 Sep, post-close) showed
+    LTT reading ~10 minutes behind local IST receipt time, not ~5.5
+    hours behind as it would if the string genuinely needed a further
+    +5:30 UTC->IST conversion. The string is already the correct IST
+    wall-clock time-of-day as-is.
+
+    Combines that HH:MM:SS with `received_at`'s own calendar date (NSE/
+    MCX trading hours never span a real midnight, so this is safe) -
+    falls back to `received_at` itself (the old behavior) if LTT is
+    missing or doesn't parse, so a malformed/absent field degrades
+    gracefully instead of dropping the tick."""
+    if not raw_ltt:
+        return received_at
+    try:
+        t = datetime.strptime(str(raw_ltt), "%H:%M:%S").time()
+    except (TypeError, ValueError):
+        return received_at
+    return received_at.replace(hour=t.hour, minute=t.minute, second=t.second, microsecond=0)
+
+
 def _retry(fn, *args, retries: int = 2, delay: float = 1.5, **kwargs):
     """Retries a call once or twice with a short backoff. Dhan's market-data
     REST calls (confirmed live) intermittently fail with a bare generic
@@ -307,10 +347,6 @@ class DhanWrapper:
         # so existing LTP-only option subscribers are completely
         # unaffected by this addition - see add_quote_tick_subscriber().
         self._on_quote_tick_subscribers: list[Callable[[str, float, float, datetime], None]] = []
-        # TEMPORARY (22 Sep 2026) - see _on_market_tick's own LTT_DIAGNOSTIC
-        # comment. Tracks which symbols have already logged one diagnostic
-        # line, so this doesn't spam the log on every tick.
-        self._ltt_diagnostic_logged: set[str] = set()
         # underlying_symbol -> (fetched_at, is_bearish, candle_start) - see
         # refresh_supertrend_signal()/get_cached_supertrend_bearish().
         self._supertrend_cache: dict[str, tuple[datetime, bool, Optional[datetime]]] = {}
@@ -899,34 +935,19 @@ class DhanWrapper:
                 except (TypeError, ValueError):
                     volume_val = None
                 if volume_val is not None:
-                    # TEMPORARY diagnostic (22 Sep 2026) - investigating the
-                    # live-confirmed WS-candle open-price mismatch (see
-                    # underlying_candle_feed.py's module docstring): ticks are
-                    # currently bucketed into 5-min windows by LOCAL RECEIPT
-                    # TIME (`now` below), not by LTT (Last Trade Time - the
-                    # field the SDK already parses out of the Quote packet
-                    # but that nothing in this codebase reads). A trade
-                    # processed just after a 5-min boundary due to network/
-                    # processing latency would get misbucketed into the NEXT
-                    # bar, corrupting that bar's OPEN specifically (the first
-                    # attributed tick sets it) while leaving close/volume
-                    # mostly self-correcting - exactly the pattern seen live.
-                    # Logs once per symbol (not every tick) to confirm LTT's
-                    # actual timezone convention (the SDK's own utc_time()
-                    # formats it via datetime.utcfromtimestamp - unverified
-                    # whether that's genuinely UTC or already IST-equivalent)
-                    # before trusting it for the real fix. Remove once
-                    # verified and the real fix (bucket by LTT, correctly
-                    # converted) is in.
-                    if underlying_symbol not in self._ltt_diagnostic_logged:
-                        self._ltt_diagnostic_logged.add(underlying_symbol)
-                        logger.info(
-                            "LTT_DIAGNOSTIC %s: raw tick LTT=%r, local receipt time (IST)=%s, raw tick keys=%s",
-                            underlying_symbol, tick.get("LTT"), now.isoformat(), sorted(tick.keys()),
-                        )
+                    # Bucket by the exchange's own trade time (LTT), not
+                    # local receipt time - see _tick_time_from_ltt's own
+                    # docstring for the real incident this fixes and the
+                    # live-confirmed timezone verification behind it.
+                    # Deliberately does NOT touch `now`/_ltp_cache_ts above -
+                    # those answer "how fresh is our own knowledge of the
+                    # price" (correctly local-receipt-time-based) which is a
+                    # different question from "which 5-min bar does this
+                    # trade belong to".
+                    trade_time = _tick_time_from_ltt(tick.get("LTT"), now)
                     for callback in self._on_quote_tick_subscribers:
                         try:
-                            callback(underlying_symbol, ltp_val, volume_val, now)
+                            callback(underlying_symbol, ltp_val, volume_val, trade_time)
                         except Exception:  # noqa: BLE001
                             logger.exception("on_quote_tick subscriber failed for %s", underlying_symbol)
 
