@@ -400,6 +400,18 @@ class DhanWrapper:
         # underlying since liquidity is a property of the specific
         # contract being held, not the underlying stock).
         self._liquidity_cache: dict[str, tuple[datetime, bool]] = {}
+        # underlying_symbol -> "MCX"/"NSE" - see _expected_exchange_for
+        # (added 23 Sep 2026, MCX WS LTP support). Never expires/resets
+        # intraday - an underlying's own exchange classification is a
+        # static instrument-master fact, not something that changes
+        # during a session, unlike every time-based cache above. Without
+        # this, get_cached_option_ltp/note_rest_ltp (both now on EVERY
+        # package's per-position monitor-loop poll, not just once per
+        # entry like the only other _is_mcx_commodity call site) would
+        # re-run a full scrip-master DataFrame filter every ~2s for every
+        # open position across all 4 packages, NSE ones included, just to
+        # re-derive the same static answer each time.
+        self._mcx_underlying_cache: dict[str, str] = {}
         # Nifty50 open gap-down/sharp-fall cool-off - see evaluate_nifty_
         # open_condition()/should_delay_ce_entry(). One dict, computed at
         # most once per calendar date (keyed by result["date"]), not a
@@ -999,16 +1011,50 @@ class DhanWrapper:
         _ = self.order_update_feed
         _ = self.market_feed
 
+    def _expected_exchange_for(self, trading_symbol: str) -> str:
+        """Returns "MCX" or "NSE" for a trading_symbol whose exchange isn't
+        already known by the caller (added 23 Sep 2026, MCX WS LTP support -
+        see subscribe_option_price's own updated docstring). Reuses
+        _is_mcx_commodity (already trusted elsewhere, e.g.
+        _get_atm_option_once) against the trading_symbol's own underlying
+        token. Safe to take trading_symbol.split()[0] here specifically
+        because this is Tradehull's own SPACE-separated trading_symbol
+        format ("NATURALGAS 23 OCT 290 CALL"), not Dhan's raw hyphen-
+        separated SEM_TRADING_SYMBOL - the underlying is always one
+        whitespace token regardless of internal hyphens (e.g. "BAJAJ-AUTO
+        23 SEP 10000 CALL" still splits correctly), unlike SEM_TRADING_
+        SYMBOL's own hyphen-delimited shape which needs _underlying_from_
+        trading_symbol's dedicated parsing instead. Cached per underlying
+        via _mcx_underlying_cache - see that dict's own docstring for why
+        (this is now called on every WS-cache LTP read, not just once per
+        entry)."""
+        underlying = trading_symbol.split()[0] if trading_symbol else ""
+        if not underlying:
+            return "NSE"
+        cached = self._mcx_underlying_cache.get(underlying)
+        if cached is not None:
+            return cached
+        result = "MCX" if self._is_mcx_commodity(underlying) else "NSE"
+        self._mcx_underlying_cache[underlying] = result
+        return result
+
     def subscribe_option_price(self, trading_symbol: str) -> None:
         if not config.ENABLE_WS_FEED:
             return
-        # NSE_FNO-only subscription (no MCX WS feed exists in this codebase
-        # today - see Swing/trading_engine.py's own guard) - expected_exchange
-        # pins the lookup so a symbol-string collision with an unrelated
-        # MCX row (see _instrument_meta's own docstring) can never win here.
-        meta = self._instrument_meta(trading_symbol, expected_exchange="NSE")
+        # NSE_FNO or MCX subscription (MCX WS support added 23 Sep 2026 -
+        # previously NSE_FNO-only, see Swing/trading_engine.py's own
+        # now-updated guard). expected_exchange pins the lookup so a
+        # symbol-string collision with an unrelated row on the other
+        # exchange (see _instrument_meta's own docstring) can never win
+        # here. _on_market_tick's own LTP-cache/price-tick-subscriber path
+        # is already segment-agnostic (keyed purely by security_id, no
+        # exchange check) - only the SUBSCRIBE side was ever NSE_FNO-only.
+        expected_exchange = self._expected_exchange_for(trading_symbol)
+        is_mcx = expected_exchange == "MCX"
+        meta = self._instrument_meta(trading_symbol, expected_exchange=expected_exchange)
         self._security_id_to_symbol[meta["security_id"]] = trading_symbol
-        instrument = (MarketFeed.NSE_FNO, meta["security_id"], MarketFeed.Ticker)
+        segment = MarketFeed.MCX if is_mcx else MarketFeed.NSE_FNO
+        instrument = (segment, meta["security_id"], MarketFeed.Ticker)
         # Update our OWN authoritative set first (21 Sep 2026 - see
         # _run_market_feed_forever's docstring) - this is what a FUTURE
         # reconnect resubscribes from, independent of whether a feed
@@ -1024,7 +1070,9 @@ class DhanWrapper:
     def unsubscribe_option_price(self, trading_symbol: str) -> None:
         if not config.ENABLE_WS_FEED:
             return
-        meta = self._instrument_meta(trading_symbol, expected_exchange="NSE")
+        expected_exchange = self._expected_exchange_for(trading_symbol)
+        is_mcx = expected_exchange == "MCX"
+        meta = self._instrument_meta(trading_symbol, expected_exchange=expected_exchange)
         security_id = meta["security_id"]
         self._security_id_to_symbol.pop(security_id, None)
         # Found + fixed 31 Aug 2026 (user request, "memory issues" audit):
@@ -1041,7 +1089,8 @@ class DhanWrapper:
         # a memory-constrained droplet.
         self._ltp_cache.pop(security_id, None)
         self._ltp_cache_ts.pop(security_id, None)
-        instrument = (MarketFeed.NSE_FNO, security_id, MarketFeed.Ticker)
+        segment = MarketFeed.MCX if is_mcx else MarketFeed.NSE_FNO
+        instrument = (segment, security_id, MarketFeed.Ticker)
         with self._market_feed_lock:
             self._market_feed_instruments.discard(instrument)
             feed = self._market_feed
@@ -1133,7 +1182,7 @@ class DhanWrapper:
         catches genuinely stale/silent instruments."""
         if not config.ENABLE_WS_FEED:
             return None
-        meta = self._instrument_meta(trading_symbol, expected_exchange="NSE")
+        meta = self._instrument_meta(trading_symbol, expected_exchange=self._expected_exchange_for(trading_symbol))
         security_id = meta["security_id"]
         ltp = self._ltp_cache.get(security_id)
         if ltp is not None and config.LTP_STALE_AFTER_SECONDS > 0:
@@ -1162,7 +1211,7 @@ class DhanWrapper:
         naturally throttled to roughly once per LTP_STALE_AFTER_SECONDS,
         not once per poll."""
         try:
-            meta = self._instrument_meta(trading_symbol, expected_exchange="NSE")
+            meta = self._instrument_meta(trading_symbol, expected_exchange=self._expected_exchange_for(trading_symbol))
         except ValueError:
             return  # best-effort - a lookup failure here shouldn't break the exit check that called us
         self._ltp_cache[meta["security_id"]] = ltp

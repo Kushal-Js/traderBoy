@@ -524,12 +524,13 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
             return {"symbol": symbol, "status": "already_pending", "order_id": existing_order_id,
                     "trading_symbol": trading_symbol}
 
-        if exchange_segment == "NSE_FNO":
+        if exchange_segment in ("NSE_FNO", "MCX_COMM"):
+            # MCX joined this WS subscription 23 Sep 2026 (see _get_ltp's
+            # own updated docstring) - previously only NSE_FNO subscribed
+            # here, and equity still doesn't (no option/futures contract
+            # to WS-subscribe for a raw equity leg; falls back to the
+            # REST poll loop only, same as always).
             await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, trading_symbol)
-        # WS ticks are ONLY subscribed for NSE_FNO above - equity and MCX
-        # both have no WS feed today (see Swing/config.py's MCX_SYMBOLS
-        # docstring for MCX; _get_ltp's own docstring for both) and fall
-        # back to the REST poll loop only.
         place_fn = _market_order_placer(exchange_segment)
         order_resp = await loop.run_in_executor(
             None, place_fn, trading_symbol, quantity, transaction_type, tag, product_type,
@@ -565,7 +566,7 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
         # position) - anything other than TRADED here is a FAILED entry,
         # not "pending," and is released rather than left half-tracked.
         if result.status != OrderStatus.TRADED:
-            if exchange_segment == "NSE_FNO":
+            if exchange_segment in ("NSE_FNO", "MCX_COMM"):
                 await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, trading_symbol)
             logger.warning("%s: entry order %s did not reach TRADED (status=%s remark=%s) - treating as a failed entry",
                             symbol, order_id, result.status, result.remark)
@@ -667,7 +668,7 @@ async def _check_broker_stop_already_filled(symbol: str, position: Position) -> 
         logger.info("%s: broker-side stop-loss order %s ALREADY FILLED - closing at the real fill price %.2f",
                     symbol, position.stop_loss_order_id, final_exit_price)
         await position_store.close_position(symbol, final_exit_price, "MAX_LOSS_HIT")
-        if position.exchange_segment == "NSE_FNO":
+        if position.exchange_segment in ("NSE_FNO", "MCX_COMM"):
             await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
         return True
     logger.warning("%s: broker-side stop-loss order %s ended as %s without firing - this position now relies "
@@ -746,7 +747,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
                                       symbol, stale_order_id, exit_price)
                     final_exit_price = exit_price
                 await position_store.close_position(symbol, final_exit_price, reason)
-                if position.exchange_segment == "NSE_FNO":
+                if position.exchange_segment in ("NSE_FNO", "MCX_COMM"):
                     await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
                 return
             logger.warning("%s: broker shows only %d qty left (stored position says %d) after cancelling stale "
@@ -775,7 +776,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             logger.warning("%s: broker shows this position already flat after %d exit failure(s) - reconciling "
                             "locally as closed instead of retrying.", symbol, position.exit_failure_count)
             await position_store.close_position(symbol, exit_price or position.best_price, "RECONCILED_ALREADY_FLAT")
-            if position.exchange_segment == "NSE_FNO":
+            if position.exchange_segment in ("NSE_FNO", "MCX_COMM"):
                 await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
             return
 
@@ -848,7 +849,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
 
         final_exit_price = result.fill_price or exit_price
         await position_store.close_position(symbol, final_exit_price, reason)
-        if position.exchange_segment == "NSE_FNO":
+        if position.exchange_segment in ("NSE_FNO", "MCX_COMM"):
             await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
         pnl = unrealized_pnl_rs(position.instrument_side, position.entry_price, final_exit_price, position.pnl_multiplier)
         logger.info("%s exit order %s FILLED for %s (%s): reason=%s entry=%s exit=%s qty=%s pnl=%.2f",
@@ -885,25 +886,29 @@ _ORDER_RESULT_TIMEOUT_SECONDS = 30.0
 
 
 async def _get_ltp(position: Position) -> float:
-    """FNO positions use the same WS-cache-then-REST-fallback pattern as
-    Options/Futures/Luxury (_get_ltp there). Equity and MCX have no WS
-    feed today (subscribe_option_price hardcodes the NSE_FNO market-feed
-    segment - see Swing/config.py's own note on this), so both are plain
-    REST always - a 5s poll is adequate for a swing strategy's equity/
-    Copper leg (MCX WS support deliberately deferred, 12 Sep 2026 - see
-    Swing/config.py's MCX_SYMBOLS docstring).
-
-    Added 18 Sep 2026 (same day, user follow-up request): an MCX position
-    (basket_type=="OPTIONS", exchange_segment=="MCX_COMM") falls back to
-    get_last_historical_close (MCX segment codes) if the plain REST
-    get_option_ltp call fails, same second tier Options/Futures/Luxury's
-    own _get_ltp already has for NSE - observed live on COPPER/NATURALGAS
-    the same day: a consistent first-attempt "No LTP returned" that
-    self-healed via get_option_ltp's own internal retry every time so far,
-    but with zero fallback at all if that retry ever doesn't recover.
-    Equity keeps the old plain-REST-no-fallback behavior - out of today's
-    scope, and get_last_historical_close isn't built for an EQUITY
+    """FNO and MCX positions both use the WS-cache-then-REST-fallback
+    pattern Options/Futures/Luxury's own _get_ltp already has for NSE.
+    MCX joined this path 23 Sep 2026 (user request, after the NATURALGAS
+    "No LTP returned" retry loop stayed stuck for 15+ minutes straight
+    live the same day, best_price never updating) - previously MCX (like
+    equity) had "no WS feed today" because subscribe_option_price/
+    get_cached_option_ltp/note_rest_ltp all hardcoded the NSE_FNO/NSE
+    market-feed segment; Options/dhan_client.py's own _expected_exchange_
+    for now detects MCX from the trading_symbol and routes to Dhan's
+    MarketFeed.MCX segment instead - see that function's own docstring.
+    _on_market_tick's LTP-cache/price-tick-subscriber path was already
+    segment-agnostic (keyed purely by security_id), so no change was
+    needed there; only the subscribe/cache-lookup side was ever NSE-only.
+    Equity keeps the old plain-REST-no-fallback behavior - genuinely out
+    of scope here (no option/futures contract to WS-subscribe for a raw
+    equity leg), and get_last_historical_close isn't built for an EQUITY
     instrument_type anyway.
+
+    The MCX historical-close fallback (added 18 Sep 2026, same day,
+    user follow-up request) still applies exactly as before - falls back
+    to get_last_historical_close (MCX segment codes) if the REST
+    get_option_ltp call fails, now just reached AFTER the WS cache is
+    tried first rather than as MCX's only tier.
 
     _LTP_FETCH_TIMEOUT_SECONDS (added 22 Sep 2026, real incident): every
     REST call below (get_option_ltp, get_last_historical_close) goes
@@ -923,12 +928,22 @@ async def _get_ltp(position: Position) -> float:
     same as any other run_in_executor cancellation) - it only stops
     monitor_loop's own critical path from waiting on it."""
     loop = asyncio.get_running_loop()
-    if position.exchange_segment != "NSE_FNO":
+    if position.exchange_segment not in ("NSE_FNO", "MCX_COMM"):
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, dhan_wrapper.get_option_ltp, position.trading_symbol),
+            timeout=_LTP_FETCH_TIMEOUT_SECONDS,
+        )
+    ltp = await loop.run_in_executor(None, dhan_wrapper.get_cached_option_ltp, position.trading_symbol)
+    if ltp is not None:
+        return ltp
+    async with dhan_wrapper.ltp_rest_fallback_semaphore:
         try:
-            return await asyncio.wait_for(
+            ltp = await asyncio.wait_for(
                 loop.run_in_executor(None, dhan_wrapper.get_option_ltp, position.trading_symbol),
                 timeout=_LTP_FETCH_TIMEOUT_SECONDS,
             )
+            await loop.run_in_executor(None, dhan_wrapper.note_rest_ltp, position.trading_symbol, ltp)
+            return ltp
         except Exception:
             if position.exchange_segment == "MCX_COMM":
                 fallback = await asyncio.wait_for(
@@ -945,16 +960,6 @@ async def _get_ltp(position: Position) -> float:
                     )
                     return fallback
             raise
-    ltp = await loop.run_in_executor(None, dhan_wrapper.get_cached_option_ltp, position.trading_symbol)
-    if ltp is not None:
-        return ltp
-    async with dhan_wrapper.ltp_rest_fallback_semaphore:
-        ltp = await asyncio.wait_for(
-            loop.run_in_executor(None, dhan_wrapper.get_option_ltp, position.trading_symbol),
-            timeout=_LTP_FETCH_TIMEOUT_SECONDS,
-        )
-        await loop.run_in_executor(None, dhan_wrapper.note_rest_ltp, position.trading_symbol, ltp)
-    return ltp
 
 
 async def _handle_ltp_staleness(symbol: str, position: Position) -> None:
@@ -1112,7 +1117,7 @@ async def _sync_pending_exit_orders() -> None:
         if result.status in OrderStatus.TERMINAL_STATUSES:
             final_exit_price = result.fill_price or position.best_price
             await position_store.close_position(symbol, final_exit_price, position.pending_exit_reason or "AMO_EXIT_FILLED")
-            if position.exchange_segment == "NSE_FNO":
+            if position.exchange_segment in ("NSE_FNO", "MCX_COMM"):
                 await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
 
 
@@ -1288,4 +1293,21 @@ async def reconcile_broker_positions() -> list[Position]:
             order_id="", pnl_multiplier=pnl_multiplier, resolved_option_type=bp.get("option_type") or None,
             reconciled=True, stop_loss_order_id=stop_loss_order_id,
         ))
+
+    # WS-subscribe every reconciled NSE_FNO/MCX_COMM position (added 23
+    # Sep 2026, real incident: ASHOKLEY and NATURALGAS both reconciled
+    # after a restart with best_price frozen at entry for 30+ minutes -
+    # this function built each Position directly and never re-subscribed
+    # it to the market-data feed, unlike a fresh entry (enter_position_
+    # for_stock above) or Options/Futures/Luxury's own reconcile_broker_
+    # positions, which all already do this. Left permanently on the
+    # REST-only path, so when that REST call itself started failing, the
+    # software-side hard-stop/target check had no fresh price at all -
+    # only the broker-side stop-loss order was still protecting either
+    # position. Equity is skipped, same as everywhere else in this file
+    # (no option/futures contract to WS-subscribe for a raw equity leg).
+    for pos in positions:
+        if pos.exchange_segment in ("NSE_FNO", "MCX_COMM"):
+            await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, pos.trading_symbol)
+
     return positions
