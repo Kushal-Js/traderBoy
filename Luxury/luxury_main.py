@@ -202,7 +202,7 @@ async def _handle_chartink_webhook(
     ranked-entry path."""
     await position_store.maybe_reset_for_new_day()
     stocks = payload.stock_list()
-    fire_and_forget(breakout_signal.record_alert("Luxury", option_type, stocks))
+    fire_and_forget(breakout_signal.record_alert("Luxury", option_type, stocks, cfg=config))
 
     if not config.BREAKOUT_SIGNAL_ENABLED:
         return await _enter_directly_from_webhook(payload, option_type, prefer_highest, stocks)

@@ -255,24 +255,44 @@ async def _maybe_clear_after_close(w: _Watchlist, cfg) -> None:
 
 
 # ---------------------------------------------------------------- recording ---
-async def record_alert(strategy: str, option_type: str, stocks: list[str]) -> None:
+async def record_alert(strategy: str, option_type: str, stocks: list[str], cfg=None) -> None:
     """Fire-and-forget from the calling package's own webhook handler -
-    never raises, never affects the real alert response."""
+    never raises, never affects the real alert response.
+
+    `cfg` (added 23 Sep 2026, user request) closes a real coverage gap
+    found via a live audit the same day: underlying_candle_feed.subscribe
+    was previously only ever called from the curated-universe seeding
+    path (_seed_static_universe/_sync_universe_bucket_source), never from
+    a genuine real-time Chartink alert hitting a package directly - so a
+    symbol outside the curated universe stayed on the REST-capped
+    single-snapshot path (_evaluate_signal_sync) FOREVER, even after the
+    same-day WS-walk fix (_evaluate_ws_walk_sync) landed, since that fix
+    only ever runs for symbols underlying_candle_feed.is_fresh() already
+    reports true. Confirmed live: 37 of 143 pending symbols across
+    Futures/Luxury/Options were REST-only purely because they'd never
+    been WS-subscribed by anything. Optional and best-effort - when given
+    and cfg.BREAKOUT_USE_WS_CANDLES is on, every alerted symbol is ALSO
+    WS-subscribed immediately via the same idempotent path the curated
+    universe already uses (an already-subscribed symbol, by this or any
+    other strategy, is a cheap no-op). None (the default) preserves
+    today's exact behavior for the 2 internal dispatcher/universe-seed
+    call sites, which already WS-subscribe separately right after their
+    own record_alert call."""
     try:
         if option_type not in ("CE", "PE") or not stocks:
             return
         w = _watchlist(strategy, option_type)
         now = datetime.now(IST).isoformat()
+        cleaned = [s for s in (str(raw).strip().upper() for raw in stocks) if s]
         async with _LOCK:
             _ensure_today_locked(w)
-            for raw in stocks:
-                sym = str(raw).strip().upper()
-                if not sym:
-                    continue
+            for sym in cleaned:
                 if sym not in w.items:
                     w.items[sym] = {"first_alert_at": now, "signaled": False, "signaled_at": None,
                                      "checked_through_epoch": None}
             await _persist(w)
+        if cleaned and cfg is not None and getattr(cfg, "BREAKOUT_USE_WS_CANDLES", False):
+            await _ws_subscribe_best_effort(strategy, cleaned)
     except Exception:  # noqa: BLE001
         logger.exception("%s %s: record_alert failed - no effect on trading", strategy, option_type)
 
