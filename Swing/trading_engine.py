@@ -1165,6 +1165,15 @@ async def _monitor_tick() -> None:
             candidates.append((symbol, regime))
 
     for symbol, regime in candidates:
+        if config.PAPER_MODE_ENABLED:
+            # Paper-mode REPLACES real trading (23 Sep 2026, user request) -
+            # see swing_paper_engine.py's own module docstring. Real entry
+            # never runs while this flag is true - checked here rather than
+            # inside enter_position_for_stock itself so a real capacity
+            # check never gates a paper-mode entry attempt.
+            from . import swing_paper_engine
+            await swing_paper_engine.process_paper_entry(symbol, regime)
+            continue
         if await position_store.remaining_capacity() <= 0:
             break
         await enter_position_for_stock(symbol, regime)

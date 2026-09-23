@@ -63,6 +63,21 @@ STRATEGY_ENABLED = os.getenv("SWING_V2_STRATEGY_ENABLED", "true").lower() == "tr
 # managing whatever's already open.
 ENTRY_ENABLED = os.getenv("SWING_ENTRY_ENABLED", "true").lower() == "true"
 
+# Global paper-mode kill switch (added 23 Sep 2026, user request - the
+# Swing counterpart to Options/Futures/Luxury's own BREAKOUT_PAPER_MODE_
+# ENABLED, see breakout_paper_engine.py's module docstring for the full
+# design this mirrors). REPLACES real trading entirely while true - every
+# real entry Swing's own monitor_tick would otherwise place instead goes
+# to swing_paper_engine.process_paper_entry, using the exact same real
+# entry gates/exit logic (_evaluate_entry_signal, enter_position_for_
+# stock's own gate sequence, _exit_reason_for, _evaluate_exit_signal),
+# just never placing a real order. Defaults FALSE - flipping this on is a
+# deliberate, explicit action, never a silent side effect of deploying
+# this feature. See swing_paper_engine.py's own module docstring for
+# exactly what is and isn't replicated (broker-side stop-loss placement
+# can't be, by construction - it's a real order).
+PAPER_MODE_ENABLED = os.getenv("SWING_PAPER_MODE_ENABLED", "false").lower() == "true"
+
 # ---------------------------------------------------------------------------
 # Basket-type - the ONE configurable instrument choice for every watchlist
 # stock (user request: "This basket can contain either that stock Future

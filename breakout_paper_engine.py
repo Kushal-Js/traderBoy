@@ -41,13 +41,43 @@ loss today never blocks a paper re-entry and vice versa):
   5. Capacity (this module's own paper-only pool per strategy+option_
      type, respecting MAX_LIVE_POSITIONS_CE/PE + the real opening-burst
      slot)
-  6. Liquid-contract resolution (dhan_wrapper.get_liquid_atm_option -
+  6. cross_strategy_registry.try_claim/release_claim (added 23 Sep 2026,
+     user request: "uses cross_strategy_registry and everything that is
+     used in live for real trades" - the SAME real, process-wide registry
+     Options/Futures/Luxury's real _process_one_entry claims, not a
+     paper-only lookalike. Matters most in MIXED mode - one package for
+     real, another on paper - so a paper leg can't simulate an entry into
+     a symbol a real package has already genuinely claimed/opened, and
+     vice versa. Claimed for the full duration of this function, released
+     in a finally, identical scoping to the real function.
+  7. dhan_wrapper.has_open_position_for_underlying (real, read-only
+     broker query) - skips the paper entry if the broker already shows a
+     real open FNO position for this underlying, same belt-and-suspenders
+     reasoning _process_one_entry itself uses.
+  8. Liquid-contract resolution (dhan_wrapper.get_liquid_atm_option -
      the real function, resolves a real contract, places no order)
-  7. Option-liquidity entry gate (LIQUIDITY_ENTRY_GATE_ENABLED -
+  9. Option-liquidity entry gate (LIQUIDITY_ENTRY_GATE_ENABLED -
      reversal_filters.check_option_liquidity on the resolved contract;
      defaults true in all 3 packages, added here explicitly - Paper01's
      own template omits it, but "real conditions" for a data-quality
      gate that's live-on-by-default is worth the one extra REST call)
+  10. FUNDS_CHECK_ENABLED (added 23 Sep 2026, same user request) - the
+      SAME real fund_allocation.has_sufficient_bucket_funds check against
+      the real account's real available balance (a live, read-only
+      margin-calculator + fund-limit query - no order is placed either
+      way), so a paper entry that the real account genuinely couldn't
+      afford is skipped exactly like a real one would be, not silently
+      allowed through on paper money.
+
+NOT REPLICATED, and cannot be by construction - both place a REAL order
+at the broker, which contradicts "paper" outright:
+  - BROKER_STOP_LOSS_ENABLED's resting SL-L order. A paper position's
+    protection is the same poll/tick-driven _exit_reason_for check that
+    already backstops every real position even when ITS OWN broker-side
+    stop failed to place - not a weaker guarantee than the real path ever
+    silently falls back to.
+  - Real order placement itself (place_market_order) - the entire point
+    of paper mode.
 
 INTENTIONALLY SKIPPED, same rationale Paper01 already established (no
 real capital at risk to protect): cross_strategy_registry.try_claim,
@@ -85,6 +115,8 @@ from datetime import datetime, time as dtime
 from typing import Callable, Optional
 
 from Options.dhan_client import dhan_wrapper
+import cross_strategy_registry
+import fund_allocation
 import reversal_filters
 import trade_history
 
@@ -213,25 +245,45 @@ async def process_paper_entry(strategy: str, symbol: str, option_type: str) -> d
                 return {"symbol": symbol, "status": "skipped", "reason": "volume_floor_gate",
                         "vol_ratio": vol_ratio, "mode": "paper"}
 
-        cap = cfg.MAX_LIVE_POSITIONS_CE if option_type == "CE" else cfg.MAX_LIVE_POSITIONS_PE
-        if option_type == "CE" and getattr(cfg, "BURST_CAPACITY_ENABLED", False):
-            now_t = datetime.now().time()
-            sh, sm = (int(x) for x in cfg.BURST_WINDOW_START.split(":"))
-            eh, em = (int(x) for x in cfg.BURST_WINDOW_END.split(":"))
-            if dtime(sh, sm) <= now_t <= dtime(eh, em):
-                cap += cfg.BURST_EXTRA_SLOTS_CE
-        current_open = sum(1 for (s, _sym), pos in _positions.items()
-                            if s == strategy and pos.option_type == option_type)
-        if current_open >= cap:
-            return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full", "mode": "paper"}
-        if key in _positions:
-            return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full", "mode": "paper"}
-
-        # Reserve the slot before any await below, matching the real
-        # reserve-then-fill ordering every package's own PositionStore uses.
-        _positions[key] = None  # placeholder, replaced below or removed on failure
-
+    # cross_strategy_registry claim - SAME real, process-wide registry the
+    # real _process_one_entry claims, checked here (before capacity/
+    # reserve) to match its exact ordering. Held for the rest of this
+    # function via the try/finally below, identical scoping to the real
+    # path - matters most in MIXED mode (one package real, another paper).
+    if not await cross_strategy_registry.try_claim(symbol, strategy):
+        return {"symbol": symbol, "status": "skipped", "reason": "claimed_by_another_strategy", "mode": "paper"}
     try:
+        async with _lock:
+            cap = cfg.MAX_LIVE_POSITIONS_CE if option_type == "CE" else cfg.MAX_LIVE_POSITIONS_PE
+            if option_type == "CE" and getattr(cfg, "BURST_CAPACITY_ENABLED", False):
+                now_t = datetime.now().time()
+                sh, sm = (int(x) for x in cfg.BURST_WINDOW_START.split(":"))
+                eh, em = (int(x) for x in cfg.BURST_WINDOW_END.split(":"))
+                if dtime(sh, sm) <= now_t <= dtime(eh, em):
+                    cap += cfg.BURST_EXTRA_SLOTS_CE
+            current_open = sum(1 for (s, _sym), pos in _positions.items()
+                                if s == strategy and pos.option_type == option_type)
+            if current_open >= cap:
+                return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full", "mode": "paper"}
+            if key in _positions:
+                return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full", "mode": "paper"}
+
+            # Reserve the slot before any await below, matching the real
+            # reserve-then-fill ordering every package's own PositionStore uses.
+            _positions[key] = None  # placeholder, replaced below or removed on failure
+
+        # Broker-truth belt-and-suspenders check (real, read-only) - same
+        # reasoning _process_one_entry itself uses: our own in-memory
+        # reservation only guards duplicates within THIS paper pool, not a
+        # real broker position that predates it (another process instance,
+        # a manual trade, or a real position this same underlying already
+        # has open for real, in mixed mode).
+        already_open = await loop.run_in_executor(None, dhan_wrapper.has_open_position_for_underlying, symbol)
+        if already_open:
+            async with _lock:
+                _positions.pop(key, None)
+            return {"symbol": symbol, "status": "skipped", "reason": "already_open_at_broker", "mode": "paper"}
+
         atm = await loop.run_in_executor(None, dhan_wrapper.get_liquid_atm_option, symbol, option_type)
         if atm is None:
             async with _lock:
@@ -252,6 +304,30 @@ async def process_paper_entry(strategy: str, symbol: str, option_type: str) -> d
                         "option_trading_symbol": atm.trading_symbol, "mode": "paper"}
 
         quantity = atm.lot_size * cfg.QUANTITY_LOTS
+
+        if getattr(cfg, "FUNDS_CHECK_ENABLED", False):
+            # Real, read-only margin-calculator + fund-limit query - no
+            # order is placed either way, so this is safe to run exactly
+            # as-is in paper mode. Uses the same "secondary" bucket
+            # Options/Futures/Luxury's real entries check (see fund_
+            # allocation.py's own 2-bucket docstring).
+            try:
+                price_for_funds = await h.get_ltp(atm.trading_symbol)
+                if not price_for_funds:
+                    price_for_funds = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, atm.trading_symbol)
+                sufficient = await fund_allocation.has_sufficient_bucket_funds(
+                    "secondary", symbol, [(atm.security_id, cfg.OPTIONS_PRODUCT, quantity, price_for_funds)],
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("%s %s: could not price the leg for the paper funds check - proceeding optimistically",
+                                  strategy, symbol)
+                sufficient = True
+            if not sufficient:
+                async with _lock:
+                    _positions.pop(key, None)
+                return {"symbol": symbol, "status": "skipped", "reason": "insufficient_funds",
+                        "option_trading_symbol": atm.trading_symbol, "mode": "paper"}
+
         await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, atm.trading_symbol)
 
         entry_price = await h.get_ltp(atm.trading_symbol)
@@ -298,6 +374,8 @@ async def process_paper_entry(strategy: str, symbol: str, option_type: str) -> d
             _positions.pop(key, None)
         logger.exception("%s %s: failed to enter paper position", strategy, symbol)
         return {"symbol": symbol, "status": "error", "reason": str(exc), "mode": "paper"}
+    finally:
+        await cross_strategy_registry.release_claim(symbol, strategy)
 
 
 # --------------------------------------------------------------------- #

@@ -81,7 +81,7 @@ from Futures import config as futures_config
 from K01 import screener_main
 from Luxury import luxury_main
 from Luxury import config as luxury_config
-from Swing import swing_main
+from Swing import swing_main, swing_paper_engine
 from Paper01 import paper01_main
 import universe_bucket
 import breakout_signal
@@ -188,12 +188,22 @@ async def lifespan(app: FastAPI):
                                 # it spans Options/Luxury/Futures, so it can't
                                 # live inside any one package's own lifespan.
                                 paper_engine_task = asyncio.create_task(breakout_paper_engine.paper_engine_monitor_loop())
+                                # Swing's own paper-mode kill switch (23 Sep
+                                # 2026, user request) - separate task/module
+                                # from the one above since Swing has its own
+                                # single-strategy paper engine, not a
+                                # dispatch-table one (see swing_paper_
+                                # engine.py's own docstring). Same "cheap
+                                # no-op when config.PAPER_MODE_ENABLED is
+                                # off" reasoning.
+                                swing_paper_engine_task = asyncio.create_task(swing_paper_engine.paper_engine_monitor_loop())
                                 try:
                                     yield
                                 finally:
                                     if dispatcher_task:
                                         dispatcher_task.cancel()
                                     paper_engine_task.cancel()
+                                    swing_paper_engine_task.cancel()
 
 
 app = FastAPI(title="Chartink -> Dhan Algo Bot", lifespan=lifespan)
