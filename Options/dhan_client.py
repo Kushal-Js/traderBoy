@@ -357,6 +357,20 @@ class DhanWrapper:
         # different instrument spaces silently sharing one lookup dict, and
         # this repo doesn't repeat that mistake twice.
         self._equity_security_id_to_symbol: dict[str, str] = {}
+        # Same idea, MCX-segment futures contracts (added 23 Sep 2026,
+        # Swing/candle_feed.py's own WS-based regime/Supertrend rebuild) -
+        # a SEPARATE dict from the equity one above, not a shared one keyed
+        # by bare security_id, because Dhan's security_id is NOT globally
+        # unique across exchange segments and a real collision between an
+        # NSE and an MCX instrument has already happened in this exact
+        # codebase (trading-skills' incidents/2026-09-17-copper-mcx-
+        # security-id-collision-and-adoption.md - an MCX contract's raw
+        # security_id resolved to an unrelated NSE instrument when no
+        # exchange hint was threaded through). _on_market_tick disambiguates
+        # by the tick's own exchange_segment field before choosing which of
+        # the two dicts to look in, so a numeric clash between the two
+        # spaces can never cross-contaminate either one.
+        self._mcx_security_id_to_symbol: dict[str, str] = {}
         # Fired synchronously from the market-feed's WebSocket thread on
         # every Quote/Full packet (never Ticker - those have no volume
         # field), as (underlying_symbol, ltp, day_cumulative_volume,
@@ -939,13 +953,21 @@ class DhanWrapper:
 
         # Quote/Full packets only (process_quote/process_full both set a
         # "volume" key - Ticker packets, process_ticker, never do) - routed
-        # via the SEPARATE equity lookup dict, never _security_id_to_symbol,
-        # so this can never fire for an option tick or cross-contaminate
-        # the two instrument spaces (see _equity_security_id_to_symbol's
-        # own docstring for the incident that makes this worth being
-        # explicit about).
+        # via the SEPARATE equity/MCX lookup dicts, never _security_id_to_
+        # symbol, so this can never fire for an option tick or cross-
+        # contaminate the two instrument spaces (see _equity_security_id_
+        # to_symbol's own docstring for the incident that makes this worth
+        # being explicit about). Disambiguated by the tick's OWN exchange_
+        # segment (not just "which dict happens to have this numeric id"),
+        # since security_id is not unique across segments - a bare dict
+        # lookup without this check is exactly the class of bug
+        # _mcx_security_id_to_symbol's own docstring describes.
         if self._on_quote_tick_subscribers and "volume" in tick:
-            underlying_symbol = self._equity_security_id_to_symbol.get(security_id)
+            tick_segment = tick.get("exchange_segment")
+            if tick_segment == MarketFeed.MCX:
+                underlying_symbol = self._mcx_security_id_to_symbol.get(security_id)
+            else:
+                underlying_symbol = self._equity_security_id_to_symbol.get(security_id)
             if underlying_symbol is not None:
                 try:
                     volume_val = float(tick["volume"])
@@ -1053,6 +1075,39 @@ class DhanWrapper:
         security_id = self._equity_security_id(underlying_symbol)
         self._equity_security_id_to_symbol.pop(security_id, None)
         instrument = (MarketFeed.NSE, security_id, MarketFeed.Quote)
+        with self._market_feed_lock:
+            self._market_feed_instruments.discard(instrument)
+            feed = self._market_feed
+        if feed is not None:
+            feed.unsubscribe_symbols([instrument])
+
+    def subscribe_mcx_quote(self, underlying_symbol: str, security_id: str) -> None:
+        """MCX-segment counterpart to subscribe_equity_quote above (added 23
+        Sep 2026 for Swing/candle_feed.py). Takes security_id directly
+        rather than resolving it internally - unlike an NSE equity symbol,
+        an MCX symbol's tradeable instrument is a specific FUTURES CONTRACT
+        that rolls monthly (see Swing/signals.py's own get_mcx_futures_
+        contract/_underlying_reference), so the caller already has to
+        resolve it fresh periodically and is better placed to detect a
+        roll than this method would be. Routed through the SEPARATE
+        _mcx_security_id_to_symbol dict, never the equity one - see that
+        dict's own docstring for the real cross-segment collision this
+        avoids."""
+        if not config.ENABLE_WS_FEED:
+            return
+        self._mcx_security_id_to_symbol[security_id] = underlying_symbol
+        instrument = (MarketFeed.MCX, security_id, MarketFeed.Quote)
+        with self._market_feed_lock:
+            self._market_feed_instruments.add(instrument)
+            feed = self._market_feed
+        if feed is not None:
+            feed.subscribe_symbols([instrument])
+
+    def unsubscribe_mcx_quote(self, underlying_symbol: str, security_id: str) -> None:
+        if not config.ENABLE_WS_FEED:
+            return
+        self._mcx_security_id_to_symbol.pop(security_id, None)
+        instrument = (MarketFeed.MCX, security_id, MarketFeed.Quote)
         with self._market_feed_lock:
             self._market_feed_instruments.discard(instrument)
             feed = self._market_feed

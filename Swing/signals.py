@@ -28,7 +28,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 from Options.dhan_client import dhan_wrapper, _compute_ema, _compute_supertrend, IST
-from . import config
+from . import candle_feed, config
 
 logger = logging.getLogger("swing_signals")
 
@@ -84,8 +84,41 @@ def _underlying_reference(symbol: str) -> tuple[str, str, str]:
             _mcx_contract_cache[symbol] = (today, contract.security_id)
             logger.info("%s: resolved MCX futures contract for today's signal reference: security_id=%s",
                         symbol, contract.security_id)
-        return _mcx_contract_cache[symbol][1], "MCX_COMM", "FUTCOM"
-    return dhan_wrapper._equity_security_id(symbol), "NSE_EQ", "EQUITY"
+        security_id, exchange_segment, instrument_type = _mcx_contract_cache[symbol][1], "MCX_COMM", "FUTCOM"
+    else:
+        security_id, exchange_segment, instrument_type = dhan_wrapper._equity_security_id(symbol), "NSE_EQ", "EQUITY"
+
+    if config.USE_WS_CANDLES:
+        try:
+            candle_feed.ensure_subscribed(symbol, security_id, exchange_segment)
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not WS-subscribe for candle feed - REST fallback continues", symbol)
+    return security_id, exchange_segment, instrument_type
+
+
+def _get_intraday_series(
+    symbol: str, security_id: str, exchange_segment: str, instrument_type: str,
+    interval_minutes: int, min_bars: int, lookback_days_override: Optional[int] = None,
+) -> dict:
+    """Tries the local WS-reconstructed candle feed first (candle_feed.py)
+    when config.USE_WS_CANDLES is on, falling back to the existing REST
+    fetch otherwise - zero REST calls once the local series is fresh and
+    already has at least min_bars for THIS call's own need, byte-identical
+    behavior to today whenever it isn't (never raises on an insufficient/
+    empty WS series - just falls through). min_bars must match whatever
+    the caller itself requires downstream (config.REGIME_EMA_PERIOD for
+    regime, config.SUPERTREND_PERIOD + 2 for Supertrend) so a WS series
+    is never accepted with LESS history than REST would have supplied -
+    the hybrid switch can only make a symbol's signal faster to compute,
+    never worse."""
+    if config.USE_WS_CANDLES and candle_feed.is_fresh(symbol, config.WS_STALE_AFTER_SECONDS):
+        ws_data = candle_feed.get_candles_dict(symbol, interval_minutes)
+        if len(ws_data.get("close") or []) >= min_bars:
+            return ws_data
+    return dhan_wrapper.fetch_continuous_intraday(
+        security_id, exchange_segment, instrument_type, interval_minutes,
+        lookback_days_override=lookback_days_override,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -220,9 +253,9 @@ def _fetch_regime_state_once(symbol: str) -> Optional[RegimeState]:
     to keep the last good cached value) actually gets to run."""
     security_id, exchange_segment, instrument_type = _underlying_reference(symbol)
 
-    fast_data = dhan_wrapper.fetch_continuous_intraday(
-        security_id, exchange_segment, instrument_type, config.REGIME_FAST_INTERVAL_MINUTES,
-        lookback_days_override=config.REGIME_EMA_LOOKBACK_DAYS,
+    fast_data = _get_intraday_series(
+        symbol, security_id, exchange_segment, instrument_type, config.REGIME_FAST_INTERVAL_MINUTES,
+        min_bars=config.REGIME_EMA_PERIOD, lookback_days_override=config.REGIME_EMA_LOOKBACK_DAYS,
     )
     if not fast_data.get("close"):
         raise RuntimeError(
@@ -242,9 +275,9 @@ def _fetch_regime_state_once(symbol: str) -> Optional[RegimeState]:
     if fast_ema_arr[-1] is None:
         return None
 
-    slow_data = dhan_wrapper.fetch_continuous_intraday(
-        security_id, exchange_segment, instrument_type, config.REGIME_SLOW_INTERVAL_MINUTES,
-        lookback_days_override=config.REGIME_EMA_LOOKBACK_DAYS,
+    slow_data = _get_intraday_series(
+        symbol, security_id, exchange_segment, instrument_type, config.REGIME_SLOW_INTERVAL_MINUTES,
+        min_bars=config.REGIME_EMA_PERIOD, lookback_days_override=config.REGIME_EMA_LOOKBACK_DAYS,
     )
     if not slow_data.get("close"):
         raise RuntimeError(
@@ -399,8 +432,9 @@ def _fetch_supertrend_state_once(symbol: str, interval_minutes: int) -> Optional
     period/multiplier/the crossover math are identical for either
     timeframe, only the candle interval differs."""
     security_id, exchange_segment, instrument_type = _underlying_reference(symbol)
-    data = dhan_wrapper.fetch_continuous_intraday(
-        security_id, exchange_segment, instrument_type, interval_minutes,
+    data = _get_intraday_series(
+        symbol, security_id, exchange_segment, instrument_type, interval_minutes,
+        min_bars=config.SUPERTREND_PERIOD + 2,
     )
     if not data.get("close"):
         # A COMPLETELY empty response for an already-established watchlist

@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 from Options.dhan_client import dhan_wrapper
 
-from . import config, signals
+from . import candle_feed, config, signals
 from .position_store import position_store
 from .trading_engine import monitor_loop, on_price_tick, reconcile_broker_positions
 from .watchlist import watchlist_store
@@ -204,6 +204,66 @@ async def get_structure_break_signals():
     never-ran."""
     symbols = ["COPPER"] if config.COPPER_STRUCTURE_BREAK_ENABLED else []
     return {"signals": [signals.structure_break_debug_snapshot(s) for s in symbols]}
+
+
+# --------------------------------------------------------------------------- #
+# WS-candle-feed observation endpoints (added 23 Sep 2026, mirroring main.py's
+# own /debug/underlying-feed/* pattern for Options/Luxury/Futures - see
+# Swing/candle_feed.py's module docstring). Deliberately DECOUPLED from
+# config.USE_WS_CANDLES (which stays false by default): subscribing here just
+# starts real 5-min bars accumulating in the background for observation -
+# zero effect on any real entry/exit decision regardless of the flag, and the
+# intended way to let history warm up and be diffed against real REST candles
+# BEFORE ever flipping USE_WS_CANDLES on for a live decision.
+# --------------------------------------------------------------------------- #
+class CandleFeedSubscribeRequest(BaseModel):
+    symbols: list[str]
+
+
+@router.post("/swing/debug/candle-feed/subscribe")
+async def candle_feed_subscribe(payload: CandleFeedSubscribeRequest):
+    """Resolves each symbol's current underlying reference (NSE equity or
+    MCX futures contract, same resolution Swing's own regime/Supertrend
+    fetches use) and WS-subscribes it for local 5-min bar reconstruction.
+    Safe to call regardless of config.USE_WS_CANDLES - purely additive
+    observation, no effect on any real trading decision."""
+    symbols = [s.strip().upper() for s in payload.symbols if s.strip()]
+    loop = asyncio.get_running_loop()
+
+    def _subscribe_all() -> list[str]:
+        subscribed = []
+        for sym in symbols:
+            security_id, exchange_segment, _ = signals._underlying_reference(sym)
+            candle_feed.ensure_subscribed(sym, security_id, exchange_segment)
+            subscribed.append(sym)
+        return subscribed
+
+    subscribed = await loop.run_in_executor(None, _subscribe_all)
+    return {"subscribed": subscribed}
+
+
+@router.get("/swing/debug/candle-feed/snapshot")
+async def candle_feed_snapshot():
+    """Read-only: every symbol subscribed via the endpoint above (or via
+    a live regime/Supertrend fetch cycle once config.USE_WS_CANDLES is
+    on), its 5-min/15-min completed-bar counts, and how long ago its last
+    real tick arrived - see candle_feed.snapshot()'s own docstring."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, candle_feed.snapshot)
+
+
+@router.get("/swing/debug/candle-feed/candles/{symbol}")
+async def candle_feed_candles(symbol: str, interval_minutes: int = 5):
+    """Read-only: this symbol's completed bars at the requested timeframe
+    (5 or 15) as reconstructed from real WS ticks so far - the SAME
+    dict-of-lists shape a REST fetch_continuous_intraday call returns, so
+    it can be diffed directly against one fetched separately for the
+    same symbol/day before trusting it for a real signal."""
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(
+        None, candle_feed.get_candles_dict, symbol.strip().upper(), interval_minutes,
+    )
+    return {"symbol": symbol.strip().upper(), "interval_minutes": interval_minutes, "candles": data}
 
 
 @router.post("/swing/square-off-now")

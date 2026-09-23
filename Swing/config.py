@@ -318,6 +318,31 @@ COPPER_STRUCTURE_BREAK_ENABLED = os.getenv("SWING_COPPER_STRUCTURE_BREAK_ENABLED
 # has no real information gain from refreshing faster than this anyway.
 STRUCTURE_BREAK_REFRESH_SECONDS = int(os.getenv("SWING_STRUCTURE_BREAK_REFRESH_SECONDS", "60"))
 
+# WS-based local candle reconstruction for the regime/Supertrend signals
+# above (added 23 Sep 2026, user request, direct follow-up to Options/
+# Luxury/Futures' own breakout_signal.py rearchitecture the same day -
+# see Swing/candle_feed.py's module docstring for the full design). Swing
+# is the heaviest single source of DH-904 rate-limit hits of any package
+# (confirmed live: continuous ASHOKLEY/NATURALGAS regime+Supertrend REST
+# failures every refresh cycle right after a restart, see trading-skills'
+# incidents/) because it's the only package running TWO REST fetches
+# (5-min AND 15-min) per symbol per refresh, on top of Supertrend's own
+# second-timeframe fetch and (when enabled) COPPER's 3-timeframe
+# structure-break fetch - same account-wide rate limit as everyone else,
+# more calls per symbol than any other package.
+#
+# Same flag-gated, fail-open discipline as OPTIONS/LUXURY/FUTURES_
+# BREAKOUT_USE_WS_CANDLES: default false, zero behavior change until
+# explicitly turned on, and even when on, a fetch always falls back to
+# the existing REST path whenever the local WS-reconstructed series isn't
+# fresh enough or doesn't yet have enough history for that specific call
+# (200-period EMA needs materially more history than breakout_signal.py's
+# own 10-candle lookback ever did - see candle_feed.py's own MAX_BARS_
+# KEPT/lookback sizing for why "flag on" does not mean "instant, silent
+# switch-over" the way it effectively does for the other three).
+USE_WS_CANDLES = os.getenv("SWING_USE_WS_CANDLES", "false").lower() == "true"
+WS_STALE_AFTER_SECONDS = float(os.getenv("SWING_WS_STALE_AFTER_SECONDS", "90"))
+
 # Entry-signal strategy version (user request 14 Sep 2026: "mark current
 # deployed EMA-regime strategy with a version and then add another
 # version to this Combined (15min ST OR EMA) strategy"). Two entry
