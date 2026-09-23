@@ -30,6 +30,26 @@ session. Each side stays independently configurable via
 UNIVERSE_BUCKET_WINDOW_TRADING_DAYS_CE/_PE regardless of what today's
 particular values are.
 
+BOTH RAISED TO 2 AGAIN (23 Sep 2026, user request) - the scan-cadence
+concern above (~13.4 min for a 134-symbol pass under
+BREAKOUT_SCAN_MAX_PER_CYCLE) is now STALE: the same-day WS-walk fix
+(breakout_signal.py's _dispatch_ws_pass/_ws_pass, added 23 Sep 2026 for
+the BANDHANBNK/GAIL/TORNTPHARM incidents) evaluates every WS-fresh
+symbol EVERY CYCLE WITH NO BREAKOUT_SCAN_MAX_PER_CYCLE CAP AT ALL -
+pacing only applies to the rare per-symbol daily-data REST refetch, not
+to routine per-cycle evaluation. universe_dispatcher_loop WS-subscribes
+the FULL merged bucket every cycle (_ws_subscribe_best_effort), so with
+BREAKOUT_USE_WS_CANDLES=true (live on all 3 packages as of this date)
+essentially the whole rolling-window set becomes WS-ready within
+minutes and rides the uncapped path - a 2-day window's ~180 symbols
+(60 CE + 120 PE, measured 23 Sep) is NOT expected to reproduce the old
+134-symbol bottleneck. The only residual exposure is the same one any
+window size already has: a symbol subscribed in roughly the last
+5-10 minutes has no WS history yet and rides the capped/paced REST
+fallback until it warms up - a small, transient handful each cycle,
+never the full merged set. If BREAKOUT_USE_WS_CANDLES is ever turned
+off again, re-check this reasoning before trusting a window above 1.
+
 WHY A SEPARATE MODULE, NOT alert_bucket.py: that module is a single-day
 (today-only), per-symbol SCORED pool feeding the loss-triggered bucket-
 switch feature - a different, still-undecided piece of work (see
@@ -119,8 +139,8 @@ IST = ZoneInfo("Asia/Kolkata")
 # persisted files fresh every call (never mutates/deletes them, see
 # module docstring), so changing either constant takes effect on the
 # very next read, no backfill/cleanup step required.
-WINDOW_TRADING_DAYS_CE = int(os.getenv("UNIVERSE_BUCKET_WINDOW_TRADING_DAYS_CE", "1"))
-WINDOW_TRADING_DAYS_PE = int(os.getenv("UNIVERSE_BUCKET_WINDOW_TRADING_DAYS_PE", "1"))
+WINDOW_TRADING_DAYS_CE = int(os.getenv("UNIVERSE_BUCKET_WINDOW_TRADING_DAYS_CE", "2"))
+WINDOW_TRADING_DAYS_PE = int(os.getenv("UNIVERSE_BUCKET_WINDOW_TRADING_DAYS_PE", "2"))
 
 
 def _window_for(option_type: str) -> int:
