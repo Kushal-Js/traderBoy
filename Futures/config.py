@@ -361,7 +361,13 @@ STALE_ENTRY_ORDER_TIMEOUT_SECONDS = int(os.getenv("FUTURES_STALE_ENTRY_ORDER_TIM
 BREAKOUT_SIGNAL_ENABLED = os.getenv("FUTURES_BREAKOUT_SIGNAL_ENABLED", "true").lower() == "true"
 
 # Consolidation/breakout shape - same values the backtest validated.
-BREAKOUT_LOOKBACK_CANDLES = int(os.getenv("FUTURES_BREAKOUT_LOOKBACK_CANDLES", "10"))
+# LOOKBACK_CANDLES lowered 10->5 (23 Sep 2026, user request) after
+# backtest_breakout_scanner_6vs11_candle_10day.py found the shorter
+# 6-candle window (5 prior + 1 current) held win rate steady (96%) and
+# added +Rs1,611 PnL / 1 extra trade over the 11-candle window across a
+# 10-day sample - see trading-skills' designs/breakout-scanner-vs-real-
+# pnl.md for the full comparison.
+BREAKOUT_LOOKBACK_CANDLES = int(os.getenv("FUTURES_BREAKOUT_LOOKBACK_CANDLES", "5"))
 BREAKOUT_MAX_CONSOLIDATION_RANGE_PCT = float(os.getenv("FUTURES_BREAKOUT_MAX_CONSOLIDATION_RANGE_PCT", "12"))
 BREAKOUT_CLEARANCE_PCT = float(os.getenv("FUTURES_BREAKOUT_CLEARANCE_PCT", "0.3"))
 BREAKOUT_MIN_BODY_PCT = float(os.getenv("FUTURES_BREAKOUT_MIN_BODY_PCT", "0.5"))

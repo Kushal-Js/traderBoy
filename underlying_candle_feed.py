@@ -125,7 +125,8 @@ IST = ZoneInfo("Asia/Kolkata")
 HISTORY_DIR = Path("history")
 
 # Bars kept per symbol - comfortably more than any real signal check's own
-# lookback (BREAKOUT_LOOKBACK_CANDLES=10) plus the 20d/50d DAILY checks
+# lookback (BREAKOUT_LOOKBACK_CANDLES=5, lowered from 10 on 23 Sep 2026 -
+# see Options/config.py's own comment) plus the 20d/50d DAILY checks
 # (which stay on REST regardless - see module docstring; only the 5-min
 # intraday series is WS-sourced). 120 bars = 10 trading hours = TWO full
 # sessions genuinely kept continuous across the day boundary (see _on_tick's
@@ -324,7 +325,8 @@ def _on_tick(underlying_symbol: str, ltp: float, cum_volume: float, t: datetime)
             # today's" - that reasoning was simply wrong: a real chart's
             # 5-min series does NOT reset at midnight, so the FIRST candle
             # right after today's 09:15 open must still see yesterday's
-            # closing bars for a 10-candle consolidation lookback, exactly
+            # closing bars for the consolidation lookback (BREAKOUT_
+            # LOOKBACK_CANDLES, 5 as of 23 Sep 2026), exactly
             # like breakout_signal.py's own REST path (_fetch_5m_sync)
             # already does by fetching BREAKOUT_CANDLE_LOOKBACK_DAYS of
             # continuous history. Only the intra-day CUMULATIVE VOLUME
@@ -393,9 +395,9 @@ def has_bars(symbol: str) -> bool:
     (which fetches real history immediately) until this turns True.
 
     NOTE (23 Sep 2026): "at least one bar" is NOT the same threshold the
-    WS-walk evaluator itself needs (BREAKOUT_LOOKBACK_CANDLES + 1, 11 by
-    default, to compute the prior-N-candles consolidation range) - a
-    symbol with 1-10 bars passes this check but still can't actually be
+    WS-walk evaluator itself needs (BREAKOUT_LOOKBACK_CANDLES + 1, 6 by
+    default as of 23 Sep 2026, to compute the prior-N-candles consolidation
+    range) - a symbol with fewer bars than that passes this check but still can't actually be
     evaluated by _evaluate_ws_walk_sync, which just returns "nothing to
     do yet" every cycle with no error and no checked_through_epoch
     update. Real incident, same day: TORNTPHARM/BIOCON/DIVISLAB sat with
