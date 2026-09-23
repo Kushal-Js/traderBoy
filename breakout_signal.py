@@ -900,24 +900,43 @@ _CAPACITY_REJECTION_REASON = "duplicate_or_capacity_full"  # the exact reason st
 _dispatcher_owned_strategies: set[str] = set()
 _dispatch_turn: dict[str, int] = {"CE": 0, "PE": 0}
 
+# Option types whose target order ROTATES for fairness between
+# structurally-equal peers (added 23 Sep 2026, alongside PE getting its
+# own targets - see _dispatch_to_targets below). CE's two targets
+# (Luxury, Futures) are peers - neither has a claim to go first, hence
+# the existing rotation. PE is deliberately NOT in this set: Options is
+# the PE/bearish bucket's primary destination (user request - it's an
+# options-trading strategy, the natural home for a PE signal), with
+# Futures/Luxury only as capacity fallback behind it, never equal peers
+# to rotate against - so PE's targets are tried in the FIXED order
+# they're configured in (main.py), every cycle.
+_ROTATE_OPTION_TYPES = {"CE"}
+
 
 async def _dispatch_to_targets(option_type: str, sym: str, sig: dict, targets: list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]]) -> bool:
     """Tries each (strategy, cfg, entry_fn) in `targets`, SEQUENTIALLY
     (never concurrently - that would just reintroduce the race this whole
-    dispatcher exists to remove), starting from a rotating position so
-    the offer is DIVIDED across targets over time - see this section's
-    own module-level docstring above. Returns True if EVERY target that
-    declined did so specifically with _CAPACITY_REJECTION_REASON (i.e.
-    this signal is a genuine capacity-backlog candidate - see
-    _dispatch_backlog_cycle below); False if it succeeded OR if at least
-    one decline was for a different reason (a gap-down delay, an RSI
-    block, insufficient funds, ...) - those aren't capacity problems, so
-    a freed slot elsewhere wouldn't fix them, and this signal should NOT
-    be kept waiting on one."""
+    dispatcher exists to remove). For an option_type in _ROTATE_OPTION_TYPES,
+    starts from a rotating position so the offer is DIVIDED across targets
+    over time - see this section's own module-level docstring above. For
+    any other option_type (PE, as of 23 Sep 2026), `targets` is tried in
+    its given FIXED order every time instead - see _ROTATE_OPTION_TYPES'
+    own comment for why PE's targets (Options primary, Futures/Luxury
+    fallback) are priority-ordered, not peers to rotate between. Returns
+    True if EVERY target that declined did so specifically with
+    _CAPACITY_REJECTION_REASON (i.e. this signal is a genuine
+    capacity-backlog candidate - see _dispatch_backlog_cycle below);
+    False if it succeeded OR if at least one decline was for a different
+    reason (a gap-down delay, an RSI block, insufficient funds, ...) -
+    those aren't capacity problems, so a freed slot elsewhere wouldn't
+    fix them, and this signal should NOT be kept waiting on one."""
     n = len(targets)
-    start = _dispatch_turn[option_type] % n
-    order = targets[start:] + targets[:start]
-    _dispatch_turn[option_type] = (_dispatch_turn[option_type] + 1) % n
+    if option_type in _ROTATE_OPTION_TYPES:
+        start = _dispatch_turn[option_type] % n
+        order = targets[start:] + targets[:start]
+        _dispatch_turn[option_type] = (_dispatch_turn[option_type] + 1) % n
+    else:
+        order = targets
 
     all_capacity_blocked = True
     for strategy, _cfg, entry_fn in order:
@@ -998,7 +1017,7 @@ def _momentum_still_valid_sync(symbol: str, direction: str, original_close: floa
         return None
 
 
-async def _dispatch_backlog_cycle(cfg, targets: list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]]) -> None:
+async def _dispatch_backlog_cycle(cfg, targets_by_ot: dict[str, list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]]]) -> None:
     """Drains the capacity backlog - called FIRST each dispatcher tick,
     BEFORE fresh signals get their own scan budget (user's own ordering:
     a freed slot should go to "the next signal OR one which couldn't be
@@ -1014,6 +1033,7 @@ async def _dispatch_backlog_cycle(cfg, targets: list[tuple[str, Any, Callable[[s
     max_age = timedelta(minutes=cfg.BREAKOUT_CAPACITY_BACKLOG_MAX_AGE_MINUTES)
     for option_type in ("CE", "PE"):
         direction = "bullish" if option_type == "CE" else "bearish"
+        targets = targets_by_ot[option_type]
         remaining: list[dict] = []
         for entry in _capacity_backlog[option_type]:
             sym, sig, queued_at = entry["symbol"], entry["signal"], entry["queued_at"]
@@ -1060,7 +1080,7 @@ async def _handle_dispatcher_confirmed_signal(ot: str, sym: str, sig: dict,
         _capacity_backlog[ot].append({"symbol": sym, "signal": sig, "queued_at": datetime.now(IST)})
 
 
-async def _dispatch_ws_pass(cfg, targets: list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]],
+async def _dispatch_ws_pass(cfg, targets_by_ot: dict[str, list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]]],
                              pending_ws: list[tuple[str, str]]) -> None:
     """Dispatcher-side counterpart of _ws_pass - see that function's own
     docstring for the rationale (real incident, BANDHANBNK, today)."""
@@ -1083,17 +1103,19 @@ async def _dispatch_ws_pass(cfg, targets: list[tuple[str, Any, Callable[[str, st
                     it["checked_through_epoch"] = new_checked_through
                     await _persist(w)
         if sig is not None:
-            await _handle_dispatcher_confirmed_signal(ot, sym, sig, targets)
+            await _handle_dispatcher_confirmed_signal(ot, sym, sig, targets_by_ot[ot])
 
 
-async def _dispatch_scan_cycle(cfg, targets: list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]]) -> None:
+async def _dispatch_scan_cycle(cfg, targets_by_ot: dict[str, list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]]]) -> None:
     """Same shape as _scan_cycle, but on a confirmed signal calls
     _dispatch_to_targets instead of a single package's own entry_fn.
     `cfg` supplies the SHARED scan-cadence/threshold settings (read from
     whichever package's config the dispatcher was started with - see
     universe_dispatcher_loop's own docstring: these are already identical
     across Options/Luxury/Futures as of 21 Sep 2026, so any one of the
-    target configs is representative)."""
+    target configs is representative). `targets_by_ot` (added 23 Sep 2026)
+    gives CE and PE their own independent target list/order - see
+    _ROTATE_OPTION_TYPES' own comment for why they can no longer share one."""
     pending: list[tuple[str, str]] = []
     for option_type in ("CE", "PE"):
         w = _watchlist(DISPATCHER_STRATEGY_NAME, option_type)
@@ -1102,7 +1124,7 @@ async def _dispatch_scan_cycle(cfg, targets: list[tuple[str, Any, Callable[[str,
             pending.extend((option_type, sym) for sym, it in w.items.items() if not it["signaled"])
 
     ws_pending, rest_pending = _split_ws_rest(cfg, pending)
-    await _dispatch_ws_pass(cfg, targets, ws_pending)
+    await _dispatch_ws_pass(cfg, targets_by_ot, ws_pending)
 
     rest_pending = _rotate_pending_from_cursor(DISPATCHER_STRATEGY_NAME, rest_pending)
     loop = asyncio.get_running_loop()
@@ -1118,20 +1140,25 @@ async def _dispatch_scan_cycle(cfg, targets: list[tuple[str, Any, Callable[[str,
         await asyncio.sleep(cfg.BREAKOUT_SCAN_PACE_SECONDS)
         if sig is None:
             continue
-        await _handle_dispatcher_confirmed_signal(ot, sym, sig, targets)
+        await _handle_dispatcher_confirmed_signal(ot, sym, sig, targets_by_ot[ot])
     if last_examined is not None:
         _scan_cursor[DISPATCHER_STRATEGY_NAME] = last_examined
 
 
-async def universe_dispatcher_loop(targets: list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]]) -> None:
+async def universe_dispatcher_loop(targets_by_ot: dict[str, list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]]]) -> None:
     """Started ONCE for the whole process (not per-package - see main.py's
-    own lifespan for where), given the list of (strategy, cfg, entry_fn)
-    tuples it should divide universe_bucket-sourced signals between.
-    Registers every listed strategy in _dispatcher_owned_strategies FIRST
-    (before the loop starts touching anything) so _maybe_seed_universe
-    correctly no-ops for all of them from the very first tick - see that
-    function's own docstring for why running both paths at once would
-    double-process every signal.
+    own lifespan for where), given CE's and PE's own (strategy, cfg,
+    entry_fn) target lists to divide universe_bucket-sourced signals
+    between - kept as two independent lists (added 23 Sep 2026, user
+    request), not one shared list, because PE's targets are no longer
+    structural peers of each other the way CE's are: Options is PE's
+    primary destination, Futures/Luxury only its capacity fallback - see
+    _ROTATE_OPTION_TYPES' own comment. Registers every strategy from
+    EITHER list in _dispatcher_owned_strategies FIRST (before the loop
+    starts touching anything) so _maybe_seed_universe correctly no-ops
+    for all of them from the very first tick - see that function's own
+    docstring for why running both paths at once would double-process
+    every signal.
 
     Same unconditional-every-tick shape as signal_scanner_loop: day-
     rollover/post-close truncation for the dispatcher's OWN watchlist
@@ -1139,13 +1166,18 @@ async def universe_dispatcher_loop(targets: list[tuple[str, Any, Callable[[str, 
     from universe_bucket every tick (not just once/day - see
     _sync_universe_bucket_source's own docstring for why), then a scan
     cycle - all gated the same way this module's other loop already is."""
-    if len(targets) < 2:
-        logger.warning("UniverseDispatcher: started with only %d target(s) - dispatching still works "
-                        "but there's nothing to divide between.", len(targets))
-    _dispatcher_owned_strategies.update(strategy for strategy, _cfg, _fn in targets)
-    primary_cfg = targets[0][1]
-    logger.info("UniverseDispatcher started for targets=%s (interval=%ss, max %d/cycle).",
-                [t[0] for t in targets], primary_cfg.BREAKOUT_SCAN_INTERVAL_SECONDS, primary_cfg.BREAKOUT_SCAN_MAX_PER_CYCLE)
+    for option_type, targets in targets_by_ot.items():
+        if len(targets) < 2:
+            logger.warning("UniverseDispatcher: %s started with only %d target(s) - dispatching still works "
+                            "but there's nothing to divide/fall back between.", option_type, len(targets))
+    all_targets = [t for lst in targets_by_ot.values() for t in lst]
+    _dispatcher_owned_strategies.update(strategy for strategy, _cfg, _fn in all_targets)
+    primary_cfg = targets_by_ot["CE"][0][1]
+    for option_type, targets in targets_by_ot.items():
+        logger.info("UniverseDispatcher started for %s targets=%s (%s, interval=%ss, max %d/cycle).",
+                    option_type, [t[0] for t in targets],
+                    "rotates for fairness" if option_type in _ROTATE_OPTION_TYPES else "fixed priority order",
+                    primary_cfg.BREAKOUT_SCAN_INTERVAL_SECONDS, primary_cfg.BREAKOUT_SCAN_MAX_PER_CYCLE)
     while True:
         try:
             for option_type in ("CE", "PE"):
@@ -1173,8 +1205,8 @@ async def universe_dispatcher_loop(targets: list[tuple[str, Any, Callable[[str, 
             if getattr(primary_cfg, "BREAKOUT_USE_WS_CANDLES", False):
                 await _ws_subscribe_best_effort(DISPATCHER_STRATEGY_NAME, sorted(set(ce_symbols) | set(pe_symbols)))
             if primary_cfg.BREAKOUT_SIGNAL_ENABLED and _market_hours_now():
-                await _dispatch_backlog_cycle(primary_cfg, targets)  # backlog gets first look at any freed capacity, see its own docstring
-                await _dispatch_scan_cycle(primary_cfg, targets)
+                await _dispatch_backlog_cycle(primary_cfg, targets_by_ot)  # backlog gets first look at any freed capacity, see its own docstring
+                await _dispatch_scan_cycle(primary_cfg, targets_by_ot)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001

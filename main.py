@@ -158,11 +158,29 @@ async def lifespan(app: FastAPI):
                                     # nested lifespan above has already
                                     # run, so Luxury's/Futures' own
                                     # _breakout_entry_fn are ready to call.
-                                    dispatcher_task = asyncio.create_task(breakout_signal.universe_dispatcher_loop([
-                                        ("Luxury", luxury_config, luxury_main._breakout_entry_fn),
-                                        ("Futures", futures_config, futures_main._breakout_entry_fn),
-                                    ]))
-                                    logger.info("UniverseDispatcher task started (Luxury + Futures).")
+                                    # CE keeps its existing Luxury/Futures-only, rotating-for-
+                                    # fairness split (unchanged 23 Sep 2026). PE gets its OWN
+                                    # target list (added 23 Sep 2026, user request, after
+                                    # discovering universe_bucket's PE bucket was already being
+                                    # live-dispatched to Luxury/Futures with no PE-focused
+                                    # destination at all) - Options FIRST (it's an
+                                    # options-trading strategy, the natural home for a
+                                    # PE/bearish signal), Futures/Luxury only as capacity
+                                    # fallback behind it - see breakout_signal.py's own
+                                    # _ROTATE_OPTION_TYPES comment for why PE is fixed-order,
+                                    # never rotated, unlike CE.
+                                    dispatcher_task = asyncio.create_task(breakout_signal.universe_dispatcher_loop({
+                                        "CE": [
+                                            ("Luxury", luxury_config, luxury_main._breakout_entry_fn),
+                                            ("Futures", futures_config, futures_main._breakout_entry_fn),
+                                        ],
+                                        "PE": [
+                                            ("Options", options_config, option_main._breakout_entry_fn),
+                                            ("Futures", futures_config, futures_main._breakout_entry_fn),
+                                            ("Luxury", luxury_config, luxury_main._breakout_entry_fn),
+                                        ],
+                                    }))
+                                    logger.info("UniverseDispatcher task started (CE: Luxury+Futures, PE: Options>Futures>Luxury).")
                                 # Started unconditionally (cheap no-op when no
                                 # package has BREAKOUT_PAPER_MODE_ENABLED on -
                                 # see breakout_paper_engine.py's own docstring),
