@@ -12,4 +12,4 @@ _compute_supertrend is the pure, module-level Supertrend implementation -
 re-exported here rather than duplicated, same as CopperOptions/Futures
 import it.
 """
-from Options.dhan_client import OrderStatus, _compute_supertrend, dhan_wrapper  # noqa: F401
+from Options.dhan_client import OrderResult, OrderStatus, _compute_supertrend, dhan_wrapper  # noqa: F401

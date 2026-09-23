@@ -49,7 +49,7 @@ from .position_store import (
     price_past_hard_stop, price_past_target, resolve_instrument_side,
     resolved_option_type_for, target_price_for, unrealized_pnl_rs,
 )
-from Options.dhan_client import IST, OrderStatus, dhan_wrapper
+from Options.dhan_client import IST, OrderResult, OrderStatus, dhan_wrapper
 
 logger = logging.getLogger("swing_trading_engine")
 
@@ -541,7 +541,20 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
             is_amo=is_amo, lot_size=lot_size,
         ))
 
-        result = await loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, is_amo)
+        try:
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, is_amo),
+                timeout=_ORDER_RESULT_TIMEOUT_SECONDS,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: could not confirm entry order %s's fill status within %.0fs - treating as a "
+                "failed entry per the strict TRADED-only rule below (broker-side get_pending_order_id "
+                "still guards the next attempt against a real duplicate)",
+                symbol, order_id, _ORDER_RESULT_TIMEOUT_SECONDS,
+            )
+            result = OrderResult(order_id=order_id, status=OrderStatus.TRANSIT, remark="order_confirmation_timeout",
+                                  fill_price=0.0, filled_quantity=0, is_amo=is_amo)
         await position_store.update_order_status(order_id, result.status, result.remark)
 
         # Swing v2 requires a LITERAL TRADED fill to count as a real entry -
@@ -639,7 +652,10 @@ async def _check_broker_stop_already_filled(symbol: str, position: Position) -> 
         return False
     loop = asyncio.get_running_loop()
     try:
-        result = await loop.run_in_executor(None, dhan_wrapper.check_if_order_filled, position.stop_loss_order_id)
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, dhan_wrapper.check_if_order_filled, position.stop_loss_order_id),
+            timeout=_ORDER_STATUS_TIMEOUT_SECONDS,
+        )
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not check broker stop-loss order %s status - falling through to "
                           "the normal poll/tick-driven check this tick", symbol, position.stop_loss_order_id)
@@ -691,7 +707,10 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
                         "restart, or this position's own broker-side SL-L) - cancelling it before placing "
                         "a fresh exit order.", symbol, exit_side, stale_order_id, position.trading_symbol)
         try:
-            await loop.run_in_executor(None, dhan_wrapper.cancel_order, stale_order_id)
+            await asyncio.wait_for(
+                loop.run_in_executor(None, dhan_wrapper.cancel_order, stale_order_id),
+                timeout=_ORDER_STATUS_TIMEOUT_SECONDS,
+            )
         except Exception:  # noqa: BLE001
             logger.exception("%s: could not cancel stale %s order %s - proceeding with a new order anyway",
                               symbol, exit_side, stale_order_id)
@@ -710,7 +729,10 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
                                 "as closed using that order's own real fill price instead of placing a fresh exit.",
                                 symbol, stale_order_id)
                 try:
-                    stale_result = await loop.run_in_executor(None, dhan_wrapper.refresh_order_status, stale_order_id)
+                    stale_result = await asyncio.wait_for(
+                        loop.run_in_executor(None, dhan_wrapper.refresh_order_status, stale_order_id),
+                        timeout=_ORDER_STATUS_TIMEOUT_SECONDS,
+                    )
                     final_exit_price = stale_result.fill_price or exit_price
                 except Exception:  # noqa: BLE001
                     logger.exception("%s: could not fetch stale order %s's own fill price - using %.2f instead",
@@ -770,7 +792,20 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
         ))
         await position_store.set_pending_exit_order(symbol, order_id, reason)
 
-        result = await loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, is_amo)
+        try:
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, is_amo),
+                timeout=_ORDER_RESULT_TIMEOUT_SECONDS,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: could not confirm %s exit order %s's fill status within %.0fs - treating as still "
+                "pending so the 'not yet terminal' handling below applies (pending_exit_order_id stays "
+                "set, background sync resolves it)",
+                symbol, exit_side, order_id, _ORDER_RESULT_TIMEOUT_SECONDS,
+            )
+            result = OrderResult(order_id=order_id, status=OrderStatus.TRANSIT, remark="order_confirmation_timeout",
+                                  fill_price=0.0, filled_quantity=0, is_amo=is_amo)
         await position_store.update_order_status(order_id, result.status, result.remark)
 
         if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
@@ -825,6 +860,21 @@ def _exit_on_cooldown(position: Position) -> bool:
 # Bounds _get_ltp's worst-case wait - see that function's own docstring
 # for the real incident (22 Sep 2026) this fixes.
 _LTP_FETCH_TIMEOUT_SECONDS = 10.0
+
+# Bounds every other blocking Dhan order-status/order-management REST call
+# in this file (refresh_order_status/check_if_order_filled/cancel_order) -
+# same rationale as _LTP_FETCH_TIMEOUT_SECONDS above, generalized 23 Sep
+# 2026 after a live-code audit found the original fix only covered LTP
+# reads: any of these can equally hang on the dhanhq SDK's own 60s default
+# HTTP timeout and freeze monitor_loop the same way.
+_ORDER_STATUS_TIMEOUT_SECONDS = 10.0
+
+# wait_for_order_result has its own internal retry loop (up to 6 REST
+# attempts, ~1s apart) - a longer budget than the single-call timeout
+# above so a legitimately-slow-but-working poll isn't cut off early, while
+# still bounding the worst case (one hung attempt) far below what an
+# unbounded dhanhq timeout could otherwise cost.
+_ORDER_RESULT_TIMEOUT_SECONDS = 30.0
 
 
 async def _get_ltp(position: Position) -> float:
@@ -1039,7 +1089,10 @@ async def _sync_pending_exit_orders() -> None:
         if not position.pending_exit_order_id or position.pending_exit_order_id == EXIT_CLAIMED:
             continue
         try:
-            result = await loop.run_in_executor(None, dhan_wrapper.refresh_order_status, position.pending_exit_order_id, True)
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, dhan_wrapper.refresh_order_status, position.pending_exit_order_id, True),
+                timeout=_ORDER_STATUS_TIMEOUT_SECONDS,
+            )
         except Exception:  # noqa: BLE001
             logger.exception("Could not refresh AMO exit order %s", position.pending_exit_order_id)
             continue
