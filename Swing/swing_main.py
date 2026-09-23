@@ -191,6 +191,21 @@ async def get_signals():
     return {"signals": out}
 
 
+@router.get("/swing/structure-break")
+async def get_structure_break_signals():
+    """Cache-only structure-break state (COPPER today, gated on
+    config.COPPER_STRUCTURE_BREAK_ENABLED) - the structure-break
+    counterpart to /swing/signals above, which can't see this mechanism
+    at all (COPPER bypasses the classic regime/Supertrend path entirely
+    while the flag is on - see _evaluate_entry_signal's own docstring).
+    No live fetch - see signals.structure_break_debug_snapshot's own
+    docstring for what each field means, including why "nothing logged
+    in the server log" alone can't distinguish working-fine from
+    never-ran."""
+    symbols = ["COPPER"] if config.COPPER_STRUCTURE_BREAK_ENABLED else []
+    return {"signals": [signals.structure_break_debug_snapshot(s) for s in symbols]}
+
+
 @router.post("/swing/square-off-now")
 async def manual_square_off():
     """Manual kill-switch: closes every live Swing position immediately -

@@ -616,6 +616,71 @@ def mark_structure_break_consumed(symbol: str, side: int) -> None:
     _structure_break_consumed[symbol] = side
 
 
+def _predict_structure_break_entry_signal(symbol: str) -> Optional[int]:
+    """Read-only prediction of what structure_break_entry_signal would
+    return right now - same logic, but WITHOUT that function's "clear
+    the consumed marker the instant a break is observed" side effect.
+    That mutation must only ever happen from the real entry-evaluation
+    path (_evaluate_entry_signal, on monitor_tick's own cadence) - a
+    debug/introspection read polled at an arbitrary, unrelated cadence
+    must never be able to advance real gating state just by being
+    called. Used only by structure_break_debug_snapshot below."""
+    sig = peek_structure_break_signal(symbol)
+    if sig is None:
+        return None
+    consumed = _structure_break_consumed.get(symbol)
+    if consumed is not None and sig.combined != consumed:
+        consumed = None  # would clear on the real path - predicted here, not applied
+    if sig.combined == 0:
+        return None
+    if consumed is not None and sig.combined == consumed:
+        return None
+    return sig.combined
+
+
+def structure_break_debug_snapshot(symbol: str) -> dict:
+    """Cache-only introspection for a debug endpoint (added 23 Sep 2026,
+    user request after asking whether COPPER's structure-break signal is
+    actually working - unlike /swing/signals' classic regime/Supertrend
+    state, there was no way to see this mechanism's own state without
+    reading server logs and inferring). Lays out everything peek_
+    structure_break_signal/structure_break_entry_signal read from, in one
+    place - never used by real entry/exit logic itself (that stays on
+    the narrower, purpose-built peek_structure_break_signal/structure_
+    break_entry_signal - see their own docstrings for why), this exists
+    only so a human can see WHY the gated entry read is returning what it
+    returns, without guessing from log silence (this file's fail-open
+    refresh only logs on failure, so "nothing logged" is ambiguous
+    between "working fine" and "never ran" without this).
+
+    Deliberately calls _predict_structure_break_entry_signal, NOT
+    structure_break_entry_signal directly - the real function mutates
+    _structure_break_consumed as a side effect (clearing it the instant
+    it observes a break), which a read-only debug endpoint must never
+    trigger on its own, unrelated polling cadence (see that predictor's
+    own docstring).
+
+    `cache_age_seconds` is time since the last refresh ATTEMPT (success
+    or failure - refresh_structure_break_signal stamps the cache either
+    way); `computed_at`/`combined` are from the last SUCCESSFUL
+    computation specifically, which can be older than the last attempt
+    if the symbol has been failing. All fields are None/0 in their
+    natural empty state if nothing has ever run yet for this symbol
+    (e.g. right after startup, or before market hours open the refresh
+    loop's own gate)."""
+    cached = _structure_break_cache.get(symbol)
+    sig = cached[1] if cached else None
+    return {
+        "symbol": symbol,
+        "combined": sig.combined if sig else None,
+        "computed_at": sig.computed_at.isoformat() if sig else None,
+        "cache_age_seconds": (_now_ist() - cached[0]).total_seconds() if cached else None,
+        "fail_streak": _structure_break_fail_streak.get(symbol, 0),
+        "consumed_side": _structure_break_consumed.get(symbol),
+        "effective_entry_signal": _predict_structure_break_entry_signal(symbol),
+    }
+
+
 async def refresh_structure_break_signal(symbol: str) -> None:
     """Does the actual fetch + cache update - called ONLY from
     structure_break_refresh_loop's own independent background task, NEVER
