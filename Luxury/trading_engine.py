@@ -1191,6 +1191,14 @@ async def _check_broker_stop_already_filled(symbol: str, position: Position) -> 
         "solely on the regular poll/tick-driven MAX_LOSS_HIT check",
         symbol, position.stop_loss_order_id, result.status,
     )
+    # Real incident 23 Sep 2026 (MCX): this field used to stay pointed at
+    # the now-dead order forever, so check_if_order_filled's own cache-
+    # first optimization never applied again (a cached TERMINAL status
+    # still triggers a fresh refresh_order_status REST call every time) -
+    # every subsequent tick re-logged the warning above AND re-hit Dhan
+    # for an order we already know is gone. See position_store.
+    # clear_stop_loss_order_id's own docstring for the full writeup.
+    await position_store.clear_stop_loss_order_id(symbol)
     return False
 
 

@@ -366,6 +366,18 @@ class SwingPositionStore:
             if pos and is_more_favorable(pos.instrument_side, current_price, pos.best_price):
                 pos.best_price = current_price
 
+    async def clear_stop_loss_order_id(self, underlying_symbol: str) -> None:
+        """See Luxury/position_store.py's identical method for the full
+        real-incident writeup this fixes (added 23 Sep 2026) - same bug,
+        ported identically: _check_broker_stop_already_filled never
+        cleared this field on REJECTED/CANCELLED/EXPIRED, so every
+        subsequent tick re-checked (and re-REST-called on) the same
+        known-dead order_id forever."""
+        async with self._lock:
+            pos = self.live_positions.get(underlying_symbol)
+            if pos:
+                pos.stop_loss_order_id = None
+
     async def record_order(self, order: OrderRecord) -> None:
         async with self._lock:
             self.orders_today[order.order_id] = order

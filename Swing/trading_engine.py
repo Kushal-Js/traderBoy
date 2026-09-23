@@ -673,6 +673,13 @@ async def _check_broker_stop_already_filled(symbol: str, position: Position) -> 
     logger.warning("%s: broker-side stop-loss order %s ended as %s without firing - this position now relies "
                     "solely on the regular poll/tick-driven MAX_LOSS_HIT check",
                     symbol, position.stop_loss_order_id, result.status)
+    # Real incident 23 Sep 2026 (Luxury MCX) - see Luxury/position_store.py's
+    # clear_stop_loss_order_id docstring for the full writeup: this field
+    # used to stay pointed at the now-dead order forever, so every
+    # subsequent tick re-logged the warning above AND re-hit Dhan for an
+    # order already known to be gone (a cached TERMINAL status still
+    # triggers a fresh REST call every time in check_if_order_filled).
+    await position_store.clear_stop_loss_order_id(symbol)
     return False
 
 

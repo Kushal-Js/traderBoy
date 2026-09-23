@@ -387,8 +387,22 @@ async def test_5_broker_stop_rejected_falls_through_without_crashing():
         assert result is False, result
         assert "SBIN" in store.live_positions, \
             "a REJECTED broker stop must fall through to the normal reactive check, not crash or close anything"
+        # Real incident 23 Sep 2026 (MCX): this field used to stay pointed at the now-dead order
+        # forever, so every subsequent tick re-logged the same warning AND re-hit Dhan for an
+        # order already known to be gone. Must be cleared the moment the terminal status is learned.
+        assert position.stop_loss_order_id is None, (
+            "stop_loss_order_id must be cleared once REJECTED/CANCELLED is learned - otherwise every "
+            "future tick keeps re-checking (and re-REST-calling on) the same known-dead order forever"
+        )
+        check_calls = []
+        odc.dhan_wrapper.check_if_order_filled = lambda order_id: check_calls.append(order_id)
+        result2 = await lte._check_broker_stop_already_filled("SBIN", position)
+        assert result2 is False and not check_calls, (
+            "a SECOND call after clearing must short-circuit on 'not position.stop_loss_order_id' and "
+            "never call check_if_order_filled again - the whole point of clearing the field"
+        )
         print("5. A REJECTED/CANCELLED broker stop-loss order returns False cleanly (logged) instead of "
-              "raising - the position falls through to the pre-existing reactive MAX_LOSS_HIT check: PASSED")
+              "raising, clears stop_loss_order_id so it's never re-checked again: PASSED")
     finally:
         odc.dhan_wrapper.check_if_order_filled = real_check
         lte.config.BROKER_STOP_LOSS_ENABLED = real_enabled

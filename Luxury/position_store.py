@@ -242,6 +242,28 @@ class PositionStore:
             if pos and current_price > pos.highest_price:
                 pos.highest_price = current_price
 
+    async def clear_stop_loss_order_id(self, underlying_symbol: str) -> None:
+        """Called from _check_broker_stop_already_filled the moment a
+        broker-side stop-loss order is found REJECTED/CANCELLED/EXPIRED
+        without firing (added 23 Sep 2026, real incident - see trading-
+        skills' own write-up: MCX's resting SL order was found cancelled
+        and this field was never cleared, so EVERY subsequent tick kept
+        re-checking the same known-dead order_id - check_if_order_filled
+        only skips a fresh REST call while the cache still shows an
+        UNTERMINAL status, so a cached terminal status like CANCELLED
+        triggers a real refresh_order_status REST call on literally every
+        tick for the rest of the position's life. Confirmed live: ~0.6
+        redundant REST calls/second, continuously, plus the same warning
+        re-logged every tick - both silenced by clearing this once the
+        terminal status is learned, exactly matching this field's own
+        documented intent ("Cleared to None whenever the position closes
+        through ANY path" - REJECTED/CANCELLED/EXPIRED without firing is
+        a path too, just one that leaves the position still open)."""
+        async with self._lock:
+            pos = self.live_positions.get(underlying_symbol)
+            if pos:
+                pos.stop_loss_order_id = None
+
     async def record_order(self, order: OrderRecord) -> None:
         async with self._lock:
             self.orders_today[order.order_id] = order
