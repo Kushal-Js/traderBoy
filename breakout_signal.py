@@ -355,16 +355,36 @@ def _fetch_5m_hybrid(symbol: str, cfg) -> dict:
     user's own framing). Inert unless cfg.BREAKOUT_USE_WS_CANDLES is true
     (default false) - falls straight through to the original REST-only
     _fetch_5m_sync otherwise, byte-for-byte the same behavior as before
-    this function existed."""
+    this function existed.
+
+    TIGHTENED 23 Sep 2026 (real incident, same root cause as _split_ws_
+    rest's own same-day fix): used to trust ANY non-empty WS data once
+    `is_fresh` was true, even a freshly-subscribed symbol's 1-10 thin
+    bars - which meant a REST-pending symbol (routed there BY _split_ws_
+    rest specifically because it doesn't have enough bars yet) landed
+    right back on that same too-thin WS data here anyway, since this
+    function had no bar-count floor of its own. That silently defeated
+    the "ASAP REST evaluation for a thin-history symbol" fix one layer
+    up - confirmed live: TORNTPHARM/BIOCON/DIVISLAB kept getting handed
+    their own 3-5 WS bars, never a real REST fetch, never enough rows for
+    _check_candle to evaluate anything. Now requires the SAME BREAKOUT_
+    LOOKBACK_CANDLES + 1 floor _evaluate_ws_walk_sync itself needs before
+    trusting the WS data at all - anything thinner genuinely falls
+    through to a real REST call (full BREAKOUT_CANDLE_LOOKBACK_DAYS of
+    history, immediately), which is the whole point of this being called
+    "hybrid" rather than "WS-if-it-exists"."""
     if not getattr(cfg, "BREAKOUT_USE_WS_CANDLES", False):
         return _fetch_5m_sync(symbol, cfg.BREAKOUT_CANDLE_LOOKBACK_DAYS)
     import underlying_candle_feed
     stale_after = getattr(cfg, "BREAKOUT_WS_STALE_AFTER_SECONDS", 90)
-    if underlying_candle_feed.is_fresh(symbol, stale_after):
+    needed_bars = cfg.BREAKOUT_LOOKBACK_CANDLES + 1
+    if (underlying_candle_feed.is_fresh(symbol, stale_after)
+            and underlying_candle_feed.bar_count(symbol) >= needed_bars):
         data = underlying_candle_feed.get_candles_dict(symbol)
         if data:
             return data
-    # Not subscribed yet, no tick received yet, or gone stale - REST fallback.
+    # Not subscribed yet, no tick received yet, too little history yet,
+    # or gone stale - REST fallback.
     return _fetch_5m_sync(symbol, cfg.BREAKOUT_CANDLE_LOOKBACK_DAYS)
 
 
@@ -664,27 +684,43 @@ async def _handle_confirmed_signal(strategy: str, ot: str, sym: str, sig: dict,
 def _split_ws_rest(cfg, pending: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     """Splits `pending` into (ws_pending, rest_pending) - a symbol goes to
     ws_pending only if cfg.BREAKOUT_USE_WS_CANDLES is on AND
-    underlying_candle_feed reports it BOTH fresh (ticking) AND has at
-    least one completed bar (something to actually walk). A symbol that
-    just joined the watchlist starts ticking immediately but has zero WS
-    candles for its first ~5 minutes (no REST backfill on subscribe - see
-    underlying_candle_feed's module docstring); routing it to ws_pending
-    anyway meant `_evaluate_ws_walk_sync` had nothing to check and a real
-    breakout could sit unevaluated for up to ~10 minutes even though a
-    REST call would see the actual last completed candle immediately.
-    Falls to rest_pending instead (real incident, GAIL, 23 Sep 2026 -
-    see trading-skills), same as the existing thin/dead-WS-stream
-    fallback via _fetch_5m_hybrid - this split is purely about which
-    EVALUATION strategy - single-snapshot vs. full-history walk - a
-    symbol gets, not a new source-of-truth decision."""
+    underlying_candle_feed reports it BOTH fresh (ticking) AND holds
+    ENOUGH completed bars for _evaluate_ws_walk_sync to actually run a
+    check (BREAKOUT_LOOKBACK_CANDLES + 1 - the same `needed` threshold
+    that function itself uses). A symbol that just joined the watchlist
+    starts ticking immediately but has zero WS candles for its first ~5
+    minutes (no REST backfill on subscribe - see underlying_candle_
+    feed's module docstring); routing it to ws_pending anyway meant
+    `_evaluate_ws_walk_sync` had nothing to check and a real breakout
+    could sit unevaluated for up to ~10 minutes even though a REST call
+    would see the actual last completed candle immediately. Falls to
+    rest_pending instead (real incident, GAIL, 23 Sep 2026 - see
+    trading-skills), same as the existing thin/dead-WS-stream fallback
+    via _fetch_5m_hybrid - this split is purely about which EVALUATION
+    strategy - single-snapshot vs. full-history walk - a symbol gets,
+    not a new source-of-truth decision.
+
+    TIGHTENED same day (real incident #2, same root cause one level
+    deeper): the GAIL fix above only checked has_bars() (>=1 bar), not
+    "enough bars to actually walk" - so a symbol with 1-10 bars still
+    passed as ws_pending and then sat silently unevaluated (no error, no
+    checked_through_epoch update, nothing) until it crossed 11 bars on
+    its own, up to ~40+ minutes for a fresh alert. Confirmed live:
+    TORNTPHARM/BIOCON/DIVISLAB (3-5 bars each) never got a single
+    evaluation attempt the same afternoon. Now compares against
+    underlying_candle_feed.bar_count() directly instead of the coarser
+    has_bars(), so a thin-history symbol correctly falls to REST (full
+    history, immediate ASAP evaluation) until it's genuinely walk-ready,
+    closing the exact gap the first fix left open."""
     if not getattr(cfg, "BREAKOUT_USE_WS_CANDLES", False):
         return [], pending
     import underlying_candle_feed
     stale_after = getattr(cfg, "BREAKOUT_WS_STALE_AFTER_SECONDS", 90)
+    needed_bars = cfg.BREAKOUT_LOOKBACK_CANDLES + 1
     ws_pending, rest_pending = [], []
     for ot, sym in pending:
         is_ws_ready = (underlying_candle_feed.is_fresh(sym, stale_after)
-                       and underlying_candle_feed.has_bars(sym))
+                       and underlying_candle_feed.bar_count(sym) >= needed_bars)
         (ws_pending if is_ws_ready else rest_pending).append((ot, sym))
     return ws_pending, rest_pending
 

@@ -390,10 +390,36 @@ def has_bars(symbol: str) -> bool:
     minutes after subscribe (no REST backfill on subscribe - see module
     docstring), which used to route it into the WS-walk path anyway with
     nothing to evaluate. Callers should fall back to the REST path
-    (which fetches real history immediately) until this turns True."""
+    (which fetches real history immediately) until this turns True.
+
+    NOTE (23 Sep 2026): "at least one bar" is NOT the same threshold the
+    WS-walk evaluator itself needs (BREAKOUT_LOOKBACK_CANDLES + 1, 11 by
+    default, to compute the prior-N-candles consolidation range) - a
+    symbol with 1-10 bars passes this check but still can't actually be
+    evaluated by _evaluate_ws_walk_sync, which just returns "nothing to
+    do yet" every cycle with no error and no checked_through_epoch
+    update. Real incident, same day: TORNTPHARM/BIOCON/DIVISLAB sat with
+    3-5 bars each, is_fresh=True, has_bars=True - routed to the WS-walk
+    path by breakout_signal.py's _split_ws_rest and then silently never
+    evaluated at all, for up to 40+ minutes, when a REST call would have
+    seen their real history immediately. See bar_count() below, which
+    _split_ws_rest now uses instead of this function for that decision -
+    has_bars() itself is kept as-is (still a correct, narrower claim: at
+    least one bar to walk) for any other caller that only needs that."""
     with _lock:
         st = _state.get(symbol)
         return bool(st and st.bars)
+
+
+def bar_count(symbol: str) -> int:
+    """Number of COMPLETED bars currently held for this symbol - lets a
+    caller compare against its OWN "how many do I actually need"
+    threshold (e.g. breakout_signal.py's BREAKOUT_LOOKBACK_CANDLES + 1)
+    instead of has_bars()'s fixed ">= 1" answer - see that function's own
+    updated docstring for the real gap this closes."""
+    with _lock:
+        st = _state.get(symbol)
+        return len(st.bars) if st is not None else 0
 
 
 def get_candles_dict(symbol: str) -> dict:
