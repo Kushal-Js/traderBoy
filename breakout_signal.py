@@ -93,6 +93,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
@@ -106,10 +107,28 @@ logger = logging.getLogger("breakout_signal")
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# Own single-thread pool for this feature's blocking REST reads - see
+# Own thread pool for this feature's blocking REST/candle reads - see
 # alert_bucket.py's identical rationale: its own REST traffic must never
-# starve the shared pool real order placement depends on.
-_SCAN_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="breakout-signal")
+# starve the shared pool real order placement depends on. Was hardcoded
+# to a single worker until 23 Sep 2026 - every evaluation across every
+# strategy (Options/Luxury/Futures) AND the UniverseDispatcher, both the
+# WS-walk path and the REST-fallback path, shared this ONE thread, so a
+# single slow/rate-limited REST call could transiently stall every OTHER
+# strategy's otherwise-instant WS-walk evaluation behind it (found via a
+# live audit the same day this codebase closed the WS-subscribe coverage
+# gap - see record_alert's own docstring - which meaningfully increased
+# how much work funnels through this pool). Configurable, not just
+# bumped outright, because more workers also means more CONCURRENT REST
+# calls at peak (previously naturally serialized to one at a time) - the
+# same account-wide DH-904 rate limit every other package already
+# contends with, so this needs to stay tunable without a code change if
+# it ever needs dialing back. Default 3 (up from 1): enough that one
+# stuck call can no longer block everything, deliberately NOT high
+# enough to meaningfully multiply peak REST pressure - never shared with
+# the pool real order placement depends on, regardless of this value.
+_SCAN_EXECUTOR = ThreadPoolExecutor(
+    max_workers=int(os.getenv("BREAKOUT_SCAN_EXECUTOR_WORKERS", "3")), thread_name_prefix="breakout-signal",
+)
 _LOCK = asyncio.Lock()
 
 # Round-robin position for _scan_cycle/_dispatch_scan_cycle, keyed by
@@ -455,6 +474,17 @@ def _check_candle(rows: list[tuple], idx: int, daily: dict, direction: str, cfg)
 
 
 _daily_cache: dict[str, tuple[date, dict]] = {}  # symbol -> (date, daily_dict)
+# Guards _daily_cache's read-check/write only, NEVER held across the
+# actual blocking REST call below - added 23 Sep 2026 alongside
+# _SCAN_EXECUTOR's move off a single worker, since concurrent workers can
+# now genuinely race on this dict (impossible before, when only one
+# worker thread ever touched it). Two workers racing a cache MISS for the
+# same symbol at the same instant can still both fetch (a benign,
+# self-healing duplicate REST call, last write wins) - this lock isn't
+# trying to prevent that (would need per-symbol fetch coordination, real
+# complexity for a rare, harmless race), only to keep the dict's own
+# get/set consistent under genuine concurrent access.
+_daily_cache_lock = threading.Lock()
 
 
 def _fetch_daily_cached(symbol: str, cfg) -> tuple[dict, bool]:
@@ -468,12 +498,14 @@ def _fetch_daily_cached(symbol: str, cfg) -> tuple[dict, bool]:
     that actually hit Dhan, not the (overwhelmingly common, after the
     first pass of the day) cache-hit case."""
     today = _today()
-    cached = _daily_cache.get(symbol)
-    if cached is not None and cached[0] == today:
-        return cached[1], False
+    with _daily_cache_lock:
+        cached = _daily_cache.get(symbol)
+        if cached is not None and cached[0] == today:
+            return cached[1], False
     daily = _fetch_daily_sync(symbol, cfg.BREAKOUT_DAILY_LOOKBACK_DAYS)
     if daily.get("close"):
-        _daily_cache[symbol] = (today, daily)
+        with _daily_cache_lock:
+            _daily_cache[symbol] = (today, daily)
     return daily, True
 
 
