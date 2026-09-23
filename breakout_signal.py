@@ -270,7 +270,8 @@ async def record_alert(strategy: str, option_type: str, stocks: list[str]) -> No
                 if not sym:
                     continue
                 if sym not in w.items:
-                    w.items[sym] = {"first_alert_at": now, "signaled": False, "signaled_at": None}
+                    w.items[sym] = {"first_alert_at": now, "signaled": False, "signaled_at": None,
+                                     "checked_through_epoch": None}
             await _persist(w)
     except Exception:  # noqa: BLE001
         logger.exception("%s %s: record_alert failed - no effect on trading", strategy, option_type)
@@ -343,92 +344,317 @@ def _fetch_daily_sync(symbol: str, lookback_days: int) -> dict:
     return (resp.get("data") or {}) if isinstance(resp, dict) else {}
 
 
+def _rows_from_candles(candles: dict) -> list[tuple]:
+    """Drops a still-forming candle and any zero-volume padding bar - same
+    filter every candle source (REST or WS) needs before check logic sees
+    it. `underlying_candle_feed.get_candles_dict` already never returns
+    the still-forming bar, but the epoch filter is kept here too rather
+    than trusted per-source, so this function is safe regardless of which
+    fetcher produced `candles`."""
+    ts = candles.get("timestamp") or []
+    opens, highs, lows, closes, vols = (candles.get(k) or [] for k in ("open", "high", "low", "close", "volume"))
+    now_epoch = time.time()
+    return [
+        (e, o, h, l, c, v) for e, o, h, l, c, v in zip(ts, opens, highs, lows, closes, vols)
+        if v and e + 300 <= now_epoch
+    ]
+
+
+def _check_candle(rows: list[tuple], idx: int, daily: dict, direction: str, cfg) -> Optional[dict]:
+    """Pure per-candle check - the same 7 checks (5 candle-based, 2 daily-
+    based) _evaluate_signal_sync always ran, with `rows[idx]` as the
+    'current' candle. Split out of that single-snapshot function (added
+    23 Sep 2026, user request) so a WS-fed symbol's entire unchecked
+    candle history can be walked one candle at a time in one pass - see
+    _evaluate_ws_walk_sync's own docstring for why a single-snapshot check
+    was silently losing real signals to the scan-cadence bottleneck.
+    `daily` is passed in (not fetched here) so a multi-candle walk fetches
+    it once, not once per candle - see _fetch_daily_cached."""
+    needed = cfg.BREAKOUT_LOOKBACK_CANDLES + 1
+    if idx < needed - 1:
+        return None
+    window = rows[idx - needed + 1: idx + 1]
+    prior, current = window[:-1], window[-1]
+    _e, c_open, c_high, c_low, c_close, c_vol = current
+
+    consolidation_high = max(max(o, c) for _e, o, h, l, c, v in prior)
+    consolidation_low = min(min(o, c) for _e, o, h, l, c, v in prior)
+    if consolidation_low <= 0:
+        return None
+    range_pct = (consolidation_high - consolidation_low) / consolidation_low * 100
+    if not (range_pct <= cfg.BREAKOUT_MAX_CONSOLIDATION_RANGE_PCT):
+        return None
+
+    clearance = 1 + cfg.BREAKOUT_CLEARANCE_PCT / 100
+    if direction == "bullish":
+        if not (c_close >= consolidation_high * clearance):
+            return None
+    else:
+        if not (c_close <= consolidation_low * (2 - clearance)):
+            return None
+
+    body_pct = abs(c_close - c_open) / c_open * 100
+    if not (body_pct >= cfg.BREAKOUT_MIN_BODY_PCT):
+        return None
+
+    avg_prior_vol = _sma([v for _e, o, h, l, c, v in prior])
+    relative_volume = c_vol / avg_prior_vol if avg_prior_vol > 0 else 0
+    if not (relative_volume >= cfg.BREAKOUT_MIN_RELATIVE_VOLUME):
+        return None
+
+    d_closes, d_vols = daily.get("close") or [], daily.get("volume") or []
+    if len(d_closes) < 50:
+        return None
+    last20c, last50c, last20v = d_closes[-20:], d_closes[-50:], d_vols[-20:]
+
+    if _sma(last20v) < cfg.BREAKOUT_MIN_AVG_DAILY_VOLUME:
+        return None
+
+    if direction == "bullish":
+        high20, high50 = max(last20c), max(last50c)
+        pct_from_20 = (high20 - c_close) / high20 * 100
+        pct_from_50 = (high50 - c_close) / high50 * 100
+        if not (pct_from_20 <= cfg.BREAKOUT_MAX_PCT_FROM_HIGH_LOW or pct_from_50 <= cfg.BREAKOUT_MAX_PCT_FROM_HIGH_LOW):
+            return None
+        if not (c_close > _sma(last20c) and c_close > _sma(last50c)):
+            return None
+    else:
+        low20, low50 = min(last20c), min(last50c)
+        pct_from_20 = (c_close - low20) / low20 * 100
+        pct_from_50 = (c_close - low50) / low50 * 100
+        if not (pct_from_20 <= cfg.BREAKOUT_MAX_PCT_FROM_HIGH_LOW or pct_from_50 <= cfg.BREAKOUT_MAX_PCT_FROM_HIGH_LOW):
+            return None
+        if not (c_close < _sma(last20c) and c_close < _sma(last50c)):
+            return None
+
+    return {
+        "symbol": None, "close": c_close, "range_pct": round(range_pct, 2),
+        "body_pct": round(body_pct, 2), "relative_volume": round(relative_volume, 2),
+        "detected_at": datetime.now(IST).isoformat(), "candle_epoch": _e,
+    }
+
+
+_daily_cache: dict[str, tuple[date, dict]] = {}  # symbol -> (date, daily_dict)
+
+
+def _fetch_daily_cached(symbol: str, cfg) -> tuple[dict, bool]:
+    """20d/50d daily closes/volumes don't change intraday - fetching them
+    fresh every scan cycle (the only behavior before 23 Sep 2026) was
+    needless REST load, and would become a real rate-limit risk once a
+    WS-fresh symbol can be walked through many candles per cycle instead
+    of just one (see _evaluate_ws_walk_sync). Cached per symbol per
+    calendar date; refetched once the date rolls over. Returns
+    (daily_dict, did_fetch) - did_fetch lets a caller pace ONLY the calls
+    that actually hit Dhan, not the (overwhelmingly common, after the
+    first pass of the day) cache-hit case."""
+    today = _today()
+    cached = _daily_cache.get(symbol)
+    if cached is not None and cached[0] == today:
+        return cached[1], False
+    daily = _fetch_daily_sync(symbol, cfg.BREAKOUT_DAILY_LOOKBACK_DAYS)
+    if daily.get("close"):
+        _daily_cache[symbol] = (today, daily)
+    return daily, True
+
+
 def _evaluate_signal_sync(symbol: str, direction: str, cfg) -> Optional[dict]:
-    """Blocking. Returns signal detail dict if every check passes on the
-    most recently completed 5-min candle, else None. Never raises -
-    caller treats any exception as "no signal yet, try again next cycle"."""
+    """Blocking, REST/hybrid path - UNCHANGED behavior from before 23 Sep
+    2026: checks only the most recently completed candle. Kept exactly
+    this way for symbols not on a fresh WS feed - walking every unchecked
+    candle every cycle (like the WS path now does) would reintroduce the
+    real REST rate-limit risk underlying_candle_feed.py was built to
+    avoid (each candle-source fetch here is a REST round-trip, unlike the
+    WS path's free in-memory read). Never raises - caller treats any
+    exception as "no signal yet, try again next cycle"."""
     try:
         candles = _fetch_5m_hybrid(symbol, cfg)
-        ts = candles.get("timestamp") or []
-        opens, highs, lows, closes, vols = (candles.get(k) or [] for k in ("open", "high", "low", "close", "volume"))
-        # Drop a still-forming candle and any zero-volume padding bar.
-        now_epoch = time.time()
-        rows = [
-            (e, o, h, l, c, v) for e, o, h, l, c, v in zip(ts, opens, highs, lows, closes, vols)
-            if v and e + 300 <= now_epoch
-        ]
-        needed = cfg.BREAKOUT_LOOKBACK_CANDLES + 1
-        if len(rows) < needed:
+        rows = _rows_from_candles(candles)
+        if not rows:
             return None
-        window = rows[-needed:]
-        prior, current = window[:-1], window[-1]
-        _e, c_open, c_high, c_low, c_close, c_vol = current
-
-        consolidation_high = max(max(o, c) for _e, o, h, l, c, v in prior)
-        consolidation_low = min(min(o, c) for _e, o, h, l, c, v in prior)
-        if consolidation_low <= 0:
-            return None
-        range_pct = (consolidation_high - consolidation_low) / consolidation_low * 100
-        if not (range_pct <= cfg.BREAKOUT_MAX_CONSOLIDATION_RANGE_PCT):
-            return None
-
-        clearance = 1 + cfg.BREAKOUT_CLEARANCE_PCT / 100
-        if direction == "bullish":
-            if not (c_close >= consolidation_high * clearance):
-                return None
-        else:
-            if not (c_close <= consolidation_low * (2 - clearance)):
-                return None
-
-        body_pct = abs(c_close - c_open) / c_open * 100
-        if not (body_pct >= cfg.BREAKOUT_MIN_BODY_PCT):
-            return None
-
-        avg_prior_vol = _sma([v for _e, o, h, l, c, v in prior])
-        relative_volume = c_vol / avg_prior_vol if avg_prior_vol > 0 else 0
-        if not (relative_volume >= cfg.BREAKOUT_MIN_RELATIVE_VOLUME):
-            return None
-
-        daily = _fetch_daily_sync(symbol, cfg.BREAKOUT_DAILY_LOOKBACK_DAYS)
-        d_closes, d_vols = daily.get("close") or [], daily.get("volume") or []
-        if len(d_closes) < 50:
-            return None
-        last20c, last50c, last20v = d_closes[-20:], d_closes[-50:], d_vols[-20:]
-
-        if _sma(last20v) < cfg.BREAKOUT_MIN_AVG_DAILY_VOLUME:
-            return None
-
-        if direction == "bullish":
-            high20, high50 = max(last20c), max(last50c)
-            pct_from_20 = (high20 - c_close) / high20 * 100
-            pct_from_50 = (high50 - c_close) / high50 * 100
-            if not (pct_from_20 <= cfg.BREAKOUT_MAX_PCT_FROM_HIGH_LOW or pct_from_50 <= cfg.BREAKOUT_MAX_PCT_FROM_HIGH_LOW):
-                return None
-            if not (c_close > _sma(last20c) and c_close > _sma(last50c)):
-                return None
-        else:
-            low20, low50 = min(last20c), min(last50c)
-            pct_from_20 = (c_close - low20) / low20 * 100
-            pct_from_50 = (c_close - low50) / low50 * 100
-            if not (pct_from_20 <= cfg.BREAKOUT_MAX_PCT_FROM_HIGH_LOW or pct_from_50 <= cfg.BREAKOUT_MAX_PCT_FROM_HIGH_LOW):
-                return None
-            if not (c_close < _sma(last20c) and c_close < _sma(last50c)):
-                return None
-
-        return {
-            "symbol": symbol, "close": c_close, "range_pct": round(range_pct, 2),
-            "body_pct": round(body_pct, 2), "relative_volume": round(relative_volume, 2),
-            "detected_at": datetime.now(IST).isoformat(),
-        }
+        daily, _did_fetch = _fetch_daily_cached(symbol, cfg)
+        sig = _check_candle(rows, len(rows) - 1, daily, direction, cfg)
+        if sig:
+            sig["symbol"] = symbol
+        return sig
     except Exception:  # noqa: BLE001
         logger.exception("%s: breakout-signal evaluation failed - will retry next cycle", symbol)
         return None
+
+
+def _evaluate_ws_walk_sync(symbol: str, direction: str, cfg,
+                            checked_through_epoch: Optional[float]) -> tuple[Optional[dict], Optional[float], bool]:
+    """Blocking, WS-only path (added 23 Sep 2026, user request after a
+    real, quantified miss the same day: BANDHANBNK's own qualifying
+    candle was 09:15, but the scan-cadence bottleneck
+    (BREAKOUT_SCAN_MAX_PER_CYCLE/BREAKOUT_SCAN_INTERVAL_SECONDS means a
+    ~90-symbol combined watchlist only gets one look per symbol roughly
+    every ~9 minutes) meant the live check didn't happen until ~09:22 -
+    by then the underlying had already run and the real ATM CE entry cost
+    ~3x more than it would have at 09:15, and that late, already-extended
+    entry stopped out for a real loss minutes later.
+    _evaluate_signal_sync's single-snapshot design (only ever the MOST
+    RECENT candle) throws away every candle it wasn't looking at the
+    instant it closed - once missed, gone for the day, even though the
+    data was sitting right there.
+
+    For a WS-fresh symbol the candle history is a free, local, already-
+    persisted list (underlying_candle_feed.get_candles_dict, up to
+    MAX_BARS_KEPT=120 bars) - no REST cost to check every unchecked
+    candle instead of just the last one. Walks forward from the first
+    candle after `checked_through_epoch` (None = never checked - starts
+    from the earliest evaluable candle, so a symbol added mid-session
+    still gets its full day's history examined, not just whatever candle
+    happens to be 'current' the moment it's first scanned), returning the
+    FIRST one that confirms (preserving the existing "first qualifying
+    candle wins" semantics) or None if none did. Either way also returns
+    the epoch of the last candle actually examined (so the caller can
+    advance checked_through_epoch and never re-examine an already-cleared
+    candle) and whether a fresh daily REST fetch happened this call (so
+    the caller can pace only that, not the common all-cached case).
+
+    STALE-CANDLE GUARD: a walked candle that ISN'T the freshest one
+    available (i.e. real time has passed since it closed - the exact
+    "was missed, found on replay" case this function exists for) is
+    re-validated against the LATEST close via reversal_filters.
+    check_underlying_move_confirms_exit before being treated as
+    tradeable - the same real, already-backtested 0.10%-move check the
+    capacity backlog already trusts to answer "is a past signal still
+    live", just pointed at a replayed candle instead of a backlog entry.
+    Without this, retroactively catching a qualifying candle from long
+    ago could fire a real entry into a breakout that has since fully
+    reversed - not a hypothetical: this is exactly the failure mode a
+    fixed 'just check every unchecked candle' walk would otherwise have.
+    A stale-and-reversed candle is skipped (not returned, not treated as
+    the walk's answer) and the walk continues to the next candle - a
+    LATER, still-fresh qualifying candle should still fire."""
+    try:
+        import underlying_candle_feed
+        import reversal_filters
+        candles = underlying_candle_feed.get_candles_dict(symbol)
+        rows = _rows_from_candles(candles)
+        needed = cfg.BREAKOUT_LOOKBACK_CANDLES + 1
+        if len(rows) < needed:
+            return None, checked_through_epoch, False
+
+        start_idx = needed - 1
+        if checked_through_epoch is not None:
+            first_unchecked = next((i for i, r in enumerate(rows) if r[0] > checked_through_epoch), None)
+            if first_unchecked is None:
+                return None, checked_through_epoch, False  # every row already checked
+            start_idx = max(start_idx, first_unchecked)
+        if start_idx >= len(rows):
+            return None, checked_through_epoch, False
+
+        daily, did_fetch = _fetch_daily_cached(symbol, cfg)
+        current_close = rows[-1][4]
+        option_type = "CE" if direction == "bullish" else "PE"
+        for idx in range(start_idx, len(rows)):
+            sig = _check_candle(rows, idx, daily, direction, cfg)
+            if sig is None:
+                continue
+            if idx < len(rows) - 1:
+                reversed_against = reversal_filters.check_underlying_move_confirms_exit(
+                    sig["close"], current_close, option_type)
+                if reversed_against:
+                    logger.info("%s: WS-walk found a %s candle at %s but it has since reversed "
+                                "(close then=%.2f now=%.2f) - skipping, not treated as a live signal",
+                                symbol, direction, datetime.fromtimestamp(sig["candle_epoch"], tz=IST).strftime("%H:%M"),
+                                sig["close"], current_close)
+                    continue
+            sig["symbol"] = symbol
+            return sig, rows[idx][0], did_fetch
+        return None, rows[-1][0], did_fetch
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: WS-walk breakout-signal evaluation failed - will retry next cycle", symbol)
+        return None, checked_through_epoch, False
 
 
 # ------------------------------------------------------------------- loop ---
 def _market_hours_now() -> bool:
     now = datetime.now(IST)
     return now.weekday() < 5 and (9, 10) <= (now.hour, now.minute) <= (15, 35)
+
+
+async def _handle_confirmed_signal(strategy: str, ot: str, sym: str, sig: dict,
+                                    entry_fn: Callable[[str, str], Awaitable[dict]]) -> None:
+    """Shared "mark signaled, log, attempt real entry" tail (added 23 Sep
+    2026) - identical regardless of whether `sig` came from the WS-walk
+    path or the REST single-snapshot path, so both share this instead of
+    each re-implementing it."""
+    w = _watchlist(strategy, ot)
+    # Mark signaled BEFORE attempting entry - at most one attempt per
+    # symbol per day even if entry_fn itself fails/skips, matching the
+    # backtest's own "first qualifying candle only" design.
+    async with _LOCK:
+        it = w.items.get(sym)
+        if it is None or it["signaled"]:
+            return
+        it["signaled"], it["signaled_at"] = True, sig["detected_at"]
+        await _persist(w)
+
+    logger.warning(
+        "BREAKOUT SIGNAL [%s]: %s %s confirmed (range=%.2f%% body=%.2f%% relvol=%.2fx) - attempting real entry",
+        strategy, ot, sym, sig["range_pct"], sig["body_pct"], sig["relative_volume"],
+    )
+    try:
+        result = await entry_fn(sym, ot)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: breakout-signal entry attempt for %s failed", strategy, sym)
+        result = {"status": "error"}
+    trade_history.append_jsonl("breakout_signals", {
+        "strategy": strategy, "option_type": ot, "symbol": sym,
+        **{k: v for k, v in sig.items() if k not in ("symbol", "candle_epoch")},
+        "entry_result_status": (result or {}).get("status"), "entry_result_reason": (result or {}).get("reason"),
+        "logged_at": datetime.now().isoformat(),
+    })
+
+
+def _split_ws_rest(cfg, pending: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Splits `pending` into (ws_pending, rest_pending) - a symbol goes to
+    ws_pending only if cfg.BREAKOUT_USE_WS_CANDLES is on AND
+    underlying_candle_feed reports it fresh (a thin/dead WS stream falls
+    through to the REST path exactly as it always has via
+    _fetch_5m_hybrid, this split is purely about which EVALUATION
+    strategy - single-snapshot vs. full-history walk - a symbol gets, not
+    a new source-of-truth decision)."""
+    if not getattr(cfg, "BREAKOUT_USE_WS_CANDLES", False):
+        return [], pending
+    import underlying_candle_feed
+    stale_after = getattr(cfg, "BREAKOUT_WS_STALE_AFTER_SECONDS", 90)
+    ws_pending, rest_pending = [], []
+    for ot, sym in pending:
+        (ws_pending if underlying_candle_feed.is_fresh(sym, stale_after) else rest_pending).append((ot, sym))
+    return ws_pending, rest_pending
+
+
+async def _ws_pass(strategy: str, cfg, entry_fn: Callable[[str, str], Awaitable[dict]],
+                    pending_ws: list[tuple[str, str]]) -> None:
+    """Evaluates EVERY WS-fresh not-yet-signaled symbol every cycle (added
+    23 Sep 2026) - no BREAKOUT_SCAN_MAX_PER_CYCLE cap, and paced only on
+    the (rare, after the first pass of the day) calls that actually hit
+    Dhan for a fresh daily fetch - see _evaluate_ws_walk_sync's own
+    docstring for the real incident (today, BANDHANBNK) this path exists
+    to close, and _fetch_daily_cached's for why the common case is free."""
+    loop = asyncio.get_running_loop()
+    for ot, sym in pending_ws:
+        direction = "bullish" if ot == "CE" else "bearish"
+        w = _watchlist(strategy, ot)
+        it = w.items.get(sym)
+        if it is None or it["signaled"]:
+            continue
+        checked_through = it.get("checked_through_epoch")
+        sig, new_checked_through, did_daily_fetch = await loop.run_in_executor(
+            _SCAN_EXECUTOR, _evaluate_ws_walk_sync, sym, direction, cfg, checked_through)
+        if did_daily_fetch:
+            await asyncio.sleep(cfg.BREAKOUT_SCAN_PACE_SECONDS)
+        if new_checked_through != checked_through:
+            async with _LOCK:
+                it = w.items.get(sym)
+                if it is not None and not it["signaled"]:
+                    it["checked_through_epoch"] = new_checked_through
+                    await _persist(w)
+        if sig is not None:
+            await _handle_confirmed_signal(strategy, ot, sym, sig, entry_fn)
 
 
 async def _scan_cycle(strategy: str, cfg, entry_fn: Callable[[str, str], Awaitable[dict]]) -> None:
@@ -438,12 +664,15 @@ async def _scan_cycle(strategy: str, cfg, entry_fn: Callable[[str, str], Awaitab
         async with _LOCK:
             _ensure_today_locked(w)
             pending.extend((option_type, sym) for sym, it in w.items.items() if not it["signaled"])
-    pending = _rotate_pending_from_cursor(strategy, pending)
 
+    ws_pending, rest_pending = _split_ws_rest(cfg, pending)
+    await _ws_pass(strategy, cfg, entry_fn, ws_pending)
+
+    rest_pending = _rotate_pending_from_cursor(strategy, rest_pending)
     loop = asyncio.get_running_loop()
     checked = 0
     last_examined: Optional[str] = None
-    for ot, sym in pending:
+    for ot, sym in rest_pending:
         if checked >= cfg.BREAKOUT_SCAN_MAX_PER_CYCLE:
             break
         checked += 1
@@ -453,32 +682,7 @@ async def _scan_cycle(strategy: str, cfg, entry_fn: Callable[[str, str], Awaitab
         await asyncio.sleep(cfg.BREAKOUT_SCAN_PACE_SECONDS)
         if sig is None:
             continue
-
-        w = _watchlist(strategy, ot)
-        # Mark signaled BEFORE attempting entry - at most one attempt per
-        # symbol per day even if entry_fn itself fails/skips, matching the
-        # backtest's own "first qualifying candle only" design.
-        async with _LOCK:
-            it = w.items.get(sym)
-            if it is None or it["signaled"]:
-                continue
-            it["signaled"], it["signaled_at"] = True, sig["detected_at"]
-            await _persist(w)
-
-        logger.warning(
-            "BREAKOUT SIGNAL [%s]: %s %s confirmed (range=%.2f%% body=%.2f%% relvol=%.2fx) - attempting real entry",
-            strategy, ot, sym, sig["range_pct"], sig["body_pct"], sig["relative_volume"],
-        )
-        try:
-            result = await entry_fn(sym, ot)
-        except Exception:  # noqa: BLE001
-            logger.exception("%s: breakout-signal entry attempt for %s failed", strategy, sym)
-            result = {"status": "error"}
-        trade_history.append_jsonl("breakout_signals", {
-            "strategy": strategy, "option_type": ot, "symbol": sym, **{k: v for k, v in sig.items() if k != "symbol"},
-            "entry_result_status": (result or {}).get("status"), "entry_result_reason": (result or {}).get("reason"),
-            "logged_at": datetime.now().isoformat(),
-        })
+        await _handle_confirmed_signal(strategy, ot, sym, sig, entry_fn)
     if last_examined is not None:
         _scan_cursor[strategy] = last_examined
 
@@ -771,6 +975,55 @@ async def _dispatch_backlog_cycle(cfg, targets: list[tuple[str, Any, Callable[[s
         _capacity_backlog[option_type] = remaining
 
 
+async def _handle_dispatcher_confirmed_signal(ot: str, sym: str, sig: dict,
+                                               targets: list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]]) -> None:
+    """Dispatcher-side counterpart of _handle_confirmed_signal (added 23
+    Sep 2026) - marks signaled, logs, then offers the signal to targets
+    via _dispatch_to_targets/backlog instead of a single entry_fn. Shared
+    between the WS-walk pass and the REST pass below."""
+    w = _watchlist(DISPATCHER_STRATEGY_NAME, ot)
+    async with _LOCK:
+        it = w.items.get(sym)
+        if it is None or it["signaled"]:
+            return
+        it["signaled"], it["signaled_at"] = True, sig["detected_at"]
+        await _persist(w)
+
+    logger.warning(
+        "BREAKOUT SIGNAL [UniverseDispatcher]: %s %s confirmed (range=%.2f%% body=%.2f%% relvol=%.2fx) - dispatching",
+        ot, sym, sig["range_pct"], sig["body_pct"], sig["relative_volume"],
+    )
+    all_capacity_blocked = await _dispatch_to_targets(ot, sym, sig, targets)
+    if all_capacity_blocked:
+        _capacity_backlog[ot].append({"symbol": sym, "signal": sig, "queued_at": datetime.now(IST)})
+
+
+async def _dispatch_ws_pass(cfg, targets: list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]],
+                             pending_ws: list[tuple[str, str]]) -> None:
+    """Dispatcher-side counterpart of _ws_pass - see that function's own
+    docstring for the rationale (real incident, BANDHANBNK, today)."""
+    loop = asyncio.get_running_loop()
+    for ot, sym in pending_ws:
+        direction = "bullish" if ot == "CE" else "bearish"
+        w = _watchlist(DISPATCHER_STRATEGY_NAME, ot)
+        it = w.items.get(sym)
+        if it is None or it["signaled"]:
+            continue
+        checked_through = it.get("checked_through_epoch")
+        sig, new_checked_through, did_daily_fetch = await loop.run_in_executor(
+            _SCAN_EXECUTOR, _evaluate_ws_walk_sync, sym, direction, cfg, checked_through)
+        if did_daily_fetch:
+            await asyncio.sleep(cfg.BREAKOUT_SCAN_PACE_SECONDS)
+        if new_checked_through != checked_through:
+            async with _LOCK:
+                it = w.items.get(sym)
+                if it is not None and not it["signaled"]:
+                    it["checked_through_epoch"] = new_checked_through
+                    await _persist(w)
+        if sig is not None:
+            await _handle_dispatcher_confirmed_signal(ot, sym, sig, targets)
+
+
 async def _dispatch_scan_cycle(cfg, targets: list[tuple[str, Any, Callable[[str, str], Awaitable[dict]]]]) -> None:
     """Same shape as _scan_cycle, but on a confirmed signal calls
     _dispatch_to_targets instead of a single package's own entry_fn.
@@ -785,12 +1038,15 @@ async def _dispatch_scan_cycle(cfg, targets: list[tuple[str, Any, Callable[[str,
         async with _LOCK:
             _ensure_today_locked(w)
             pending.extend((option_type, sym) for sym, it in w.items.items() if not it["signaled"])
-    pending = _rotate_pending_from_cursor(DISPATCHER_STRATEGY_NAME, pending)
 
+    ws_pending, rest_pending = _split_ws_rest(cfg, pending)
+    await _dispatch_ws_pass(cfg, targets, ws_pending)
+
+    rest_pending = _rotate_pending_from_cursor(DISPATCHER_STRATEGY_NAME, rest_pending)
     loop = asyncio.get_running_loop()
     checked = 0
     last_examined: Optional[str] = None
-    for ot, sym in pending:
+    for ot, sym in rest_pending:
         if checked >= cfg.BREAKOUT_SCAN_MAX_PER_CYCLE:
             break
         checked += 1
@@ -800,22 +1056,7 @@ async def _dispatch_scan_cycle(cfg, targets: list[tuple[str, Any, Callable[[str,
         await asyncio.sleep(cfg.BREAKOUT_SCAN_PACE_SECONDS)
         if sig is None:
             continue
-
-        w = _watchlist(DISPATCHER_STRATEGY_NAME, ot)
-        async with _LOCK:
-            it = w.items.get(sym)
-            if it is None or it["signaled"]:
-                continue
-            it["signaled"], it["signaled_at"] = True, sig["detected_at"]
-            await _persist(w)
-
-        logger.warning(
-            "BREAKOUT SIGNAL [UniverseDispatcher]: %s %s confirmed (range=%.2f%% body=%.2f%% relvol=%.2fx) - dispatching",
-            ot, sym, sig["range_pct"], sig["body_pct"], sig["relative_volume"],
-        )
-        all_capacity_blocked = await _dispatch_to_targets(ot, sym, sig, targets)
-        if all_capacity_blocked:
-            _capacity_backlog[ot].append({"symbol": sym, "signal": sig, "queued_at": datetime.now(IST)})
+        await _handle_dispatcher_confirmed_signal(ot, sym, sig, targets)
     if last_examined is not None:
         _scan_cursor[DISPATCHER_STRATEGY_NAME] = last_examined
 
