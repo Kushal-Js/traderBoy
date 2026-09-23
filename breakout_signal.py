@@ -664,18 +664,28 @@ async def _handle_confirmed_signal(strategy: str, ot: str, sym: str, sig: dict,
 def _split_ws_rest(cfg, pending: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     """Splits `pending` into (ws_pending, rest_pending) - a symbol goes to
     ws_pending only if cfg.BREAKOUT_USE_WS_CANDLES is on AND
-    underlying_candle_feed reports it fresh (a thin/dead WS stream falls
-    through to the REST path exactly as it always has via
-    _fetch_5m_hybrid, this split is purely about which EVALUATION
-    strategy - single-snapshot vs. full-history walk - a symbol gets, not
-    a new source-of-truth decision)."""
+    underlying_candle_feed reports it BOTH fresh (ticking) AND has at
+    least one completed bar (something to actually walk). A symbol that
+    just joined the watchlist starts ticking immediately but has zero WS
+    candles for its first ~5 minutes (no REST backfill on subscribe - see
+    underlying_candle_feed's module docstring); routing it to ws_pending
+    anyway meant `_evaluate_ws_walk_sync` had nothing to check and a real
+    breakout could sit unevaluated for up to ~10 minutes even though a
+    REST call would see the actual last completed candle immediately.
+    Falls to rest_pending instead (real incident, GAIL, 23 Sep 2026 -
+    see trading-skills), same as the existing thin/dead-WS-stream
+    fallback via _fetch_5m_hybrid - this split is purely about which
+    EVALUATION strategy - single-snapshot vs. full-history walk - a
+    symbol gets, not a new source-of-truth decision."""
     if not getattr(cfg, "BREAKOUT_USE_WS_CANDLES", False):
         return [], pending
     import underlying_candle_feed
     stale_after = getattr(cfg, "BREAKOUT_WS_STALE_AFTER_SECONDS", 90)
     ws_pending, rest_pending = [], []
     for ot, sym in pending:
-        (ws_pending if underlying_candle_feed.is_fresh(sym, stale_after) else rest_pending).append((ot, sym))
+        is_ws_ready = (underlying_candle_feed.is_fresh(sym, stale_after)
+                       and underlying_candle_feed.has_bars(sym))
+        (ws_pending if is_ws_ready else rest_pending).append((ot, sym))
     return ws_pending, rest_pending
 
 

@@ -383,6 +383,19 @@ def is_fresh(symbol: str, max_age_seconds: float) -> bool:
         return age <= max_age_seconds
 
 
+def has_bars(symbol: str) -> bool:
+    """True once at least one COMPLETED bar exists for this symbol - i.e.
+    there's something for the WS-walk evaluator to actually walk. A
+    symbol can be `is_fresh` (ticking) with zero bars for its first ~5
+    minutes after subscribe (no REST backfill on subscribe - see module
+    docstring), which used to route it into the WS-walk path anyway with
+    nothing to evaluate. Callers should fall back to the REST path
+    (which fetches real history immediately) until this turns True."""
+    with _lock:
+        st = _state.get(symbol)
+        return bool(st and st.bars)
+
+
 def get_candles_dict(symbol: str) -> dict:
     """Returns the SAME Dhan dict-of-lists shape (timestamp/open/high/low/
     close/volume, epoch seconds) breakout_signal.py's REST fetchers
