@@ -935,6 +935,61 @@ def mark_structure_break_consumed(symbol: str, side: int) -> None:
     _structure_break_consumed[symbol] = side
 
 
+# Same "wait for the agreement to break and reform, don't re-enter
+# instantly on a still-persisting one" rule as _structure_break_consumed
+# above, generalized to every OTHER SWING symbol (user request 24 Sep
+# 2026: once a symbol's position has exited/been squared off, don't let
+# it re-enter the same setup unless a new formation has occurred - the
+# same failure mode the COPPER mechanism fixes is possible here too, since
+# a price-based exit (MAX_LOSS_HIT/TARGET_HIT/PROFIT_PROTECTION_HIT/
+# STOP_LOSS_HIT) can fire mid-candle while the entry-triggering candle is
+# still "current" in the cache, so the very next monitor tick's
+# _evaluate_entry_signal call would otherwise see the exact same regime/
+# Supertrend state and re-enter immediately at a worse price).
+#
+# Keyed off RegimeState.is_bullish (the plain fast_ema > slow_ema LEVEL
+# check) rather than v1/v2/v3's own version-specific filter internals -
+# it's the one directional signal every ENTRY_STRATEGY_VERSION reads as
+# its fundamental bias (see _evaluate_entry_signal's own docstring in
+# Swing/trading_engine.py), so this stays correct across strategy-version
+# changes without tracking each version's filter logic separately. Same
+# +1/-1 mapping as _structure_break_consumed; no 0/neutral state here
+# since is_bullish is always one side or the other.
+_regime_entry_consumed: dict[str, int] = {}
+
+
+def regime_entry_signal_allowed(symbol: str, is_bullish: bool) -> bool:
+    """Call on EVERY _evaluate_entry_signal invocation for a non-COPPER
+    symbol, regardless of whether a direction would otherwise fire this
+    tick - same reasoning as structure_break_entry_signal reading its
+    cache unconditionally: the "did the regime leave the consumed side"
+    check must run every tick so a real break gets observed even on ticks
+    where this function isn't about to return a fresh entry anyway.
+    Returns False only when `is_bullish`'s side is the SAME side a
+    position was already entered for and the regime hasn't been observed
+    on the opposite side since (i.e. still the same, already-traded
+    formation) - True otherwise, including when nothing has been consumed
+    yet for this symbol."""
+    side = 1 if is_bullish else -1
+    consumed = _regime_entry_consumed.get(symbol)
+    if consumed is not None and side != consumed:
+        _regime_entry_consumed[symbol] = None  # observed it break - next match is a fresh formation
+        consumed = None
+    return consumed is None or consumed != side
+
+
+def mark_regime_entry_consumed(symbol: str, side: int) -> None:
+    """Called ONLY once a real position has actually been OPENED for
+    `side` (see Swing/trading_engine.py's enter_position_for_stock, its
+    non-COPPER call site) - deliberately NOT called merely when the signal
+    fires, same "mark at entry-time, not signal-time" reasoning as
+    mark_structure_break_consumed above (a signal can fire repeatedly
+    while genuinely blocked by a downstream gate - funds/volume-floor/
+    capacity - and those legitimate retries must not be treated as
+    "already used")."""
+    _regime_entry_consumed[symbol] = side
+
+
 def _predict_structure_break_entry_signal(symbol: str) -> Optional[int]:
     """Read-only prediction of what structure_break_entry_signal would
     return right now - same logic, but WITHOUT that function's "clear

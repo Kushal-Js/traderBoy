@@ -261,7 +261,18 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
     OPEN - never here, since this function can return a signal
     repeatedly while genuinely blocked downstream (that repeated-
     blocking IS the volume-floor incident above) and those retries must
-    keep happening."""
+    keep happening.
+
+    Every OTHER symbol (the v1/v2/v3 branches below) gets the same "wait
+    for the agreement to break and reform" rule, generalized rather than
+    duplicated (user request 24 Sep 2026 - the same failure mode is
+    possible here too: a price-based exit firing mid-candle while the
+    entry-triggering candle is still cached would otherwise let the very
+    next tick re-enter the same setup immediately). See signals.
+    regime_entry_signal_allowed's own docstring for why it's keyed off
+    RegimeState.is_bullish specifically. Same "mark consumed only once a
+    position is confirmed OPEN, never at signal-time" discipline as
+    COPPER's branch - see enter_position_for_stock's matching call site."""
     if symbol == "COPPER" and config.COPPER_STRUCTURE_BREAK_ENABLED:
         combined = signals.structure_break_entry_signal(symbol)
         if combined is None:
@@ -269,6 +280,15 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
         return "BULLISH" if combined == 1 else "BEARISH"
     regime = await signals.get_regime_state(symbol)
     if regime is None:
+        return None
+    # Generalized "wait for the agreement to break and reform" gate (user
+    # request 24 Sep 2026 - see signals.regime_entry_signal_allowed's own
+    # docstring). Checked unconditionally, before any version-specific
+    # branch below, so a real break gets observed on every tick even when
+    # this tick wasn't about to return a fresh entry anyway - same
+    # reasoning as the COPPER branch's structure_break_entry_signal read
+    # above.
+    if not signals.regime_entry_signal_allowed(symbol, regime.is_bullish):
         return None
     st = await signals.get_supertrend_state(symbol)
     if st is None:
@@ -693,6 +713,11 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
             # docstring for why this only happens here, at confirmed
             # success, never at signal-evaluation time.
             signals.mark_structure_break_consumed(symbol, 1 if regime == "BULLISH" else -1)
+        else:
+            # Same "mark at confirmed-entry-time, not signal-time" rule,
+            # generalized to every other SWING symbol - see
+            # signals.mark_regime_entry_consumed's own docstring.
+            signals.mark_regime_entry_consumed(symbol, 1 if regime == "BULLISH" else -1)
         return {"symbol": symbol, "status": "entered", "trading_symbol": trading_symbol, "entry_price": fill_price}
     except Exception:  # noqa: BLE001
         logger.exception("%s: unexpected error entering position", symbol)
