@@ -127,9 +127,21 @@ RAW_SERIES_DEDUP_SECONDS = 10
 _raw_series_cache: dict[tuple, tuple[datetime, dict]] = {}
 
 
+def _spans_prior_day(timestamps: list[float]) -> bool:
+    """True if timestamps (epoch seconds) covers at least two distinct IST
+    calendar dates - i.e. contains at least one bar from before today.
+    Empty/single-day input is False. See _get_intraday_series's
+    require_prior_day param for why this matters."""
+    if not timestamps:
+        return False
+    today = _now_ist().date()
+    return any(datetime.fromtimestamp(t, tz=IST).date() != today for t in timestamps)
+
+
 def _get_intraday_series(
     symbol: str, security_id: str, exchange_segment: str, instrument_type: str,
     interval_minutes: int, min_bars: int, lookback_days_override: Optional[int] = None,
+    require_prior_day: bool = False,
 ) -> dict:
     """Tries the local WS-reconstructed candle feed first (candle_feed.py)
     when config.USE_WS_CANDLES is on, falling back to the existing REST
@@ -142,6 +154,25 @@ def _get_intraday_series(
     is never accepted with LESS history than REST would have supplied -
     the hybrid switch can only make a symbol's signal faster to compute,
     never worse.
+
+    require_prior_day (added 24 Sep 2026, real incident): a bar-COUNT
+    floor alone isn't enough for a caller that needs yesterday's own data
+    (get_day_range_state's today_open-vs-yesterday_close check) - a
+    symbol's local WS candle feed only starts accumulating from whenever
+    it was first subscribed (see candle_feed.py), so for a symbol added
+    to the watchlist TODAY (confirmed live: NIFTY/BANKNIFTY, added this
+    morning), the WS series can clear min_bars while still containing
+    ONLY today's bars - silently starving _fetch_day_range_state_once's
+    own "no fully-formed prior trading day in this fetched window" check
+    forever, never surfacing as an error (a clean, expected None return,
+    not a fetch failure), completely independent of the DH-904 rate-
+    limit issue RAW_SERIES_DEDUP_SECONDS above addresses. When True, a WS
+    series spanning only one calendar date (IST) is rejected even if it
+    clears min_bars, falling through to REST (which spans
+    config.INTRADAY_CONTINUOUS_LOOKBACK_DAYS days and therefore always
+    has yesterday, independent of WS's own bar-count floor). Every other
+    caller (regime, Supertrend) is unaffected - False by default, same
+    behavior as before this parameter existed.
 
     REST fallback goes through a short-TTL (RAW_SERIES_DEDUP_SECONDS) raw-
     series cache, keyed by (security_id, exchange_segment, instrument_type,
@@ -166,8 +197,10 @@ def _get_intraday_series(
     since it reads this function's return value exactly as before."""
     if config.USE_WS_CANDLES and candle_feed.is_fresh(symbol, config.WS_STALE_AFTER_SECONDS):
         ws_data = candle_feed.get_candles_dict(symbol, interval_minutes)
+        ws_timestamps = ws_data.get("timestamp") or []
         if len(ws_data.get("close") or []) >= min_bars:
-            return ws_data
+            if not require_prior_day or _spans_prior_day(ws_timestamps):
+                return ws_data
     cache_key = (security_id, exchange_segment, instrument_type, interval_minutes, lookback_days_override)
     cached = _raw_series_cache.get(cache_key)
     if cached and (_now_ist() - cached[0]).total_seconds() < RAW_SERIES_DEDUP_SECONDS:
@@ -669,7 +702,7 @@ def _fetch_day_range_state_once(symbol: str) -> Optional[DayRangeState]:
     min_bars = max(config.SUPERTREND_PERIOD + 2, config.DAY_RANGE_RSI_PERIOD + 2)
     data = _get_intraday_series(
         symbol, security_id, exchange_segment, instrument_type, config.SUPERTREND_INTERVAL_MINUTES,
-        min_bars=min_bars,
+        min_bars=min_bars, require_prior_day=True,
     )
     if not data.get("close"):
         raise RuntimeError(
