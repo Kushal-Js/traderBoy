@@ -752,15 +752,45 @@ _structure_break_fail_streak: dict[str, int] = {}
 _STRUCTURE_BREAK_FETCH_PACE_SECONDS = 1.6   # same back-to-back-REST-call pacing bt_fetch.py/the backtest script use
 
 
+def _structure_break_ws_candles(symbol: str, interval_minutes: int) -> Optional[dict]:
+    """The ws_candles_fn hook structure_break.fetch_timeframe accepts
+    (added 24 Sep 2026, user request - "add WS feeds for COPPER should
+    also use in structure_break.py... just switch from REST to WS (REST
+    for fallback)"). Thin wrapper over candle_feed.py's own is_fresh/
+    get_candles_dict - the exact same WS-first/REST-fallback discipline
+    _get_intraday_series already applies for regime/Supertrend/Day Range,
+    just handed to structure_break.py as a callback instead of baked into
+    it directly (keeps that module import-free of the Swing package - see
+    its own fetch_timeframe docstring). None (not an empty dict) on
+    anything not fresh/warm enough - fetch_timeframe's own fallback logic
+    treats that as "try REST instead", never as "zero candles exist"."""
+    if not (config.USE_WS_CANDLES and candle_feed.is_fresh(symbol, config.WS_STALE_AFTER_SECONDS)):
+        return None
+    return candle_feed.get_candles_dict(symbol, interval_minutes)
+
+
 def _fetch_one_structure_break_timeframe(symbol: str, timeframe: str) -> int:
     """Blocking, ONE timeframe only - always call via run_in_executor.
     Deliberately split out from a combined multi-fetch function (see this
     section's own module-level comment above) so the executor thread is
     released back to the shared pool between calls, not held through the
     whole sequence. Raises on any fetch failure or not-yet-warm timeframe -
-    never returns a partial/best-effort regime."""
+    never returns a partial/best-effort regime.
+
+    _underlying_reference(symbol) below is called FIRST purely for its
+    WS-subscribe side effect (added 24 Sep 2026) - COPPER never reaches
+    get_regime_state/get_supertrend_state/get_day_range_state (this
+    module's own COPPER-only structure-break branch bypasses all three
+    entirely, see this section's own module-level comment), so nothing
+    else in this file would otherwise ever call candle_feed.ensure_
+    subscribed for it. Its own return value is unused here - structure_
+    break.py resolves its OWN security_id independently (own _mcx_
+    contract_cache, deliberately not shared - see that module's own
+    _underlying_reference docstring on staying standalone); this call
+    only needs to happen, not feed its result forward."""
+    _underlying_reference(symbol)
     import structure_break as sb
-    r = sb.fetch_timeframe(symbol, timeframe, mcx=True)
+    r = sb.fetch_timeframe(symbol, timeframe, mcx=True, ws_candles_fn=_structure_break_ws_candles)
     if r.error or not r.warm:
         raise RuntimeError(f"{symbol}: structure-break {timeframe} fetch failed/not warm: {r.error}")
     return r.last_regime

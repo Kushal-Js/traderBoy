@@ -43,7 +43,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -433,7 +433,8 @@ def _underlying_reference(symbol: str, mcx: bool) -> tuple:
 
 
 def fetch_timeframe(symbol: str, timeframe: str, params: Optional[StructureBreakParams] = None,
-                     mcx: bool = False, lookback_days_override: Optional[int] = None) -> StructureBreakResult:
+                     mcx: bool = False, lookback_days_override: Optional[int] = None,
+                     ws_candles_fn: Optional[Callable[[str, int], Optional[dict]]] = None) -> StructureBreakResult:
     """Fetches `symbol`'s candles for one timeframe ("5m"/"15m"/"1h"/"1d")
     and returns its StructureBreakResult. NSE equities by default; pass
     `mcx=True` for an MCX commodity (e.g. COPPER) - resolves its current
@@ -443,7 +444,24 @@ def fetch_timeframe(symbol: str, timeframe: str, params: Optional[StructureBreak
     more trading days than the default warm-up buffer comfortably covers -
     see backtest_swing_structure_break_mtf.py). Blocking REST call(s) via
     the shared dhan_wrapper - never call this from the WebSocket tick
-    path."""
+    path.
+
+    `ws_candles_fn` (added 24 Sep 2026, user request - "add WS feeds for
+    COPPER should also use in structure_break.py... just switch from REST
+    to WS (REST for fallback)") - an OPTIONAL (symbol, interval_minutes)
+    -> candles-dict-or-None callable, tried BEFORE the REST fetch for any
+    intraday (non-daily) timeframe. Deliberately a caller-injected hook,
+    not an import of Swing/candle_feed.py's WS mechanism directly - this
+    module stays usable standalone, outside the Swing package (see this
+    module's own docstring), which owns the actual WS subscription/local-
+    bar-reconstruction state; Swing/signals.py's own _fetch_one_structure_
+    break_timeframe is the one live caller that supplies it. None (the
+    default) preserves the exact prior REST-only behavior unchanged - the
+    CLI (`main()`) and the backtest script never pass one. Falls straight
+    through to the existing REST fetch below whenever the hook returns
+    None, raises, or hands back fewer than params.atr_len+1 bars (not
+    warm enough to trust yet) - REST is always the fallback, per the same
+    fail-open discipline every other hybrid fetch in this repo follows."""
     if timeframe not in TIMEFRAMES:
         return StructureBreakResult(n=0, basis=[], upper=[], lower=[], regime=[], switch_up=[],
                                      switch_down=[], bull_retest=[], bear_retest=[], strength=[],
@@ -472,26 +490,35 @@ def fetch_timeframe(symbol: str, timeframe: str, params: Optional[StructureBreak
             volumes = list(data.get("volume") or [])
             timestamps = list(data.get("timestamp") or [])
         else:
-            # Retry once on an EMPTY-but-not-raised response, not just on a
-            # raised exception - dhan_client.py's own _retry only retries
-            # when the underlying call THROWS, but Dhan's documented
-            # back-to-back-unpaced-calls failure mode is a soft "failure"
-            # JSON body with no "data" key, which fetch_continuous_intraday
-            # turns into a plain empty dict rather than an exception. Real
-            # symptom this fixes: fetching 5m then immediately 15m then 1h
-            # for the same symbol with no gap between calls - the 2nd/3rd
-            # call would occasionally come back with 0 candles and no error
-            # message at all (confirmed live, 22 Sep 2026, COPPER 15m).
-            data = dhan_wrapper.fetch_continuous_intraday(
-                security_id, exchange_segment, instrument_type, interval,
-                lookback_days_override=lookback_days_override or _INTRADAY_LOOKBACK_DAYS[interval],
-            )
-            if not (data.get("close") or []):
-                time.sleep(2.0)
+            data = None
+            if ws_candles_fn is not None:
+                try:
+                    ws_data = ws_candles_fn(symbol, interval)
+                except Exception:  # noqa: BLE001
+                    ws_data = None
+                if ws_data and len(ws_data.get("close") or []) >= params.atr_len + 1:
+                    data = ws_data
+            if data is None:
+                # Retry once on an EMPTY-but-not-raised response, not just on a
+                # raised exception - dhan_client.py's own _retry only retries
+                # when the underlying call THROWS, but Dhan's documented
+                # back-to-back-unpaced-calls failure mode is a soft "failure"
+                # JSON body with no "data" key, which fetch_continuous_intraday
+                # turns into a plain empty dict rather than an exception. Real
+                # symptom this fixes: fetching 5m then immediately 15m then 1h
+                # for the same symbol with no gap between calls - the 2nd/3rd
+                # call would occasionally come back with 0 candles and no error
+                # message at all (confirmed live, 22 Sep 2026, COPPER 15m).
                 data = dhan_wrapper.fetch_continuous_intraday(
                     security_id, exchange_segment, instrument_type, interval,
                     lookback_days_override=lookback_days_override or _INTRADAY_LOOKBACK_DAYS[interval],
                 )
+                if not (data.get("close") or []):
+                    time.sleep(2.0)
+                    data = dhan_wrapper.fetch_continuous_intraday(
+                        security_id, exchange_segment, instrument_type, interval,
+                        lookback_days_override=lookback_days_override or _INTRADAY_LOOKBACK_DAYS[interval],
+                    )
             opens, highs, lows, closes, volumes, timestamps = _drop_forming_candle(data, interval)
 
         if len(closes) < params.atr_len + 1:
