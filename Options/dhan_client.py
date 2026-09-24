@@ -30,6 +30,7 @@ import pandas as pd
 from Dhan_Tradehull import Tradehull
 from dhanhq import MarketFeed, OrderUpdate
 
+import nifty_market_guard
 from . import config
 
 logger = logging.getLogger("dhan_client")
@@ -2637,6 +2638,36 @@ class DhanWrapper:
         if not config.ENABLE_NIFTY_RECOVERY_GATE:
             return False
         return not self.is_nifty_recovering(result["today_open"], now)
+
+    # ------------------------------------------------------------------ #
+    # Global gap-down block (added 24 Sep 2026, user request - see
+    # nifty_market_guard.py's own module docstring for the full spec
+    # history: originally a 3-tier "block/PE-only/allow" design with a
+    # 3-consecutive-falling-day trigger, simplified twice down to this
+    # single rule). Deliberately SEPARATE from should_delay_ce_entry
+    # above - that one only ever delays CE for a short (~30min .env-
+    # configured) window and auto-recovers; this one blocks EVERY entry
+    # (CE and PE, Options/Futures/Luxury) for the WHOLE trading day, no
+    # recovery/expiry, once set. Reuses evaluate_nifty_open_condition's
+    # already-cached today_open/prev_close (same one-shot-per-day fetch
+    # should_delay_ce_entry itself reuses) rather than a second fetch.
+    # ------------------------------------------------------------------ #
+    def should_block_all_entries_today(self, now: Optional[datetime] = None) -> bool:
+        """True for the entire trading day once Nifty50 has opened with a
+        gap DOWN of config.GAP_DOWN_THRESHOLD_POINTS (100) or more -
+        never true on a gap UP of any size, and never true for a gap down
+        under that threshold (see nifty_market_guard.classify_day's own
+        docstring - binary, gap-down-only, nothing else considered).
+        Fails OPEN (returns False) if evaluate_nifty_open_condition
+        hasn't resolved yet (no fetch of its own - piggybacks entirely on
+        that method's own cache/fetch/fail-open behavior)."""
+        cond = self.evaluate_nifty_open_condition(now)
+        if not cond.get("evaluated"):
+            return False
+        state = nifty_market_guard.NiftyDayState(
+            trading_date=cond["date"], prev_close=cond["prev_close"], open=cond["today_open"],
+        )
+        return nifty_market_guard.classify_day(state) == "BLOCK_ALL"
 
     # ------------------------------------------------------------------ #
     # Liquidity guard (added 2 Sep 2026, see config.LIQUIDITY_GUARD_

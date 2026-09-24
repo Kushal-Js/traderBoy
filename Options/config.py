@@ -1117,6 +1117,19 @@ BREAKOUT_PAPER_MODE_ENABLED = os.getenv("OPTIONS_BREAKOUT_PAPER_MODE_ENABLED", "
 # momentum actually shows once cleared, or dropped entirely on timeout.
 CLIMACTIC_GUARD_ENABLED = os.getenv("OPTIONS_CLIMACTIC_GUARD_ENABLED", "false").lower() == "true"
 
+# Global Nifty gap-down block (added 24 Sep 2026, user request - see
+# nifty_market_guard.py's own module docstring for the full spec history
+# and backtest_nifty_market_guard.py for the real-trade evidence). Default
+# false. When true, gates EVERY _breakout_entry_fn call (both real and
+# paper branches, before either) behind dhan_wrapper.should_block_all_
+# entries_today(): if Nifty50 opened with a gap DOWN of GAP_DOWN_
+# THRESHOLD_POINTS (100) or more, EVERY entry (CE and PE) is blocked for
+# the REST OF THE TRADING DAY - no recovery/expiry, unlike the separate,
+# existing ENABLE_GAP_DOWN_CE_DELAY (which only delays CE for a short
+# window and auto-recovers). A gap UP never triggers this, regardless of
+# size.
+NIFTY_GAP_BLOCK_ENABLED = os.getenv("OPTIONS_NIFTY_GAP_BLOCK_ENABLED", "false").lower() == "true"
+
 # Where BREAKOUT_SEED_UNIVERSE_ENABLED's symbol list comes from (added 21
 # Sep 2026, user request - see universe_bucket.py's own module docstring):
 #   "static"          (default) - the fixed BREAKOUT_UNIVERSE_SYMBOLS list

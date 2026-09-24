@@ -532,6 +532,14 @@ BREAKOUT_PAPER_MODE_ENABLED = os.getenv("LUXURY_BREAKOUT_PAPER_MODE_ENABLED", "f
 # call (real AND paper branches) behind climactic_entry_guard.guard_entry.
 CLIMACTIC_GUARD_ENABLED = os.getenv("LUXURY_CLIMACTIC_GUARD_ENABLED", "false").lower() == "true"
 
+# Global Nifty gap-down block (added 24 Sep 2026, user request - see
+# nifty_market_guard.py's own module docstring and backtest_nifty_market_
+# guard.py for the design/evidence). Gates EVERY _breakout_entry_fn call
+# (real AND paper branches) behind dhan_wrapper.should_block_all_entries_
+# today(): a >=100pt Nifty gap DOWN blocks every entry (CE and PE) for
+# the rest of the trading day, no recovery - a gap UP never triggers it.
+NIFTY_GAP_BLOCK_ENABLED = os.getenv("LUXURY_NIFTY_GAP_BLOCK_ENABLED", "false").lower() == "true"
+
 # "static" (default, unchanged) or "universe_bucket" (universe_bucket.py's
 # rolling 3-trading-day pool instead of the fixed list above) - see
 # Options/config.py's identical block for the full rationale.

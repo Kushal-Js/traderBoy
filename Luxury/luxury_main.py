@@ -52,6 +52,7 @@ from pydantic import BaseModel, field_validator
 from trade_history import fire_and_forget, record_webhook_alert
 import breakout_signal
 import breakout_paper_engine
+import paper_mode_control
 import climactic_entry_guard
 import reversal_filters
 
@@ -137,6 +138,8 @@ async def _breakout_entry_fn(symbol: str, option_type: str) -> dict:
     repeat block, cross-strategy claim, capacity + the opening-burst slot,
     liquid-contract resolution, funds check - all inherited automatically,
     nothing reimplemented here)."""
+    if config.NIFTY_GAP_BLOCK_ENABLED and dhan_wrapper.should_block_all_entries_today():
+        return {"symbol": symbol, "status": "skipped", "reason": "nifty_gap_down_block"}
     if not is_within_trading_windows():
         return {"symbol": symbol, "status": "skipped", "reason": "outside_trading_windows"}
     if is_past_allowed_trading_time():
@@ -158,7 +161,7 @@ async def _resolve_entry(symbol: str, option_type: str) -> dict:
     climactic_entry_guard.guard_entry can call it either immediately
     (non-climactic alert) or later, with a possibly-different
     option_type, once a deferred alert's cooldown clears."""
-    if breakout_paper_engine.is_paper_mode_enabled("Luxury"):
+    if paper_mode_control.is_paper_mode_enabled("Luxury"):
         # Paper-mode REPLACES real trading for this package (22 Sep 2026,
         # explicit user instruction; runtime-togglable since 24 Sep 2026
         # via POST /paper-mode - see breakout_paper_engine.py's own
@@ -250,6 +253,11 @@ async def _enter_directly_from_webhook(
         fire_and_forget(record_webhook_alert(
             "Luxury", payload.scan_name, payload.alert_name, stocks, status, reason,
         ))
+
+    if config.NIFTY_GAP_BLOCK_ENABLED and dhan_wrapper.should_block_all_entries_today():
+        logger.info("Ignoring alert (%s) - Nifty50 gap-down block active for the whole trading day.", option_type)
+        _log_alert("ignored", "nifty_gap_down_block")
+        return {"status": "ignored", "reason": "nifty_gap_down_block"}
 
     if not is_within_trading_windows():
         logger.info(

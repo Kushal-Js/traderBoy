@@ -86,6 +86,7 @@ from Paper01 import paper01_main
 import universe_bucket
 import breakout_signal
 import breakout_paper_engine
+import paper_mode_control
 import underlying_candle_feed
 from Options.dhan_client import dhan_wrapper
 
@@ -223,6 +224,27 @@ app.include_router(universe_bucket.router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/nifty-gap-block/status")
+async def nifty_gap_block_status():
+    """Read-only status of the global Nifty gap-down block (added 24 Sep
+    2026 - see nifty_market_guard.py's own module docstring and
+    dhan_client.should_block_all_entries_today). Shared across Options/
+    Futures/Luxury (each gated independently by its own NIFTY_GAP_BLOCK_
+    ENABLED flag, but they all read the SAME underlying Nifty condition)
+    - one status view here rather than three near-identical endpoints."""
+    cond = dhan_wrapper.evaluate_nifty_open_condition()
+    blocked = dhan_wrapper.should_block_all_entries_today() if cond.get("evaluated") else False
+    return {
+        "evaluated": cond.get("evaluated", False),
+        "blocked_today": blocked,
+        "prev_close": cond.get("prev_close"), "today_open": cond.get("today_open"),
+        "gap_points": cond.get("gap_points"),
+        "options_enabled": options_config.NIFTY_GAP_BLOCK_ENABLED,
+        "futures_enabled": futures_config.NIFTY_GAP_BLOCK_ENABLED,
+        "luxury_enabled": luxury_config.NIFTY_GAP_BLOCK_ENABLED,
+    }
 
 
 @app.get("/incidents")
@@ -364,7 +386,7 @@ async def funds_buckets():
     return await loop.run_in_executor(None, fund_allocation.snapshot)
 
 
-PAPER_MODE_STRATEGIES = ("Options", "Futures", "Luxury")
+PAPER_MODE_STRATEGIES = paper_mode_control.STRATEGIES  # ("Options", "Futures", "Luxury", "Swing")
 
 
 class PaperModeRequest(BaseModel):
@@ -382,8 +404,8 @@ class PaperModeRequest(BaseModel):
 def _paper_mode_snapshot() -> dict:
     return {
         strategy: {
-            "paper_mode_enabled": breakout_paper_engine.is_paper_mode_enabled(strategy),
-            "source": breakout_paper_engine.paper_mode_source(strategy),
+            "paper_mode_enabled": paper_mode_control.is_paper_mode_enabled(strategy),
+            "source": paper_mode_control.paper_mode_source(strategy),
         }
         for strategy in PAPER_MODE_STRATEGIES
     }
@@ -391,11 +413,15 @@ def _paper_mode_snapshot() -> dict:
 
 @app.get("/paper-mode")
 async def get_paper_mode():
-    """Current paper-mode state for Options/Futures/Luxury - "source" is
-    "runtime_override" if POST /paper-mode has ever set it (persisted,
-    survives a restart), else "env_default" (that package's own .env
-    BREAKOUT_PAPER_MODE_ENABLED, unchanged since before this endpoint
-    existed). See POST /paper-mode's own docstring for the full design."""
+    """Current paper-mode state for Options/Futures/Luxury/Swing -
+    "source" is "runtime_override" if POST /paper-mode has ever set it
+    (persisted, survives a restart), else "env_default" (that strategy's
+    own .env default - BREAKOUT_PAPER_MODE_ENABLED for Options/Futures/
+    Luxury, PAPER_MODE_ENABLED for Swing - unchanged since before this
+    endpoint existed). Swing's separate, narrower INDEX_PAPER_MODE_ENABLED
+    (NIFTY/BANKNIFTY-only) is NOT part of this - see POST /paper-mode's
+    own docstring for why. See POST /paper-mode's own docstring for the
+    full design."""
     return _paper_mode_snapshot()
 
 
@@ -403,26 +429,37 @@ async def get_paper_mode():
 async def set_paper_mode(payload: PaperModeRequest):
     """Runtime paper-mode ON/OFF switch, per strategy (user request 24 Sep
     2026: "turn paper trading on or off... without deployment just by
-    calling an endpoint"). Options/Futures/Luxury each already had their
-    own BREAKOUT_PAPER_MODE_ENABLED flag (added 22 Sep 2026) - this makes
-    it a runtime override instead of a fixed .env value read once at
-    startup, persisted to data/paper_mode_overrides.json (gitignored,
+    calling an endpoint", extended same day to cover Swing: "update the
+    swing strategy method with a similar kind of a dynamic endpoint").
+    Options/Futures/Luxury each already had their own
+    BREAKOUT_PAPER_MODE_ENABLED flag (added 22 Sep 2026); Swing already
+    had its own PAPER_MODE_ENABLED flag (added 23 Sep 2026) - this makes
+    each one a runtime override instead of a fixed .env value read once
+    at startup, persisted to data/paper_mode_overrides.json (gitignored,
     same convention as Swing/watchlist.py's own runtime-editable file) so
     it SURVIVES a restart - including the automatic 08:00 IST morning-
     refresh restart - rather than silently reverting to whatever .env
-    says. See breakout_paper_engine.py's is_paper_mode_enabled/
-    set_paper_mode for the actual state.
+    says. See paper_mode_control.py for the actual state and full design
+    reasoning (including why it lives in its own small shared module
+    rather than inside breakout_paper_engine.py or swing_paper_engine.py).
 
-    Same "replaces real trading for that package, doesn't add a shadow
-    copy" semantic as the original flag, and does NOT touch any already-
+    Swing-specific scope note: this controls ONLY Swing's global
+    PAPER_MODE_ENABLED equivalent (real trading on/off for every Swing
+    symbol). Swing's separate INDEX_PAPER_MODE_ENABLED flag (NIFTY/
+    BANKNIFTY-only paper mode, independent of and narrower than this) is
+    NOT exposed here - it's a different, more targeted switch than "real
+    trading on/off for the whole strategy" and stays .env-only.
+
+    Same "replaces real trading for that strategy, doesn't add a shadow
+    copy" semantic as each original flag, and does NOT touch any already-
     open position: flipping a strategy INTO paper mode leaves its
     current real position(s) to be managed for real through to their own
     close; flipping OUT of paper mode leaves any currently-open PAPER
     position simulated to its own close too - only entries from this
     point on are affected.
 
-    Example body: {"strategy": "Futures", "enabled": true}"""
-    await breakout_paper_engine.set_paper_mode(payload.strategy, payload.enabled)
+    Example body: {"strategy": "Swing", "enabled": true}"""
+    await paper_mode_control.set_paper_mode(payload.strategy, payload.enabled)
     return {"strategy": payload.strategy, **_paper_mode_snapshot()[payload.strategy]}
 
 
