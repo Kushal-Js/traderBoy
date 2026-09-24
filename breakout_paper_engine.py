@@ -112,6 +112,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, time as dtime
+from pathlib import Path
 from typing import Callable, Optional
 
 from Options.dhan_client import dhan_wrapper
@@ -178,6 +179,76 @@ def _hooks(strategy: str) -> _StrategyHooks:
     if not _HOOKS:
         _HOOKS.update(_build_hooks())
     return _HOOKS[strategy]
+
+
+# --------------------------------------------------------------------- #
+# Runtime paper-mode ON/OFF switch (added 24 Sep 2026, user request: "turn
+# paper trading on or off... without deployment just by calling an
+# endpoint"). Each package's own BREAKOUT_PAPER_MODE_ENABLED (Options/
+# Futures/Luxury config.py) stays exactly as it was - the static .env-
+# configured STARTUP default - but is now only the FALLBACK a strategy
+# reads when no runtime override has ever been set for it. An override,
+# once set via POST /paper-mode (main.py), takes priority and is
+# persisted to PAPER_MODE_OVERRIDE_FILE (gitignored, same data/ dir
+# convention as Swing/watchlist.py's own runtime-editable file) so it
+# SURVIVES a restart - including the automatic 08:00 IST morning-refresh
+# restart - instead of silently reverting to whatever .env says. Loaded
+# lazily (once) rather than at module import time, matching _hooks'
+# own deferred-import reasoning above.
+#
+# Deliberately does NOT touch _resolve_entry's ("Options"/"Futures"/
+# "Luxury"'s own *_main.py) existing "paper REPLACES real, not an
+# addition" semantic, or any already-open position - flipping a
+# strategy INTO paper mode leaves its current real position(s) to be
+# managed for real through to their own close; flipping OUT of paper
+# mode leaves any currently-open PAPER position simulated to its own
+# close too. Only NEW entries from that point on are affected - same
+# behavior every other paper-mode flag in this codebase already has.
+# --------------------------------------------------------------------- #
+PAPER_MODE_OVERRIDE_FILE = Path("data/paper_mode_overrides.json")
+_paper_mode_overrides: dict[str, bool] = {}
+_paper_mode_overrides_loaded = False
+
+
+def _load_paper_mode_overrides() -> None:
+    global _paper_mode_overrides_loaded
+    if _paper_mode_overrides_loaded:
+        return
+    _paper_mode_overrides_loaded = True
+    if PAPER_MODE_OVERRIDE_FILE.exists():
+        try:
+            _paper_mode_overrides.update(json.loads(PAPER_MODE_OVERRIDE_FILE.read_text()))
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Could not read %s - starting with no runtime paper-mode overrides "
+                "(every strategy falls back to its own .env BREAKOUT_PAPER_MODE_ENABLED)",
+                PAPER_MODE_OVERRIDE_FILE,
+            )
+
+
+def is_paper_mode_enabled(strategy: str) -> bool:
+    """The one thing _resolve_entry (Options/Futures/Luxury's own *_main.py)
+    should call instead of reading config.BREAKOUT_PAPER_MODE_ENABLED
+    directly - everything else about paper-mode dispatch is unchanged."""
+    _load_paper_mode_overrides()
+    if strategy in _paper_mode_overrides:
+        return _paper_mode_overrides[strategy]
+    return bool(_hooks(strategy).cfg.BREAKOUT_PAPER_MODE_ENABLED)
+
+
+def paper_mode_source(strategy: str) -> str:
+    _load_paper_mode_overrides()
+    return "runtime_override" if strategy in _paper_mode_overrides else "env_default"
+
+
+async def set_paper_mode(strategy: str, enabled: bool) -> None:
+    _load_paper_mode_overrides()
+    async with _lock:
+        _paper_mode_overrides[strategy] = enabled
+        PAPER_MODE_OVERRIDE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PAPER_MODE_OVERRIDE_FILE.write_text(json.dumps(_paper_mode_overrides, indent=2))
+    logger.info("%s: paper mode set to %s via runtime override (persisted to %s)",
+                strategy, enabled, PAPER_MODE_OVERRIDE_FILE)
 
 
 # --------------------------------------------------------------------- #

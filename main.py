@@ -67,7 +67,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from trade_history import HISTORY_DIR, read_all_jsonl, read_all_trades, read_all_webhook_alerts
 import choppy_stocks
@@ -362,6 +362,68 @@ async def funds_buckets():
     100%) without doing the arithmetic by hand."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, fund_allocation.snapshot)
+
+
+PAPER_MODE_STRATEGIES = ("Options", "Futures", "Luxury")
+
+
+class PaperModeRequest(BaseModel):
+    strategy: str
+    enabled: bool
+
+    @field_validator("strategy")
+    @classmethod
+    def valid_strategy(cls, v: str) -> str:
+        if v not in PAPER_MODE_STRATEGIES:
+            raise ValueError(f"strategy must be one of {PAPER_MODE_STRATEGIES}, got {v!r}")
+        return v
+
+
+def _paper_mode_snapshot() -> dict:
+    return {
+        strategy: {
+            "paper_mode_enabled": breakout_paper_engine.is_paper_mode_enabled(strategy),
+            "source": breakout_paper_engine.paper_mode_source(strategy),
+        }
+        for strategy in PAPER_MODE_STRATEGIES
+    }
+
+
+@app.get("/paper-mode")
+async def get_paper_mode():
+    """Current paper-mode state for Options/Futures/Luxury - "source" is
+    "runtime_override" if POST /paper-mode has ever set it (persisted,
+    survives a restart), else "env_default" (that package's own .env
+    BREAKOUT_PAPER_MODE_ENABLED, unchanged since before this endpoint
+    existed). See POST /paper-mode's own docstring for the full design."""
+    return _paper_mode_snapshot()
+
+
+@app.post("/paper-mode")
+async def set_paper_mode(payload: PaperModeRequest):
+    """Runtime paper-mode ON/OFF switch, per strategy (user request 24 Sep
+    2026: "turn paper trading on or off... without deployment just by
+    calling an endpoint"). Options/Futures/Luxury each already had their
+    own BREAKOUT_PAPER_MODE_ENABLED flag (added 22 Sep 2026) - this makes
+    it a runtime override instead of a fixed .env value read once at
+    startup, persisted to data/paper_mode_overrides.json (gitignored,
+    same convention as Swing/watchlist.py's own runtime-editable file) so
+    it SURVIVES a restart - including the automatic 08:00 IST morning-
+    refresh restart - rather than silently reverting to whatever .env
+    says. See breakout_paper_engine.py's is_paper_mode_enabled/
+    set_paper_mode for the actual state.
+
+    Same "replaces real trading for that package, doesn't add a shadow
+    copy" semantic as the original flag, and does NOT touch any already-
+    open position: flipping a strategy INTO paper mode leaves its
+    current real position(s) to be managed for real through to their own
+    close; flipping OUT of paper mode leaves any currently-open PAPER
+    position simulated to its own close too - only entries from this
+    point on are affected.
+
+    Example body: {"strategy": "Futures", "enabled": true}"""
+    await breakout_paper_engine.set_paper_mode(payload.strategy, payload.enabled)
+    return {"strategy": payload.strategy, **_paper_mode_snapshot()[payload.strategy]}
 
 
 # --------------------------------------------------------------------------- #

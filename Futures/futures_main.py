@@ -155,10 +155,11 @@ async def _resolve_entry(symbol: str, option_type: str) -> dict:
     climactic_entry_guard.guard_entry can call it either immediately
     (non-climactic alert) or later, with a possibly-different
     option_type, once a deferred alert's cooldown clears."""
-    if config.BREAKOUT_PAPER_MODE_ENABLED:
+    if breakout_paper_engine.is_paper_mode_enabled("Futures"):
         # Paper-mode REPLACES real trading for this package (22 Sep 2026,
-        # explicit user instruction) - see breakout_paper_engine.py's own
-        # docstring. Real entry never runs while this flag is true.
+        # explicit user instruction; runtime-togglable since 24 Sep 2026
+        # via POST /paper-mode - see breakout_paper_engine.py's own
+        # docstring for both). Real entry never runs while this is true.
         return await breakout_paper_engine.process_paper_entry("Futures", symbol, option_type)
     return await trading_engine._process_one_entry(symbol, option_type)
 
