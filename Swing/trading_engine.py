@@ -39,6 +39,7 @@ from datetime import datetime
 from typing import Optional
 
 import fund_allocation
+import paper_mode_control
 from trade_history import append_jsonl, attribute_open_broker_position
 
 from . import config, signals
@@ -1292,19 +1293,26 @@ async def _monitor_tick() -> None:
 
     for symbol, regime in candidates:
         index_paper_only = symbol in config.INDEX_SYMBOLS and config.INDEX_PAPER_MODE_ENABLED
-        if config.PAPER_MODE_ENABLED or index_paper_only:
+        if paper_mode_control.is_paper_mode_enabled("Swing") or index_paper_only:
             # Paper-mode REPLACES real trading (23 Sep 2026, user request) -
             # see swing_paper_engine.py's own module docstring. Real entry
-            # never runs while PAPER_MODE_ENABLED is true - checked here
-            # rather than inside enter_position_for_stock itself so a real
-            # capacity check never gates a paper-mode entry attempt.
+            # never runs while this is true - checked here rather than
+            # inside enter_position_for_stock itself so a real capacity
+            # check never gates a paper-mode entry attempt. Runtime-
+            # togglable since 24 Sep 2026 via POST /paper-mode
+            # (strategy="Swing") - see paper_mode_control.py's own
+            # docstring; config.PAPER_MODE_ENABLED remains the .env
+            # fallback when no runtime override has been set.
             #
             # index_paper_only (added 24 Sep 2026, user request - "add a
             # flag to turn off real trading and start paper trading" for
             # NIFTY/BANKNIFTY specifically) is the SAME reroute, scoped to
             # just the two index symbols via config.INDEX_PAPER_MODE_
             # ENABLED - every non-index symbol is completely unaffected by
-            # this flag and keeps trading real, even while it's on.
+            # this flag and keeps trading real, even while it's on. This
+            # narrower flag is intentionally NOT part of the runtime
+            # /paper-mode endpoint (see that endpoint's own docstring) -
+            # still .env-only, unchanged.
             from . import swing_paper_engine
             await swing_paper_engine.process_paper_entry(symbol, regime)
             continue
