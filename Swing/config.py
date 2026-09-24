@@ -460,9 +460,13 @@ if ENTRY_STRATEGY_VERSION not in ("v1", "v2"):
 # now but make it configurable also"). ONE shared counter across the
 # whole strategy - not split by direction/basket-type, since a stock's
 # regime is mutually exclusive at any given time (it's never
-# simultaneously both a long and a short candidate).
+# simultaneously both a long and a short candidate). Code default raised
+# 2->5 (25 Sep 2026, user request, same value as the .env override below)
+# - previously raised 2->3 in .env alone on 24 Sep after live evidence
+# showed 2 slots being pinned (COPPER+BANKNIFTY) starved the entire
+# entry-scan loop (NIFTY saw zero signal activity until that raise).
 # ---------------------------------------------------------------------------
-MAX_CONCURRENT_TRADES = int(os.getenv("SWING_MAX_CONCURRENT_TRADES", "2"))
+MAX_CONCURRENT_TRADES = int(os.getenv("SWING_MAX_CONCURRENT_TRADES", "5"))
 
 # ---------------------------------------------------------------------------
 # Funds (user request: "Use primary bucket funds as max cap available for
