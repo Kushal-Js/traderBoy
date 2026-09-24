@@ -52,6 +52,7 @@ from pydantic import BaseModel, field_validator
 from trade_history import fire_and_forget, record_webhook_alert
 import breakout_signal
 import breakout_paper_engine
+import climactic_entry_guard
 import reversal_filters
 
 from . import config
@@ -144,6 +145,19 @@ async def _breakout_entry_fn(symbol: str, option_type: str) -> dict:
         return {"symbol": symbol, "status": "skipped", "reason": "past_square_off_time"}
     if option_type == "CE" and config.ENABLE_GAP_DOWN_CE_DELAY and dhan_wrapper.should_delay_ce_entry():
         return {"symbol": symbol, "status": "skipped", "reason": "nifty_gap_down_ce_delay"}
+    if config.CLIMACTIC_GUARD_ENABLED:
+        # Gates BOTH branches below (real and paper) - see
+        # climactic_entry_guard.py's own module docstring.
+        return await climactic_entry_guard.guard_entry("Luxury", symbol, option_type, _resolve_entry)
+    return await _resolve_entry(symbol, option_type)
+
+
+async def _resolve_entry(symbol: str, option_type: str) -> dict:
+    """The actual real-vs-paper dispatch, extracted out of
+    _breakout_entry_fn (22 Sep 2026 paper-mode logic, unchanged) so
+    climactic_entry_guard.guard_entry can call it either immediately
+    (non-climactic alert) or later, with a possibly-different
+    option_type, once a deferred alert's cooldown clears."""
     if config.BREAKOUT_PAPER_MODE_ENABLED:
         # Paper-mode REPLACES real trading for this package (22 Sep 2026,
         # explicit user instruction) - see breakout_paper_engine.py's own
@@ -383,3 +397,11 @@ async def get_breakout_signal_status():
     watched, and which have already fired (at most one signal/symbol/day).
     Read-only, see breakout_signal.py's own module docstring."""
     return await breakout_signal.snapshot("Luxury")
+
+
+@router.get("/luxury/climactic-guard/pending")
+async def get_climactic_guard_pending():
+    """Every alert currently deferred by the climactic-entry cooldown
+    guard - read-only, see climactic_entry_guard.py's own module
+    docstring."""
+    return {"enabled": config.CLIMACTIC_GUARD_ENABLED, "pending": climactic_entry_guard.snapshot("Luxury")}

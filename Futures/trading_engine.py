@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfo
 from trade_history import (
     attribute_open_broker_position, count_opened_today, loss_count_today, loss_exit_count_today,
 )
+import climactic_entry_guard
 import cross_strategy_registry
 import fund_allocation
 import reversal_filters
@@ -1885,6 +1886,8 @@ async def monitor_loop() -> None:
         try:
             await position_store.maybe_reset_for_new_day()
             await _sync_pending_orders()
+            if config.CLIMACTIC_GUARD_ENABLED:
+                await climactic_entry_guard.poll_pending("Futures")
 
             cutoff = _todays_square_off_time()
             if cutoff is not None:

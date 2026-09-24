@@ -411,6 +411,12 @@ BREAKOUT_WS_STALE_AFTER_SECONDS = float(os.getenv("FUTURES_BREAKOUT_WS_STALE_AFT
 # user's own explicit clarification.
 BREAKOUT_PAPER_MODE_ENABLED = os.getenv("FUTURES_BREAKOUT_PAPER_MODE_ENABLED", "false").lower() == "true"
 
+# Climactic-entry cooldown guard (added 24 Sep 2026, user request - see
+# climactic_entry_guard.py's own module docstring and backtest_climactic_
+# entry_guard.py for the design/evidence). Gates EVERY _breakout_entry_fn
+# call (real AND paper branches) behind climactic_entry_guard.guard_entry.
+CLIMACTIC_GUARD_ENABLED = os.getenv("FUTURES_CLIMACTIC_GUARD_ENABLED", "false").lower() == "true"
+
 # "static" (default, unchanged) or "universe_bucket" (universe_bucket.py's
 # rolling 3-trading-day pool instead of the fixed list above) - see
 # Options/config.py's identical block for the full rationale.

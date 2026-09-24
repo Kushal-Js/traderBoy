@@ -1061,6 +1061,18 @@ BREAKOUT_WS_STALE_AFTER_SECONDS = float(os.getenv("OPTIONS_BREAKOUT_WS_STALE_AFT
 # user's own explicit clarification.
 BREAKOUT_PAPER_MODE_ENABLED = os.getenv("OPTIONS_BREAKOUT_PAPER_MODE_ENABLED", "false").lower() == "true"
 
+# Climactic-entry cooldown guard (added 24 Sep 2026, user request - see
+# climactic_entry_guard.py's own module docstring for the full design and
+# backtest_climactic_entry_guard.py for the same-day evidence behind it).
+# Default false. When true, gates EVERY _breakout_entry_fn call (both the
+# real and paper-mode branches - it runs BEFORE that branch, in
+# option_main._breakout_entry_fn) behind climactic_entry_guard.guard_entry:
+# a climactic alert (RSI-extreme + high Efficiency Ratio) is deferred and
+# re-checked every ~5min for up to COOLDOWN_MAX_WAIT_MINUTES instead of
+# entering immediately, resolving in whichever direction (CE or PE)
+# momentum actually shows once cleared, or dropped entirely on timeout.
+CLIMACTIC_GUARD_ENABLED = os.getenv("OPTIONS_CLIMACTIC_GUARD_ENABLED", "false").lower() == "true"
+
 # Where BREAKOUT_SEED_UNIVERSE_ENABLED's symbol list comes from (added 21
 # Sep 2026, user request - see universe_bucket.py's own module docstring):
 #   "static"          (default) - the fixed BREAKOUT_UNIVERSE_SYMBOLS list
