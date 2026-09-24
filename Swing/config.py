@@ -658,6 +658,21 @@ MARKET_OPEN_TIME = os.getenv("SWING_MARKET_OPEN_TIME", "09:00")
 FRIDAY_SQUARE_OFF_ENABLED = os.getenv("SWING_FRIDAY_SQUARE_OFF_ENABLED", "true").lower() == "true"
 FRIDAY_SQUARE_OFF_TIME = os.getenv("SWING_FRIDAY_SQUARE_OFF_TIME", "15:25")
 
+# Daily (not just weekly) square-off, INDEX_SYMBOLS (NIFTY/BANKNIFTY) ONLY -
+# user request 24 Sep 2026 ("all open positions for NIFTY and BANKNIFTY to
+# be strictly squared off at 3:25 daily with no carry forward over the
+# night as they are very volatile instruments"). Every OTHER Swing symbol
+# (NSE equities, COPPER/CRUDEOIL/NATURALGAS) keeps carrying across days
+# exactly as today - see FRIDAY_SQUARE_OFF_TIME's own docstring above for
+# why THAT one stays weekly, not daily, for everyone else. Same 15:25
+# default (5 minutes before NSE close) as the Friday one, but this fires
+# EVERY trading day, not just Friday, and only ever touches NIFTY/
+# BANKNIFTY positions - see Swing/trading_engine.py's _monitor_tick for
+# where this is checked and enforced (both the forced square-off itself
+# and blocking a fresh same-day index re-entry after this time).
+INDEX_DAILY_SQUARE_OFF_ENABLED = os.getenv("SWING_INDEX_DAILY_SQUARE_OFF_ENABLED", "true").lower() == "true"
+INDEX_DAILY_SQUARE_OFF_TIME = os.getenv("SWING_INDEX_DAILY_SQUARE_OFF_TIME", "15:25")
+
 # Cooldown before re-attempting entry for the same symbol after a failed
 # (non-TRADED, error, or skipped) entry attempt - added 15 Sep 2026 after a
 # real incident: with no cooldown, a persistent failure (e.g. a genuinely

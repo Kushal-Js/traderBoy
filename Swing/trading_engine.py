@@ -117,6 +117,16 @@ def _is_friday_square_off_time() -> bool:
     return now.weekday() == 4 and now >= _parse_hhmm_today(config.FRIDAY_SQUARE_OFF_TIME)
 
 
+def _is_index_square_off_time() -> bool:
+    """Daily (Mon-Fri, not just Friday) counterpart to _is_friday_square_
+    off_time - see config.INDEX_DAILY_SQUARE_OFF_TIME's own docstring.
+    weekday() < 5 excludes Sat/Sun (matches _symbol_market_open's own
+    weekday guard) though this is moot in practice - nothing can be open
+    on a weekend that wasn't already force-closed the prior Friday."""
+    now = _now_ist()
+    return now.weekday() < 5 and now >= _parse_hhmm_today(config.INDEX_DAILY_SQUARE_OFF_TIME)
+
+
 def _gen_tag(prefix: str, symbol: str) -> str:
     """See Options/trading_engine.py's identical helper - same DH-905
     special-character rationale (GVT&D)."""
@@ -1110,11 +1120,18 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
         logger.exception("on_price_tick failed for %s", trading_symbol)
 
 
-async def _square_off_all(reason: str) -> None:
-    positions = dict(position_store.live_positions)
+async def _square_off_all(reason: str, symbols: Optional[set[str]] = None) -> None:
+    """symbols=None (default, every existing call site until 24 Sep 2026)
+    squares off the entire Swing book, unchanged. A non-None set scopes
+    this to just those symbols - added for config.INDEX_DAILY_SQUARE_OFF_
+    ENABLED (NIFTY/BANKNIFTY only, every trading day), which must never
+    touch a carrying-by-design NSE equity or MCX position the way the
+    (already symbol-unscoped) Friday square-off intentionally does."""
+    positions = {s: p for s, p in position_store.live_positions.items() if symbols is None or s in symbols}
     if not positions:
         return
-    logger.info("Square-off triggered (%s) for %d open Swing position(s)", reason, len(positions))
+    logger.info("Square-off triggered (%s) for %d open Swing position(s)%s", reason, len(positions),
+                f" (scoped to {sorted(symbols)})" if symbols is not None else "")
     for symbol, position in positions.items():
         if position.pending_exit_order_id or _exit_on_cooldown(position):
             continue
@@ -1174,6 +1191,17 @@ async def _monitor_tick() -> None:
         await _square_off_all("FRIDAY_SQUARE_OFF")
         return
 
+    index_square_off_now = config.INDEX_DAILY_SQUARE_OFF_ENABLED and _is_index_square_off_time()
+    if index_square_off_now:
+        # Scoped to NIFTY/BANKNIFTY only - unlike the Friday branch above,
+        # this does NOT return early: every other Swing symbol still gets
+        # its normal exit-check/entry-scan this tick, since only the two
+        # index symbols carry a "never overnight" rule (see config.
+        # INDEX_DAILY_SQUARE_OFF_TIME's own docstring). Retried harmlessly
+        # every tick for the rest of the day until actually flat, same
+        # pattern as _square_off_all's own Friday usage.
+        await _square_off_all("INDEX_DAILY_SQUARE_OFF", symbols=config.INDEX_SYMBOLS)
+
     # Exits first - more urgent than looking for new entries.
     for symbol, position in list(position_store.live_positions.items()):
         await _check_one_position(symbol, position)
@@ -1190,6 +1218,12 @@ async def _monitor_tick() -> None:
         if symbol in position_store.reserved_symbols:
             continue
         if await position_store.is_in_entry_cooldown(symbol):
+            continue
+        if index_square_off_now and symbol in config.INDEX_SYMBOLS:
+            # No fresh same-day NIFTY/BANKNIFTY entry once today's index
+            # square-off has fired - taking one right after would defeat
+            # the entire "never carry index overnight" point within
+            # minutes. Every other symbol is unaffected.
             continue
         if not signals._symbol_market_open(symbol):
             continue
@@ -1220,8 +1254,12 @@ async def _monitor_tick() -> None:
 
 async def monitor_loop() -> None:
     """Runs forever regardless of config.STRATEGY_ENABLED (so flipping
-    that flag needs no restart) - no EOD or Friday square-off anywhere in
-    this loop, Swing positions are meant to carry for days by design."""
+    that flag needs no restart). Swing positions carry across days by
+    design - the only forced square-offs are the weekly Friday one (every
+    symbol, weekend-gap protection) and the daily INDEX_SYMBOLS-only one
+    (NIFTY/BANKNIFTY never carry overnight at all, added 24 Sep 2026 - see
+    _monitor_tick and config.INDEX_DAILY_SQUARE_OFF_TIME), both checked
+    inside _monitor_tick itself, not here."""
     logger.info("Swing v2 monitor loop started.")
     while True:
         try:
