@@ -148,6 +148,44 @@ def test_3_ws_candles_fn_returns_too_few_bars_falls_through_to_rest():
         _restore_equity_mocks(saved)
 
 
+def test_3b_ws_candles_fn_passes_bar_count_but_isnt_actually_warm_falls_through_to_rest():
+    """THE real regression this fix caught live: a WS series can clear the
+    cheap atr_len+1 (15) bar-count gate while still being nowhere near
+    warm enough for the basis's own 34-bar length - confirmed live 24 Sep
+    2026, COPPER 15m, a freshly-subscribed 16-bar WS series passed an
+    earlier (buggy) version of this same check, got used instead of
+    REST's much deeper history, and came back not-warm, silently WORSE
+    than skipping the hook. Only a real compute_structure_break() call
+    can tell the difference - a bar count alone cannot."""
+    saved = _install_equity_mocks()
+    saved_fetch = W.fetch_continuous_intraday
+    try:
+        rest_calls = []
+        rest_data = _make_series(60)  # REST's own deep history - genuinely warm
+
+        def fake_fetch(security_id, exchange_segment, instrument_type, interval, lookback_days_override=None):
+            rest_calls.append(interval)
+            return rest_data
+        W.fetch_continuous_intraday = fake_fetch
+
+        # 16 bars: clears the atr_len(14)+1=15 floor, but the default
+        # basis length=34 means this can never be warm.
+        thin_but_over_floor_ws_data = _make_series(16)
+        r = sb.fetch_timeframe("TESTSTOCK", "15m", ws_candles_fn=lambda sym, iv: thin_but_over_floor_ws_data)
+
+        assert not r.error, r.error
+        assert r.warm, "the REST fallback (60 real bars) must produce a warm result"
+        assert rest_calls == [15], (
+            f"a WS series that clears the bar-count floor but isn't genuinely warm must still fall "
+            f"through to REST - got {rest_calls}"
+        )
+        print("3b. ws_candles_fn data clearing the bar-count floor but not actually warm still falls "
+              "through to REST (the real live regression this caught): PASSED")
+    finally:
+        W.fetch_continuous_intraday = saved_fetch
+        _restore_equity_mocks(saved)
+
+
 def test_4_ws_candles_fn_raising_falls_through_to_rest():
     saved = _install_equity_mocks()
     saved_fetch = W.fetch_continuous_intraday
@@ -291,6 +329,7 @@ def main():
     test_1_ws_candles_fn_used_directly_rest_never_called()
     test_2_ws_candles_fn_returns_none_falls_through_to_rest()
     test_3_ws_candles_fn_returns_too_few_bars_falls_through_to_rest()
+    test_3b_ws_candles_fn_passes_bar_count_but_isnt_actually_warm_falls_through_to_rest()
     test_4_ws_candles_fn_raising_falls_through_to_rest()
     test_5_no_ws_candles_fn_is_byte_identical_to_before()
     test_6_swing_signals_ws_candles_wrapper()

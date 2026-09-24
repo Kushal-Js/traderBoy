@@ -459,9 +459,15 @@ def fetch_timeframe(symbol: str, timeframe: str, params: Optional[StructureBreak
     default) preserves the exact prior REST-only behavior unchanged - the
     CLI (`main()`) and the backtest script never pass one. Falls straight
     through to the existing REST fetch below whenever the hook returns
-    None, raises, or hands back fewer than params.atr_len+1 bars (not
-    warm enough to trust yet) - REST is always the fallback, per the same
-    fail-open discipline every other hybrid fetch in this repo follows."""
+    None or raises, OR whenever the candles it DOES return, once actually
+    run through compute_structure_break, come back not-warm or errored -
+    a bare bar-count check is NOT trusted as a proxy for "enough to warm
+    the indicator" (a real regression from an earlier version of this
+    fix: a thin freshly-subscribed WS series passed a naive count check,
+    got used instead of REST's much deeper history, and came back not
+    warm - silently worse than skipping the hook entirely). REST is
+    always the fallback, per the same fail-open discipline every other
+    hybrid fetch in this repo follows."""
     if timeframe not in TIMEFRAMES:
         return StructureBreakResult(n=0, basis=[], upper=[], lower=[], regime=[], switch_up=[],
                                      switch_down=[], bull_retest=[], bear_retest=[], strength=[],
@@ -490,35 +496,52 @@ def fetch_timeframe(symbol: str, timeframe: str, params: Optional[StructureBreak
             volumes = list(data.get("volume") or [])
             timestamps = list(data.get("timestamp") or [])
         else:
-            data = None
+            # ws_candles_fn's result is only TRUSTED once it's actually run
+            # through compute_structure_break and reports warm=True/no
+            # error - a bare bar-count check (e.g. ">= atr_len+1") is NOT
+            # a reliable proxy for "enough to warm the indicator" (the
+            # basis's own `length`, 34 by default, is what typically
+            # gates `warm`, not atr_len 14) and a real regression was
+            # caught exactly this way in testing: a freshly-subscribed
+            # WS series with, say, 16 bars passed a naive ">=15" gate,
+            # got used instead of REST's much deeper history, and came
+            # back not-warm - silently WORSE than never having the WS
+            # hook at all, since REST alone would have succeeded. This
+            # computes the real indicator on the WS candles FIRST and
+            # only returns that result if it's genuinely usable; any
+            # other outcome falls straight through to the untouched REST
+            # path below, exactly as if ws_candles_fn had returned None.
             if ws_candles_fn is not None:
                 try:
                     ws_data = ws_candles_fn(symbol, interval)
                 except Exception:  # noqa: BLE001
                     ws_data = None
-                if ws_data and len(ws_data.get("close") or []) >= params.atr_len + 1:
-                    data = ws_data
-            if data is None:
-                # Retry once on an EMPTY-but-not-raised response, not just on a
-                # raised exception - dhan_client.py's own _retry only retries
-                # when the underlying call THROWS, but Dhan's documented
-                # back-to-back-unpaced-calls failure mode is a soft "failure"
-                # JSON body with no "data" key, which fetch_continuous_intraday
-                # turns into a plain empty dict rather than an exception. Real
-                # symptom this fixes: fetching 5m then immediately 15m then 1h
-                # for the same symbol with no gap between calls - the 2nd/3rd
-                # call would occasionally come back with 0 candles and no error
-                # message at all (confirmed live, 22 Sep 2026, COPPER 15m).
+                if ws_data and (ws_data.get("close") or []):
+                    ws_o, ws_h, ws_l, ws_c, ws_v, ws_t = _drop_forming_candle(ws_data, interval)
+                    if len(ws_c) >= params.atr_len + 1:
+                        candidate = compute_structure_break(ws_o, ws_h, ws_l, ws_c, ws_v, ws_t, params)
+                        if not candidate.error and candidate.warm:
+                            return candidate
+            # Retry once on an EMPTY-but-not-raised response, not just on a
+            # raised exception - dhan_client.py's own _retry only retries
+            # when the underlying call THROWS, but Dhan's documented
+            # back-to-back-unpaced-calls failure mode is a soft "failure"
+            # JSON body with no "data" key, which fetch_continuous_intraday
+            # turns into a plain empty dict rather than an exception. Real
+            # symptom this fixes: fetching 5m then immediately 15m then 1h
+            # for the same symbol with no gap between calls - the 2nd/3rd
+            # call would occasionally come back with 0 candles and no error
+            # message at all (confirmed live, 22 Sep 2026, COPPER 15m).
+            data = dhan_wrapper.fetch_continuous_intraday(
+                security_id, exchange_segment, instrument_type, interval,
+                lookback_days_override=lookback_days_override or _INTRADAY_LOOKBACK_DAYS[interval],
+            )
+            if not (data.get("close") or []):
+                time.sleep(2.0)
                 data = dhan_wrapper.fetch_continuous_intraday(
                     security_id, exchange_segment, instrument_type, interval,
                     lookback_days_override=lookback_days_override or _INTRADAY_LOOKBACK_DAYS[interval],
                 )
-                if not (data.get("close") or []):
-                    time.sleep(2.0)
-                    data = dhan_wrapper.fetch_continuous_intraday(
-                        security_id, exchange_segment, instrument_type, interval,
-                        lookback_days_override=lookback_days_override or _INTRADAY_LOOKBACK_DAYS[interval],
-                    )
             opens, highs, lows, closes, volumes, timestamps = _drop_forming_candle(data, interval)
 
         if len(closes) < params.atr_len + 1:
