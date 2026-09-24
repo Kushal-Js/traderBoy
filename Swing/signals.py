@@ -90,15 +90,32 @@ def _underlying_reference(symbol: str) -> tuple[str, str, str]:
         # No SEM_INSTRUMENT_NAME=="EQUITY" row exists for an index - the
         # plain NSE-equity path below always raised "No NSE equity
         # instrument found" for NIFTY/BANKNIFTY (a real gap, confirmed
-        # live before this fix). See config.INDEX_SYMBOLS' own docstring
-        # for why this deliberately does NOT also call candle_feed.
-        # ensure_subscribed below - REST-only, same segment/instrument_
-        # type should_delay_ce_entry already uses in production.
+        # live before this fix). Same segment/instrument_type should_
+        # delay_ce_entry already uses in production.
+        #
+        # WS coverage extended here 24 Sep 2026 (user request, direct
+        # follow-up to confirming candle_feed.py was WS-live for COPPER/
+        # NATURALGAS but REST-only for indices) - candle_feed.ensure_
+        # subscribed is now called for index symbols too, same as every
+        # other branch below. This used to be deliberately skipped (REST-
+        # only) because candle_feed.py's WS subscribe path didn't have an
+        # IDX_I-segment method yet - dhan_wrapper.subscribe_index_quote/
+        # unsubscribe_index_quote (Options/dhan_client.py) close that gap,
+        # confirmed against dhanhq's own MarketFeed.IDX segment constant.
+        # UNVERIFIED as of this change whether Dhan's Quote-mode packet for
+        # an index actually carries the "volume" key _on_market_tick's own
+        # quote-tick routing requires (see that function's own comment on
+        # the IDX_I branch) - watch GET /swing/debug/candle-feed/snapshot
+        # for NIFTY/BANKNIFTY after deploy to confirm ticks actually
+        # arrive, not just that the subscribe call succeeded. Fails safe
+        # either way: _get_intraday_series below only trusts the WS series
+        # once is_fresh() and a real bar count both check out, REST
+        # fallback continues exactly as before if ticks never arrive.
         security_id, exchange_segment, instrument_type = dhan_wrapper.index_security_id(symbol), "IDX_I", "INDEX"
     else:
         security_id, exchange_segment, instrument_type = dhan_wrapper._equity_security_id(symbol), "NSE_EQ", "EQUITY"
 
-    if config.USE_WS_CANDLES and not is_index:
+    if config.USE_WS_CANDLES:
         try:
             candle_feed.ensure_subscribed(symbol, security_id, exchange_segment)
         except Exception:  # noqa: BLE001

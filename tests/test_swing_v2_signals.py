@@ -231,6 +231,37 @@ def test_6_completely_empty_fetch_response_keeps_last_good_cached_value():
         W._client, W._equity_security_id = saved_client, saved_eqid
 
 
+def test_7_underlying_reference_ws_subscribes_index_symbols_too():
+    """v3, index WS coverage (24 Sep 2026, user request "make it WS feeds
+    based for IDX_I also"). _underlying_reference used to deliberately
+    SKIP candle_feed.ensure_subscribed for config.INDEX_SYMBOLS (REST-
+    only, by design) - this proves that gate is gone: an index symbol now
+    reaches ensure_subscribed exactly like every other branch, with the
+    correct (security_id, "IDX_I") pair, whenever config.USE_WS_CANDLES
+    is on."""
+    saved_index_id, saved_use_ws = W.index_security_id, sc.USE_WS_CANDLES
+    saved_ensure_subscribed = signals.candle_feed.ensure_subscribed
+    calls = []
+    try:
+        W.index_security_id = lambda sym: "13"
+        sc.USE_WS_CANDLES = True
+        signals.candle_feed.ensure_subscribed = lambda symbol, security_id, exchange_segment: (
+            calls.append((symbol, security_id, exchange_segment))
+        )
+
+        result = signals._underlying_reference("NIFTY")
+        assert result == ("13", "IDX_I", "INDEX"), result
+        assert ("NIFTY", "13", "IDX_I") in calls, (
+            f"expected _underlying_reference to WS-subscribe NIFTY via candle_feed.ensure_subscribed, got {calls}"
+        )
+        print("7. _underlying_reference now WS-subscribes index symbols too (the old REST-only "
+              "gate for config.INDEX_SYMBOLS is gone): PASSED")
+    finally:
+        W.index_security_id = saved_index_id
+        sc.USE_WS_CANDLES = saved_use_ws
+        signals.candle_feed.ensure_subscribed = saved_ensure_subscribed
+
+
 def main():
     print("=== Swing v2 signals (regime + Supertrend crossover) test suite ===\n")
     test_1_lookback_override_reaches_the_fetch_for_both_intervals()
@@ -239,6 +270,7 @@ def main():
     test_4_fetch_failure_keeps_last_good_cached_value()
     test_5_supertrend_crossed_above_fires_only_on_the_transition_candle()
     test_6_completely_empty_fetch_response_keeps_last_good_cached_value()
+    test_7_underlying_reference_ws_subscribes_index_symbols_too()
     print("\nALL SWING V2 SIGNALS CHECKS PASSED")
 
 

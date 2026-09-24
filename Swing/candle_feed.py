@@ -282,6 +282,8 @@ def ensure_subscribed(symbol: str, security_id: str, exchange_segment: str) -> N
         try:
             if old_segment == "MCX_COMM":
                 dhan_wrapper.unsubscribe_mcx_quote(symbol, old_security_id)
+            elif old_segment == "IDX_I":
+                dhan_wrapper.unsubscribe_index_quote(symbol, old_security_id)
             else:
                 dhan_wrapper.unsubscribe_equity_quote(symbol)
         except Exception:  # noqa: BLE001
@@ -310,6 +312,8 @@ def ensure_subscribed(symbol: str, security_id: str, exchange_segment: str) -> N
     try:
         if exchange_segment == "MCX_COMM":
             dhan_wrapper.subscribe_mcx_quote(symbol, security_id)
+        elif exchange_segment == "IDX_I":
+            dhan_wrapper.subscribe_index_quote(symbol, security_id)
         else:
             dhan_wrapper.subscribe_equity_quote(symbol)
     except Exception:  # noqa: BLE001

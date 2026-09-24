@@ -78,6 +78,12 @@ class _FakeDhanWrapper:
     def unsubscribe_mcx_quote(self, symbol: str, security_id: str) -> None:
         self.calls.append(("unsubscribe_mcx_quote", symbol, security_id))
 
+    def subscribe_index_quote(self, symbol: str, security_id: str) -> None:
+        self.calls.append(("subscribe_index_quote", symbol, security_id))
+
+    def unsubscribe_index_quote(self, symbol: str, security_id: str) -> None:
+        self.calls.append(("unsubscribe_index_quote", symbol, security_id))
+
 
 def _install_fake_dhan_wrapper() -> _FakeDhanWrapper:
     import Options.dhan_client as dc
@@ -294,6 +300,31 @@ def test_8_concurrent_ticks_and_ensure_subscribed_never_crash_or_corrupt():
     print("8. Concurrent ticks + repeated ensure_subscribed calls: no crash, no deadlock, no corruption: PASSED")
 
 
+def test_9_ensure_subscribed_idx_dispatches_to_index_quote():
+    """v3, index WS coverage (24 Sep 2026, user request "make it WS feeds
+    based for IDX_I also") - ensure_subscribed's segment dispatch must
+    route an IDX_I symbol (NIFTY/BANKNIFTY) to subscribe_index_quote, not
+    silently fall through to the NSE-equity branch (the "else" arm below
+    the MCX check) the way it would have before this three-way dispatch
+    existed."""
+    fake = _install_fake_dhan_wrapper()
+    _reset_module_state()
+    sym = "NIFTY"
+
+    cf.ensure_subscribed(sym, "13", "IDX_I")
+    assert cf._subscribed_ref[sym] == ("13", "IDX_I")
+    assert ("subscribe_index_quote", sym, "13") in fake.calls
+    assert not any(c[0] == "subscribe_equity_quote" for c in fake.calls), (
+        "an index symbol must never fall through to the NSE-equity subscribe path"
+    )
+
+    calls_before = list(fake.calls)
+    cf.ensure_subscribed(sym, "13", "IDX_I")  # identical reference again
+    assert fake.calls == calls_before, "an unchanged index reference must be a complete no-op too"
+    print("9. ensure_subscribed correctly dispatches an IDX_I symbol to subscribe_index_quote, "
+          "never the NSE-equity path: PASSED")
+
+
 def main():
     tmp_history = Path(tempfile.mkdtemp(prefix="swing_cf_test_history_"))
     saved_history_dir = cf.HISTORY_DIR
@@ -310,6 +341,7 @@ def main():
         test_6_roll_restore_never_loads_the_retired_contracts_bars()
         test_7_is_fresh_and_get_candles_dict()
         test_8_concurrent_ticks_and_ensure_subscribed_never_crash_or_corrupt()
+        test_9_ensure_subscribed_idx_dispatches_to_index_quote()
         print("\nALL SWING CANDLE_FEED TESTS PASSED")
     finally:
         cf.HISTORY_DIR = saved_history_dir

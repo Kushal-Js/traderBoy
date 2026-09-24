@@ -371,6 +371,14 @@ class DhanWrapper:
         # the two dicts to look in, so a numeric clash between the two
         # spaces can never cross-contaminate either one.
         self._mcx_security_id_to_symbol: dict[str, str] = {}
+        # Same idea again, IDX_I-segment indices (NIFTY/BANKNIFTY - added 24
+        # Sep 2026, Swing/candle_feed.py's WS coverage extended to
+        # config.INDEX_SYMBOLS). A THIRD separate dict, same collision
+        # reasoning as the MCX one above - NIFTY's security_id ("13") and
+        # BANKNIFTY's ("25") are small integers with no guarantee of being
+        # globally unique across NSE_EQ/MCX_COMM's own security_id spaces
+        # either, so this never shares a lookup with them.
+        self._index_security_id_to_symbol: dict[str, str] = {}
         # Fired synchronously from the market-feed's WebSocket thread on
         # every Quote/Full packet (never Ticker - those have no volume
         # field), as (underlying_symbol, ltp, day_cumulative_volume,
@@ -1002,6 +1010,21 @@ class DhanWrapper:
             tick_segment = tick.get("exchange_segment")
             if tick_segment == MarketFeed.MCX:
                 underlying_symbol = self._mcx_security_id_to_symbol.get(security_id)
+            elif tick_segment == MarketFeed.IDX:
+                # An index has no real traded volume of its own - IF Dhan's
+                # Quote/Full packet for one still carries a "volume" key
+                # (unverified as of 24 Sep 2026 - watch candle_feed's own
+                # snapshot endpoint after deploy to confirm ticks actually
+                # arrive here, not just that subscribe_symbols() accepted
+                # the instrument), it should read 0, matching what the REST
+                # candle series already reports for NIFTY/BANKNIFTY too -
+                # _update_bar's own OHLC reconstruction never depends on
+                # volume being nonzero, only on LTP + LTT. If Dhan omits the
+                # key entirely for IDX_I, this whole branch silently never
+                # fires and Swing/candle_feed.py's own is_fresh() check
+                # correctly keeps the symbol on its existing REST fallback -
+                # fails safe either way, never a crash or a wrong price.
+                underlying_symbol = self._index_security_id_to_symbol.get(security_id)
             else:
                 underlying_symbol = self._equity_security_id_to_symbol.get(security_id)
             if underlying_symbol is not None:
@@ -1181,6 +1204,42 @@ class DhanWrapper:
             return
         self._mcx_security_id_to_symbol.pop(security_id, None)
         instrument = (MarketFeed.MCX, security_id, MarketFeed.Quote)
+        with self._market_feed_lock:
+            self._market_feed_instruments.discard(instrument)
+            feed = self._market_feed
+        if feed is not None:
+            feed.unsubscribe_symbols([instrument])
+
+    def subscribe_index_quote(self, underlying_symbol: str, security_id: str) -> None:
+        """IDX_I-segment counterpart to subscribe_mcx_quote above (added 24
+        Sep 2026, user request - "make it WS feeds based for IDX_I also",
+        extending Swing/candle_feed.py's WS candle reconstruction to
+        NIFTY/BANKNIFTY). Takes security_id directly rather than resolving
+        it internally - same reasoning as subscribe_mcx_quote (the caller,
+        Swing/signals.py's _underlying_reference, already resolves it via
+        dhan_wrapper.index_security_id() for the REST path, no reason to
+        resolve it twice). Routed through the SEPARATE _index_security_id_
+        to_symbol dict, never the equity or MCX ones - see that dict's own
+        docstring for the collision this avoids. MarketFeed.IDX is 0
+        (confirmed against dhanhq's own marketfeed.py - get_exchange_segment
+        maps IDX -> "IDX_I", the exact same segment string _underlying_
+        reference's own REST path already uses), so this is a genuine
+        equal-with, not an accidental falsy-int bug."""
+        if not config.ENABLE_WS_FEED:
+            return
+        self._index_security_id_to_symbol[security_id] = underlying_symbol
+        instrument = (MarketFeed.IDX, security_id, MarketFeed.Quote)
+        with self._market_feed_lock:
+            self._market_feed_instruments.add(instrument)
+            feed = self._market_feed
+        if feed is not None:
+            feed.subscribe_symbols([instrument])
+
+    def unsubscribe_index_quote(self, underlying_symbol: str, security_id: str) -> None:
+        if not config.ENABLE_WS_FEED:
+            return
+        self._index_security_id_to_symbol.pop(security_id, None)
+        instrument = (MarketFeed.IDX, security_id, MarketFeed.Quote)
         with self._market_feed_lock:
             self._market_feed_instruments.discard(instrument)
             feed = self._market_feed

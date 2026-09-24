@@ -25,6 +25,16 @@ Covers:
      its own segment, never the other one's.
   4. A Ticker-mode packet (no "volume" key, options) never fires a quote
      subscriber at all - unchanged behavior.
+  5. An IDX_I (index, NIFTY/BANKNIFTY) Quote tick routes to the index
+     subscriber (added 24 Sep 2026, user request "make it WS feeds based
+     for IDX_I also" - see Options/dhan_client.py's subscribe_index_quote/
+     _index_security_id_to_symbol and Swing/signals.py's _underlying_
+     reference).
+  6. The SAME numeric security_id subscribed on all THREE segments
+     (NSE/MCX/IDX) at once still routes each tick to the correct symbol -
+     the three-way extension of test_3, since MarketFeed.IDX is 0 and a
+     careless truthiness check (rather than == ) on tick_segment would
+     have silently swallowed every index tick.
 
 HOW TO RUN:
     uv run python tests/test_dhan_client_quote_tick_routing.py
@@ -147,12 +157,76 @@ def test_4_ticker_mode_packet_never_fires_quote_subscriber():
         W._on_quote_tick_subscribers[:] = saved_subs
 
 
+def test_5_idx_quote_tick_routes_to_index_subscriber():
+    received = []
+    saved_equity, saved_mcx, saved_idx, saved_subs = (
+        dict(W._equity_security_id_to_symbol), dict(W._mcx_security_id_to_symbol),
+        dict(W._index_security_id_to_symbol), list(W._on_quote_tick_subscribers),
+    )
+    try:
+        W._equity_security_id_to_symbol.clear()
+        W._mcx_security_id_to_symbol.clear()
+        W._index_security_id_to_symbol.clear()
+        W._on_quote_tick_subscribers.clear()
+        W._index_security_id_to_symbol["13"] = "NIFTY"
+        W.add_quote_tick_subscriber(lambda sym, ltp, vol, t: received.append((sym, ltp, vol)))
+
+        W._on_market_tick(None, _quote_tick("13", MarketFeed.IDX, 24500.5, 0.0))
+        assert received == [("NIFTY", 24500.5, 0.0)]
+        print("5. IDX_I Quote tick routes to the index subscriber (new path): PASSED")
+    finally:
+        W._equity_security_id_to_symbol.clear(); W._equity_security_id_to_symbol.update(saved_equity)
+        W._mcx_security_id_to_symbol.clear(); W._mcx_security_id_to_symbol.update(saved_mcx)
+        W._index_security_id_to_symbol.clear(); W._index_security_id_to_symbol.update(saved_idx)
+        W._on_quote_tick_subscribers[:] = saved_subs
+
+
+def test_6_colliding_security_id_across_all_three_segments_never_cross_contaminates():
+    """MarketFeed.IDX == 0 is the important edge case here - a bug that
+    checked `if tick_segment:` instead of `if tick_segment == MarketFeed.
+    MCX:` / `elif tick_segment == MarketFeed.IDX:` would treat every index
+    tick as falsy and either crash or silently mis-route it. This proves
+    the three segments coexist correctly even when they share one numeric
+    security_id ("777")."""
+    received = []
+    saved_equity, saved_mcx, saved_idx, saved_subs = (
+        dict(W._equity_security_id_to_symbol), dict(W._mcx_security_id_to_symbol),
+        dict(W._index_security_id_to_symbol), list(W._on_quote_tick_subscribers),
+    )
+    try:
+        W._equity_security_id_to_symbol.clear()
+        W._mcx_security_id_to_symbol.clear()
+        W._index_security_id_to_symbol.clear()
+        W._on_quote_tick_subscribers.clear()
+        W._equity_security_id_to_symbol["777"] = "SOME_NSE_STOCK"
+        W._mcx_security_id_to_symbol["777"] = "SOME_MCX_CONTRACT"
+        W._index_security_id_to_symbol["777"] = "SOME_INDEX"
+        W.add_quote_tick_subscriber(lambda sym, ltp, vol, t: received.append((sym, ltp, vol)))
+
+        W._on_market_tick(None, _quote_tick("777", MarketFeed.NSE, 100.0, 10.0))
+        W._on_market_tick(None, _quote_tick("777", MarketFeed.MCX, 200.0, 20.0))
+        W._on_market_tick(None, _quote_tick("777", MarketFeed.IDX, 300.0, 0.0))
+
+        assert received == [
+            ("SOME_NSE_STOCK", 100.0, 10.0), ("SOME_MCX_CONTRACT", 200.0, 20.0), ("SOME_INDEX", 300.0, 0.0),
+        ], f"a security_id colliding across all three segments must never cross-contaminate any of them, got {received}"
+        print("6. A security_id colliding across NSE/MCX/IDX never cross-contaminates any of them "
+              "(MarketFeed.IDX==0 is correctly handled via ==, not truthiness): PASSED")
+    finally:
+        W._equity_security_id_to_symbol.clear(); W._equity_security_id_to_symbol.update(saved_equity)
+        W._mcx_security_id_to_symbol.clear(); W._mcx_security_id_to_symbol.update(saved_mcx)
+        W._index_security_id_to_symbol.clear(); W._index_security_id_to_symbol.update(saved_idx)
+        W._on_quote_tick_subscribers[:] = saved_subs
+
+
 def main():
     print("=== Options/dhan_client.py Quote-tick exchange-segment routing test suite ===\n")
     test_1_nse_equity_quote_tick_routes_to_equity_subscriber()
     test_2_mcx_quote_tick_routes_to_mcx_subscriber()
     test_3_colliding_security_id_across_segments_never_cross_contaminates()
     test_4_ticker_mode_packet_never_fires_quote_subscriber()
+    test_5_idx_quote_tick_routes_to_index_subscriber()
+    test_6_colliding_security_id_across_all_three_segments_never_cross_contaminates()
     print("\nALL DHAN_CLIENT QUOTE-TICK ROUTING TESTS PASSED")
 
 
