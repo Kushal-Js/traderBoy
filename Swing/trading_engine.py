@@ -184,6 +184,26 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
       still one of the three ORed legs), just with two additional,
       more-deliberate ways in as well.
 
+    v3 additions, config.INDEX_SYMBOLS (NIFTY/BANKNIFTY) ONLY - user
+      request 24 Sep 2026, porting backtest_nifty_options_swing_v2_1min.py's
+      best-performing config exactly (see Swing/config.py's DAY_RANGE_RSI_
+      PERIOD docstring). Every other symbol (NSE equity, MCX) is completely
+      unaffected - both changes below are gated on `is_index`:
+        - The "Regime Bullish/Bearish" leg reads regime.is_bullish (LEVEL,
+          persisting) instead of regime.crossed_above/crossed_below (EDGE)
+          for index symbols only - this is what was actually backtested,
+          and a deliberate, scoped departure from the crossed_above/
+          crossed_below fix above (that fix stays exactly as-is for every
+          symbol it was written for).
+        - A second OR-branch: signals.DayRangeState's bullish_entry/
+          bearish_entry (today's open vs yesterday's close, 5-min close
+          vs 5-min Supertrend LEVEL, RSI(14) crossing 60/40) ANDed with
+          the same Trend-aware Filter leg above - mirrors the backtest's
+          own `day_range_bull_entry and trend_filter_bullish` exactly.
+          A None DayRangeState (not enough history yet, or a fetch
+          failure) just leaves this branch False - never blocks the
+          three-way OR filter above, which is unaffected either way.
+
     COPPER, when config.COPPER_STRUCTURE_BREAK_ENABLED is true, skips all
     of the above entirely and uses the structure-break signal instead
     (see that flag's own docstring in Swing/config.py) - checked first,
@@ -228,13 +248,24 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
         st15 = await signals.get_supertrend_state(symbol, config.REGIME_SLOW_INTERVAL_MINUTES)
         if st15 is None:
             return None
+        is_index = symbol in config.INDEX_SYMBOLS
         trend_aware_bullish = bool(regime.is_bullish and regime.gap_widened)
         trend_aware_bearish = bool((not regime.is_bullish) and regime.gap_widened)
-        filter_bullish = st15.is_above or trend_aware_bullish or regime.crossed_above
-        filter_bearish = (not st15.is_above) or trend_aware_bearish or regime.crossed_below
-        if filter_bullish and st.crossed_above:
+        regime_bullish_leg = regime.is_bullish if is_index else regime.crossed_above
+        regime_bearish_leg = (not regime.is_bullish) if is_index else regime.crossed_below
+        filter_bullish = st15.is_above or trend_aware_bullish or regime_bullish_leg
+        filter_bearish = (not st15.is_above) or trend_aware_bearish or regime_bearish_leg
+        branch_a_bullish = filter_bullish and st.crossed_above
+        branch_a_bearish = filter_bearish and st.crossed_below
+        branch_b_bullish = branch_b_bearish = False
+        if is_index:
+            day_range = await signals.get_day_range_state(symbol)
+            if day_range is not None:
+                branch_b_bullish = day_range.bullish_entry and trend_aware_bullish
+                branch_b_bearish = day_range.bearish_entry and trend_aware_bearish
+        if branch_a_bullish or branch_b_bullish:
             return "BULLISH"
-        if filter_bearish and st.crossed_below:
+        if branch_a_bearish or branch_b_bearish:
             return "BEARISH"
         return None
     if regime.is_bullish and st.crossed_above:

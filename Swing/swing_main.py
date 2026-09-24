@@ -173,6 +173,8 @@ async def get_signals():
     for symbol in await watchlist_store.symbols():
         regime = signals.peek_regime_state(symbol)
         st = signals.peek_supertrend_state(symbol)
+        is_index = symbol in config.INDEX_SYMBOLS
+        day_range = signals.peek_day_range_state(symbol) if is_index else None
         out.append({
             "symbol": symbol,
             "regime": None if regime is None else {
@@ -186,6 +188,19 @@ async def get_signals():
                 "close": st.close, "supertrend": st.supertrend, "is_above": st.is_above,
                 "crossed_above": st.crossed_above, "crossed_below": st.crossed_below,
                 "candle_start": st.candle_start.isoformat() if st.candle_start else None,
+            },
+            # v3, INDEX_SYMBOLS only - None for every other symbol, not just
+            # "not computed yet" (see _evaluate_entry_signal's is_index gate).
+            "day_range": None if day_range is None else {
+                "today_open": day_range.today_open, "yesterday_close": day_range.yesterday_close,
+                "gap_up_day": day_range.gap_up_day, "gap_down_day": day_range.gap_down_day,
+                "close": day_range.close, "supertrend": day_range.supertrend,
+                "is_above_supertrend": day_range.is_above_supertrend,
+                "rsi": day_range.rsi, "prev_rsi": day_range.prev_rsi,
+                "crossed_above_bull_level": day_range.crossed_above_bull_level,
+                "crossed_below_bear_level": day_range.crossed_below_bear_level,
+                "bullish_entry": day_range.bullish_entry, "bearish_entry": day_range.bearish_entry,
+                "candle_start": day_range.candle_start.isoformat() if day_range.candle_start else None,
             },
         })
     return {"signals": out}

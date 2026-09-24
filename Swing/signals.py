@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from Options.dhan_client import dhan_wrapper, _compute_ema, _compute_supertrend, IST
+from Options.dhan_client import dhan_wrapper, _compute_ema, _compute_rsi, _compute_supertrend, IST
 from . import candle_feed, config
 
 logger = logging.getLogger("swing_signals")
@@ -527,6 +527,163 @@ async def get_supertrend_state(symbol: str, interval_minutes: Optional[int] = No
     # Stamp the cache even on failure - see the matching comment in
     # get_regime_state above; same bug, same fix, same live incident.
     _supertrend_cache[cache_key] = (_now_ist(), state)
+    return state
+
+
+# --------------------------------------------------------------------------- #
+# Day Range Bull/Bear - v3, config.INDEX_SYMBOLS (NIFTY/BANKNIFTY) ONLY, user
+# request 24 Sep 2026. See Swing/config.py's DAY_RANGE_RSI_PERIOD docstring
+# for the full backtest this ports (backtest_nifty_options_swing_v2_1min.py -
+# +Rs14,752/59.4% WR, NIFTY, 30-day window, 5-min fast layer) and Swing/
+# trading_engine.py's _evaluate_entry_signal for the exact combined formula
+# this feeds into. Never called for a non-index symbol - see that function.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class DayRangeState:
+    """today_open/yesterday_close are derived from the SAME continuous 5-min
+    series close/open/candle_start already fetched here (bucketed by IST
+    calendar date) - not a separate OHLC-quote REST call, deliberately
+    mirroring exactly how the backtest itself derived these two values, and
+    avoiding a second, independently-throttled fetch path with its own
+    failure mode. close/supertrend/is_above_supertrend are this state's OWN
+    5-min Supertrend read (a LEVEL, not an edge - the spec's "5 min candle
+    close is greater than 5 min Super trend" is a standing condition, not a
+    crossover) - intentionally NOT shared with SupertrendState's own
+    independently-cached/throttled value, same reasoning st15 and st (5-min)
+    already stay independent of each other in _evaluate_entry_signal.
+
+    rsi/prev_rsi are RSI(config.DAY_RANGE_RSI_PERIOD) on the same 5-min
+    close series, the last two closed bars only - enough to detect the
+    level-CROSS the spec asks for ("buy when 5 min candle price cross above
+    RSI value 60"), read as the RSI VALUE crossing level 60/40 (not price
+    crossing an RSI value) - same interpretation call the backtest itself
+    documented and used. None (not False) when there isn't yet enough
+    history - callers must treat None the same as False, fails closed."""
+    today_open: float
+    yesterday_close: float
+    close: float
+    supertrend: float
+    is_above_supertrend: bool
+    rsi: Optional[float]
+    prev_rsi: Optional[float]
+    candle_start: Optional[datetime]
+
+    @property
+    def gap_up_day(self) -> bool:
+        return self.today_open > self.yesterday_close
+
+    @property
+    def gap_down_day(self) -> bool:
+        return self.today_open < self.yesterday_close
+
+    @property
+    def crossed_above_bull_level(self) -> bool:
+        return bool(self.prev_rsi is not None and self.rsi is not None
+                    and self.prev_rsi <= config.DAY_RANGE_RSI_BULL_LEVEL < self.rsi)
+
+    @property
+    def crossed_below_bear_level(self) -> bool:
+        return bool(self.prev_rsi is not None and self.rsi is not None
+                    and self.prev_rsi >= config.DAY_RANGE_RSI_BEAR_LEVEL > self.rsi)
+
+    @property
+    def bullish_entry(self) -> bool:
+        """Day Range Bull, exactly as specified: today's open > yesterday's
+        close, AND this candle's close is above today's open, AND this
+        candle's close is above the 5-min Supertrend, AND RSI just crossed
+        above the bull level (60)."""
+        return bool(self.gap_up_day and self.close > self.today_open
+                    and self.is_above_supertrend and self.crossed_above_bull_level)
+
+    @property
+    def bearish_entry(self) -> bool:
+        return bool(self.gap_down_day and self.close < self.today_open
+                    and (not self.is_above_supertrend) and self.crossed_below_bear_level)
+
+
+_day_range_cache: dict[str, tuple[datetime, Optional[DayRangeState]]] = {}
+_day_range_fail_streak: dict[str, int] = {}
+
+
+def _fetch_day_range_state_once(symbol: str) -> Optional[DayRangeState]:
+    """Blocking - always call via run_in_executor. Same fail-open/raise-on-
+    completely-empty-response discipline as _fetch_regime_state_once/
+    _fetch_supertrend_state_once above - see those for the real incident
+    this guards against."""
+    security_id, exchange_segment, instrument_type = _underlying_reference(symbol)
+    min_bars = max(config.SUPERTREND_PERIOD + 2, config.DAY_RANGE_RSI_PERIOD + 2)
+    data = _get_intraday_series(
+        symbol, security_id, exchange_segment, instrument_type, config.SUPERTREND_INTERVAL_MINUTES,
+        min_bars=min_bars,
+    )
+    if not data.get("close"):
+        raise RuntimeError(
+            f"{symbol}: fetch_continuous_intraday returned no data at all for the "
+            f"{config.SUPERTREND_INTERVAL_MINUTES}-min Day Range series - treating as a fetch "
+            f"failure, not genuinely insufficient history"
+        )
+    opens = data.get("open") or []
+    highs = data.get("high") or []
+    lows = data.get("low") or []
+    closes = data.get("close") or []
+    timestamps = data.get("timestamp") or []
+    if timestamps:
+        last_candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST)
+        if _now_ist() < last_candle_start + timedelta(minutes=config.SUPERTREND_INTERVAL_MINUTES):
+            opens, highs, lows, closes, timestamps = opens[:-1], highs[:-1], lows[:-1], closes[:-1], timestamps[:-1]
+    if len(closes) < min_bars:
+        return None
+
+    dts = [datetime.fromtimestamp(t, tz=IST) for t in timestamps]
+    today = dts[-1].date()
+    today_first_idx = next((i for i, dt in enumerate(dts) if dt.date() == today), None)
+    if today_first_idx is None or today_first_idx == 0:
+        return None  # no fully-formed prior trading day in this fetched window
+
+    supertrend = _compute_supertrend(highs, lows, closes, period=config.SUPERTREND_PERIOD,
+                                      multiplier=config.SUPERTREND_MULTIPLIER)
+    if supertrend[-1] is None:
+        return None
+    rsi = _compute_rsi(closes, config.DAY_RANGE_RSI_PERIOD)
+    if rsi[-1] is None:
+        return None
+
+    return DayRangeState(
+        today_open=opens[today_first_idx], yesterday_close=closes[today_first_idx - 1],
+        close=closes[-1], supertrend=supertrend[-1], is_above_supertrend=closes[-1] > supertrend[-1],
+        rsi=rsi[-1], prev_rsi=rsi[-2] if len(rsi) > 1 else None,
+        candle_start=dts[-1],
+    )
+
+
+def peek_day_range_state(symbol: str) -> Optional[DayRangeState]:
+    """Cache-only, no fetch - for GET /swing/signals, same as peek_regime_
+    state/peek_supertrend_state above."""
+    cached = _day_range_cache.get(symbol)
+    return cached[1] if cached else None
+
+
+async def get_day_range_state(symbol: str) -> Optional[DayRangeState]:
+    """Cached, throttled (reuses config.SUPERTREND_REFRESH_SECONDS - same
+    5-min cadence as the Supertrend signal this shares a timeframe with),
+    fail-open - same "keep the last good cached value" discipline as
+    get_regime_state/get_supertrend_state above. Only ever called for
+    symbols in config.INDEX_SYMBOLS - see Swing/trading_engine.py's
+    _evaluate_entry_signal."""
+    cached = _day_range_cache.get(symbol)
+    streak = _day_range_fail_streak.get(symbol, 0)
+    effective_refresh = min(config.SUPERTREND_REFRESH_SECONDS * (2 ** streak), MAX_FETCH_BACKOFF_SECONDS)
+    if cached and (_now_ist() - cached[0]).total_seconds() < effective_refresh:
+        return cached[1]
+    loop = asyncio.get_running_loop()
+    try:
+        state = await loop.run_in_executor(None, _fetch_day_range_state_once, symbol)
+        _day_range_fail_streak[symbol] = 0
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not fetch Day Range state - keeping last cached value", symbol)
+        state = cached[1] if cached else None
+        _day_range_fail_streak[symbol] = streak + 1
+    _day_range_cache[symbol] = (_now_ist(), state)
     return state
 
 

@@ -270,6 +270,33 @@ REGIME_SLOW_INTERVAL_MINUTES = int(os.getenv("SWING_REGIME_SLOW_INTERVAL_MINUTES
 #      confirmed trend.
 REGIME_GAP_WIDENING_LOOKBACK_CANDLES = int(os.getenv("SWING_REGIME_GAP_WIDENING_LOOKBACK_CANDLES", "8"))
 
+# v3, INDEX_SYMBOLS (NIFTY/BANKNIFTY) ONLY - user request 24 Sep 2026,
+# following the exact formula backtested in backtest_nifty_options_
+# swing_v2_1min.py (see trading-skills' designs/nifty-options-swing-v2-
+# 1min-v3.md for the full backtest writeup: 5-min fast layer + 0.6x
+# volume-floor gate, +Rs14,752/59.4% WR over a 30-day NIFTY window).
+# Two additions, gated to config.INDEX_SYMBOLS only - NSE equities and
+# MCX (COPPER/CRUDEOIL/NATURALGAS) keep today's exact v2 behavior,
+# UNCHANGED:
+#   1. The "Regime Bullish/Bearish" leg reads regime.is_bullish (a LEVEL,
+#      persisting until the next flip) instead of regime.crossed_above/
+#      crossed_below (an EDGE) - ONLY for INDEX_SYMBOLS. This is what the
+#      backtest actually used and is a DELIBERATE departure from the
+#      17 Sep 2026 COPPER-incident fix above (a hairline, narrowing-gap
+#      regime reading firing this leg on sign alone) - that risk is
+#      real for NIFTY/BANKNIFTY too, just not yet observed live. Kept
+#      scoped to indices specifically because that incident's own fix
+#      must stay in place, untouched, for every symbol it was written
+#      for.
+#   2. A second OR-branch: "Day Range Bull/Bear" (today's open vs
+#      yesterday's close, 5-min close vs 5-min Supertrend LEVEL, RSI(14)
+#      crossing 60/40 - see Swing/signals.py's DayRangeState) ANDed with
+#      the existing Trend-aware Filter - see Swing/trading_engine.py's
+#      _evaluate_entry_signal for the exact combined formula.
+DAY_RANGE_RSI_PERIOD = int(os.getenv("SWING_DAY_RANGE_RSI_PERIOD", "14"))
+DAY_RANGE_RSI_BULL_LEVEL = float(os.getenv("SWING_DAY_RANGE_RSI_BULL_LEVEL", "60"))
+DAY_RANGE_RSI_BEAR_LEVEL = float(os.getenv("SWING_DAY_RANGE_RSI_BEAR_LEVEL", "40"))
+
 # The global INTRADAY_CONTINUOUS_LOOKBACK_DAYS every other signal in this
 # codebase uses (default 7) is nowhere near enough to warm up a 200-period
 # EMA on 15-min bars (7 days is only ~125 bars; needs >=200 for a first
