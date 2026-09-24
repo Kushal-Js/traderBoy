@@ -1238,12 +1238,20 @@ async def _monitor_tick() -> None:
             candidates.append((symbol, regime))
 
     for symbol, regime in candidates:
-        if config.PAPER_MODE_ENABLED:
+        index_paper_only = symbol in config.INDEX_SYMBOLS and config.INDEX_PAPER_MODE_ENABLED
+        if config.PAPER_MODE_ENABLED or index_paper_only:
             # Paper-mode REPLACES real trading (23 Sep 2026, user request) -
             # see swing_paper_engine.py's own module docstring. Real entry
-            # never runs while this flag is true - checked here rather than
-            # inside enter_position_for_stock itself so a real capacity
-            # check never gates a paper-mode entry attempt.
+            # never runs while PAPER_MODE_ENABLED is true - checked here
+            # rather than inside enter_position_for_stock itself so a real
+            # capacity check never gates a paper-mode entry attempt.
+            #
+            # index_paper_only (added 24 Sep 2026, user request - "add a
+            # flag to turn off real trading and start paper trading" for
+            # NIFTY/BANKNIFTY specifically) is the SAME reroute, scoped to
+            # just the two index symbols via config.INDEX_PAPER_MODE_
+            # ENABLED - every non-index symbol is completely unaffected by
+            # this flag and keeps trading real, even while it's on.
             from . import swing_paper_engine
             await swing_paper_engine.process_paper_entry(symbol, regime)
             continue

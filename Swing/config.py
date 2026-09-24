@@ -78,6 +78,22 @@ ENTRY_ENABLED = os.getenv("SWING_ENTRY_ENABLED", "true").lower() == "true"
 # can't be, by construction - it's a real order).
 PAPER_MODE_ENABLED = os.getenv("SWING_PAPER_MODE_ENABLED", "false").lower() == "true"
 
+# INDEX_SYMBOLS-only paper-mode kill switch (added 24 Sep 2026, user
+# request - "add a flag to turn off real trading and start paper trading"
+# specifically for the newly-added NIFTY/BANKNIFTY v3 Day Range logic +
+# its brand-new WS index feed, both deployed the same day with no live
+# track record yet). Independent of PAPER_MODE_ENABLED above (that one
+# still replaces ALL of Swing when true) - this one ONLY reroutes NIFTY/
+# BANKNIFTY candidates to swing_paper_engine.process_paper_entry;
+# ASHOKLEY/COALINDIA/COPPER/NATURALGAS keep trading real, unaffected, the
+# same instant this is flipped. See Swing/trading_engine.py's
+# _monitor_tick for where this is checked (ORed with PAPER_MODE_ENABLED,
+# so either flag alone is enough to paper-trade an index candidate).
+# Turning this OFF later does not retroactively affect any already-open
+# paper position - swing_paper_engine.py's own paper_engine_monitor_loop
+# keeps managing it through to its own exit regardless.
+INDEX_PAPER_MODE_ENABLED = os.getenv("SWING_INDEX_PAPER_MODE_ENABLED", "false").lower() == "true"
+
 # ---------------------------------------------------------------------------
 # Basket-type - the ONE configurable instrument choice for every watchlist
 # stock (user request: "This basket can contain either that stock Future

@@ -113,6 +113,13 @@ async def process_paper_entry(symbol: str, regime: str) -> dict:
     if not config.STRATEGY_ENABLED:
         return {"symbol": symbol, "status": "ignored", "reason": "strategy_disabled", "mode": "paper"}
 
+    if (symbol in config.INDEX_SYMBOLS and config.INDEX_DAILY_SQUARE_OFF_ENABLED
+            and swing_te._is_index_square_off_time()):
+        # Same reasoning as the real path's index_square_off_now check in
+        # _monitor_tick - no fresh same-day NIFTY/BANKNIFTY entry (paper or
+        # real) once today's index square-off time has passed.
+        return {"symbol": symbol, "status": "skipped", "reason": "index_daily_square_off_window", "mode": "paper"}
+
     basket_type = config.BASKET_TYPE.upper()
     is_mcx = symbol in config.MCX_SYMBOLS
     effective_basket_type = "OPTIONS" if symbol in config.MCX_OPTIONS_ONLY_SYMBOLS else basket_type
@@ -309,6 +316,18 @@ async def _check_one(symbol: str, position: Position) -> None:
     if ltp is None:
         return
     position.best_price = ltp if swing_te.is_more_favorable(position.instrument_side, ltp, position.best_price) else position.best_price
+
+    # Daily index square-off (added 24 Sep 2026) - a paper NIFTY/BANKNIFTY
+    # position must behave identically to a real one, including never
+    # carrying overnight (see config.INDEX_DAILY_SQUARE_OFF_TIME's own
+    # docstring and Swing/trading_engine.py's _square_off_all for the real
+    # side of this). Checked BEFORE the ordinary exit-reason ladder so it
+    # can't be masked by a coincidentally-also-true real exit reason -
+    # either way the position closes, but the logged reason should be the
+    # genuine one for anyone diffing paper vs real behavior later.
+    if symbol in config.INDEX_SYMBOLS and config.INDEX_DAILY_SQUARE_OFF_ENABLED and swing_te._is_index_square_off_time():
+        await _exit_one(symbol, position, ltp, "INDEX_DAILY_SQUARE_OFF")
+        return
 
     reason = swing_te._exit_reason_for(position, ltp)
     if not reason:
