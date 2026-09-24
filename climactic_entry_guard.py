@@ -30,6 +30,27 @@ guard now runs against real live alerts, no REAL money is at risk while
 paper mode stays on - see breakout_paper_engine.py's own docstring for
 paper mode's own real-vs-simulated boundary.
 
+DECISION LOGGING (added 24 Sep 2026, user request: "everything should be
+logged... stored in a file so that restart shouldn't kill the records"):
+_log_event() writes ONE line per alert this guard evaluates - not just
+the climactic ones - to history/<date>_climactic_entry_guard.log via
+trade_history.append_jsonl, the exact same on-disk mechanism real_trades.
+log/breakout_paper_trades.log/reversal_filter_shadow.log already use.
+Four event types: "entered_immediately" (not climactic - the common
+case), "deferred" (climactic, cooldown started), "entered_after_cooldown"
+(cleared - carries rsi/er at both alert and resolution, minutes_waited,
+resolved_option_type, and `flipped` if that differs from the alert's own
+side), "skipped_timeout" (never cleared within COOLDOWN_MAX_WAIT_MINUTES).
+Each record also carries entry_result_status/entry_result_reason (resolve_
+fn's own return value), so this log alone shows what the guard decided
+AND what actually happened to the trade - joinable against real_trades.
+log/breakout_paper_trades.log by (strategy, symbol, option_type, time) for
+end-of-day analysis. Being a file under history/, it survives a restart by
+construction - this does NOT fix _pending itself still being in-memory
+(see KNOWN LIMITATION above): a deferred alert lost to a restart gets its
+"deferred" row but never a matching resolution row, which is itself a
+visible, analyzable signal of the gap rather than a silent one.
+
 KNOWN LIMITATION: `_pending` below is in-memory only, like most other
 per-session state in this codebase (position_store's own caches, the
 duplicate-order guard, etc.) - a dhanboy.service restart while an alert
@@ -72,9 +93,21 @@ from typing import Awaitable, Callable, Literal, Optional
 from zoneinfo import ZoneInfo
 
 from reversal_filters import _compute_rsi, _efficiency_ratio_at, _fetch_indicators_sync
+from trade_history import append_jsonl
 
 logger = logging.getLogger("climactic_entry_guard")
 IST = ZoneInfo("Asia/Kolkata")
+
+# Every decision this guard makes (not just the climactic ones - see
+# _log_event) - added 24 Sep 2026, user request: "everything should be
+# logged... so that restart shouldn't kill the records". Written via
+# trade_history.append_jsonl, the SAME history/<date>_<name>.log-on-disk
+# mechanism real_trades.log/breakout_paper_trades.log/reversal_filter_
+# shadow.log already use - survives a dhanboy.service restart by
+# construction (it's a file, not process memory), unlike `_pending`
+# itself (see module docstring's KNOWN LIMITATION, still unresolved -
+# this only makes the DECISION HISTORY durable, not in-flight state).
+DECISION_LOG_NAME = "climactic_entry_guard"
 
 # Thresholds to CALL something climactic in the first place. RSI legs are
 # deliberately tighter than reversal_filters.py's own RSI_OVERBOUGHT/
@@ -233,6 +266,30 @@ RECHECK_INTERVAL_SECONDS = 300  # matches the 5-min bar RSI/ER are computed on
 ResolveFn = Callable[[str, str], Awaitable[dict]]
 
 
+def _log_event(**fields) -> None:
+    """Appends one line to history/<date>_climactic_entry_guard.log -
+    called for EVERY alert the guard evaluates, not just the climactic
+    ones (an `event="entered_immediately"` row for a normal alert is what
+    makes this log a complete audit trail rather than only showing the
+    interesting cases). `entry_result` (when present) is resolve_fn's own
+    return dict, unpacked as entry_result_status/entry_result_reason -
+    same convention breakout_signal.py's own "breakout_signals" log
+    already uses to link a decision to what actually happened to the
+    trade, so this log can be joined against real_trades.log/
+    breakout_paper_trades.log by (strategy, symbol, option_type, time)."""
+    entry_result = fields.pop("entry_result", None) or {}
+    record = {
+        **fields,
+        "entry_result_status": entry_result.get("status"),
+        "entry_result_reason": entry_result.get("reason"),
+        "logged_at": datetime.now(IST).isoformat(),
+    }
+    try:
+        append_jsonl(DECISION_LOG_NAME, record)
+    except Exception:  # noqa: BLE001
+        logger.exception("climactic_entry_guard: could not append decision-log row - no other effect")
+
+
 @dataclass
 class PendingEntry:
     strategy: str
@@ -277,6 +334,7 @@ async def guard_entry(strategy: str, symbol: str, option_type: str, resolve_fn: 
     if key in _pending:
         logger.info("%s %s %s: alert ignored - a climactic-guard cooldown is already pending for this exact "
                     "(strategy, symbol, option_type)", strategy, symbol, option_type)
+        _log_event(strategy=strategy, symbol=symbol, alert_option_type=option_type, event="ignored_already_pending")
         return {"symbol": symbol, "option_type": option_type, "status": "skipped",
                 "reason": "climactic_guard_already_pending"}
 
@@ -286,7 +344,13 @@ async def guard_entry(strategy: str, symbol: str, option_type: str, resolve_fn: 
     result = evaluate(rsi, er, option_type)
 
     if result.decision == "ENTER_NOW":
-        return await resolve_fn(symbol, option_type)
+        entry_result = await resolve_fn(symbol, option_type)
+        _log_event(
+            strategy=strategy, symbol=symbol, alert_option_type=option_type, event="entered_immediately",
+            rsi_at_alert=result.rsi, er_at_alert=result.er, alert_time=datetime.now(IST).isoformat(),
+            entry_result=entry_result,
+        )
+        return entry_result
 
     now = datetime.now(IST)
     _pending[key] = PendingEntry(
@@ -298,6 +362,10 @@ async def guard_entry(strategy: str, symbol: str, option_type: str, resolve_fn: 
         "%s %s %s: CLIMACTIC ENTRY DEFERRED (RSI=%s ER=%s, RSI-extreme+high-ER combo) - "
         "re-checking every ~%ds, dropped if not cleared within %dmin",
         strategy, symbol, option_type, result.rsi, result.er, RECHECK_INTERVAL_SECONDS, COOLDOWN_MAX_WAIT_MINUTES,
+    )
+    _log_event(
+        strategy=strategy, symbol=symbol, alert_option_type=option_type, event="deferred",
+        rsi_at_alert=result.rsi, er_at_alert=result.er, alert_time=now.isoformat(),
     )
     return {"symbol": symbol, "option_type": option_type, "status": "deferred",
             "reason": "climactic_entry_cooldown", "rsi": result.rsi, "er": result.er}
@@ -332,19 +400,34 @@ async def poll_pending(strategy: str) -> None:
 
         if step.decision == "ENTER_AFTER_COOLDOWN":
             del _pending[key]
+            flipped = step.resolved_option_type != entry.alert_option_type
             logger.info(
                 "%s %s: climactic cooldown CLEARED after %.1fmin (alert RSI=%s ER=%s -> now RSI=%s ER=%s) - "
                 "entering %s (original alert was %s)",
                 strategy, entry.symbol, step.minutes_waited, entry.rsi_at_alert, entry.er_at_alert,
                 step.rsi, step.er, step.resolved_option_type, entry.alert_option_type,
             )
-            await entry.resolve_fn(entry.symbol, step.resolved_option_type)
+            entry_result = await entry.resolve_fn(entry.symbol, step.resolved_option_type)
+            _log_event(
+                strategy=strategy, symbol=entry.symbol, alert_option_type=entry.alert_option_type,
+                event="entered_after_cooldown", resolved_option_type=step.resolved_option_type, flipped=flipped,
+                rsi_at_alert=entry.rsi_at_alert, er_at_alert=entry.er_at_alert,
+                rsi_at_resolution=step.rsi, er_at_resolution=step.er, minutes_waited=step.minutes_waited,
+                alert_time=entry.deferred_since.isoformat(), resolved_time=now.isoformat(),
+                entry_result=entry_result,
+            )
         elif step.decision == "SKIP_COOLDOWN_TIMEOUT":
             del _pending[key]
             logger.info(
                 "%s %s: climactic cooldown TIMED OUT after %.1fmin (alert RSI=%s ER=%s) - "
                 "alert dropped, no entry placed",
                 strategy, entry.symbol, step.minutes_waited, entry.rsi_at_alert, entry.er_at_alert,
+            )
+            _log_event(
+                strategy=strategy, symbol=entry.symbol, alert_option_type=entry.alert_option_type,
+                event="skipped_timeout", rsi_at_alert=entry.rsi_at_alert, er_at_alert=entry.er_at_alert,
+                rsi_at_resolution=step.rsi, er_at_resolution=step.er, minutes_waited=step.minutes_waited,
+                alert_time=entry.deferred_since.isoformat(), resolved_time=now.isoformat(),
             )
         # else DEFER - leave pending, try again next RECHECK_INTERVAL_SECONDS
 
