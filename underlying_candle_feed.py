@@ -370,7 +370,26 @@ def subscribe(symbols: list[str]) -> None:
             continue
         _restore_from_disk(sym)
         try:
-            dhan_wrapper.subscribe_equity_quote(sym)
+            # Index support (added 24 Sep 2026) - a curated/Chartink-sourced
+            # universe can hand this an index name (confirmed live: BANKNIFTY
+            # showing up in a "Simply Bear" PE screener result, reaching this
+            # module via breakout_signal.py's own universe-bucket sync), which
+            # subscribe_equity_quote can never resolve (no SEM_INSTRUMENT_
+            # NAME=="EQUITY" row exists for an index - same gap Swing/
+            # signals.py's _underlying_reference hit and fixed the same way).
+            # dhan_wrapper.INDEX_SECURITY_ID is the same small, explicit,
+            # known-index set index_security_id() itself reads from - no
+            # exception-driven control flow needed to detect this case.
+            # getattr(..., {}) rather than a bare attribute read - several
+            # existing tests install a minimal fake dhan_wrapper that only
+            # defines subscribe_equity_quote (this module never needed an
+            # index concept before today); those must keep working
+            # unchanged, correctly falling through to the equity branch,
+            # not raise (and get silently swallowed by the except below).
+            if sym.upper() in getattr(dhan_wrapper, "INDEX_SECURITY_ID", {}):
+                dhan_wrapper.subscribe_index_quote(sym, dhan_wrapper.index_security_id(sym))
+            else:
+                dhan_wrapper.subscribe_equity_quote(sym)
             _subscribed.add(sym)
         except Exception:  # noqa: BLE001
             logger.exception("underlying_candle_feed: failed to WS-subscribe %s - it will stay on REST fallback", sym)

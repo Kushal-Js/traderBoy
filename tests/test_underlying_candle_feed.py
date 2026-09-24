@@ -208,6 +208,11 @@ def test_7_restart_reconciliation_end_to_end():
         dhan_client_module.dhan_wrapper = saved
 
     assert sym in ucf._state, "subscribe() must restore state for a symbol with persisted history"
+    assert sym in ucf._subscribed, (
+        "the real subscribe_equity_quote call must have succeeded (not silently swallowed by the "
+        "except below) - this fake wrapper deliberately has no INDEX_SECURITY_ID, same as every "
+        "wrapper predating the 24 Sep 2026 index-support fix, and must still work unchanged"
+    )
     restored_bars = ucf._state[sym].bars
     assert len(restored_bars) == 1, f"expected the 1 pre-restart bar restored, got {len(restored_bars)}"
     assert restored_bars[0]["volume"] == pre_restart_bars[0]["volume"] == 1_000.0
@@ -219,6 +224,51 @@ def test_7_restart_reconciliation_end_to_end():
     assert len(ucf._state[sym].bars) == 1, "a same-bar tick must not fabricate a new completed bar"
     print("7. Restart reconciliation end-to-end: persisted bars survive a full _state wipe, and new "
           "ticks after 'restart' continue correctly, no duplication: PASSED")
+
+
+def test_8_subscribe_routes_an_index_symbol_to_subscribe_index_quote():
+    """24 Sep 2026 fix - a curated/Chartink-sourced universe can hand
+    subscribe() an index name (confirmed live: BANKNIFTY appearing in a
+    "Simply Bear" PE screener result), which subscribe_equity_quote can
+    never resolve (no SEM_INSTRUMENT_NAME=="EQUITY" row exists for an
+    index). Must route through subscribe_index_quote instead, never fall
+    through to the equity path and raise."""
+    ucf._state.clear()
+    ucf._subscribed.clear()
+    ucf._tick_subscriber_registered = True  # skip the real dhan_wrapper subscribe call in this test
+
+    calls = []
+
+    class _FakeDhanWrapper:
+        INDEX_SECURITY_ID = {"NIFTY": "13", "BANKNIFTY": "25"}
+
+        @staticmethod
+        def index_security_id(symbol):
+            return _FakeDhanWrapper.INDEX_SECURITY_ID[symbol.upper()]
+
+        @staticmethod
+        def subscribe_index_quote(symbol, security_id):
+            calls.append(("subscribe_index_quote", symbol, security_id))
+
+        @staticmethod
+        def subscribe_equity_quote(symbol):
+            calls.append(("subscribe_equity_quote", symbol))
+
+    import Options.dhan_client as dhan_client_module
+    saved = dhan_client_module.dhan_wrapper
+    dhan_client_module.dhan_wrapper = _FakeDhanWrapper()
+    try:
+        ucf.subscribe(["BANKNIFTY", "RELIANCE"])
+    finally:
+        dhan_client_module.dhan_wrapper = saved
+
+    assert ("subscribe_index_quote", "BANKNIFTY", "25") in calls, calls
+    assert ("subscribe_equity_quote", "RELIANCE") in calls, calls
+    assert not any(c[0] == "subscribe_equity_quote" and c[1] == "BANKNIFTY" for c in calls), (
+        "BANKNIFTY must never fall through to the equity subscribe path"
+    )
+    print("8. subscribe() routes an index symbol (BANKNIFTY) to subscribe_index_quote, "
+          "a plain equity symbol (RELIANCE) still goes through subscribe_equity_quote unchanged: PASSED")
 
 
 def main():
@@ -234,6 +284,7 @@ def main():
         test_5_persist_bar_writes_a_restorable_jsonl_line()
         test_6_load_persisted_bars_spans_multiple_days_and_trims_to_max_kept()
         test_7_restart_reconciliation_end_to_end()
+        test_8_subscribe_routes_an_index_symbol_to_subscribe_index_quote()
         print("\nALL UNDERLYING_CANDLE_FEED TESTS PASSED")
     finally:
         ucf.HISTORY_DIR = saved_history_dir
