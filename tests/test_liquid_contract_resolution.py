@@ -182,9 +182,10 @@ def test_3_atm_passing_both_checks_returns_it_unchanged():
     atm = make_atm(1540.0)
     wrapper.get_atm_option = lambda sym, ot: atm
     wrapper._is_mcx_commodity = lambda sym: False
+    wrapper._is_index_underlying = lambda sym: False
     calls = {"n": 0}
 
-    def fake_is_liquid_and_active(candidate, is_mcx=False):
+    def fake_is_liquid_and_active(candidate, is_mcx=False, is_index=False):
         calls["n"] += 1
         return True  # ATM passes immediately
 
@@ -205,9 +206,10 @@ def test_4_atm_fails_current_session_liquidity_substitutes_nearby():
     nearby = make_atm(1580.0)
     wrapper.get_atm_option = lambda sym, ot: atm
     wrapper._is_mcx_commodity = lambda sym: False
+    wrapper._is_index_underlying = lambda sym: False
     wrapper._nearby_option_candidates = lambda *a, **k: [atm, nearby]
 
-    def fake_check(candidate, is_mcx=False):
+    def fake_check(candidate, is_mcx=False, is_index=False):
         return candidate.strike != 1540.0  # ATM (1540) fails, 1580 passes
 
     wrapper._is_contract_liquid_and_active = fake_check
@@ -242,6 +244,7 @@ def test_5_atm_fails_prior_session_volume_substitutes_nearby():
 
     wrapper.get_atm_option = lambda sym, ot: atm
     wrapper._is_mcx_commodity = lambda sym: False
+    wrapper._is_index_underlying = lambda sym: False
     wrapper._nearby_option_candidates = lambda *a, **k: [atm, nearby]
     odc.config.LIQUID_CONTRACT_GATE_ENABLED = True
     result = wrapper.get_liquid_atm_option("TESTSTOCK", "CE")
@@ -255,8 +258,9 @@ def test_6_no_candidate_passes_returns_none():
     atm = make_atm(1540.0)
     wrapper.get_atm_option = lambda sym, ot: atm
     wrapper._is_mcx_commodity = lambda sym: False
+    wrapper._is_index_underlying = lambda sym: False
     wrapper._nearby_option_candidates = lambda *a, **k: [atm, make_atm(1580.0), make_atm(1500.0)]
-    wrapper._is_contract_liquid_and_active = lambda candidate, is_mcx=False: False
+    wrapper._is_contract_liquid_and_active = lambda candidate, is_mcx=False, is_index=False: False
     odc.config.LIQUID_CONTRACT_GATE_ENABLED = True
     result = wrapper.get_liquid_atm_option("TESTSTOCK", "CE")
     assert result is None, f"expected None when no candidate in the search window passes, got {result}"
@@ -291,10 +295,11 @@ def test_8_mcx_underlying_runs_through_the_same_checks_with_mcx_segment_codes():
     atm = make_atm(1540.0, "COPPER 23 SEP 1360 CALL")
     wrapper.get_atm_option = lambda sym, ot: atm
     wrapper._is_mcx_commodity = lambda sym: sym == "COPPER"
+    wrapper._is_index_underlying = lambda sym: False
     wrapper._nearby_option_candidates = lambda *a, **k: [atm]
     calls = []
 
-    def fake_check(candidate, is_mcx=False):
+    def fake_check(candidate, is_mcx=False, is_index=False):
         calls.append(is_mcx)
         return True
 
@@ -494,6 +499,7 @@ def test_14_atm_leg_completely_missing_falls_back_to_nearby_search():
 
     wrapper.get_atm_option = raise_missing_leg
     wrapper._is_mcx_commodity = lambda sym: True
+    wrapper._is_index_underlying = lambda sym: False
     wrapper._nearest_listed_expiry = lambda sym, ot, is_mcx: FUTURE_EXPIRY
     captured = {}
 
@@ -503,7 +509,7 @@ def test_14_atm_leg_completely_missing_falls_back_to_nearby_search():
         return [reference, nearby]
 
     wrapper._nearby_option_candidates = fake_nearby
-    wrapper._is_contract_liquid_and_active = lambda candidate, is_mcx=False: candidate.trading_symbol == nearby.trading_symbol
+    wrapper._is_contract_liquid_and_active = lambda candidate, is_mcx=False, is_index=False: candidate.trading_symbol == nearby.trading_symbol
     odc.config.LIQUID_CONTRACT_GATE_ENABLED = True
 
     result = wrapper.get_liquid_atm_option("COPPER", "CE")
@@ -528,6 +534,7 @@ def test_15_atm_leg_missing_and_no_listed_expiry_returns_none_cleanly():
 
     wrapper.get_atm_option = raise_missing_leg
     wrapper._is_mcx_commodity = lambda sym: True
+    wrapper._is_index_underlying = lambda sym: False
     wrapper._nearest_listed_expiry = lambda sym, ot, is_mcx: None
     odc.config.LIQUID_CONTRACT_GATE_ENABLED = True
 

@@ -564,6 +564,30 @@ class DhanWrapper:
             return parts[0]
         return "-".join(parts[:-3])
 
+    def _is_index_underlying(self, underlying_symbol: str) -> bool:
+        """Data-driven check (same convention as _is_mcx_commodity right
+        below - no hardcoded symbol list) - does a real NSE OPTIDX/FUTIDX
+        contract for this underlying exist in the instrument master right
+        now? Added 24 Sep 2026 for get_liquid_atm_option's own real bug:
+        _is_contract_liquid_and_active hardcoded instrument_type="OPTSTK"
+        for every non-MCX underlying, including an index - Dhan's real
+        instrument master confirms NIFTY's own option rows are
+        SEM_INSTRUMENT_NAME=="OPTIDX", not "OPTSTK" (verified live via a
+        real instrument-master query, not assumed), so get_daily_volume_
+        sum's historical_daily_data call was silently asking Dhan for the
+        WRONG instrument type - liable to return empty/zero volume for
+        even NIFTY's own ATM strike (the single most liquid F&O contract
+        on the exchange) and incorrectly reject it as illiquid. Used
+        alongside _is_mcx_commodity (mutually exclusive in practice - an
+        underlying is never both) to pick the right instrument_type string
+        for the liquidity/volume checks below."""
+        df = self.instruments()
+        return bool((
+            (df["SEM_EXM_EXCH_ID"] == "NSE")
+            & (df["SEM_INSTRUMENT_NAME"].isin(["OPTIDX", "FUTIDX"]))
+            & (df["SEM_CUSTOM_SYMBOL"].str.startswith(underlying_symbol.upper() + " "))
+        ).any())
+
     def _is_mcx_commodity(self, underlying_symbol: str) -> bool:
         """Data-driven check (no hardcoded symbol list, no cross-package
         config import needed) - does a real MCX FUTCOM contract for this
@@ -1413,6 +1437,7 @@ class DhanWrapper:
         if not config.LIQUID_CONTRACT_GATE_ENABLED or self._client is None:
             return atm
         is_mcx = self._is_mcx_commodity(underlying_symbol)
+        is_index = (not is_mcx) and self._is_index_underlying(underlying_symbol)
 
         if atm is not None:
             reference = atm
@@ -1438,7 +1463,7 @@ class DhanWrapper:
             if c.trading_symbol   # drop the placeholder itself if it ever comes back as its own "candidate"
         ]
         for candidate in candidates:
-            if self._is_contract_liquid_and_active(candidate, is_mcx):
+            if self._is_contract_liquid_and_active(candidate, is_mcx, is_index):
                 if atm is None or candidate.trading_symbol != atm.trading_symbol:
                     logger.info(
                         "%s: ATM strike %s %s %s - substituted nearby strike %s %s instead",
@@ -1453,20 +1478,31 @@ class DhanWrapper:
         )
         return None
 
-    def _is_contract_liquid_and_active(self, candidate: "AtmOption", is_mcx: bool = False) -> bool:
+    def _is_contract_liquid_and_active(self, candidate: "AtmOption", is_mcx: bool = False, is_index: bool = False) -> bool:
         """The two checks get_liquid_atm_option requires of every
         candidate - see that function's own docstring for the full
-        rationale of each."""
+        rationale of each. is_index (added 24 Sep 2026, real bug fix -
+        see _is_index_underlying's own docstring) picks NSE_FNO/OPTIDX
+        instead of NSE_FNO/OPTSTK for both checks below - the wrong
+        instrument_type string was making even NIFTY/BANKNIFTY's own ATM
+        strike look illiquid to get_daily_volume_sum's real Dhan query."""
         if is_mcx:
             self.refresh_liquidity_signal(
                 candidate.trading_symbol, expected_exchange="MCX",
                 exchange_segment="MCX_COMM", instrument_type="OPTFUT",
             )
+        elif is_index:
+            self.refresh_liquidity_signal(candidate.trading_symbol, instrument_type="OPTIDX")
         else:
             self.refresh_liquidity_signal(candidate.trading_symbol)
         if self.get_cached_illiquid(candidate.trading_symbol):
             return False
-        exchange_segment, instrument_type = ("MCX_COMM", "OPTFUT") if is_mcx else ("NSE_FNO", "OPTSTK")
+        if is_mcx:
+            exchange_segment, instrument_type = "MCX_COMM", "OPTFUT"
+        elif is_index:
+            exchange_segment, instrument_type = "NSE_FNO", "OPTIDX"
+        else:
+            exchange_segment, instrument_type = "NSE_FNO", "OPTSTK"
         volume_sum = self.get_daily_volume_sum(
             candidate.security_id, exchange_segment, instrument_type, config.LIQUID_CONTRACT_LOOKBACK_DAYS,
         )
@@ -2249,8 +2285,33 @@ class DhanWrapper:
     # signal always reading Options.config regardless of caller. Only ever
     # gates CE entries (see should_delay_ce_entry); PE is untouched.
     # ------------------------------------------------------------------ #
-    NIFTY_SECURITY_ID = "13"  # NSE index (spot), IDX_I segment - same ID
-    # IndexScalping/config.py's INDEX_SECURITY_ID["NIFTY"] already uses.
+    # NSE index (spot), IDX_I segment - same confirmed IDs IndexScalping/
+    # config.py's own INDEX_SECURITY_ID already uses in production. Shared
+    # here (added 24 Sep 2026, Swing's own index-watchlist-symbol support
+    # - see Swing/signals.py's _underlying_reference and index_security_id
+    # below) so there's one canonical source instead of each caller
+    # hardcoding its own copy of the same two IDs.
+    INDEX_SECURITY_ID = {"NIFTY": "13", "BANKNIFTY": "25"}
+    NIFTY_SECURITY_ID = INDEX_SECURITY_ID["NIFTY"]
+
+    def index_security_id(self, underlying_symbol: str) -> str:
+        """Resolves a known index's own IDX_I-segment security_id (for
+        Supertrend/regime candle fetches - see Swing/signals.py's
+        _underlying_reference) - the index counterpart to
+        _equity_security_id above, which can never resolve one itself
+        (Dhan's instrument master has no SEM_INSTRUMENT_NAME=="EQUITY" row
+        for an index, so that lookup always raises for NIFTY/BANKNIFTY -
+        the real gap this method closes). Deliberately a small, explicit
+        dict rather than an instrument-master query - unlike an equity or
+        option leg, an index has no per-symbol instrument-master row to
+        look up in the first place; NIFTY/BANKNIFTY's own security_ids are
+        well-known, fixed constants, already proven correct via
+        should_delay_ce_entry's own real production use of the same IDs."""
+        sid = self.INDEX_SECURITY_ID.get(underlying_symbol.upper())
+        if sid is None:
+            raise ValueError(f"No known index security_id for {underlying_symbol!r} - only "
+                              f"{sorted(self.INDEX_SECURITY_ID)} are supported")
+        return sid
 
     def evaluate_nifty_open_condition(self, now: Optional[datetime] = None) -> dict:
         """The GAP/FALL judgment itself is computed ONCE per trading day -

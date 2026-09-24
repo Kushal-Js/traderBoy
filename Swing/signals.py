@@ -76,6 +76,7 @@ def _underlying_reference(symbol: str) -> tuple[str, str, str]:
     of whatever BASKET_TYPE is actually configured - the regime/Supertrend
     signal always needs a real continuous price series regardless of
     which instrument ends up traded."""
+    is_index = symbol in config.INDEX_SYMBOLS
     if symbol in config.MCX_SYMBOLS:
         today = _now_ist().date()
         cached = _mcx_contract_cache.get(symbol)
@@ -85,10 +86,19 @@ def _underlying_reference(symbol: str) -> tuple[str, str, str]:
             logger.info("%s: resolved MCX futures contract for today's signal reference: security_id=%s",
                         symbol, contract.security_id)
         security_id, exchange_segment, instrument_type = _mcx_contract_cache[symbol][1], "MCX_COMM", "FUTCOM"
+    elif is_index:
+        # No SEM_INSTRUMENT_NAME=="EQUITY" row exists for an index - the
+        # plain NSE-equity path below always raised "No NSE equity
+        # instrument found" for NIFTY/BANKNIFTY (a real gap, confirmed
+        # live before this fix). See config.INDEX_SYMBOLS' own docstring
+        # for why this deliberately does NOT also call candle_feed.
+        # ensure_subscribed below - REST-only, same segment/instrument_
+        # type should_delay_ce_entry already uses in production.
+        security_id, exchange_segment, instrument_type = dhan_wrapper.index_security_id(symbol), "IDX_I", "INDEX"
     else:
         security_id, exchange_segment, instrument_type = dhan_wrapper._equity_security_id(symbol), "NSE_EQ", "EQUITY"
 
-    if config.USE_WS_CANDLES:
+    if config.USE_WS_CANDLES and not is_index:
         try:
             candle_feed.ensure_subscribed(symbol, security_id, exchange_segment)
         except Exception:  # noqa: BLE001

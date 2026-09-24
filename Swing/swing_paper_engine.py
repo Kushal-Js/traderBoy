@@ -29,7 +29,8 @@ ENTRY GATES REPLICATED, same order as enter_position_for_stock:
   1. STRATEGY_ENABLED
   2. resolve_instrument_side (skips EQUITY+BEARISH, long-only)
   3. Volume-floor gate (MCX_VOLUME_FLOOR_GATE_ENABLED / NSE_VOLUME_FLOOR_
-     GATE_ENABLED - same real signals.get_supertrend_state read)
+     GATE_ENABLED / INDEX_VOLUME_FLOOR_GATE_ENABLED (NIFTY/BANKNIFTY only,
+     added 24 Sep 2026) - same real signals.get_supertrend_state read)
   4. Capacity (this module's own paper-only pool, MAX_CONCURRENT_TRADES -
      Swing has one shared counter, no CE/PE split, same as real)
   5. Instrument resolution - the SAME real dhan_wrapper calls
@@ -119,13 +120,21 @@ async def process_paper_entry(symbol: str, regime: str) -> dict:
     if side is None:
         return {"symbol": symbol, "status": "skipped", "reason": "equity_long_only", "mode": "paper"}
 
-    volume_floor_enabled = config.MCX_VOLUME_FLOOR_GATE_ENABLED if is_mcx else config.NSE_VOLUME_FLOOR_GATE_ENABLED
-    volume_floor_ratio_min = config.MCX_VOLUME_FLOOR_RATIO_MIN if is_mcx else config.NSE_VOLUME_FLOOR_RATIO_MIN
+    is_index = symbol in config.INDEX_SYMBOLS
+    if is_mcx:
+        volume_floor_enabled, volume_floor_ratio_min, gate_label = (
+            config.MCX_VOLUME_FLOOR_GATE_ENABLED, config.MCX_VOLUME_FLOOR_RATIO_MIN, "mcx")
+    elif is_index:
+        volume_floor_enabled, volume_floor_ratio_min, gate_label = (
+            config.INDEX_VOLUME_FLOOR_GATE_ENABLED, config.INDEX_VOLUME_FLOOR_RATIO_MIN, "index")
+    else:
+        volume_floor_enabled, volume_floor_ratio_min, gate_label = (
+            config.NSE_VOLUME_FLOOR_GATE_ENABLED, config.NSE_VOLUME_FLOOR_RATIO_MIN, "nse")
     if volume_floor_enabled:
         st = await signals.get_supertrend_state(symbol)
         vol_ratio = st.volume_ratio if st else None
         if vol_ratio is not None and vol_ratio < volume_floor_ratio_min:
-            gate_reason = "mcx_volume_floor_gate" if is_mcx else "nse_volume_floor_gate"
+            gate_reason = f"{gate_label}_volume_floor_gate"
             return {"symbol": symbol, "status": "skipped", "reason": gate_reason, "vol_ratio": vol_ratio, "mode": "paper"}
 
     async with _lock:

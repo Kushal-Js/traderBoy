@@ -471,6 +471,27 @@ MCX_OPTIONS_ONLY_SYMBOLS = {
     s.strip().upper() for s in os.getenv("SWING_MCX_OPTIONS_ONLY_SYMBOLS", "COPPER").split(",") if s.strip()
 }
 
+# Index underlyings (added 24 Sep 2026, fixing a real gap: adding NIFTY/
+# BANKNIFTY to the watchlist raised "No NSE equity instrument found" on
+# every regime/Supertrend fetch - Dhan's instrument master has no
+# SEM_INSTRUMENT_NAME=="EQUITY" row for an index, so the ordinary NSE-
+# equity path in _underlying_reference (dhan_wrapper._equity_security_id)
+# can never resolve one; needs the IDX_I/INDEX segment via dhan_wrapper.
+# index_security_id instead - see Swing/signals.py's own updated
+# _underlying_reference. Only NIFTY/BANKNIFTY are backed by a real,
+# confirmed security_id today (dhan_wrapper.INDEX_SECURITY_ID, the same
+# values IndexScalping/config.py's own INDEX_SECURITY_ID and
+# should_delay_ce_entry's NIFTY_SECURITY_ID already use in production) -
+# adding a symbol here that isn't in that dict raises clearly rather than
+# silently resolving nothing. Deliberately does NOT gain WS-based candle
+# reconstruction (Swing/candle_feed.py) - an index tick's volume
+# semantics aren't confirmed the way MCX's were before that got WS
+# support, so an index watchlist symbol stays on the REST-only fetch
+# path (already proven correct - see should_delay_ce_entry, which has
+# used this exact segment/instrument_type in production since before
+# this file's own MCX support existed).
+INDEX_SYMBOLS = {s.strip().upper() for s in os.getenv("SWING_INDEX_SYMBOLS", "NIFTY,BANKNIFTY").split(",") if s.strip()}
+
 # The REAL per-lot economic quantity (kg for Copper) - used ONLY for P&L/
 # rupee-threshold math (MAX_LOSS_PROTECTION_RS/PROFIT_PROTECTION_RS checks,
 # the broker-side SL-L trigger/limit formula), NEVER for the real order's
@@ -534,6 +555,22 @@ MCX_VOLUME_FLOOR_RATIO_MIN = float(os.getenv("SWING_MCX_VOLUME_FLOOR_RATIO_MIN",
 # consistent with the MCX gate's own "make it enabled as of now" precedent.
 NSE_VOLUME_FLOOR_GATE_ENABLED = os.getenv("SWING_NSE_VOLUME_FLOOR_GATE_ENABLED", "true").lower() == "true"
 NSE_VOLUME_FLOOR_RATIO_MIN = float(os.getenv("SWING_NSE_VOLUME_FLOOR_RATIO_MIN", "1.2"))
+
+# Same volume-floor gate again, this time for INDEX_SYMBOLS only (NIFTY/
+# BANKNIFTY) - added 24 Sep 2026, user request, explicitly NOT sharing
+# MCX's or NSE-equity's own flag/threshold (an index's own candle volume
+# is real, confirmed non-zero data - see Swing/signals.py's _underlying_
+# reference's own INDEX branch and its real-data verification - but its
+# scale/character is genuinely different from a single stock's, so a
+# separate, independently-tunable threshold is the right default rather
+# than forcing it to share NSE_VOLUME_FLOOR_RATIO_MIN's 1.2x). User-set
+# default of 0.6x is deliberately LOWER than the 1.2x stock/MCX floor -
+# not yet backtested against real index trades the way 1.2x was for MCX/
+# NSE (see NSE_VOLUME_FLOOR_RATIO_MIN's own docstring for that lineage) -
+# revisit once there's real NIFTY/BANKNIFTY trade history to check it
+# against.
+INDEX_VOLUME_FLOOR_GATE_ENABLED = os.getenv("SWING_INDEX_VOLUME_FLOOR_GATE_ENABLED", "true").lower() == "true"
+INDEX_VOLUME_FLOOR_RATIO_MIN = float(os.getenv("SWING_INDEX_VOLUME_FLOOR_RATIO_MIN", "0.6"))
 
 # ---------------------------------------------------------------------------
 # Plumbing
