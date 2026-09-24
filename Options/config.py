@@ -593,6 +593,50 @@ EMA_CROSS_REFRESH_SECONDS = int(os.getenv("EMA_CROSS_REFRESH_SECONDS", "15"))
 # far more than any period-10..14 indicator needs to be stable.
 INTRADAY_CONTINUOUS_LOOKBACK_DAYS = int(os.getenv("INTRADAY_CONTINUOUS_LOOKBACK_DAYS", "7"))
 
+# Cross-package REST throttle/backoff for fetch_continuous_intraday (added
+# 24 Sep 2026 - see trading-skills' incidents/2026-09-22-swing-signal-
+# cache-never-throttled-on-failure.md, whose own writeup deferred this
+# exact fix: "whether/how to reduce the account-wide call volume more
+# structurally"). DH-904 is a single account-wide Dhan REST budget shared
+# by every package that calls fetch_continuous_intraday - Options/Futures/
+# Luxury/Swing (via the one shared dhan_wrapper singleton), plus structure_
+# break.py and the paper-only IndexScalping/K01 diagnostics. Two distinct
+# mechanisms, both enforced inside fetch_continuous_intraday itself so
+# every call site gets them automatically, with no per-caller change
+# needed:
+#   1. Steady pacing - MARKET_DATA_MIN_INTERVAL_SECONDS is the minimum gap
+#      enforced between ANY two fetch_continuous_intraday calls account-
+#      wide (not per-symbol), turning a simultaneous burst (e.g. every
+#      package's cold cache re-fetching everything right after a restart)
+#      into a serialized trickle instead.
+#   2. Backoff on an actual hit - MARKET_DATA_RATE_LIMIT_COOLDOWN_SECONDS
+#      is how long every subsequent call is SKIPPED (returns {} immediately,
+#      no REST attempt, no blocking wait - deliberately fail-fast, see
+#      DhanWrapper._throttle_market_data_call's own docstring for why) once
+#      a DH-904 response is actually observed (detected from the response
+#      envelope itself, not an exception - Dhan returns DH-904 as a normal
+#      `{"status": "failure", "remarks": {"error_code": "DH-904", ...}}`
+#      payload, never a raised error), doubling on each consecutive hit up
+#      to MARKET_DATA_RATE_LIMIT_COOLDOWN_MAX_SECONDS, and resetting back
+#      to the base value the next time a call succeeds cleanly. This is
+#      what "throttle" means here beyond simple pacing: once Dhan has
+#      actually said "too many requests," every package stops adding to
+#      that same budget together, each one falling back to its last cached
+#      signal exactly as it already did before this existed - just
+#      coordinated account-wide now instead of each package only knowing
+#      about its own failed calls.
+# Values are conservative starting points (no official published Dhan
+# quota to tune against - see NOTES.md bug #5) - 0.5s minimum spacing caps
+# the account-wide ceiling at 2 calls/sec across all 4 packages combined,
+# well under the ~0.27/s single-package rate already called "far under
+# Dhan's undocumented rate limit" above (SUPERTREND_REFRESH_SECONDS's own
+# comment), and the 5s/40s backoff range keeps a genuinely rate-limited
+# stretch within the ~3min worst case Swing's own docs already tolerate
+# for a slow/rate-limited fetch.
+MARKET_DATA_MIN_INTERVAL_SECONDS = float(os.getenv("MARKET_DATA_MIN_INTERVAL_SECONDS", "0.5"))
+MARKET_DATA_RATE_LIMIT_COOLDOWN_SECONDS = float(os.getenv("MARKET_DATA_RATE_LIMIT_COOLDOWN_SECONDS", "5"))
+MARKET_DATA_RATE_LIMIT_COOLDOWN_MAX_SECONDS = float(os.getenv("MARKET_DATA_RATE_LIMIT_COOLDOWN_MAX_SECONDS", "40"))
+
 # Per-package on/off for the EMA-cross exit above. Kept in all three option
 # packages so the Options/Futures trading_engine.py copies stay byte-
 # identical; default off, only FUTURES_ENABLE_EMA_CROSS_EXIT is turned on

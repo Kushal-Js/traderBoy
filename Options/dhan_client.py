@@ -474,6 +474,19 @@ class DhanWrapper:
         # at construction time.
         self.ltp_rest_fallback_semaphore = asyncio.Semaphore(2)
 
+        # Cross-package throttle/backoff for fetch_continuous_intraday
+        # (added 24 Sep 2026, see config.MARKET_DATA_MIN_INTERVAL_SECONDS'
+        # own docstring for the full incident history/design). A plain
+        # threading.Lock, not an asyncio primitive - every real caller
+        # reaches this method from a worker thread (run_in_executor), never
+        # directly on the event loop, so blocking here is the intended
+        # behavior, not a bug. monotonic() throughout since this is a
+        # pure elapsed-time budget, never a wall-clock one.
+        self._market_data_lock = threading.Lock()
+        self._market_data_next_allowed_at = 0.0
+        self._market_data_cooldown_until = 0.0
+        self._market_data_consecutive_rate_limit_hits = 0
+
     # ------------------------------------------------------------------ #
     # Auth
     # ------------------------------------------------------------------ #
@@ -1975,10 +1988,24 @@ class DhanWrapper:
         timestamp lists), or {} on failure - callers apply their own
         still-forming-last-candle drop and minimum-length checks. Wrapped in
         _retry for Dhan's intermittent rate-limit failures on back-to-back
-        market-data calls."""
+        market-data calls, and in _throttle_market_data_call for the
+        account-wide DH-904 pacing/backoff shared by every package (see
+        config.MARKET_DATA_MIN_INTERVAL_SECONDS's own docstring). A skipped
+        call (still-active shared cooldown) returns {} exactly like any
+        other failure - deliberately NOT distinguished from a genuine empty
+        response, since every caller already treats {} as "fall back to
+        cache," which is exactly the right behavior here too."""
         days = lookback_days_override or config.INTRADAY_CONTINUOUS_LOOKBACK_DAYS
         from_date = (datetime.now(IST) - timedelta(days=days)).strftime("%Y-%m-%d")
         to_date = datetime.now(IST).strftime("%Y-%m-%d")
+        if not self._throttle_market_data_call():
+            logger.info(
+                "fetch_continuous_intraday(security_id=%s, segment=%s, interval=%s) skipped - "
+                "shared account-wide DH-904 cooldown still active (%.1fs remaining)",
+                security_id, exchange_segment, interval_minutes,
+                self._market_data_cooldown_until - time.monotonic(),
+            )
+            return {}
         resp = _retry(
             self.client.Dhan.intraday_minute_data,
             security_id=security_id,
@@ -1988,6 +2015,7 @@ class DhanWrapper:
             to_date=to_date,
             interval=interval_minutes,
         )
+        self._note_market_data_rate_limit_outcome(resp)
         data = (resp.get("data") or {}) if isinstance(resp, dict) else {}
         if not data.get("close"):
             # Diagnostic only (added 22 Sep 2026) - callers already treat an
@@ -2005,6 +2033,76 @@ class DhanWrapper:
                 from_date, to_date, resp,
             )
         return data
+
+    def _throttle_market_data_call(self) -> bool:
+        """Returns False (caller must skip the call entirely, no REST
+        attempt) if the shared account-wide DH-904 cooldown is still
+        active - a FAIL-FAST skip, never a sleep-and-wait for it. This is
+        the one deliberate asymmetry in the whole design (24 Sep 2026,
+        real finding): this method is reached from inside Swing/Options/
+        Futures/Luxury's own per-position exit-check poll loop, which
+        checks every open position SEQUENTIALLY in one tick - blocking
+        here for the cooldown's full duration (up to
+        config.MARKET_DATA_RATE_LIMIT_COOLDOWN_MAX_SECONDS) would delay
+        every position checked AFTER this one in the same tick, including
+        a completely unrelated position's PRIMARY LTP-based MAX_LOSS/
+        TARGET/STOP_LOSS exit check for any symbol with no WebSocket fast
+        path (equity-only positions - see Swing/trading_engine.py's
+        on_price_tick docstring). That would reintroduce real risk to
+        exactly the safety net this codebase already deliberately made
+        fail-open (see trading-skills' 2026-09-22-swing-signal-cache-
+        never-throttled-on-failure.md: "no incorrect order was placed...
+        the real impact is staleness" - a design choice, not an oversight).
+        Skipping preserves that: a cooldown-covered symbol just falls back
+        to its last cached signal exactly as it always has, no new delay.
+
+        The steady PACING floor (config.MARKET_DATA_MIN_INTERVAL_SECONDS,
+        0.5s default) is the one part that still blocks - small and
+        bounded enough (versus a 5s+ poll tick) to accept, and it's what
+        actually prevents a same-tick burst from ever reaching Dhan's
+        limit in the first place; the cooldown only matters once Dhan has
+        already said no, at which point waiting it out is this account's
+        job collectively, not any single caller's job to block on."""
+        with self._market_data_lock:
+            now = time.monotonic()
+            if now < self._market_data_cooldown_until:
+                return False
+            wait = self._market_data_next_allowed_at - now
+            if wait > 0:
+                time.sleep(wait)
+                now = time.monotonic()
+            self._market_data_next_allowed_at = now + config.MARKET_DATA_MIN_INTERVAL_SECONDS
+            return True
+
+    def _note_market_data_rate_limit_outcome(self, resp: object) -> None:
+        """Arms/clears the shared backoff cooldown based on what Dhan
+        actually said - detected from the response envelope itself (Dhan
+        returns DH-904 as a normal `{"status": "failure", ...}` payload,
+        never a raised exception - same detection idiom as shadow_
+        evaluator.py's own throttle). A hit doubles the cooldown from
+        config.MARKET_DATA_RATE_LIMIT_COOLDOWN_SECONDS, capped at
+        MARKET_DATA_RATE_LIMIT_COOLDOWN_MAX_SECONDS, and pushes every OTHER
+        package's next fetch_continuous_intraday call out to match - not
+        just this caller's own retry. A clean (non-rate-limited) response,
+        including a genuine {} for an unrelated reason, resets the streak
+        so the NEXT hit starts back at the base cooldown rather than
+        wherever a stale streak left off."""
+        remarks = str(resp.get("remarks")) if isinstance(resp, dict) else ""
+        if not ("DH-904" in remarks or "Rate_Limit" in remarks or "Too many" in remarks):
+            self._market_data_consecutive_rate_limit_hits = 0
+            return
+        with self._market_data_lock:
+            self._market_data_consecutive_rate_limit_hits += 1
+            cooldown_seconds = min(
+                config.MARKET_DATA_RATE_LIMIT_COOLDOWN_SECONDS * (2 ** (self._market_data_consecutive_rate_limit_hits - 1)),
+                config.MARKET_DATA_RATE_LIMIT_COOLDOWN_MAX_SECONDS,
+            )
+            self._market_data_cooldown_until = time.monotonic() + cooldown_seconds
+        logger.warning(
+            "fetch_continuous_intraday hit DH-904 (consecutive hit #%s) - "
+            "backing off the shared account-wide call budget for %.1fs",
+            self._market_data_consecutive_rate_limit_hits, cooldown_seconds,
+        )
 
     # ------------------------------------------------------------------ #
     # Supertrend exit signal (computed on the underlying stock, not the
