@@ -69,7 +69,7 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from trade_history import HISTORY_DIR, read_all_trades, read_all_webhook_alerts
+from trade_history import HISTORY_DIR, read_all_jsonl, read_all_trades, read_all_webhook_alerts
 import choppy_stocks
 import cross_strategy_registry
 import fund_allocation
@@ -268,6 +268,39 @@ async def trade_history(strategy: str | None = None):
         return {"error": "strategy must be 'Options', 'Futures', 'Luxury', or 'Swing' (or omitted for all)"}
     trades = read_all_trades(strategy)
     return {"count": len(trades), "trades": trades}
+
+
+@app.get("/paper-trades")
+async def get_paper_trades(strategy: str | None = None):
+    """Consolidated view of breakout-scanner paper trading across
+    Options/Futures/Luxury (added 24 Sep 2026, user request: "I should
+    see a consolidated view" - closed-only via history/<date>_breakout_
+    paper_trades.log left OPEN paper positions invisible between entry
+    and exit, the exact gap this closes). Combines:
+      - "open": every currently-open paper position, live from
+        breakout_paper_engine.snapshot() (in-memory - NOT the durable
+        record, just what's live right now);
+      - "closed": every closed paper trade ever recorded, from
+        history/*_breakout_paper_trades.log (durable, survives a
+        restart - read_all_jsonl reads every dated file, not just
+        today's, same convention /trade-history already uses for real
+        trades).
+    strategy=None returns all 3 packages; pass strategy=Options/Futures/
+    Luxury to filter both halves to one. Swing's own separate paper
+    engine (swing_paper_engine.py, index-only, gated by SWING_INDEX_
+    PAPER_MODE_ENABLED - currently false) is NOT included here; its own
+    trades log to history/<date>_swing_paper_trades.log directly if/when
+    that's ever turned back on."""
+    if strategy is not None and strategy not in ("Options", "Futures", "Luxury"):
+        return {"error": "strategy must be 'Options', 'Futures', or 'Luxury' (or omitted for all)"}
+    open_positions = await breakout_paper_engine.snapshot()
+    if strategy is not None:
+        open_positions = {k: v for k, v in open_positions.items() if k.startswith(f"{strategy}:")}
+    closed = read_all_jsonl(breakout_paper_engine.PAPER_TRADES_LOG_NAME)
+    if strategy is not None:
+        closed = [t for t in closed if t.get("strategy") == strategy]
+    return {"open_count": len(open_positions), "open": open_positions,
+            "closed_count": len(closed), "closed": closed}
 
 
 @app.get("/webhook-alerts")
