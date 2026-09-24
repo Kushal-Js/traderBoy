@@ -368,6 +368,17 @@ async def _evaluate_exit_signal(symbol: str, position: Position) -> Optional[str
     return None
 
 
+def current_target_pct(symbol: str) -> float:
+    """COPPER keeps reading config.TARGET_PCT unchanged; every other
+    watchlist symbol reads config.TARGET_PCT_NON_COPPER instead (user
+    request 24 Sep 2026). Deliberately keyed off "is this COPPER", not
+    "is this MCX" - NATURALGAS, also MCX, gets the new non-COPPER value
+    same as any NSE symbol. Same is_mcx-branch convention as
+    current_profit_protection_rs/_giveback_pct below, just on a plain
+    symbol check instead."""
+    return config.TARGET_PCT if symbol == "COPPER" else config.TARGET_PCT_NON_COPPER
+
+
 def current_profit_protection_rs(basket_type: str, is_mcx: bool = False) -> float:
     """MCX OPTIONS gets its own override (user request 22 Sep 2026 -
     scoped to MCX only, NOT every OPTIONS symbol - ASHOKLEY, an NSE
@@ -697,7 +708,7 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
             underlying_symbol=symbol, trading_symbol=trading_symbol, basket_type=effective_basket_type, regime=regime,
             instrument_side=side, exchange_segment=exchange_segment, product_type=product_type,
             quantity=quantity, lot_size=lot_size, entry_price=fill_price, best_price=fill_price,
-            target_price=target_price_for(side, fill_price, config.TARGET_PCT),
+            target_price=target_price_for(side, fill_price, current_target_pct(symbol)),
             hard_stop_loss=hard_stop_for(side, fill_price, config.HARD_STOP_LOSS_PCT),
             order_id=order_id, pnl_multiplier=pnl_multiplier, resolved_option_type=option_type,
             supertrend_entry_candle_start=entry_candle_start, stop_loss_order_id=stop_loss_order_id,
@@ -1424,7 +1435,7 @@ async def reconcile_broker_positions() -> list[Position]:
             basket_type=basket_type, regime="UNKNOWN", instrument_side=side,
             exchange_segment=exchange_segment, product_type=bp.get("product_type") or config.FUTURES_PRODUCT,
             quantity=quantity, lot_size=bp.get("lot_size"), entry_price=avg_price, best_price=avg_price,
-            target_price=target_price_for(side, avg_price, config.TARGET_PCT),
+            target_price=target_price_for(side, avg_price, current_target_pct(underlying_symbol)),
             hard_stop_loss=hard_stop_for(side, avg_price, config.HARD_STOP_LOSS_PCT),
             order_id="", pnl_multiplier=pnl_multiplier, resolved_option_type=bp.get("option_type") or None,
             reconciled=True, stop_loss_order_id=stop_loss_order_id,

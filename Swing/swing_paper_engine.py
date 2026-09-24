@@ -242,7 +242,7 @@ async def process_paper_entry(symbol: str, regime: str) -> dict:
             underlying_symbol=symbol, trading_symbol=trading_symbol, basket_type=effective_basket_type, regime=regime,
             instrument_side=side, exchange_segment=exchange_segment, product_type="PAPER",
             quantity=quantity, lot_size=lot_size, entry_price=fill_price, best_price=fill_price,
-            target_price=swing_te.target_price_for(side, fill_price, config.TARGET_PCT),
+            target_price=swing_te.target_price_for(side, fill_price, swing_te.current_target_pct(symbol)),
             hard_stop_loss=swing_te.hard_stop_for(side, fill_price, config.HARD_STOP_LOSS_PCT),
             order_id="", pnl_multiplier=pnl_multiplier, resolved_option_type=option_type,
             supertrend_entry_candle_start=entry_candle_start, stop_loss_order_id=None,

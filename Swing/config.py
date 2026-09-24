@@ -196,6 +196,15 @@ PROFIT_PROTECTION_GIVEBACK_PCT_MCX = float(
     os.getenv("SWING_PROFIT_PROTECTION_GIVEBACK_PCT_MCX", str(PROFIT_PROTECTION_GIVEBACK_PCT_OPTIONS))
 )
 TARGET_PCT = float(os.getenv("SWING_TARGET_PCT", "0.20"))
+# Non-COPPER override (user request 24 Sep 2026) - every OTHER watchlist
+# symbol (NATURALGAS, ASHOKLEY, SONACOMS, NIFTY, BANKNIFTY, ...) now
+# targets 35%, not the shared 20% above. COPPER keeps reading TARGET_PCT
+# unchanged - this is deliberately scoped to "not COPPER" specifically,
+# not "not MCX" (NATURALGAS, also MCX, gets the new 35% same as every
+# NSE symbol). See Swing/trading_engine.py's current_target_pct for where
+# the symbol check happens - same is_copper-branch convention as
+# current_profit_protection_rs/_giveback_pct's own is_mcx branch above.
+TARGET_PCT_NON_COPPER = float(os.getenv("SWING_TARGET_PCT_NON_COPPER", "0.35"))
 HARD_STOP_LOSS_PCT = float(os.getenv("SWING_HARD_STOP_LOSS_PCT", "0.20"))
 ENABLE_TARGET_EXIT = os.getenv("SWING_ENABLE_TARGET_EXIT", "true").lower() == "true"
 
