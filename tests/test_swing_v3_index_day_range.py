@@ -98,6 +98,7 @@ def test_1_today_open_and_yesterday_close_from_day_boundary():
         data = _index_series([100.0] * 40, day2, day2_opens=[105.0] + day2[1:])
         W._client = _install_fake_client(data)
         signals._day_range_cache.clear()
+        signals._raw_series_cache.clear()
         state = asyncio.run(signals.get_day_range_state("NIFTY"))
         assert state is not None, "expected a resolvable DayRangeState with 2 full days of bars"
         assert state.today_open == 105.0, state.today_open
@@ -117,6 +118,7 @@ def test_2_insufficient_history_returns_none():
         data["timestamp"] = data["timestamp"][-40:]  # drop the (empty) day-1 contribution cleanly
         W._client = _install_fake_client(data)
         signals._day_range_cache.clear()
+        signals._raw_series_cache.clear()
         state = asyncio.run(signals.get_day_range_state("NIFTY"))
         assert state is None, "no prior trading day in the fetched window must yield None, not a guess"
         print("2. DayRangeState is None (not a guess) when there's no prior-day bar to compare against: PASSED")
@@ -139,6 +141,7 @@ def test_3_rsi_crossed_above_bull_level_and_combined_bullish_entry():
         data = _index_series([100.0] * 30, day2)
         W._client = _install_fake_client(data)
         signals._day_range_cache.clear()
+        signals._raw_series_cache.clear()
         state = asyncio.run(signals.get_day_range_state("NIFTY"))
         assert state is not None, "expected enough bars for RSI(14)+Supertrend(10) to warm up"
         assert state.rsi is not None and state.prev_rsi is not None
@@ -168,6 +171,7 @@ def test_4_one_missing_condition_blocks_bullish_entry():
         data = _index_series([100.0] * 30, day2)
         W._client = _install_fake_client(data)
         signals._day_range_cache.clear()
+        signals._raw_series_cache.clear()
         state = asyncio.run(signals.get_day_range_state("NIFTY"))
         assert state is not None
         assert state.gap_up_day is False, "today's open (95) must read below yesterday's close (100)"

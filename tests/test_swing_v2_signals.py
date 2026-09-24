@@ -69,6 +69,7 @@ def test_1_lookback_override_reaches_the_fetch_for_both_intervals():
         fake_client, seen = _install_fake_client([100.0] * 250, [100.0] * 250)
         W._client = fake_client
         signals._regime_cache.clear()
+        signals._raw_series_cache.clear()
 
         asyncio.run(signals.get_regime_state("TESTSTOCK"))
 
@@ -94,6 +95,7 @@ def test_2_regime_reads_bullish_and_bearish_correctly():
         fake_client, _ = _install_fake_client(fast_closes, slow_closes)
         W._client = fake_client
         signals._regime_cache.clear()
+        signals._raw_series_cache.clear()
         regime = asyncio.run(signals.get_regime_state("TESTSTOCK"))
         assert regime is not None and regime.is_bullish is True, regime
 
@@ -101,6 +103,7 @@ def test_2_regime_reads_bullish_and_bearish_correctly():
         fake_client2, _ = _install_fake_client([100.0] * 250, [100.0 + i * 0.5 for i in range(250)])
         W._client = fake_client2
         signals._regime_cache.clear()
+        signals._raw_series_cache.clear()
         regime2 = asyncio.run(signals.get_regime_state("TESTSTOCK"))
         assert regime2 is not None and regime2.is_bullish is False, regime2
         print("2. RegimeState.is_bullish correctly reflects fast-EMA(200) vs slow-EMA(200): PASSED")
@@ -116,6 +119,7 @@ def test_3_insufficient_bars_returns_none_not_a_guess():
         fake_client, _ = _install_fake_client([100.0] * 50, [100.0] * 250)
         W._client = fake_client
         signals._regime_cache.clear()
+        signals._raw_series_cache.clear()
         regime = asyncio.run(signals.get_regime_state("TESTSTOCK"))
         assert regime is None, "insufficient fast-series bars must yield None, not a guessed regime"
         print("3. get_regime_state returns None (not a guess) when there aren't enough bars yet: PASSED")
@@ -130,6 +134,7 @@ def test_4_fetch_failure_keeps_last_good_cached_value():
         fake_client, _ = _install_fake_client([100.0 + i * 0.5 for i in range(250)], [100.0] * 250)
         W._client = fake_client
         signals._regime_cache.clear()
+        signals._raw_series_cache.clear()
         first = asyncio.run(signals.get_regime_state("TESTSTOCK"))
         assert first is not None and first.is_bullish is True
 
@@ -161,6 +166,7 @@ def test_5_supertrend_crossed_above_fires_only_on_the_transition_candle():
         fake_client, _ = _install_fake_client(closes, closes)  # supertrend fetch only uses one series
         W._client = fake_client
         signals._supertrend_cache.clear()
+        signals._raw_series_cache.clear()
         st = asyncio.run(signals.get_supertrend_state("TESTSTOCK"))
         assert st is not None, "expected enough bars for a Supertrend read"
         assert st.crossed_above is True, f"expected a crossover on the spike bar, got is_above={st.is_above} prev_is_above={st.prev_is_above}"
@@ -195,6 +201,7 @@ def test_6_completely_empty_fetch_response_keeps_last_good_cached_value():
         fake_client, _ = _install_fake_client([100.0 + i * 0.5 for i in range(250)], [100.0] * 250)
         W._client = fake_client
         signals._regime_cache.clear()
+        signals._raw_series_cache.clear()
         first = asyncio.run(signals.get_regime_state("TESTSTOCK"))
         assert first is not None and first.is_bullish is True
 
@@ -214,6 +221,7 @@ def test_6_completely_empty_fetch_response_keeps_last_good_cached_value():
         fake_client2, _ = _install_fake_client([100.0] * 30 + [200.0], [100.0] * 30 + [200.0])
         W._client = fake_client2
         signals._supertrend_cache.clear()
+        signals._raw_series_cache.clear()
         st_first = asyncio.run(signals.get_supertrend_state("TESTSTOCK"))
         assert st_first is not None
 

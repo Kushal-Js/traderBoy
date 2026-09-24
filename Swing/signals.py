@@ -123,6 +123,10 @@ def _underlying_reference(symbol: str) -> tuple[str, str, str]:
     return security_id, exchange_segment, instrument_type
 
 
+RAW_SERIES_DEDUP_SECONDS = 10
+_raw_series_cache: dict[tuple, tuple[datetime, dict]] = {}
+
+
 def _get_intraday_series(
     symbol: str, security_id: str, exchange_segment: str, instrument_type: str,
     interval_minutes: int, min_bars: int, lookback_days_override: Optional[int] = None,
@@ -137,15 +141,43 @@ def _get_intraday_series(
     regime, config.SUPERTREND_PERIOD + 2 for Supertrend) so a WS series
     is never accepted with LESS history than REST would have supplied -
     the hybrid switch can only make a symbol's signal faster to compute,
-    never worse."""
+    never worse.
+
+    REST fallback goes through a short-TTL (RAW_SERIES_DEDUP_SECONDS) raw-
+    series cache, keyed by (security_id, exchange_segment, instrument_type,
+    interval_minutes, lookback_days_override) - NOT by symbol, so any two
+    callers asking about the same underlying instrument's same interval
+    within the same dedup window share one REST call. Added 24 Sep 2026,
+    real incident: get_regime_state's fast(5min) fetch, get_supertrend_
+    state's own 5min fetch, and (for INDEX_SYMBOLS) get_day_range_state's
+    5min fetch were each independently re-fetching the IDENTICAL series
+    for NIFTY/BANKNIFTY within the same monitor tick - confirmed live via
+    journalctl: 3 separate fetch_continuous_intraday calls for the same
+    security_id+interval seconds apart, each hitting Dhan's account-wide
+    DH-904 rate limit independently. This does NOT fix DH-904 itself (an
+    account-wide budget shared across all 4 packages, see trading-skills'
+    2026-09-22 incident writeup for that still-open question) - it only
+    removes Swing's own redundant, same-tick duplicate calls, cutting a
+    symbol needing all three signals from ~5 REST calls/tick down to ~2
+    (one per distinct interval). Caches the OUTCOME either way (including
+    an empty {} on failure) so a second caller within the window gets the
+    same failure immediately rather than making its own doomed call -
+    each caller's own existing fail-streak/backoff logic is unaffected,
+    since it reads this function's return value exactly as before."""
     if config.USE_WS_CANDLES and candle_feed.is_fresh(symbol, config.WS_STALE_AFTER_SECONDS):
         ws_data = candle_feed.get_candles_dict(symbol, interval_minutes)
         if len(ws_data.get("close") or []) >= min_bars:
             return ws_data
-    return dhan_wrapper.fetch_continuous_intraday(
+    cache_key = (security_id, exchange_segment, instrument_type, interval_minutes, lookback_days_override)
+    cached = _raw_series_cache.get(cache_key)
+    if cached and (_now_ist() - cached[0]).total_seconds() < RAW_SERIES_DEDUP_SECONDS:
+        return cached[1]
+    data = dhan_wrapper.fetch_continuous_intraday(
         security_id, exchange_segment, instrument_type, interval_minutes,
         lookback_days_override=lookback_days_override,
     )
+    _raw_series_cache[cache_key] = (_now_ist(), data)
+    return data
 
 
 # --------------------------------------------------------------------------- #
