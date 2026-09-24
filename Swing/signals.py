@@ -580,12 +580,18 @@ async def get_supertrend_state(symbol: str, interval_minutes: Optional[int] = No
 
 
 # --------------------------------------------------------------------------- #
-# Day Range Bull/Bear - v3, config.INDEX_SYMBOLS (NIFTY/BANKNIFTY) ONLY, user
-# request 24 Sep 2026. See Swing/config.py's DAY_RANGE_RSI_PERIOD docstring
-# for the full backtest this ports (backtest_nifty_options_swing_v2_1min.py -
-# +Rs14,752/59.4% WR, NIFTY, 30-day window, 5-min fast layer) and Swing/
-# trading_engine.py's _evaluate_entry_signal for the exact combined formula
-# this feeds into. Never called for a non-index symbol - see that function.
+# Day Range Bull/Bear - v3, originally config.INDEX_SYMBOLS (NIFTY/
+# BANKNIFTY) ONLY (24 Sep 2026), promoted to the default for every Swing
+# symbol later the same day (user request - see Swing/config.py's DAY_
+# RANGE_RSI_PERIOD docstring for the full history and the SONACOMS
+# backtest that motivated the promotion). See Swing/config.py's DAY_
+# RANGE_RSI_PERIOD docstring for the original NIFTY backtest this ports
+# (backtest_nifty_options_swing_v2_1min.py - +Rs14,752/59.4% WR, NIFTY,
+# 30-day window, 5-min fast layer) and Swing/trading_engine.py's
+# _evaluate_entry_signal for the exact combined formula this feeds into.
+# Called for every symbol that reaches the v2 entry branch now (COPPER
+# excluded only because its structure-break signal bypasses that branch
+# entirely, not because of anything here).
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class DayRangeState:

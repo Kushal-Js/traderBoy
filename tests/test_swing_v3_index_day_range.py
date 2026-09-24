@@ -1,9 +1,12 @@
 """
-Tests for the v3 additions to Swing's entry logic - config.INDEX_SYMBOLS
-(NIFTY/BANKNIFTY) ONLY, user request 24 Sep 2026 (port
-backtest_nifty_options_swing_v2_1min.py's best-performing config live -
-see Swing/config.py's DAY_RANGE_RSI_PERIOD docstring and Swing/
-trading_engine.py's _evaluate_entry_signal for the full spec).
+Tests for the v3 additions to Swing's entry logic - originally config.
+INDEX_SYMBOLS (NIFTY/BANKNIFTY) ONLY (24 Sep 2026, porting
+backtest_nifty_options_swing_v2_1min.py's best-performing config live),
+PROMOTED TO THE DEFAULT FOR EVERY SWING SYMBOL later the same day (user
+request: "Make v3 as default for SWING so that all entries apart from
+COPPER follow it ... Nifty and BankNifty already using v3 only" - see
+Swing/config.py's DAY_RANGE_RSI_PERIOD docstring and Swing/trading_
+engine.py's _evaluate_entry_signal for the full spec and history).
 
 Coverage:
   1. DayRangeState correctly derives today's open / yesterday's close from
@@ -12,19 +15,22 @@ Coverage:
      Range Bull conditions (AND, not any-one-of).
   2. Insufficient history (no prior trading day in the fetched window, or
      not enough bars for RSI/Supertrend) returns None, not a guess.
-  3. _evaluate_entry_signal: for an INDEX symbol, the "Regime Bullish" leg
-     reads regime.is_bullish (a LEVEL, persisting) - fires even with NO
-     fresh crossed_above edge. For a NON-index symbol, the exact same
-     regime/Supertrend inputs must NOT fire (still requires the edge) -
-     proves the v3 departure is correctly scoped to indices only, not a
-     global regression of the 17 Sep COPPER-incident fix.
-  4. _evaluate_entry_signal: INDEX symbol admits an entry via the Day
-     Range branch ALONE (branch_a entirely false), only when Trend-aware
-     Filter also agrees (AND-gated, not OR).
-  5. _evaluate_entry_signal: get_day_range_state is never even called for
-     a non-index symbol.
+  3. _evaluate_entry_signal: the "Regime Bullish" leg reads regime.
+     is_bullish (a LEVEL, persisting) - fires even with NO fresh
+     crossed_above edge - for BOTH an index symbol (NIFTY) AND a plain
+     NSE equity (TESTSTOCK), proving the level-vs-edge change is now
+     universal, not index-scoped. The underlying 17 Sep COPPER-incident
+     fix (the OTHER two OR-legs, st15.is_above/Trend-aware Filter) is
+     confirmed untouched by a case where only the level leg differs.
+  4. _evaluate_entry_signal: a symbol admits an entry via the Day Range
+     branch ALONE (branch_a entirely false), only when Trend-aware Filter
+     also agrees (AND-gated, not OR) - checked for both NIFTY and a plain
+     NSE equity.
+  5. _evaluate_entry_signal: get_day_range_state IS now called (and its
+     result used) for a non-index symbol too - the exact opposite of this
+     suite's original index-only assertion.
   6. A None DayRangeState (not enough history / fetch failure) never
-     blocks branch_a - the index symbol still enters via the unchanged
+     blocks branch_a - any symbol still enters via the unchanged
      three-way OR filter.
 
 HOW TO RUN:
@@ -210,7 +216,7 @@ async def _resolved(value):
     return value
 
 
-def _install(regime_state, st5_state, st15_state, day_range_state=None, day_range_raises=False):
+def _install(regime_state, st5_state, st15_state, day_range_state=None):
     ste.signals.get_regime_state = lambda symbol: _resolved(regime_state)
 
     def fake_get_supertrend_state(symbol, interval_minutes=None):
@@ -218,12 +224,7 @@ def _install(regime_state, st5_state, st15_state, day_range_state=None, day_rang
             return _resolved(st15_state)
         return _resolved(st5_state)
     ste.signals.get_supertrend_state = fake_get_supertrend_state
-
-    def fake_get_day_range_state(symbol):
-        if day_range_raises:
-            raise AssertionError(f"get_day_range_state must never be called for a non-index symbol ({symbol!r})")
-        return _resolved(day_range_state)
-    ste.signals.get_day_range_state = fake_get_day_range_state
+    ste.signals.get_day_range_state = lambda symbol: _resolved(day_range_state)
 
 
 def _restore():
@@ -233,12 +234,13 @@ def _restore():
     ste.signals.get_day_range_state = _REAL_GET_DAY_RANGE_STATE
 
 
-def test_5_index_regime_leg_uses_level_not_edge():
+def test_5_regime_leg_uses_level_not_edge_for_every_symbol():
     """is_bullish=True but prev_is_bullish=True too (NO fresh crossed_above
     edge), gap NOT widened (Trend-aware Filter leg off), 15-min ST
-    disagrees (off) - isolates the Regime-Bullish leg alone. NIFTY must
-    fire via regime.is_bullish (a LEVEL); the identical inputs for a
-    non-index symbol must NOT fire, since it still requires the edge."""
+    disagrees (off) - isolates the Regime-Bullish leg alone. Both NIFTY
+    AND a plain NSE equity (TESTSTOCK) must now fire via regime.is_bullish
+    (a LEVEL) - the level-vs-edge change is universal since the 24 Sep
+    "v3 default for everyone" promotion, not index-scoped any more."""
     sc.ENTRY_STRATEGY_VERSION = "v2"
     try:
         _install(_regime(is_bullish=True, prev_is_bullish=True, gap_widened=False),
@@ -248,95 +250,105 @@ def test_5_index_regime_leg_uses_level_not_edge():
         assert result_index == "BULLISH", f"NIFTY: expected BULLISH via regime.is_bullish (level), got {result_index!r}"
 
         result_equity = asyncio.run(ste._evaluate_entry_signal("TESTSTOCK"))
-        assert result_equity is None, (
-            f"TESTSTOCK (non-index): must still require a FRESH crossed_above edge - "
-            f"the 17 Sep COPPER-incident fix must stay untouched, got {result_equity!r}"
+        assert result_equity == "BULLISH", (
+            f"TESTSTOCK (non-index): must ALSO fire via regime.is_bullish (level) now that v3 is the "
+            f"default for every symbol - got {result_equity!r}"
         )
-        print("5. Index-only Regime-leg-as-LEVEL is correctly scoped: NIFTY fires on level alone, "
-              "TESTSTOCK still requires the edge: PASSED")
+        print("5. Regime-leg-as-LEVEL now applies to every symbol: NIFTY and TESTSTOCK both fire "
+              "on level alone, no edge required: PASSED")
     finally:
         _restore()
 
 
-def test_6_index_day_range_branch_admits_entry_branch_a_false():
+def test_6_day_range_branch_admits_entry_branch_a_false():
     """branch_a entirely false (all three legs off, no 5-min crossover
     either) - only the Day Range branch, ANDed with Trend-aware Filter,
-    can admit this entry."""
+    can admit this entry. Checked for NIFTY (the original v3 target) AND
+    a plain NSE equity (TESTSTOCK), since the Day Range branch is no
+    longer index-scoped."""
     sc.ENTRY_STRATEGY_VERSION = "v2"
     try:
-        _install(_regime(is_bullish=True, prev_is_bullish=True, gap_widened=True),  # Trend-aware Filter: ON
-                 _supertrend(is_above=False, prev_is_above=False),  # no 5-min crossover -> branch_a impossible
-                 _supertrend(is_above=False, prev_is_above=False),  # 15-min ST bearish -> that leg also off
-                 day_range_state=_day_range(bull_entry=True))
-        result = asyncio.run(ste._evaluate_entry_signal("NIFTY"))
-        assert result == "BULLISH", f"expected BULLISH via the Day Range branch alone, got {result!r}"
-        print("6. NIFTY admits a BULLISH entry via the Day Range branch alone (branch_a impossible, "
-              "Trend-aware Filter agrees): PASSED")
+        for symbol in ("NIFTY", "TESTSTOCK"):
+            _install(_regime(is_bullish=True, prev_is_bullish=True, gap_widened=True),  # Trend-aware Filter: ON
+                     _supertrend(is_above=False, prev_is_above=False),  # no 5-min crossover -> branch_a impossible
+                     _supertrend(is_above=False, prev_is_above=False),  # 15-min ST bearish -> that leg also off
+                     day_range_state=_day_range(bull_entry=True))
+            result = asyncio.run(ste._evaluate_entry_signal(symbol))
+            assert result == "BULLISH", f"{symbol}: expected BULLISH via the Day Range branch alone, got {result!r}"
+        print("6. NIFTY and TESTSTOCK both admit a BULLISH entry via the Day Range branch alone "
+              "(branch_a impossible, Trend-aware Filter agrees): PASSED")
     finally:
         _restore()
 
 
 def test_7_day_range_branch_requires_trend_aware_filter_too():
     """Day Range Bull fires, but the Trend-aware Filter leg is OFF (gap not
-    widened) - the AND must block it, proving this isn't secretly an OR."""
+    widened) - the AND must block it, proving this isn't secretly an OR.
+    Checked for both an index and a plain NSE equity."""
     sc.ENTRY_STRATEGY_VERSION = "v2"
     try:
-        _install(_regime(is_bullish=True, prev_is_bullish=True, gap_widened=False),  # Trend-aware Filter: OFF
-                 _supertrend(is_above=False, prev_is_above=False),
-                 _supertrend(is_above=False, prev_is_above=False),
-                 day_range_state=_day_range(bull_entry=True))
-        result = asyncio.run(ste._evaluate_entry_signal("NIFTY"))
-        assert result is None, f"Day Range Bull without Trend-aware Filter agreeing must not enter, got {result!r}"
-        print("7. Day Range branch correctly requires Trend-aware Filter too (AND, not OR): PASSED")
+        for symbol in ("NIFTY", "TESTSTOCK"):
+            _install(_regime(is_bullish=True, prev_is_bullish=True, gap_widened=False),  # Trend-aware Filter: OFF
+                     _supertrend(is_above=False, prev_is_above=False),
+                     _supertrend(is_above=False, prev_is_above=False),
+                     day_range_state=_day_range(bull_entry=True))
+            result = asyncio.run(ste._evaluate_entry_signal(symbol))
+            assert result is None, f"{symbol}: Day Range Bull without Trend-aware Filter agreeing must not enter, got {result!r}"
+        print("7. Day Range branch correctly requires Trend-aware Filter too for both symbols (AND, not OR): PASSED")
     finally:
         _restore()
 
 
-def test_8_day_range_never_consulted_for_non_index_symbol():
-    """get_day_range_state must not even be CALLED for a non-index symbol -
-    not just 'its result is ignored'."""
+def test_8_day_range_now_consulted_for_non_index_symbol_too():
+    """Since the 24 Sep 'v3 default for everyone' promotion, get_day_range_
+    state IS called for a non-index symbol, and its bullish_entry result
+    is actually used to admit the entry via branch_b - the exact opposite
+    of this suite's original index-only assertion."""
     sc.ENTRY_STRATEGY_VERSION = "v2"
     try:
-        _install(_regime(is_bullish=False, prev_is_bullish=False, gap_widened=False),
+        _install(_regime(is_bullish=True, prev_is_bullish=True, gap_widened=True),  # Trend-aware Filter: ON
+                 _supertrend(is_above=False, prev_is_above=False),  # branch_a impossible
                  _supertrend(is_above=False, prev_is_above=False),
-                 _supertrend(is_above=False, prev_is_above=False),
-                 day_range_raises=True)
+                 day_range_state=_day_range(bull_entry=True))
         result = asyncio.run(ste._evaluate_entry_signal("TESTSTOCK"))
-        assert result is None
-        print("8. get_day_range_state is never called at all for a non-index symbol: PASSED")
+        assert result == "BULLISH", (
+            f"TESTSTOCK (non-index): get_day_range_state's result must now be consulted and used, got {result!r}"
+        )
+        print("8. get_day_range_state is now consulted (and its result used) for a non-index symbol too: PASSED")
     finally:
         _restore()
 
 
 def test_9_none_day_range_state_never_blocks_branch_a():
     """A None DayRangeState (not enough history / a fetch failure) must not
-    prevent the unchanged three-way-OR filter from still working for an
-    index symbol."""
+    prevent the unchanged three-way-OR filter from still working, for
+    either an index symbol or a plain NSE equity."""
     sc.ENTRY_STRATEGY_VERSION = "v2"
     try:
-        _install(_regime(is_bullish=False, prev_is_bullish=False, gap_widened=False),
-                 _supertrend(is_above=True, prev_is_above=False),
-                 _supertrend(is_above=True, prev_is_above=True),  # 15-min ST bullish -> branch_a leg
-                 day_range_state=None)
-        result = asyncio.run(ste._evaluate_entry_signal("NIFTY"))
-        assert result == "BULLISH", f"expected branch_a (15-min ST leg) to still admit the entry, got {result!r}"
-        print("9. A None DayRangeState never blocks the index symbol's own branch_a: PASSED")
+        for symbol in ("NIFTY", "TESTSTOCK"):
+            _install(_regime(is_bullish=False, prev_is_bullish=False, gap_widened=False),
+                     _supertrend(is_above=True, prev_is_above=False),
+                     _supertrend(is_above=True, prev_is_above=True),  # 15-min ST bullish -> branch_a leg
+                     day_range_state=None)
+            result = asyncio.run(ste._evaluate_entry_signal(symbol))
+            assert result == "BULLISH", f"{symbol}: expected branch_a (15-min ST leg) to still admit the entry, got {result!r}"
+        print("9. A None DayRangeState never blocks branch_a, for either symbol: PASSED")
     finally:
         _restore()
 
 
 def main():
-    print("=== Swing v3 (NIFTY/BANKNIFTY Day Range + index-scoped Regime leg) test suite ===\n")
+    print("=== Swing v3 (Day Range + LEVEL-based Regime leg, now default for every symbol) test suite ===\n")
     test_1_today_open_and_yesterday_close_from_day_boundary()
     test_2_insufficient_history_returns_none()
     test_3_rsi_crossed_above_bull_level_and_combined_bullish_entry()
     test_4_one_missing_condition_blocks_bullish_entry()
-    test_5_index_regime_leg_uses_level_not_edge()
-    test_6_index_day_range_branch_admits_entry_branch_a_false()
+    test_5_regime_leg_uses_level_not_edge_for_every_symbol()
+    test_6_day_range_branch_admits_entry_branch_a_false()
     test_7_day_range_branch_requires_trend_aware_filter_too()
-    test_8_day_range_never_consulted_for_non_index_symbol()
+    test_8_day_range_now_consulted_for_non_index_symbol_too()
     test_9_none_day_range_state_never_blocks_branch_a()
-    print("\nALL SWING V3 INDEX DAY RANGE CHECKS PASSED")
+    print("\nALL SWING V3 DAY RANGE CHECKS PASSED")
 
 
 if __name__ == "__main__":
