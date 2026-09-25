@@ -884,15 +884,17 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
                             "order %s - a PARTIAL fill happened. Exiting only the real remaining %d qty instead "
                             "of the stale %d to avoid an unintended over-trade.",
                             symbol, broker_qty, position.quantity, stale_order_id, broker_qty, position.quantity)
-            # NOTE for when Swing's BROKER_STOP_LOSS_ENABLED is ever turned
-            # on for an MCX symbol: this partial-fill path is only reached
-            # via a stale broker-side SL-L order (see the gate a few lines
-            # up), which stays impossible for Copper in this rollout
-            # (BROKER_STOP_LOSS_ENABLED is off - Swing/config.py). If that
-            # ever changes, pnl_multiplier should be scaled down by the
-            # same ratio as quantity here (qty and pnl_multiplier both
-            # represent "how many lots/units are still actually held," so
-            # a partial fill shrinks both, not just the order quantity).
+            # qty and pnl_multiplier both represent "how many lots/units are
+            # still actually held," so a partial fill shrinks both, not just
+            # the order quantity - otherwise every downstream rupee-based
+            # check (MAX_LOSS/target on this position if it stays open past
+            # this tick, and the final PnL recorded via
+            # trade_history.record_closed_trade, which prefers
+            # pnl_multiplier over quantity for exactly this MCX case) keeps
+            # using the pre-partial-fill multiplier against a smaller real
+            # position (found 25 Sep 2026, BROKER_STOP_LOSS_ENABLED live for
+            # MCX since before that date - see CODE_AUDIT_2026-09-25.md).
+            position.pnl_multiplier = round(position.pnl_multiplier * broker_qty / position.quantity)
             position.quantity = broker_qty
 
     if position.exit_failure_count >= 1:
