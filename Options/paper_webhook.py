@@ -253,7 +253,15 @@ async def chartink_webhook_papertrade(payload: ChartinkWebhookPayload):
             if not entry_price:
                 entry_price = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, atm.trading_symbol)
             quantity = atm.lot_size * config.QUANTITY_LOTS
-            entry_candle_start = await _capture_supertrend_entry_candle(loop, symbol)
+            # Unpack both values, matching every other call site (Options/
+            # trading_engine.py:842,1737,1823) - audit finding 2.5,
+            # CODE_AUDIT_2026-09-24.md: this was the one call site that
+            # assigned the whole 2-tuple to entry_candle_start instead,
+            # which later made _supertrend_signal_for's `candle_start >
+            # entry_candle_start` compare a datetime to a tuple, raising
+            # TypeError (silently caught per-symbol in poll_loop, which
+            # also skipped that tick's target/SL checks as a side effect).
+            entry_candle_start, entry_underlying_price = await _capture_supertrend_entry_candle(loop, symbol)
 
             position = Position(
                 underlying_symbol=symbol,
@@ -268,6 +276,7 @@ async def chartink_webhook_papertrade(payload: ChartinkWebhookPayload):
                 order_id="",
                 product_type="PAPER",
                 supertrend_entry_candle_start=entry_candle_start,
+                entry_underlying_price=entry_underlying_price,
             )
             await paper_store.reserve_and_open(position)
             results.append({"symbol": symbol, "status": "paper_entered", "entry_price": entry_price})
