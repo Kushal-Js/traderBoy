@@ -383,7 +383,22 @@ async def _evaluate_exit_signal(symbol: str, position: Position) -> Optional[str
     as _evaluate_entry_signal's matching branch: never await a live
     fetch from inside monitor_loop's own tick (real incident, 22 Sep
     2026 - see Swing/signals.py's module-level comment on the
-    structure-break section)."""
+    structure-break section).
+
+    Market-hours gated (added 25 Sep 2026 - audit finding 2.2,
+    CODE_AUDIT_2026-09-24.md) same as the entry-scan loop and the
+    structure-break refresh loop, both of which already got this gate
+    after the confirmed "39 DH-904 rate-limit hits/hour overnight"
+    incident (see config.MARKET_OPEN_TIME's own docstring) - this was
+    the one exit-check call site that never did, so an open position
+    carried overnight kept polling get_supertrend_state's live REST
+    fallback (once its cache goes stale) all night, reproducing the same
+    rate-limit pressure via a different path. Uses the same per-symbol
+    (MCX vs NSE hours) gate as everywhere else, so COPPER's genuinely
+    longer MCX session still gets a normal exit-check right up to its
+    own close."""
+    if not signals._symbol_market_open(symbol):
+        return None
     if symbol == "COPPER" and config.COPPER_STRUCTURE_BREAK_ENABLED:
         sig = signals.peek_structure_break_signal(symbol)
         if sig is None:
@@ -1005,7 +1020,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
 
 
 def _exit_on_cooldown(position: Position) -> bool:
-    return bool(position.next_exit_retry_at and datetime.now() < position.next_exit_retry_at)
+    return bool(position.next_exit_retry_at and _now_ist() < position.next_exit_retry_at)
 
 
 # Bounds _get_ltp's worst-case wait - see that function's own docstring
@@ -1132,8 +1147,8 @@ async def _handle_ltp_staleness(symbol: str, position: Position) -> None:
     if _now_ist() < _parse_hhmm_today(config.MARKET_OPEN_TIME):
         _ltp_failure_since.pop(key, None)
         return
-    failure_start = _ltp_failure_since.setdefault(key, datetime.now())
-    stale_minutes = (datetime.now() - failure_start).total_seconds() / 60
+    failure_start = _ltp_failure_since.setdefault(key, _now_ist())
+    stale_minutes = (_now_ist() - failure_start).total_seconds() / 60
     if stale_minutes < config.LTP_STALE_FORCE_EXIT_MINUTES:
         return
     logger.error(

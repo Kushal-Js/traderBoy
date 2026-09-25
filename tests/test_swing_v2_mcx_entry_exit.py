@@ -350,7 +350,10 @@ async def test_8_ltp_staleness_uses_mcx_segment_codes_for_an_mcx_position():
     try:
         pos = _mcx_position()
         key = ("NATURALGAS", pos.opened_at)
-        ste._ltp_failure_since[key] = datetime.now() - timedelta(minutes=sc.LTP_STALE_FORCE_EXIT_MINUTES + 1)
+        # ste._now_ist() (IST-aware) - see test_swing_v2_entry_exit.py's
+        # test_14 for why a naive datetime.now() here raises a mismatch
+        # against opened_at/_handle_ltp_staleness's own aware timestamps.
+        ste._ltp_failure_since[key] = ste._now_ist() - timedelta(minutes=sc.LTP_STALE_FORCE_EXIT_MINUTES + 1)
         await ste._handle_ltp_staleness("NATURALGAS", pos)
         assert calls == [("MCX", "MCX_COMM", "OPTFUT")], \
             f"expected _handle_ltp_staleness to use the real MCX segment codes, got {calls}"

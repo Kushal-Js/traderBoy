@@ -481,7 +481,12 @@ async def test_14_ltp_stale_for_too_long_forces_a_market_exit_and_cancels_broker
         assert cancelled_order_ids == [], "nothing should be touched before the staleness threshold is reached"
 
         key = ("RELIANCE", pos.opened_at)
-        ste._ltp_failure_since[key] = datetime.now() - timedelta(
+        # ste._now_ist() (IST-aware), not plain datetime.now() - since the
+        # 25 Sep 2026 timestamp-audit fix, every real timestamp this dict
+        # is compared against (opened_at above, and _handle_ltp_staleness's
+        # own _now_ist() calls) is IST-aware; a naive one here would raise
+        # "can't subtract offset-naive and offset-aware datetimes".
+        ste._ltp_failure_since[key] = ste._now_ist() - timedelta(
             minutes=ste.config.LTP_STALE_FORCE_EXIT_MINUTES + 1
         )
         await ste._check_one_position("RELIANCE", pos)

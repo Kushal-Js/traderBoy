@@ -27,9 +27,21 @@ from typing import Dict, List, Optional, Tuple
 
 import reversal_filters
 from . import config
+from Options.dhan_client import IST
 from trade_history import fire_and_forget, record_closed_trade, record_opened_position
 
 logger = logging.getLogger("swing_position_store")
+
+
+def _now_ist() -> datetime:
+    """Same helper as Swing/trading_engine.py's own _now_ist - duplicated
+    here (rather than imported from there) to avoid a circular import,
+    since trading_engine.py itself imports from this module. Audit
+    finding 2.1, CODE_AUDIT_2026-09-24.md: every timestamp in this file
+    used to be naive datetime.now() (droplet-local, i.e. UTC), silently
+    off by 5.5h from IST for anyone reading opened_at/closed_at/placed_at/
+    updated_at - fixed 25 Sep 2026."""
+    return datetime.now(IST)
 
 # Same sentinel/semantics as Options/position_store.py's own EXIT_CLAIMED -
 # see try_start_exit's docstring below.
@@ -47,8 +59,8 @@ class OrderRecord:
     remark: str = ""
     is_amo: bool = False
     lot_size: Optional[int] = None
-    placed_at: datetime = field(default_factory=datetime.now)
-    updated_at: datetime = field(default_factory=datetime.now)
+    placed_at: datetime = field(default_factory=_now_ist)
+    updated_at: datetime = field(default_factory=_now_ist)
     owned_by_placer: bool = True
 
 
@@ -89,7 +101,7 @@ class Position:
     # every rupee-threshold exit check permanently fail to fire.
     pnl_multiplier: int
     resolved_option_type: Optional[str] = None  # real "CE"/"PE" when basket_type=="OPTIONS", else None - see the option_type property below
-    opened_at: datetime = field(default_factory=datetime.now)
+    opened_at: datetime = field(default_factory=_now_ist)
     status: str = "OPEN"
     exit_reason: Optional[str] = None
     exit_price: Optional[float] = None
@@ -416,7 +428,7 @@ class SwingPositionStore:
                 return
             order.status = status
             order.remark = remark or order.remark
-            order.updated_at = datetime.now()
+            order.updated_at = _now_ist()
 
     async def release_order_ownership(self, order_id: str) -> None:
         async with self._lock:
@@ -435,7 +447,7 @@ class SwingPositionStore:
                 return False
             if pos.pending_exit_order_id:
                 return False
-            if pos.next_exit_retry_at and datetime.now() < pos.next_exit_retry_at:
+            if pos.next_exit_retry_at and _now_ist() < pos.next_exit_retry_at:
                 return False
             pos.pending_exit_order_id = EXIT_CLAIMED
             return True
@@ -448,7 +460,7 @@ class SwingPositionStore:
             pos.pending_exit_order_id = None
             pos.exit_failure_count += 1
             backoff = min(5 * (2 ** pos.exit_failure_count), 300)
-            pos.next_exit_retry_at = datetime.now() + timedelta(seconds=backoff)
+            pos.next_exit_retry_at = _now_ist() + timedelta(seconds=backoff)
             logger.warning(
                 "%s: exit order placement failed (%d consecutive) - next retry in %ds",
                 underlying_symbol, pos.exit_failure_count, backoff,
@@ -478,11 +490,18 @@ class SwingPositionStore:
             pos.status = "CLOSED"
             pos.exit_reason = reason
             pos.exit_price = exit_price
-            pos.closed_at = datetime.now()
+            pos.closed_at = _now_ist()
             self.closed_positions_today.append(pos)
             fire_and_forget(record_closed_trade("Swing", pos))
             self.reserved_symbols.discard(underlying_symbol)
-            pnl = unrealized_pnl_rs(pos.instrument_side, pos.entry_price, exit_price, pos.quantity)
+            # pnl_multiplier, NOT quantity - see Position.pnl_multiplier's
+            # own docstring (audit finding 2.3, CODE_AUDIT_2026-09-24.md:
+            # this log line was the one place in the package that used
+            # quantity, making it wildly wrong for MCX positions - the
+            # durable trade_history record was never affected, since
+            # record_closed_trade above already reads pnl_multiplier
+            # directly off the Position object).
+            pnl = unrealized_pnl_rs(pos.instrument_side, pos.entry_price, exit_price, pos.pnl_multiplier)
             logger.info(
                 "Position CLOSED: %s (%s, %s %s) reason=%s exit=%.2f pnl=%.2f",
                 pos.underlying_symbol, pos.trading_symbol, pos.basket_type, pos.instrument_side,

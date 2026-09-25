@@ -144,6 +144,13 @@ def test_5_exit_reason_precedence_max_loss_wins_over_everything():
 async def test_6_supertrend_reversal_suppressed_on_the_entry_candle():
     real_supertrend = sc.ENABLE_SUPERTREND_EXIT
     sc.ENABLE_SUPERTREND_EXIT = True
+    # _evaluate_exit_signal is market-hours gated since 25 Sep 2026 (audit
+    # finding 2.2) - this test is about entry-candle suppression, not
+    # market hours, and TESTSTOCK isn't a real symbol dhan_wrapper.
+    # is_market_open would recognize, so force the gate open regardless
+    # of when this test actually runs.
+    real_market_open = ste.signals._symbol_market_open
+    ste.signals._symbol_market_open = lambda symbol: True
     try:
         entry_candle = datetime(2026, 9, 1, 10, 0)
         # Same candle as entry - crossed_below is true, but must NOT count as a real reversal yet.
@@ -166,6 +173,7 @@ async def test_6_supertrend_reversal_suppressed_on_the_entry_candle():
     finally:
         sc.ENABLE_SUPERTREND_EXIT = real_supertrend
         ste.signals.get_supertrend_state = _REAL_GET_SUPERTREND_STATE
+        ste.signals._symbol_market_open = real_market_open
 
 
 async def _resolved(value):

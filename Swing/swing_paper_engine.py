@@ -281,7 +281,7 @@ async def _log_paper_trade(position: Position) -> None:
         "opened_at": position.opened_at.isoformat() if position.opened_at else None,
         "closed_at": position.closed_at.isoformat() if position.closed_at else None,
         "order_id": "", "mode": "paper", "signal_source": "swing_v2",
-        "logged_at": datetime.now().isoformat(),
+        "logged_at": swing_te._now_ist().isoformat(),
     }
     loop = asyncio.get_running_loop()
     try:
@@ -297,7 +297,7 @@ async def _exit_one(symbol: str, position: Position, exit_price: float, reason: 
         await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
     position.exit_price = exit_price
     position.exit_reason = reason
-    position.closed_at = datetime.now()
+    position.closed_at = swing_te._now_ist()
     position.status = "CLOSED"
     async with _lock:
         _positions.pop(symbol, None)
