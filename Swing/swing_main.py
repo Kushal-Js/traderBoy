@@ -87,10 +87,28 @@ async def lifespan(app: FastAPI):
     logger.info(
         "Swing v2 startup complete: monitor loop running (reusing Options' Dhan connection). "
         "strategy_enabled=%s basket_type=%s broker_stop_loss_enabled=%s max_concurrent_trades=%s "
-        "copper_structure_break_enabled=%s",
+        "copper_structure_break_enabled=%s entry_strategy_version=%s",
         config.STRATEGY_ENABLED, config.BASKET_TYPE, config.BROKER_STOP_LOSS_ENABLED, config.MAX_CONCURRENT_TRADES,
-        config.COPPER_STRUCTURE_BREAK_ENABLED,
+        config.COPPER_STRUCTURE_BREAK_ENABLED, config.ENTRY_STRATEGY_VERSION,
     )
+    # Loud, dedicated line (not just buried in the combined one above) -
+    # audit finding, CODE_AUDIT_2026-09-25.md round 2: config.py's own
+    # ENTRY_STRATEGY_VERSION docstring deliberately keeps the CODE default
+    # at "v1" (a fresh deploy with no override must never silently switch
+    # strategies) - correct, kept as-is - but that means there was
+    # previously no visibility at all if the single SWING_ENTRY_STRATEGY_
+    # VERSION env var were ever lost during a redeploy/.env merge mistake:
+    # the bot would keep running fine, just silently on stale v1 logic
+    # with none of v2/v3's backtested improvements (including the entire
+    # NIFTY/BANKNIFTY Day Range/regime-leg path), and nothing would flag
+    # it. This makes that state impossible to miss in the startup logs.
+    if config.ENTRY_STRATEGY_VERSION != "v2":
+        logger.warning(
+            "Swing ENTRY_STRATEGY_VERSION=%r (NOT v2) - running on the OLDER v1 entry logic. If v2 was "
+            "intended (check SWING_ENTRY_STRATEGY_VERSION in .env), this deploy is silently missing the "
+            "backtested v2/v3 improvements, including the entire NIFTY/BANKNIFTY Day Range/regime-leg path.",
+            config.ENTRY_STRATEGY_VERSION,
+        )
     yield
     if _monitor_task:
         _monitor_task.cancel()
