@@ -1323,8 +1323,17 @@ async def _monitor_tick() -> None:
         # _check_one_position's own pending_exit_order_id guard makes this
         # a harmless no-op for the non-MCX positions just squared off
         # above.
-        for symbol, position in list(position_store.live_positions.items()):
-            await _check_one_position(symbol, position)
+        #
+        # Concurrent (asyncio.gather), not sequential - audit finding,
+        # PERFORMANCE_AUDIT_2026-09-25.md: Swing was the one package still
+        # checking positions one-at-a-time with a real 30s order-
+        # confirmation timeout (_ORDER_RESULT_TIMEOUT_SECONDS) sitting
+        # directly in the loop, unlike Options/Futures/Luxury which have
+        # used asyncio.gather here for months - a slow/stuck exit for one
+        # position could fully block a second position's real stop-loss
+        # check from even starting.
+        positions = list(position_store.live_positions.items())
+        await asyncio.gather(*[_check_one_position(sym, pos) for sym, pos in positions])
         return
 
     index_square_off_now = config.INDEX_DAILY_SQUARE_OFF_ENABLED and _is_index_square_off_time()
@@ -1338,9 +1347,11 @@ async def _monitor_tick() -> None:
         # pattern as _square_off_all's own Friday usage.
         await _square_off_all("INDEX_DAILY_SQUARE_OFF", symbols=config.INDEX_SYMBOLS)
 
-    # Exits first - more urgent than looking for new entries.
-    for symbol, position in list(position_store.live_positions.items()):
-        await _check_one_position(symbol, position)
+    # Exits first - more urgent than looking for new entries. Concurrent
+    # (asyncio.gather), not sequential - see the Friday-branch loop above
+    # for the full rationale (audit finding, PERFORMANCE_AUDIT_2026-09-25.md).
+    positions = list(position_store.live_positions.items())
+    await asyncio.gather(*[_check_one_position(sym, pos) for sym, pos in positions])
 
     if not (config.STRATEGY_ENABLED and config.ENTRY_ENABLED):
         return
@@ -1348,6 +1359,15 @@ async def _monitor_tick() -> None:
         return
 
     from .watchlist import watchlist_store  # local import - avoids a circular import at module load time
+    # Re-sync from data/watchlist every tick, matching the module's own
+    # documented design intent (Swing/watchlist.py's own docstring already
+    # claimed this happened - it didn't; sync_from_file's only call site
+    # was startup. Fixed 25 Sep 2026 - audit finding, PERFORMANCE_AUDIT_
+    # 2026-09-25.md: a manual watchlist edit silently had no effect until
+    # the next restart, which reads exactly like "bot feels stale" even
+    # though nothing was actually slow). Additive-only and fails open (see
+    # sync_from_file's own docstring), so this is always safe to call.
+    await watchlist_store.sync_from_file()
     symbols = await watchlist_store.symbols()
     # Rotate the scan's starting point each tick (see _watchlist_scan_turn's
     # own docstring) - same fairness idiom as breakout_signal.py's

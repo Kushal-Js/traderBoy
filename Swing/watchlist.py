@@ -124,10 +124,18 @@ class WatchlistStore:
         itself wasn't rewritten. Only the part before the first comma is
         ever treated as the symbol; anything after it (the old date, or
         nothing) is silently ignored rather than corrupting the symbol
-        with a literal ",2026-09-01" tail."""
+        with a literal ",2026-09-01" tail.
+
+        The file read runs via run_in_executor (added 25 Sep 2026 - audit
+        finding, PERFORMANCE_AUDIT_2026-09-25.md Part A) - harmless at the
+        old once-at-startup call frequency, but this method is now wired
+        into _monitor_tick and runs every 5s tick (see that fix's own
+        note below), so a direct synchronous read here would block the
+        whole process's single event loop, however briefly, on every tick."""
+        loop = asyncio.get_running_loop()
         try:
-            with open(WATCHLIST_FILE) as f:
-                lines = f.readlines()
+            lines = await loop.run_in_executor(None, WATCHLIST_FILE.read_text)
+            lines = lines.splitlines(keepends=True)
         except FileNotFoundError:
             return []
         except Exception:  # noqa: BLE001
