@@ -76,13 +76,33 @@ import fund_allocation
 from Options import option_main
 from Options import config as options_config
 from IndexScalping import index_main
-from Futures import futures_main
-from Futures import config as futures_config
-from K01 import screener_main
+# DISABLED 26 Sep 2026 (user request, freeing memory/CPU headroom on the
+# droplet for the new Bollinger strategy) - Futures/futures_main.py stays
+# on disk untouched, just not started/routed. Code is dormant, not
+# removed - a later session may delete Futures/ entirely once this has
+# proven stable. Re-enable by uncommenting this import plus every other
+# block tagged "DISABLED 26 Sep 2026 (Futures)" below.
+# from Futures import futures_main
+# from Futures import config as futures_config
+# DISABLED 26 Sep 2026 (user request, same reasoning as Futures above) -
+# K01/screener_main.py stays on disk untouched, dormant not removed.
+# from K01 import screener_main
 from Luxury import luxury_main
 from Luxury import config as luxury_config
-from Swing import swing_main, swing_paper_engine
-from Paper01 import paper01_main
+from Swing import swing_main
+# DISABLED 26 Sep 2026 (user request) - Swing's own paper-mode kill
+# switch task. Safe right now: SWING_INDEX_PAPER_MODE_ENABLED=false in
+# .env, so nothing is currently routed to Swing paper entries - but if
+# that flag is ever flipped back to true WITHOUT re-enabling this import
+# too, a paper position would be entered and then never monitored for
+# exit. Swing/swing_paper_engine.py itself is untouched, just not
+# imported/scheduled here.
+# from Swing import swing_paper_engine
+# DISABLED 26 Sep 2026 (user request) - Paper01/paper01_main.py is a
+# fully standalone paper-only twin of Options (its own webhooks, own
+# position store, own monitor loop) - disabling it has no effect on any
+# other package. Dormant, not removed.
+# from Paper01 import paper01_main
 import universe_bucket
 import breakout_signal
 import breakout_paper_engine
@@ -142,79 +162,74 @@ async def lifespan(app: FastAPI):
         ThreadPoolExecutor(max_workers=EXECUTOR_MAX_WORKERS)
     )
     logger.info("Default executor sized to max_workers=%d", EXECUTOR_MAX_WORKERS)
+    # DISABLED 26 Sep 2026 (user request): Futures/K01/Paper01 dropped out
+    # of this nesting chain entirely (freeing an asyncio task + a WS
+    # candle-feed subscriber + a monitor-loop tick each, on a 1-vCPU/
+    # ~1GB droplet). Nesting depth reduced from 7 levels to 4 - see the
+    # commented-out imports above for exactly what was removed and why
+    # each one was judged safe to disable right now.
     async with option_main.lifespan(app):
         async with index_main.lifespan(app):
-            async with futures_main.lifespan(app):
-                async with screener_main.lifespan(app):
-                    async with luxury_main.lifespan(app):
-                        async with swing_main.lifespan(app):
-                            async with paper01_main.lifespan(app):
-                                dispatcher_task = None
-                                if options_config.UNIVERSE_DISPATCHER_ENABLED:
-                                    # Started here, not inside any one
-                                    # package's own lifespan, since it
-                                    # spans two of them - see breakout_
-                                    # signal.py's own dispatcher-section
-                                    # docstring. By this point every
-                                    # nested lifespan above has already
-                                    # run, so Luxury's/Futures' own
-                                    # _breakout_entry_fn are ready to call.
-                                    # CE keeps its existing Luxury/Futures-only, rotating-for-
-                                    # fairness split (unchanged 23 Sep 2026). PE gets its OWN
-                                    # target list (added 23 Sep 2026, user request, after
-                                    # discovering universe_bucket's PE bucket was already being
-                                    # live-dispatched to Luxury/Futures with no PE-focused
-                                    # destination at all) - Options FIRST (it's an
-                                    # options-trading strategy, the natural home for a
-                                    # PE/bearish signal), Futures/Luxury only as capacity
-                                    # fallback behind it - see breakout_signal.py's own
-                                    # _ROTATE_OPTION_TYPES comment for why PE is fixed-order,
-                                    # never rotated, unlike CE.
-                                    dispatcher_task = asyncio.create_task(breakout_signal.universe_dispatcher_loop({
-                                        "CE": [
-                                            ("Luxury", luxury_config, luxury_main._breakout_entry_fn),
-                                            ("Futures", futures_config, futures_main._breakout_entry_fn),
-                                        ],
-                                        "PE": [
-                                            ("Options", options_config, option_main._breakout_entry_fn),
-                                            ("Futures", futures_config, futures_main._breakout_entry_fn),
-                                            ("Luxury", luxury_config, luxury_main._breakout_entry_fn),
-                                        ],
-                                    }))
-                                    logger.info("UniverseDispatcher task started (CE: Luxury+Futures, PE: Options>Futures>Luxury).")
-                                # Started unconditionally (cheap no-op when no
-                                # package has BREAKOUT_PAPER_MODE_ENABLED on -
-                                # see breakout_paper_engine.py's own docstring),
-                                # same reasoning as the dispatcher_task above:
-                                # it spans Options/Luxury/Futures, so it can't
-                                # live inside any one package's own lifespan.
-                                paper_engine_task = asyncio.create_task(breakout_paper_engine.paper_engine_monitor_loop())
-                                # Swing's own paper-mode kill switch (23 Sep
-                                # 2026, user request) - separate task/module
-                                # from the one above since Swing has its own
-                                # single-strategy paper engine, not a
-                                # dispatch-table one (see swing_paper_
-                                # engine.py's own docstring). Same "cheap
-                                # no-op when config.PAPER_MODE_ENABLED is
-                                # off" reasoning.
-                                swing_paper_engine_task = asyncio.create_task(swing_paper_engine.paper_engine_monitor_loop())
-                                try:
-                                    yield
-                                finally:
-                                    if dispatcher_task:
-                                        dispatcher_task.cancel()
-                                    paper_engine_task.cancel()
-                                    swing_paper_engine_task.cancel()
+            async with luxury_main.lifespan(app):
+                async with swing_main.lifespan(app):
+                    dispatcher_task = None
+                    if options_config.UNIVERSE_DISPATCHER_ENABLED:
+                        # Started here, not inside any one package's own
+                        # lifespan, since it spans two of them - see
+                        # breakout_signal.py's own dispatcher-section
+                        # docstring. By this point every nested lifespan
+                        # above has already run, so Luxury's own
+                        # _breakout_entry_fn is ready to call.
+                        # Futures entries removed from both lists 26 Sep
+                        # 2026 (Futures disabled, see above) - CE is now
+                        # Luxury-only, PE is Options-then-Luxury. Restore
+                        # the ("Futures", futures_config, futures_main.
+                        # _breakout_entry_fn) tuples in both lists if
+                        # Futures is ever re-enabled.
+                        dispatcher_task = asyncio.create_task(breakout_signal.universe_dispatcher_loop({
+                            "CE": [
+                                ("Luxury", luxury_config, luxury_main._breakout_entry_fn),
+                            ],
+                            "PE": [
+                                ("Options", options_config, option_main._breakout_entry_fn),
+                                ("Luxury", luxury_config, luxury_main._breakout_entry_fn),
+                            ],
+                        }))
+                        logger.info("UniverseDispatcher task started (CE: Luxury, PE: Options>Luxury - Futures disabled).")
+                    # Started unconditionally (cheap no-op when no package has
+                    # BREAKOUT_PAPER_MODE_ENABLED on - see breakout_paper_
+                    # engine.py's own docstring), same reasoning as the
+                    # dispatcher_task above: it spans Options/Luxury, so it
+                    # can't live inside any one package's own lifespan.
+                    # KEPT RUNNING 26 Sep 2026 despite the "disable the paper
+                    # engines" request - Options and Luxury both currently
+                    # have their own BREAKOUT_PAPER_MODE_ENABLED=true in .env
+                    # and stay enabled here, so this is the ONLY thing
+                    # monitoring their open paper positions for exit. Removing
+                    # it would silently orphan any paper position either of
+                    # them opens (entered, logged, never exited) the next time
+                    # the market is open - a real bug, not a cosmetic one, so
+                    # this was deliberately left out of the disable set even
+                    # though "the paper engines" as literally requested would
+                    # have included it. Flagged to the user in the same
+                    # response that made this change.
+                    paper_engine_task = asyncio.create_task(breakout_paper_engine.paper_engine_monitor_loop())
+                    try:
+                        yield
+                    finally:
+                        if dispatcher_task:
+                            dispatcher_task.cancel()
+                        paper_engine_task.cancel()
 
 
 app = FastAPI(title="Chartink -> Dhan Algo Bot", lifespan=lifespan)
 app.include_router(option_main.router)
 app.include_router(index_main.router)
-app.include_router(futures_main.router)
-app.include_router(screener_main.router)
+# app.include_router(futures_main.router)   # DISABLED 26 Sep 2026 - see imports above
+# app.include_router(screener_main.router)  # DISABLED 26 Sep 2026 - see imports above
 app.include_router(luxury_main.router)
 app.include_router(swing_main.router)
-app.include_router(paper01_main.router)
+# app.include_router(paper01_main.router)   # DISABLED 26 Sep 2026 - see imports above
 app.include_router(universe_bucket.router)
 
 
@@ -242,7 +257,7 @@ async def nifty_gap_block_status():
         "prev_close": cond.get("prev_close"), "today_open": cond.get("today_open"),
         "gap_points": cond.get("gap_points"),
         "options_enabled": options_config.NIFTY_GAP_BLOCK_ENABLED,
-        "futures_enabled": futures_config.NIFTY_GAP_BLOCK_ENABLED,
+        # "futures_enabled" removed 26 Sep 2026 - Futures disabled, see imports above
         "luxury_enabled": luxury_config.NIFTY_GAP_BLOCK_ENABLED,
     }
 
