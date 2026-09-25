@@ -173,8 +173,7 @@ async def get_signals():
     for symbol in await watchlist_store.symbols():
         regime = signals.peek_regime_state(symbol)
         st = signals.peek_supertrend_state(symbol)
-        is_index = symbol in config.INDEX_SYMBOLS
-        day_range = signals.peek_day_range_state(symbol) if is_index else None
+        day_range = signals.peek_day_range_state(symbol)
         out.append({
             "symbol": symbol,
             "regime": None if regime is None else {
@@ -189,8 +188,16 @@ async def get_signals():
                 "crossed_above": st.crossed_above, "crossed_below": st.crossed_below,
                 "candle_start": st.candle_start.isoformat() if st.candle_start else None,
             },
-            # v3, INDEX_SYMBOLS only - None for every other symbol, not just
-            # "not computed yet" (see _evaluate_entry_signal's is_index gate).
+            # v3 - fetched for every symbol, not just INDEX_SYMBOLS, since
+            # 24 Sep 2026 (see _evaluate_entry_signal's own docstring). This
+            # endpoint used to gate the display to is_index-only, which had
+            # gone stale relative to that promotion - real entries have
+            # used every symbol's day_range state all along (peek_day_
+            # range_state and get_day_range_state share one cache, see
+            # signals.py's _day_range_cache) - fixed 25 Sep 2026 to
+            # actually show what the live strategy already sees. None here
+            # now genuinely means "no cached reading yet" (fetch failure or
+            # insufficient history), not "never computed for this symbol."
             "day_range": None if day_range is None else {
                 "today_open": day_range.today_open, "yesterday_close": day_range.yesterday_close,
                 "gap_up_day": day_range.gap_up_day, "gap_down_day": day_range.gap_down_day,
