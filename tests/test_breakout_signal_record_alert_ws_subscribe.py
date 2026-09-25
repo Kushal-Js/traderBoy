@@ -128,7 +128,7 @@ def test_4_watchlist_contents_identical_regardless_of_cfg():
 async def _get_items(strategy: str, option_type: str) -> dict:
     async with bs._LOCK:
         w = bs._watchlist(strategy, option_type)
-        bs._ensure_today_locked(w)
+        await bs._ensure_today_locked(w)
         return dict(w.items)
 
 

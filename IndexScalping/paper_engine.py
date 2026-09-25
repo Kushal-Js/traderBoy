@@ -238,7 +238,10 @@ async def _poll_one_index(loop: asyncio.AbstractEventLoop, state: IndexState) ->
         opens, closes_d = daily.get("open") or [], daily.get("close") or []
         if len(closes_d) < config.RSI_PERIOD + 2:
             return
-        rsi = _compute_rsi(closes_d, config.RSI_PERIOD)
+        # run_in_executor (added 25 Sep 2026 - audit finding, PERFORMANCE_
+        # AUDIT_2026-09-25.md Part A) - RSI/Supertrend math directly on the
+        # event loop, unwrapped, unlike the fetches right next to it.
+        rsi = await loop.run_in_executor(None, _compute_rsi, closes_d, config.RSI_PERIOD)
         if rsi[-1] is None or rsi[-2] is None:
             return
         today_open, yesterday_close = opens[-1], closes_d[-2]
@@ -265,8 +268,10 @@ async def _poll_one_index(loop: asyncio.AbstractEventLoop, state: IndexState) ->
         t5, candles_5m.get("high") or [], candles_5m.get("low") or [], candles_5m.get("close") or [], 5, now)
     if len(c5) < config.SUPERTREND_5MIN_PERIOD + 1:
         return
-    st5 = _compute_supertrend(h5, l5, c5, period=config.SUPERTREND_5MIN_PERIOD,
-                               multiplier=config.SUPERTREND_5MIN_MULTIPLIER)
+    # run_in_executor (see the RSI fix above for the audit-finding note);
+    # positional args here since run_in_executor doesn't accept kwargs.
+    st5 = await loop.run_in_executor(
+        None, _compute_supertrend, h5, l5, c5, config.SUPERTREND_5MIN_PERIOD, config.SUPERTREND_5MIN_MULTIPLIER)
     if st5[-1] is None:
         return
     close5 = c5[-1]
@@ -276,8 +281,8 @@ async def _poll_one_index(loop: asyncio.AbstractEventLoop, state: IndexState) ->
         t1, candles_1m.get("high") or [], candles_1m.get("low") or [], candles_1m.get("close") or [], 1, now)
     if len(c1) < config.SUPERTREND_1MIN_PERIOD + 2:
         return
-    st1 = _compute_supertrend(h1, l1, c1, period=config.SUPERTREND_1MIN_PERIOD,
-                               multiplier=config.SUPERTREND_1MIN_MULTIPLIER)
+    st1 = await loop.run_in_executor(
+        None, _compute_supertrend, h1, l1, c1, config.SUPERTREND_1MIN_PERIOD, config.SUPERTREND_1MIN_MULTIPLIER)
     crossed_above_1min = _crossed(c1, st1, above=True)
     crossed_below_1min = _crossed(c1, st1, above=False)
 

@@ -385,10 +385,17 @@ async def _run_daily_screen(loop: asyncio.AbstractEventLoop) -> None:
             volumes = daily.get("volume") or []
             if not closes:
                 continue
-            passed_tt, tt_detail = trend_template_pass(closes)
+            # run_in_executor for both (added 25 Sep 2026 - audit finding,
+            # PERFORMANCE_AUDIT_2026-09-25.md Part A) - unwrapped SMA/ATR
+            # math over up to config.TREND_TEMPLATE_LOOKBACK_DAYS bars,
+            # called once per F&O-universe symbol (100+) during the daily
+            # screen; each call blocked the entire process's event loop
+            # for its slice.
+            passed_tt, tt_detail = await loop.run_in_executor(None, trend_template_pass, closes)
             if not passed_tt:
                 continue
-            passed_liq, atr_pct, avg_turnover_cr, liq_reason = liquidity_floor_pass(highs, lows, closes, volumes)
+            passed_liq, atr_pct, avg_turnover_cr, liq_reason = await loop.run_in_executor(
+                None, liquidity_floor_pass, highs, lows, closes, volumes)
             if not passed_liq:
                 logger.info("%s: passed Trend Template but failed liquidity floor (%s)", symbol, liq_reason)
                 continue
@@ -480,7 +487,14 @@ async def _check_watchlist_for_entries(loop: asyncio.AbstractEventLoop, now: dat
         t1 = [datetime.fromtimestamp(e, tz=IST) for e in (c1d.get("timestamp") or [])]
         t1, h1, l1, c1 = _drop_forming_bar(t1, c1d.get("high") or [], c1d.get("low") or [], c1d.get("close") or [], 1, now)
 
-        signal = momentum_signal(c5, h5, l5, c1, h1, l1)
+        # run_in_executor (added 25 Sep 2026 - audit finding, PERFORMANCE_
+        # AUDIT_2026-09-25.md Part A): momentum_signal runs RSI/Supertrend/
+        # ROC math over two full candle series directly on the event loop
+        # - even though the REST fetches right above it are correctly
+        # wrapped, this wasn't, blocking the entire process's one event
+        # loop (all six packages share it) for its duration on every
+        # watchlist symbol, every poll cycle.
+        signal = await loop.run_in_executor(None, momentum_signal, c5, h5, l5, c1, h1, l1)
         entry.last_signal = signal
         entry.last_signal_at = now
         if signal is None:

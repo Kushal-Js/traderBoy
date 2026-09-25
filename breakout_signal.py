@@ -234,17 +234,24 @@ async def _persist(w: _Watchlist) -> None:
     await loop.run_in_executor(None, _write_sync, w.strategy, w.option_type, d, payload)
 
 
-def _ensure_today_locked(w: _Watchlist) -> None:
+async def _ensure_today_locked(w: _Watchlist) -> None:
     """Caller holds _LOCK. Restart- and day-rollover-safe, same pattern as
     alert_bucket.py's own _ensure_today_locked. This is what makes "before
     market starts" true: the FIRST touch of a new calendar date (which,
     per signal_scanner_loop below, happens within one tick of midnight,
     not merely "whenever the next alert/scan occurs") resets to that
-    date's own (empty, unless restored from a same-day restart) file."""
+    date's own (empty, unless restored from a same-day restart) file.
+
+    Async + run_in_executor for the file read (added 25 Sep 2026 - audit
+    finding, PERFORMANCE_AUDIT_2026-09-25.md Part A, same pattern as
+    alert_bucket.py/universe_bucket.py's identical fix) - only hits disk
+    once per calendar-date rollover per watchlist, but a synchronous read
+    here blocks the entire process's one event loop while holding _LOCK."""
     today = _today()
     if w.day != today:
         w.day = today
-        w.items = _load_sync(w.strategy, w.option_type, today)
+        loop = asyncio.get_running_loop()
+        w.items = await loop.run_in_executor(None, _load_sync, w.strategy, w.option_type, today)
         w.cleared_after_close_for = None
         logger.info("%s %s breakout-signal watchlist ready for %s (%d symbol(s) restored)",
                     w.strategy, w.option_type, today, len(w.items))
@@ -259,7 +266,7 @@ async def _maybe_clear_after_close(w: _Watchlist, cfg) -> None:
     now = datetime.now(IST)
     end_h, end_m = (int(x) for x in cfg.BREAKOUT_MARKET_END_TIME.split(":"))
     async with _LOCK:
-        _ensure_today_locked(w)
+        await _ensure_today_locked(w)
         if (now.hour, now.minute) < (end_h, end_m):
             return
         if w.cleared_after_close_for == w.day:
@@ -304,7 +311,7 @@ async def record_alert(strategy: str, option_type: str, stocks: list[str], cfg=N
         now = datetime.now(IST).isoformat()
         cleaned = [s for s in (str(raw).strip().upper() for raw in stocks) if s]
         async with _LOCK:
-            _ensure_today_locked(w)
+            await _ensure_today_locked(w)
             for sym in cleaned:
                 if sym not in w.items:
                     w.items[sym] = {"first_alert_at": now, "signaled": False, "signaled_at": None,
@@ -324,7 +331,7 @@ async def snapshot(strategy: str) -> dict:
     for option_type in ("CE", "PE"):
         w = _watchlist(strategy, option_type)
         async with _LOCK:
-            _ensure_today_locked(w)
+            await _ensure_today_locked(w)
             out[option_type] = json.loads(json.dumps(w.items))
     return out
 
@@ -760,7 +767,7 @@ async def _scan_cycle(strategy: str, cfg, entry_fn: Callable[[str, str], Awaitab
     for option_type in ("CE", "PE"):
         w = _watchlist(strategy, option_type)
         async with _LOCK:
-            _ensure_today_locked(w)
+            await _ensure_today_locked(w)
             pending.extend((option_type, sym) for sym, it in w.items.items() if not it["signaled"])
 
     ws_pending, rest_pending = _split_ws_rest(cfg, pending)
@@ -1156,7 +1163,7 @@ async def _dispatch_scan_cycle(cfg, targets_by_ot: dict[str, list[tuple[str, Any
     for option_type in ("CE", "PE"):
         w = _watchlist(DISPATCHER_STRATEGY_NAME, option_type)
         async with _LOCK:
-            _ensure_today_locked(w)
+            await _ensure_today_locked(w)
             pending.extend((option_type, sym) for sym, it in w.items.items() if not it["signaled"])
 
     ws_pending, rest_pending = _split_ws_rest(cfg, pending)

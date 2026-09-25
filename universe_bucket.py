@@ -202,14 +202,23 @@ _BUCKETS: dict[str, _Bucket] = {"CE": _Bucket("CE"), "PE": _Bucket("PE")}
 _LOCK = asyncio.Lock()
 
 
-def _ensure_today_locked(b: _Bucket) -> None:
+async def _ensure_today_locked(b: _Bucket) -> None:
     """Caller holds _LOCK. Same restart-/day-rollover-safe pattern as
     alert_bucket.py's own _ensure_today_locked - the first touch of a new
-    calendar date loads (or starts empty) that date's own file."""
+    calendar date loads (or starts empty) that date's own file.
+
+    Async + run_in_executor for the file read (added 25 Sep 2026 - audit
+    finding, PERFORMANCE_AUDIT_2026-09-25.md Part A) - only actually hits
+    disk once per calendar-date rollover per bucket, but when it does, a
+    synchronous read here blocks the ENTIRE process's one event loop
+    (all six packages share it) while holding _LOCK, so any other caller
+    waiting on this same lock (e.g. record_alert, a webhook handler) also
+    stalls for the read's duration."""
     today = _today()
     if b.day != today:
         b.day = today
-        b.items = _load_sync(b.option_type, today)
+        loop = asyncio.get_running_loop()
+        b.items = await loop.run_in_executor(None, _load_sync, b.option_type, today)
         logger.info("%s universe bucket ready for %s (%d symbol(s) restored from disk)",
                     b.option_type, today, len(b.items))
 
@@ -231,7 +240,7 @@ async def record_alert(option_type: str, stocks: list[str], scan_name: Optional[
             return
         now = datetime.now(IST).isoformat()
         async with _LOCK:
-            _ensure_today_locked(b)
+            await _ensure_today_locked(b)
             for raw in stocks:
                 sym = str(raw).strip().upper()
                 if not sym:
@@ -259,13 +268,21 @@ async def active_symbols(option_type: str, as_of: Optional[date] = None) -> set[
     when a package's own cfg.BREAKOUT_UNIVERSE_SOURCE == "universe_bucket"."""
     today = as_of or _today()
     out: set[str] = set()
+    loop = asyncio.get_running_loop()
     async with _LOCK:
         b = _BUCKETS.get(option_type)
         if b is None:
             return out
-        _ensure_today_locked(b)
+        await _ensure_today_locked(b)
         for d in _trading_days_back(_window_for(option_type), today):
-            items = b.items if d == b.day else _load_sync(option_type, d)
+            # run_in_executor, not a direct call (added 25 Sep 2026 - audit
+            # finding, PERFORMANCE_AUDIT_2026-09-25.md Part A): this reads
+            # every non-today day in the rolling window from disk, while
+            # holding _LOCK, on every call - a synchronous read here froze
+            # the whole process (all six packages share one event loop)
+            # for that duration, and blocked any other caller waiting on
+            # this same lock (e.g. record_alert/webhook handlers) too.
+            items = b.items if d == b.day else await loop.run_in_executor(None, _load_sync, option_type, d)
             out.update(items.keys())
     return out
 

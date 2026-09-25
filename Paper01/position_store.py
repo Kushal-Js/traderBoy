@@ -44,6 +44,60 @@ def _cap_for(option_type: str) -> int:
     return config.MAX_LIVE_POSITIONS_CE if option_type == "CE" else config.MAX_LIVE_POSITIONS_PE
 
 
+def _count_opened_today_sync(underlying_symbol: str) -> int:
+    """Sync body of PaperPositionStore.count_opened_today - see that
+    method's own docstring. Kept as a plain module-level function (not a
+    method) so it dispatches cleanly through run_in_executor."""
+    path = dated_path(config.PAPER_OPENED_LOG_NAME)
+    if not path.exists():
+        return 0
+    count = 0
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("underlying_symbol") == underlying_symbol:
+                    count += 1
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not read today's %s log for %s - treating as 0 (fail open).",
+                          config.PAPER_OPENED_LOG_NAME, underlying_symbol)
+        return 0
+    return count
+
+
+def _loss_exit_count_today_sync(underlying_symbol: str, exit_reasons: tuple) -> int:
+    """Sync body of PaperPositionStore.loss_exit_count_today - see that
+    method's own docstring."""
+    path = dated_path(config.PAPER_TRADES_LOG_NAME)
+    if not path.exists():
+        return 0
+    count = 0
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (record.get("underlying_symbol") == underlying_symbol
+                        and record.get("exit_reason") in exit_reasons):
+                    count += 1
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not read today's %s log for %s - treating as 0 (fail open).",
+                          config.PAPER_TRADES_LOG_NAME, underlying_symbol)
+        return 0
+    return count
+
+
 class PaperPositionStore:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -167,55 +221,25 @@ class PaperPositionStore:
         (today's dated file only, fail-open to 0), pointed at Paper01's
         own PAPER_OPENED_LOG_NAME instead of the real OPENED_POSITIONS_NAME -
         that real function is hardcoded to the real log name, not
-        parameterizable, so this small local copy is the only option."""
-        path = dated_path(config.PAPER_OPENED_LOG_NAME)
-        if not path.exists():
-            return 0
-        count = 0
-        try:
-            with open(path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if record.get("underlying_symbol") == underlying_symbol:
-                        count += 1
-        except Exception:  # noqa: BLE001
-            logger.exception("Could not read today's %s log for %s - treating as 0 (fail open).",
-                              config.PAPER_OPENED_LOG_NAME, underlying_symbol)
-            return 0
-        return count
+        parameterizable, so this small local copy is the only option.
+
+        Dispatched via run_in_executor (added 25 Sep 2026 - audit finding,
+        PERFORMANCE_AUDIT_2026-09-25.md Part A: this was the one package
+        that duplicated trade_history.py's own count_opened_today/loss_
+        exit_count_today logic locally and dropped the executor wrapping
+        every other package's equivalent call already has - a synchronous
+        file read here blocks the entire process's one event loop for its
+        duration, called on every paper-entry evaluation)."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _count_opened_today_sync, underlying_symbol)
 
     async def loss_exit_count_today(self, underlying_symbol: str, exit_reasons: tuple) -> int:
         """Mirrors trade_history.loss_exit_count_today's exact semantics,
         pointed at Paper01's own PAPER_TRADES_LOG_NAME - same fail-open-to-0
-        rationale as count_opened_today above."""
-        path = dated_path(config.PAPER_TRADES_LOG_NAME)
-        if not path.exists():
-            return 0
-        count = 0
-        try:
-            with open(path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if (record.get("underlying_symbol") == underlying_symbol
-                            and record.get("exit_reason") in exit_reasons):
-                        count += 1
-        except Exception:  # noqa: BLE001
-            logger.exception("Could not read today's %s log for %s - treating as 0 (fail open).",
-                              config.PAPER_TRADES_LOG_NAME, underlying_symbol)
-            return 0
-        return count
+        rationale, and same run_in_executor dispatch, as count_opened_today
+        above."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _loss_exit_count_today_sync, underlying_symbol, exit_reasons)
 
     async def snapshot_open(self) -> dict:
         async with self._lock:
