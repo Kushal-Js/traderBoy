@@ -306,6 +306,12 @@ class PendingEntry:
 # see module docstring's KNOWN LIMITATION (does not survive a restart).
 _pending: dict[tuple[str, str, str], PendingEntry] = {}
 
+# Placeholder value for a key that's mid-resolution in guard_entry (between
+# its dedup check and either an ENTER_NOW/exception cleanup or a real
+# PendingEntry replacing it) - see guard_entry's own docstring for the
+# race this closes (found 25 Sep 2026, CODE_AUDIT_2026-09-25.md).
+_IN_FLIGHT = "IN_FLIGHT"
+
 
 async def _fetch_indicators(symbol: str) -> Optional[dict]:
     """Async wrapper around reversal_filters._fetch_indicators_sync (the
@@ -338,37 +344,54 @@ async def guard_entry(strategy: str, symbol: str, option_type: str, resolve_fn: 
         return {"symbol": symbol, "option_type": option_type, "status": "skipped",
                 "reason": "climactic_guard_already_pending"}
 
-    indicators = await _fetch_indicators(symbol)
-    rsi = indicators.get("rsi") if indicators else None
-    er = indicators.get("er") if indicators else None
-    result = evaluate(rsi, er, option_type)
+    # Register a placeholder for this key SYNCHRONOUSLY, before the only
+    # await below - closes a check-then-set race (found 25 Sep 2026,
+    # CODE_AUDIT_2026-09-25.md): two near-simultaneous alerts for the same
+    # exact key could otherwise both pass the `key in _pending` check above
+    # before either had set it, both fetch indicators concurrently, and if
+    # both landed in the deferred branch, the second would silently
+    # overwrite the first's PendingEntry - losing the first alert's own
+    # deferred_since/last_checked state (and thus its cooldown timing)
+    # with no log of the collision. poll_pending skips this placeholder
+    # via its own `entry is _IN_FLIGHT` guard below.
+    _pending[key] = _IN_FLIGHT
+    try:
+        indicators = await _fetch_indicators(symbol)
+        rsi = indicators.get("rsi") if indicators else None
+        er = indicators.get("er") if indicators else None
+        result = evaluate(rsi, er, option_type)
 
-    if result.decision == "ENTER_NOW":
-        entry_result = await resolve_fn(symbol, option_type)
-        _log_event(
-            strategy=strategy, symbol=symbol, alert_option_type=option_type, event="entered_immediately",
-            rsi_at_alert=result.rsi, er_at_alert=result.er, alert_time=datetime.now(IST).isoformat(),
-            entry_result=entry_result,
+        if result.decision == "ENTER_NOW":
+            entry_result = await resolve_fn(symbol, option_type)
+            _log_event(
+                strategy=strategy, symbol=symbol, alert_option_type=option_type, event="entered_immediately",
+                rsi_at_alert=result.rsi, er_at_alert=result.er, alert_time=datetime.now(IST).isoformat(),
+                entry_result=entry_result,
+            )
+            return entry_result
+
+        now = datetime.now(IST)
+        _pending[key] = PendingEntry(
+            strategy=strategy, symbol=symbol, alert_option_type=option_type,
+            deferred_since=now, last_checked=now, rsi_at_alert=result.rsi, er_at_alert=result.er,
+            resolve_fn=resolve_fn,
         )
-        return entry_result
-
-    now = datetime.now(IST)
-    _pending[key] = PendingEntry(
-        strategy=strategy, symbol=symbol, alert_option_type=option_type,
-        deferred_since=now, last_checked=now, rsi_at_alert=result.rsi, er_at_alert=result.er,
-        resolve_fn=resolve_fn,
-    )
-    logger.info(
-        "%s %s %s: CLIMACTIC ENTRY DEFERRED (RSI=%s ER=%s, RSI-extreme+high-ER combo) - "
-        "re-checking every ~%ds, dropped if not cleared within %dmin",
-        strategy, symbol, option_type, result.rsi, result.er, RECHECK_INTERVAL_SECONDS, COOLDOWN_MAX_WAIT_MINUTES,
-    )
-    _log_event(
-        strategy=strategy, symbol=symbol, alert_option_type=option_type, event="deferred",
-        rsi_at_alert=result.rsi, er_at_alert=result.er, alert_time=now.isoformat(),
-    )
-    return {"symbol": symbol, "option_type": option_type, "status": "deferred",
-            "reason": "climactic_entry_cooldown", "rsi": result.rsi, "er": result.er}
+        logger.info(
+            "%s %s %s: CLIMACTIC ENTRY DEFERRED (RSI=%s ER=%s, RSI-extreme+high-ER combo) - "
+            "re-checking every ~%ds, dropped if not cleared within %dmin",
+            strategy, symbol, option_type, result.rsi, result.er, RECHECK_INTERVAL_SECONDS, COOLDOWN_MAX_WAIT_MINUTES,
+        )
+        _log_event(
+            strategy=strategy, symbol=symbol, alert_option_type=option_type, event="deferred",
+            rsi_at_alert=result.rsi, er_at_alert=result.er, alert_time=now.isoformat(),
+        )
+        return {"symbol": symbol, "option_type": option_type, "status": "deferred",
+                "reason": "climactic_entry_cooldown", "rsi": result.rsi, "er": result.er}
+    finally:
+        # Only clean up the placeholder - if the deferred branch above
+        # already replaced it with a real PendingEntry, leave that alone.
+        if _pending.get(key) is _IN_FLIGHT:
+            del _pending[key]
 
 
 async def poll_pending(strategy: str) -> None:
@@ -381,8 +404,8 @@ async def poll_pending(strategy: str) -> None:
     now = datetime.now(IST)
     for key in [k for k in _pending if k[0] == strategy]:
         entry = _pending.get(key)
-        if entry is None:
-            continue  # resolved by a concurrent call between listing and here
+        if entry is None or entry is _IN_FLIGHT:
+            continue  # resolved by a concurrent call between listing and here, or guard_entry still resolving it
         if (now - entry.last_checked).total_seconds() < RECHECK_INTERVAL_SECONDS:
             continue
 
@@ -443,5 +466,5 @@ def snapshot(strategy: str) -> list[dict]:
             "minutes_waited": round((now - e.deferred_since).total_seconds() / 60.0, 1),
             "rsi_at_alert": e.rsi_at_alert, "er_at_alert": e.er_at_alert,
         }
-        for k, e in _pending.items() if k[0] == strategy
+        for k, e in _pending.items() if k[0] == strategy and e is not _IN_FLIGHT
     ]
