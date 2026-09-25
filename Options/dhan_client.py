@@ -544,7 +544,25 @@ class DhanWrapper:
                 "Check the relevant DHAN_* env vars and Tradehull's own console output above."
             )
         self._client = tsl
-        logger.info("Authenticated with Dhan (Tradehull, mode=%s)", mode)
+        # Shrink the per-request HTTP timeout from the SDK's own 60s
+        # default (see config.DHAN_HTTP_TIMEOUT_SECONDS's own docstring
+        # for the full audit finding this closes). dhan_http is a single
+        # shared DhanHTTP instance every API call on this client routes
+        # through - confirmed via the SDK's own source (DhanContext
+        # constructs it once; every mixin gets the same instance via
+        # get_dhan_http()) - so this one assignment bounds every call.
+        # Best-effort: never let a change here block a successful login,
+        # even if a future SDK version restructures this internal path.
+        try:
+            tsl.Dhan.dhan_http.timeout = config.DHAN_HTTP_TIMEOUT_SECONDS
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Could not set Dhan HTTP client's per-request timeout to %.1fs - proceeding with "
+                "whatever the SDK's own default is (login itself succeeded)",
+                config.DHAN_HTTP_TIMEOUT_SECONDS,
+            )
+        logger.info("Authenticated with Dhan (Tradehull, mode=%s, http_timeout=%.1fs)",
+                    mode, config.DHAN_HTTP_TIMEOUT_SECONDS)
 
     @property
     def client(self) -> Tradehull:

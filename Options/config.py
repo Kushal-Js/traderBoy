@@ -34,6 +34,29 @@ DHAN_AUTH_MODE = os.getenv("DHAN_AUTH_MODE", "access_token").lower()
 DHAN_PIN = os.getenv("DHAN_PIN", "")
 DHAN_TOTP_SECRET = os.getenv("DHAN_TOTP_SECRET", "")
 
+# Per-HTTP-request timeout for every Dhan REST call, overriding the
+# dhanhq SDK's own hardcoded 60s default (added 25 Sep 2026 - audit
+# finding, PERFORMANCE_AUDIT_2026-09-25.md 🔴: asyncio.wait_for(run_in_
+# executor(...), timeout=N), used everywhere in this codebase to bound a
+# blocking Dhan call, does NOT free the underlying OS thread once it
+# times out - the thread keeps running the real HTTP call to completion
+# in the background, still occupying one of the shared thread pool's
+# slots (only 5 on the droplet's 1 vCPU, shared by all six packages).
+# With the SDK's own 60s timeout and _retry()'s own retries on top, one
+# hung call could occupy a thread for 3-6+ minutes while the async-level
+# timeout protecting it gives up after 10-30s - the exact scenario that
+# timeout was meant to prevent, still possible underneath it. Dhan_
+# Tradehull/dhanhq's DhanHTTP.timeout is a plain, settable instance
+# attribute shared by every API call through one client (confirmed by
+# reading the SDK's own source: DhanContext constructs exactly ONE
+# DhanHTTP instance, and every mixin - Order, Portfolio, Funds, etc. -
+# shares that same instance via get_dhan_http()), so setting this once
+# right after authenticate() bounds every subsequent call. 12s is
+# generous for real network jitter while being far below the 60s
+# default - see Options/dhan_client.py's authenticate() for where this
+# gets applied.
+DHAN_HTTP_TIMEOUT_SECONDS = float(os.getenv("DHAN_HTTP_TIMEOUT_SECONDS", "12"))
+
 # Shared secret the webhook caller must send back to us, since Chartink
 # webhooks are unauthenticated by default. Optional but recommended.
 WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "")
