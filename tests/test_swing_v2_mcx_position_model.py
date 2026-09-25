@@ -2,7 +2,7 @@
 Tests for Swing v2's Copper/MCX quantity-vs-pnl_multiplier distinction -
 the single highest-stakes correctness point in the whole MCX feature (see
 Swing/position_store.py's Position.pnl_multiplier docstring and Swing/
-config.py's MCX_PNL_MULTIPLIERS docstring for the full rationale).
+mcx_registry.py's own docstring for the full rationale).
 
 A Copper OPTIONS entry's real ORDER quantity (what actually gets sent to
 place_mcx_market_order) must stay the tiny "number of lots" Dhan expects
@@ -41,6 +41,9 @@ from Options.dhan_client import AtmOption, OrderResult, OrderStatus
 
 import Swing.config as sc
 import Swing.trading_engine as ste
+from Swing.mcx_registry import mcx_registry
+
+COPPER_PNL_MULTIPLIER = 2500  # real 2,500kg/lot - matches data/mcx_config's real COPPER entry
 
 # Captured at import time, before any test (in this file or any other
 # test_swing_v2_*.py file collected in the same pytest run) can have
@@ -67,11 +70,27 @@ def install_mocks():
         "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "place_mcx_market_order": odc.dhan_wrapper.place_mcx_market_order,
         "wait_for_order_result": odc.dhan_wrapper.wait_for_order_result,
+        "is_mcx_commodity": odc.dhan_wrapper.is_mcx_commodity,
+        "subscribe_option_price": odc.dhan_wrapper.subscribe_option_price,
+        "unsubscribe_option_price": odc.dhan_wrapper.unsubscribe_option_price,
+        "get_pending_order_id": odc.dhan_wrapper.get_pending_order_id,
     }
     odc.dhan_wrapper.get_atm_option = fake_copper_atm_option
     odc.dhan_wrapper.get_option_ltp = lambda ts: 25.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 100.0}
     odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 1_000_000.0}
+    # Avoids a real instrument-master/Dhan-login call - moved off the old
+    # static sc.MCX_SYMBOLS set 25 Sep 2026 (see Swing/mcx_registry.py).
+    odc.dhan_wrapper.is_mcx_commodity = lambda symbol: symbol.upper() == "COPPER"
+    # subscribe_option_price internally calls the REAL (unmocked)
+    # _expected_exchange_for/_is_mcx_commodity, which would hit a genuine
+    # Dhan login if left unmocked - pre-existing gap (confirmed present on
+    # HEAD before this file's own MCX-registry-related edits too, not a
+    # regression from them), closed here the same way test_swing_v2_mcx_
+    # entry_exit.py's install_mocks already does.
+    odc.dhan_wrapper.subscribe_option_price = lambda ts: None
+    odc.dhan_wrapper.unsubscribe_option_price = lambda ts: None
+    odc.dhan_wrapper.get_pending_order_id = lambda trading_symbol, transaction_type, *_: None
 
     placed_orders = []
 
@@ -105,13 +124,14 @@ async def _async_none():
 
 async def test_1_copper_options_entry_splits_quantity_from_pnl_multiplier():
     _set_options_basket()
+    await mcx_registry.set_symbol("COPPER", options_only=True, pnl_multiplier=COPPER_PNL_MULTIPLIER)
     restore, placed = install_mocks()
     try:
         result = await ste.enter_position_for_stock("COPPER", "BULLISH")
         assert result["status"] == "entered", result
         pos = ste.position_store.live_positions["COPPER"]
         expected_qty = 1 * sc.QUANTITY_LOTS
-        expected_multiplier = sc.MCX_PNL_MULTIPLIERS["COPPER"] * sc.QUANTITY_LOTS
+        expected_multiplier = COPPER_PNL_MULTIPLIER * sc.QUANTITY_LOTS
         assert pos.quantity == expected_qty, \
             f"real order quantity must stay the tiny lot-count Dhan expects for MCX: got {pos.quantity}, want {expected_qty}"
         assert pos.pnl_multiplier == expected_multiplier, \

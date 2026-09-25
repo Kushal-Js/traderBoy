@@ -91,7 +91,8 @@ class Position:
     # calculator spike - quantity=1 priced a real ~2,500kg lot's actual
     # margin), so `quantity` for a Copper position stays a tiny number
     # like 1, while `pnl_multiplier` carries the REAL 2,500kg-equivalent
-    # rupee-per-point exposure (Swing/config.py's MCX_PNL_MULTIPLIERS).
+    # rupee-per-point exposure (Swing/mcx_registry.py's live-reloadable
+    # per-symbol registry).
     # Every call site that computes a rupee P&L or a rupee-cap-derived
     # broker-stop price MUST use pnl_multiplier, never quantity directly -
     # see Swing/trading_engine.py's entry/exit code. DELIBERATELY NO

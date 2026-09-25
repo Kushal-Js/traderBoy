@@ -6,7 +6,8 @@ Tests for Swing v2's Copper/MCX broker-position reconciliation:
      quantity's own docstring).
   2. reconcile_broker_positions() picks up a mocked open Copper position
      (attributed to "Swing") at startup, with the correct pnl_multiplier
-     (from MCX_PNL_MULTIPLIERS), not the raw broker quantity.
+     (from Swing/mcx_registry.py's live registry), not the raw broker
+     quantity.
 
 HOW TO RUN:
     uv run python tests/test_swing_v2_mcx_reconcile.py
@@ -33,6 +34,9 @@ import Options.dhan_client as odc
 
 import Swing.config as sc
 import Swing.trading_engine as ste
+from Swing.mcx_registry import mcx_registry
+
+COPPER_PNL_MULTIPLIER = 2500  # real 2,500kg/lot - matches data/mcx_config's real COPPER entry
 
 
 def test_1_get_broker_net_quantity_mcx_segment_reads_mcx_positions():
@@ -63,11 +67,22 @@ async def test_2_reconcile_broker_positions_picks_up_copper_with_real_multiplier
         "get_open_fno_positions": odc.dhan_wrapper.get_open_fno_positions,
         "get_open_equity_positions": odc.dhan_wrapper.get_open_equity_positions,
         "get_open_mcx_positions": odc.dhan_wrapper.get_open_mcx_positions,
+        "get_pending_order_id": odc.dhan_wrapper.get_pending_order_id,
+        "subscribe_option_price": odc.dhan_wrapper.subscribe_option_price,
+        "unsubscribe_option_price": odc.dhan_wrapper.unsubscribe_option_price,
     }
     original_attribute = ste.attribute_open_broker_position
     try:
         odc.dhan_wrapper.get_open_fno_positions = lambda: []
         odc.dhan_wrapper.get_open_equity_positions = lambda: []
+        # get_pending_order_id (broker-SL discovery) and subscribe_option_
+        # price (WS-subscribe every reconciled MCX_COMM position) both
+        # touch dhan_wrapper.client (real Dhan auth) if unmocked - pre-
+        # existing gap in this test (confirmed present on HEAD before this
+        # file's own mcx_registry-related edits too, not a regression).
+        odc.dhan_wrapper.get_pending_order_id = lambda trading_symbol, transaction_type, *_: None
+        odc.dhan_wrapper.subscribe_option_price = lambda ts: None
+        odc.dhan_wrapper.unsubscribe_option_price = lambda ts: None
         odc.dhan_wrapper.get_open_mcx_positions = lambda: [
             {"trading_symbol": "COPPER 23 SEP 1100 CALL", "underlying_symbol": "COPPER",
              "option_type": "CE", "lot_size": 1, "quantity": 1, "avg_price": 25.0, "product_type": "MARGIN"},
@@ -78,6 +93,7 @@ async def test_2_reconcile_broker_positions_picks_up_copper_with_real_multiplier
         # the same way, not as a coroutine function (which run_in_executor
         # would just return unawaited, never matching == "Swing").
         ste.attribute_open_broker_position = lambda trading_symbol: "Swing"
+        await mcx_registry.set_symbol("COPPER", options_only=True, pnl_multiplier=COPPER_PNL_MULTIPLIER)
 
         positions = await ste.reconcile_broker_positions()
         assert len(positions) == 1, positions
@@ -87,11 +103,11 @@ async def test_2_reconcile_broker_positions_picks_up_copper_with_real_multiplier
         assert pos.basket_type == "OPTIONS"
         assert pos.instrument_side == "LONG"
         assert pos.quantity == 1, "the real order-placement quantity (lot-count) must be preserved as-is"
-        expected_multiplier = sc.MCX_PNL_MULTIPLIERS["COPPER"] * sc.QUANTITY_LOTS
+        expected_multiplier = COPPER_PNL_MULTIPLIER * sc.QUANTITY_LOTS
         assert pos.pnl_multiplier == expected_multiplier, \
-            f"reconciled pnl_multiplier must come from MCX_PNL_MULTIPLIERS, got {pos.pnl_multiplier} want {expected_multiplier}"
+            f"reconciled pnl_multiplier must come from mcx_registry, got {pos.pnl_multiplier} want {expected_multiplier}"
         print("2. reconcile_broker_positions() picks up a real open Copper position with the correct "
-              "MCX_PNL_MULTIPLIERS-derived pnl_multiplier (not the raw broker quantity): PASSED")
+              "mcx_registry-derived pnl_multiplier (not the raw broker quantity): PASSED")
     finally:
         for name, fn in originals.items():
             setattr(odc.dhan_wrapper, name, fn)

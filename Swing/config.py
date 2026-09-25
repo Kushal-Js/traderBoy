@@ -518,37 +518,36 @@ EQUITY_PRODUCT = os.getenv("SWING_EQUITY_PRODUCT", "CNC")
 
 # ---------------------------------------------------------------------------
 # MCX commodities (user request 12 Sep 2026: "enable COPPER MCX options and
-# future trading also via SWING strategy" - corrected twice the same day:
-# first to "disable Copper Future trading as of now, only Options trading
-# for Copper", then again to "whatever is the BASKET_TYPE, it should not
-# impact COPPER as it only has to trade in options" - i.e. Copper doesn't
-# just skip when BASKET_TYPE happens to be "futures", it always trades
-# options regardless of what BASKET_TYPE is set to, for the ENTIRE rest of
-# the watchlist. A watchlist symbol in MCX_SYMBOLS routes through Options/
-# dhan_client.py's MCX-aware resolvers (get_mcx_futures_contract for the
-# regime/Supertrend signal reference - there's no continuous "spot" for an
-# MCX commodity, only its futures contract - and the now-MCX-capable
-# get_atm_option for the tradeable leg) instead of the NSE-equity path
-# every other watchlist symbol uses.
+# future trading also via SWING strategy"). A watchlist symbol identified as
+# an MCX commodity routes through Options/dhan_client.py's MCX-aware
+# resolvers (get_mcx_futures_contract for the regime/Supertrend signal
+# reference - there's no continuous "spot" for an MCX commodity, only its
+# futures contract - and the now-MCX-capable get_atm_option for the
+# tradeable leg) instead of the NSE-equity path every other watchlist
+# symbol uses.
+#
+# MCX_SYMBOLS/MCX_OPTIONS_ONLY_SYMBOLS/MCX_PNL_MULTIPLIERS used to live here
+# as plain env-var-driven constants, computed once at process import time -
+# meaning a newly added MCX symbol needed an .env edit AND a full bot
+# restart before its data would even start flowing, let alone trade
+# (real gap, hit 25 Sep 2026 trying to add SILVER100). Replaced the same
+# day with a live, config-free, restart-free design, mirroring
+# Swing/watchlist.py's own 25 Sep 2026 fix for the plain watchlist file:
+#
+# - MCX membership is now answered live via Options.dhan_client.
+#   dhan_wrapper.is_mcx_commodity(symbol) - checks Dhan's real instrument
+#   master (cached per underlying), never goes stale, needs no config at
+#   all. See Swing/signals.py's _underlying_reference/_symbol_market_open
+#   and Swing/trading_engine.py's enter_position_for_stock.
+# - Whether a given MCX symbol always trades options (explicit user
+#   correction, 12 Sep 2026, re: COPPER - "this doesn't apply to all
+#   instruments under MCX but only for COPPER") and its real per-lot P&L
+#   multiplier (Dhan's own instrument master reports SEM_LOT_UNITS=1 for
+#   every MCX row regardless of the commodity - genuinely not derivable,
+#   must be verified per-symbol) both moved to Swing/mcx_registry.py's
+#   live-reloadable `data/mcx_config` file - see that module's own
+#   docstring for the full design and file format.
 # ---------------------------------------------------------------------------
-MCX_SYMBOLS = {s.strip().upper() for s in os.getenv("SWING_MCX_SYMBOLS", "COPPER").split(",") if s.strip()}
-
-# The subset of MCX_SYMBOLS that ALWAYS trades OPTIONS, overriding the
-# otherwise-global BASKET_TYPE entirely for just that symbol - deliberately
-# a SEPARATE set from MCX_SYMBOLS, not "every MCX symbol behaves this way"
-# (explicit user correction, 12 Sep 2026: "this doesn't apply to all
-# instruments under MCX but only for COPPER to trade in options"). Any
-# future MCX symbol added to MCX_SYMBOLS but NOT to this set would simply
-# follow the global BASKET_TYPE like every NSE symbol does today - this
-# set exists so that decision is explicit per-symbol, never a blanket rule.
-# See Swing/trading_engine.py's enter_position_for_stock for where this is
-# actually applied (computes an `effective_basket_type` that's forced to
-# "OPTIONS" for a symbol in this set, used instead of the raw config.
-# BASKET_TYPE for every entry decision - side, instrument resolution, and
-# what gets stored on the resulting Position).
-MCX_OPTIONS_ONLY_SYMBOLS = {
-    s.strip().upper() for s in os.getenv("SWING_MCX_OPTIONS_ONLY_SYMBOLS", "COPPER").split(",") if s.strip()
-}
 
 # Index underlyings (added 24 Sep 2026, fixing a real gap: adding NIFTY/
 # BANKNIFTY to the watchlist raised "No NSE equity instrument found" on
@@ -574,24 +573,24 @@ INDEX_SYMBOLS = {s.strip().upper() for s in os.getenv("SWING_INDEX_SYMBOLS", "NI
 # The REAL per-lot economic quantity (kg for Copper) - used ONLY for P&L/
 # rupee-threshold math (MAX_LOSS_PROTECTION_RS/PROFIT_PROTECTION_RS checks,
 # the broker-side SL-L trigger/limit formula), NEVER for the real order's
-# own `quantity` parameter. This is the single easiest thing to get wrong
-# for an MCX symbol: Dhan's own instrument master reports SEM_LOT_UNITS=1
-# for Copper FUTCOM/OPTFUT rows, which is CORRECT for order placement
-# (Dhan's MCX order-quantity convention is "number of lots", confirmed via
-# a live margin-calculator spike 12 Sep 2026: quantity=1 priced out to
+# own `quantity` parameter. Moved to Swing/mcx_registry.py's live-reloadable
+# registry 25 Sep 2026 (see that module's docstring) - this used to be a
+# static MCX_PNL_MULTIPLIERS dict here, computed once at import time from
+# SWING_MCX_PNL_MULTIPLIER_<SYMBOL> env vars, DEFAULTING TO "2500" (Copper's
+# own real value) for ANY MCX symbol without its own override - a landmine
+# for the next commodity added, since 2500 is almost certainly wrong for
+# anything that isn't Copper. The registry has no such default: an
+# unconfigured symbol returns None, and entry code skips rather than
+# guesses. Still the same underlying fact to verify per-symbol though -
+# Dhan's own instrument master reports SEM_LOT_UNITS=1 for EVERY MCX row
+# regardless of the real commodity quantity (confirmed via a live
+# margin-calculator spike 12 Sep 2026: quantity=1 priced Copper out to
 # Rs 304,687.50 margin - exactly one real 2,500kg lot; quantity=2500 priced
-# an absurd Rs 76+ crore) but WRONG as a rupee-per-point multiplier (a
-# single-unit "quantity" would make every rupee threshold here effectively
-# unreachable). See Swing/position_store.py's Position.pnl_multiplier
-# field and Swing/trading_engine.py's entry code for where quantity vs
-# pnl_multiplier are each actually used - they must never be swapped.
-# Before adding any FUTURE MCX symbol here, verify its own real per-lot
-# multiplier the same way (margin_calculator at quantity=1 should price
-# out to that commodity's real-world one-lot margin) rather than guessing.
-MCX_PNL_MULTIPLIERS = {
-    sym: int(os.getenv(f"SWING_MCX_PNL_MULTIPLIER_{sym}", "2500"))
-    for sym in MCX_SYMBOLS
-}
+# an absurd Rs 76+ crore) - margin_calculator at quantity=1 should price out
+# to that commodity's real-world one-lot margin before adding any new MCX
+# symbol to the registry. See Swing/position_store.py's Position.
+# pnl_multiplier field and Swing/trading_engine.py's entry code for where
+# quantity vs pnl_multiplier are each actually used - never swap them.
 
 MCX_PRODUCT = os.getenv("SWING_MCX_PRODUCT", "MARGIN")
 

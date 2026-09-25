@@ -54,7 +54,7 @@ def _symbol_market_open(symbol: str) -> bool:
     now = _now_ist()
     if now.weekday() >= 5:  # Saturday/Sunday - neither exchange trades
         return False
-    segment = "MCX_COMM" if symbol in config.MCX_SYMBOLS else "NSE_EQ"
+    segment = "MCX_COMM" if dhan_wrapper.is_mcx_commodity(symbol) else "NSE_EQ"
     return dhan_wrapper.is_market_open(exchange_segment=segment)
 
 
@@ -70,14 +70,15 @@ def _underlying_reference(symbol: str) -> tuple[str, str, str]:
     """Returns (security_id, exchange_segment, instrument_type) for the
     underlying series both regime and Supertrend fetches read. A normal
     watchlist symbol resolves its NSE cash-segment security_id, unchanged
-    from before. A symbol in config.MCX_SYMBOLS instead resolves the
-    CURRENT MCX futures contract (there's no continuous "spot" for an MCX
-    commodity - see Swing/config.py's MCX_SYMBOLS docstring), independent
-    of whatever BASKET_TYPE is actually configured - the regime/Supertrend
-    signal always needs a real continuous price series regardless of
-    which instrument ends up traded."""
+    from before. An MCX commodity (dhan_wrapper.is_mcx_commodity - a live,
+    config-free instrument-master check, see that method's own docstring)
+    instead resolves the CURRENT MCX futures contract (there's no
+    continuous "spot" for an MCX commodity), independent of whatever
+    BASKET_TYPE is actually configured - the regime/Supertrend signal
+    always needs a real continuous price series regardless of which
+    instrument ends up traded."""
     is_index = symbol in config.INDEX_SYMBOLS
-    if symbol in config.MCX_SYMBOLS:
+    if dhan_wrapper.is_mcx_commodity(symbol):
         today = _now_ist().date()
         cached = _mcx_contract_cache.get(symbol)
         if not cached or cached[0] != today:

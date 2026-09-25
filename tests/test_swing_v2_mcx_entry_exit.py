@@ -5,9 +5,9 @@ for), same "only the Dhan network boundary mocked" convention as
 tests/test_swing_v2_entry_exit.py.
 
 Coverage:
-  1. Copper (in MCX_OPTIONS_ONLY_SYMBOLS) resolves via the MCX-capable
-     get_atm_option, sets exchange_segment="MCX_COMM", places via place_
-     mcx_market_order - regardless of BASKET_TYPE.
+  1. Copper (registered options_only=True in mcx_registry) resolves via
+     the MCX-capable get_atm_option, sets exchange_segment="MCX_COMM",
+     places via place_mcx_market_order - regardless of BASKET_TYPE.
   2. Copper ALWAYS trades OPTIONS, even when the global BASKET_TYPE is
      "futures" - it does not skip, and it does not take the futures path
      either (corrected 12 Sep 2026: "whatever is the BASKET_TYPE, it
@@ -18,12 +18,12 @@ Coverage:
      quantity=1 correctly DOES cross it at the real pnl_multiplier.
   4. WS subscribe/unsubscribe are never called for a Copper (MCX_COMM)
      position - it relies on the REST poll loop only, same as equity.
-  5. The OPTIONS-only override is scoped to MCX_OPTIONS_ONLY_SYMBOLS
-     specifically, NOT a blanket rule for every symbol in MCX_SYMBOLS
-     (explicit correction, 12 Sep 2026: "this doesn't apply to all
-     instruments under MCX but only for COPPER") - a hypothetical other
-     MCX symbol in MCX_SYMBOLS but not in MCX_OPTIONS_ONLY_SYMBOLS must
-     still follow the global BASKET_TYPE normally.
+  5. The OPTIONS-only override is scoped to symbols actually registered
+     options_only=True in mcx_registry, NOT a blanket rule for every MCX
+     commodity (explicit correction, 12 Sep 2026: "this doesn't apply to
+     all instruments under MCX but only for COPPER") - a hypothetical
+     other MCX symbol NOT registered options_only must still follow the
+     global BASKET_TYPE normally.
 
 HOW TO RUN:
     uv run python tests/test_swing_v2_mcx_entry_exit.py
@@ -52,7 +52,15 @@ from Options.dhan_client import AtmOption, OrderResult, OrderStatus
 
 import Swing.config as sc
 import Swing.trading_engine as ste
+from Swing.mcx_registry import mcx_registry
 from Swing.position_store import unrealized_pnl_rs
+
+COPPER_PNL_MULTIPLIER = 2500  # real 2,500kg/lot - matches data/mcx_config's real COPPER entry
+
+# Mutable set backing the is_mcx_commodity mock below - test_5 temporarily
+# adds "SILVER" to exercise a non-Copper MCX symbol without a real
+# instrument-master call.
+_MCX_SYMBOLS_FOR_TEST = {"COPPER"}
 
 # Captured at import time, before any test (in this file or any other
 # test_swing_v2_*.py file collected in the same pytest run) can have
@@ -80,7 +88,17 @@ def install_mocks():
         "subscribe_option_price": odc.dhan_wrapper.subscribe_option_price,
         "unsubscribe_option_price": odc.dhan_wrapper.unsubscribe_option_price,
         "wait_for_order_result": odc.dhan_wrapper.wait_for_order_result,
+        "is_mcx_commodity": odc.dhan_wrapper.is_mcx_commodity,
+        "get_pending_order_id": odc.dhan_wrapper.get_pending_order_id,
     }
+    # Avoids a real instrument-master/Dhan-login call - moved off the old
+    # static sc.MCX_SYMBOLS set 25 Sep 2026 (see Swing/mcx_registry.py).
+    odc.dhan_wrapper.is_mcx_commodity = lambda symbol: symbol.upper() in _MCX_SYMBOLS_FOR_TEST
+    # Duplicate-real-order guard's pre-entry scan - pre-existing gap
+    # (confirmed present on HEAD before this file's own mcx_registry-
+    # related edits too, not a regression), touches dhan_wrapper.client
+    # (real Dhan auth) if unmocked.
+    odc.dhan_wrapper.get_pending_order_id = lambda trading_symbol, transaction_type, *_: None
     odc.dhan_wrapper.get_atm_option = fake_copper_atm_option
     odc.dhan_wrapper.get_option_ltp = lambda ts: 25.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 100.0}
@@ -114,17 +132,18 @@ async def _async_none():
     return None
 
 
-def _set(basket_type):
+async def _set(basket_type):
     sc.BASKET_TYPE = basket_type
     sc.BROKER_STOP_LOSS_ENABLED = False
     sc.MAX_CONCURRENT_TRADES = 2
     sc.FUNDS_CHECK_BUFFER_RS = 0.0
     ste.position_store.__init__()
     ste.signals.get_supertrend_state = lambda symbol: _async_none()
+    await mcx_registry.set_symbol("COPPER", options_only=True, pnl_multiplier=COPPER_PNL_MULTIPLIER)
 
 
 async def test_1_copper_options_entry_uses_mcx_routing():
-    _set("options")
+    await _set("options")
     restore, placed, ws_calls = install_mocks()
     try:
         result = await ste.enter_position_for_stock("COPPER", "BULLISH")
@@ -148,7 +167,7 @@ async def test_2_copper_always_trades_options_even_when_global_basket_type_is_fu
     # gets this override - see test_swing_v2_mcx_position_model.py for the
     # regression guard that this is NOT a blanket rule for every MCX
     # symbol in MCX_SYMBOLS.
-    _set("futures")
+    await _set("futures")
     restore, placed, ws_calls = install_mocks()
     try:
         result = await ste.enter_position_for_stock("COPPER", "BULLISH")
@@ -165,7 +184,7 @@ async def test_2_copper_always_trades_options_even_when_global_basket_type_is_fu
 
 
 async def test_3_exit_ladder_uses_pnl_multiplier_not_quantity():
-    _set("options")
+    await _set("options")
     restore, placed, ws_calls = install_mocks()
     try:
         result = await ste.enter_position_for_stock("COPPER", "BULLISH")
@@ -200,7 +219,7 @@ async def test_3_exit_ladder_uses_pnl_multiplier_not_quantity():
 
 
 async def test_4_ws_never_subscribed_for_a_copper_position():
-    _set("options")
+    await _set("options")
     restore, placed, ws_calls = install_mocks()
     try:
         result = await ste.enter_position_for_stock("COPPER", "BULLISH")
@@ -214,38 +233,37 @@ async def test_4_ws_never_subscribed_for_a_copper_position():
 
 
 async def test_5_options_only_override_is_scoped_to_copper_not_all_mcx_symbols():
-    # A hypothetical second MCX symbol ("SILVER") added to MCX_SYMBOLS but
-    # deliberately NOT added to MCX_OPTIONS_ONLY_SYMBOLS must follow the
-    # global BASKET_TYPE like any NSE symbol - it must NOT be silently
-    # forced into OPTIONS just because it lives under MCX_SYMBOLS. This is
-    # the regression guard for the explicit correction: "this doesn't
-    # apply to all instruments under MCX but only for COPPER".
-    _set("futures")
-    real_mcx_symbols = sc.MCX_SYMBOLS
-    sc.MCX_SYMBOLS = real_mcx_symbols | {"SILVER"}  # MCX_OPTIONS_ONLY_SYMBOLS untouched - still just {"COPPER"}
-    restore, placed, ws_calls = install_mocks()
-    original_get_futures_contract = odc.dhan_wrapper.get_futures_contract
+    """A hypothetical second MCX symbol ("SILVER") that's NOT registered
+    options_only=True in mcx_registry must follow the global BASKET_TYPE
+    like any NSE symbol - it must NOT be silently forced into OPTIONS just
+    because it's an MCX commodity. This is the regression guard for the
+    explicit correction: "this doesn't apply to all instruments under MCX
+    but only for COPPER".
 
-    def fake_futures_contract(symbol):
-        from Options.dhan_client import FuturesContract
-        return FuturesContract(trading_symbol=f"{symbol} FUT", security_id=f"FUTSEC-{symbol}",
-                                lot_size=30, expiry_date=FUTURE_EXPIRY)
-    odc.dhan_wrapper.get_futures_contract = fake_futures_contract
+    UPDATED 25 Sep 2026 (alongside the mcx_registry rewrite): there is no
+    working MCX-futures execution path in this codebase - get_futures_
+    contract is NSE-only (see Swing/trading_engine.py's own guard on this).
+    A non-options-only MCX symbol under global BASKET_TYPE=futures now
+    safely SKIPS the entry rather than resolving the wrong exchange's
+    instrument for a real order. This test used to assert the OLD (latent
+    bug) behavior - a fabricated "entered" result only because get_futures_
+    contract was mocked here to return a fake contract for ANY symbol; the
+    real Dhan API has no NSE instrument named "SILVER" and would have
+    errored in production, or worse, matched an unrelated symbol."""
+    await _set("futures")
+    _MCX_SYMBOLS_FOR_TEST.add("SILVER")
+    restore, placed, ws_calls = install_mocks()
     try:
         result = await ste.enter_position_for_stock("SILVER", "BULLISH")
-        assert result["status"] == "entered", result
-        pos = ste.position_store.live_positions["SILVER"]
-        assert pos.basket_type == "FUTURES", \
-            f"SILVER is in MCX_SYMBOLS but NOT MCX_OPTIONS_ONLY_SYMBOLS - it must follow the global " \
-            f"BASKET_TYPE (futures) normally, got {pos.basket_type}"
-        assert pos.exchange_segment == "NSE_FNO", \
-            "an MCX_SYMBOLS member outside MCX_OPTIONS_ONLY_SYMBOLS takes the plain NSE futures path today"
-        print("5. The OPTIONS-only override is scoped to MCX_OPTIONS_ONLY_SYMBOLS (Copper), NOT a "
-              "blanket rule for every symbol in MCX_SYMBOLS: PASSED")
+        assert result["status"] == "skipped" and result["reason"] == "mcx_futures_execution_unsupported", result
+        assert "SILVER" not in ste.position_store.live_positions
+        assert len(placed) == 0, "no real order should have been placed for an unsupported MCX-futures route"
+        print("5. A non-options-only MCX symbol under global BASKET_TYPE=futures safely skips instead of "
+              "misrouting through the NSE-only futures path (the OPTIONS-only override stays scoped to "
+              "symbols actually registered in mcx_registry, e.g. Copper): PASSED")
     finally:
         restore()
-        odc.dhan_wrapper.get_futures_contract = original_get_futures_contract
-        sc.MCX_SYMBOLS = real_mcx_symbols
+        _MCX_SYMBOLS_FOR_TEST.discard("SILVER")
 
 
 def _mcx_position(trading_symbol="NATURALGAS 23 SEP 280 CALL", entry_price=6.70):

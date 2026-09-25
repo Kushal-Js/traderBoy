@@ -79,6 +79,7 @@ import trade_history
 from Swing import config
 from Swing import signals
 from Swing import trading_engine as swing_te
+from Swing.mcx_registry import mcx_registry
 from Swing.position_store import (
     Position,
     entry_transaction_type,
@@ -121,8 +122,8 @@ async def process_paper_entry(symbol: str, regime: str) -> dict:
         return {"symbol": symbol, "status": "skipped", "reason": "index_daily_square_off_window", "mode": "paper"}
 
     basket_type = config.BASKET_TYPE.upper()
-    is_mcx = symbol in config.MCX_SYMBOLS
-    effective_basket_type = "OPTIONS" if symbol in config.MCX_OPTIONS_ONLY_SYMBOLS else basket_type
+    is_mcx = dhan_wrapper.is_mcx_commodity(symbol)
+    effective_basket_type = "OPTIONS" if await mcx_registry.options_only(symbol) else basket_type
     side = resolve_instrument_side(effective_basket_type, regime)
     if side is None:
         return {"symbol": symbol, "status": "skipped", "reason": "equity_long_only", "mode": "paper"}
@@ -176,7 +177,13 @@ async def process_paper_entry(symbol: str, regime: str) -> dict:
                 quantity = lot_size * config.QUANTITY_LOTS
                 if is_mcx:
                     exchange_segment, product_type = "MCX_COMM", config.MCX_PRODUCT
-                    pnl_multiplier = config.MCX_PNL_MULTIPLIERS[symbol] * config.QUANTITY_LOTS
+                    raw_multiplier = await mcx_registry.pnl_multiplier(symbol)
+                    if raw_multiplier is None:
+                        async with _lock:
+                            _positions.pop(symbol, None)
+                        return {"symbol": symbol, "status": "skipped",
+                                "reason": "mcx_pnl_multiplier_not_configured", "mode": "paper"}
+                    pnl_multiplier = raw_multiplier * config.QUANTITY_LOTS
                 else:
                     exchange_segment, product_type = "NSE_FNO", config.OPTIONS_PRODUCT
                     pnl_multiplier = quantity

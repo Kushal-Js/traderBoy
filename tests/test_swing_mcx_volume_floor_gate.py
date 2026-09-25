@@ -61,6 +61,7 @@ from Options.dhan_client import AtmOption, OrderResult, OrderStatus
 import Swing.config as sc
 import Swing.signals as signals
 import Swing.trading_engine as ste
+from Swing.mcx_registry import mcx_registry
 from Swing.signals import SupertrendState
 
 _REAL_GET_SUPERTREND_STATE = ste.signals.get_supertrend_state
@@ -98,7 +99,11 @@ def install_mocks(entry_fill_status=OrderStatus.TRADED):
         "note_rest_ltp": odc.dhan_wrapper.note_rest_ltp,
         "place_mcx_stop_loss_limit_order": odc.dhan_wrapper.place_mcx_stop_loss_limit_order,
         "place_stop_loss_limit_order": odc.dhan_wrapper.place_stop_loss_limit_order,
+        "is_mcx_commodity": odc.dhan_wrapper.is_mcx_commodity,
     }
+    # Avoids a real instrument-master/Dhan-login call - moved off the old
+    # static sc.MCX_SYMBOLS set 25 Sep 2026 (see Swing/mcx_registry.py).
+    odc.dhan_wrapper.is_mcx_commodity = lambda symbol: symbol.upper() == "COPPER"
     # config.BROKER_STOP_LOSS_ENABLED is never overridden by this file's
     # own _set() (unlike every OTHER Swing test file), so every test here
     # picks up the AMBIENT real .env value - which is true - meaning every
@@ -149,11 +154,9 @@ def install_mocks(entry_fill_status=OrderStatus.TRADED):
     return restore, placed_orders
 
 
-def _set(mcx_gate_enabled, nse_gate_enabled=False, floor_ratio=1.2):
+async def _set(mcx_gate_enabled, nse_gate_enabled=False, floor_ratio=1.2):
     sc.BASKET_TYPE = "options"
-    sc.MCX_SYMBOLS = {"COPPER"}
-    sc.MCX_OPTIONS_ONLY_SYMBOLS = {"COPPER"}
-    sc.MCX_PNL_MULTIPLIERS = {"COPPER": 2500}
+    await mcx_registry.set_symbol("COPPER", options_only=True, pnl_multiplier=2500)
     sc.MCX_VOLUME_FLOOR_GATE_ENABLED = mcx_gate_enabled
     sc.MCX_VOLUME_FLOOR_RATIO_MIN = floor_ratio
     sc.NSE_VOLUME_FLOOR_GATE_ENABLED = nse_gate_enabled
@@ -163,7 +166,7 @@ def _set(mcx_gate_enabled, nse_gate_enabled=False, floor_ratio=1.2):
 
 
 async def test_1_thin_mcx_volume_blocked_when_gate_enabled():
-    _set(mcx_gate_enabled=True)
+    await _set(mcx_gate_enabled=True)
     restore, placed = install_mocks()
     ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=0.5))
     try:
@@ -177,7 +180,7 @@ async def test_1_thin_mcx_volume_blocked_when_gate_enabled():
 
 
 async def test_2_same_thin_volume_allowed_when_gate_disabled():
-    _set(mcx_gate_enabled=False)
+    await _set(mcx_gate_enabled=False)
     restore, placed = install_mocks()
     ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=0.5))
     try:
@@ -194,7 +197,7 @@ async def test_3_thin_nse_volume_blocked_when_nse_gate_enabled():
     """The extension: ADANIPORTS is NOT in MCX_SYMBOLS, so is_mcx=False -
     this now goes through the NSE gate instead of skipping volume checks
     entirely. Mirrors the real ANGELONE incident's VolRatio=0.01 entry."""
-    _set(mcx_gate_enabled=False, nse_gate_enabled=True)
+    await _set(mcx_gate_enabled=False, nse_gate_enabled=True)
     restore, placed = install_mocks()
     ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=0.01))
     try:
@@ -209,7 +212,7 @@ async def test_3_thin_nse_volume_blocked_when_nse_gate_enabled():
 
 
 async def test_4_same_thin_nse_volume_allowed_when_nse_gate_disabled():
-    _set(mcx_gate_enabled=False, nse_gate_enabled=False)
+    await _set(mcx_gate_enabled=False, nse_gate_enabled=False)
     restore, placed = install_mocks()
     ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=0.01))
     try:
@@ -226,7 +229,7 @@ async def test_5_mcx_and_nse_gates_are_genuinely_independent():
     """MCX enabled + NSE disabled: COPPER (thin) is blocked, ADANIPORTS
     (equally thin) is not - and the mirror configuration the other way -
     proving these are two separate flags/thresholds, not one shared one."""
-    _set(mcx_gate_enabled=True, nse_gate_enabled=False)
+    await _set(mcx_gate_enabled=True, nse_gate_enabled=False)
     restore, placed = install_mocks()
     ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=0.3))
     try:
@@ -237,7 +240,7 @@ async def test_5_mcx_and_nse_gates_are_genuinely_independent():
     finally:
         restore()
 
-    _set(mcx_gate_enabled=False, nse_gate_enabled=True)
+    await _set(mcx_gate_enabled=False, nse_gate_enabled=True)
     restore, placed = install_mocks()
     ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=0.3))
     try:
@@ -253,7 +256,7 @@ async def test_5_mcx_and_nse_gates_are_genuinely_independent():
 
 
 async def test_6_healthy_mcx_volume_not_blocked():
-    _set(mcx_gate_enabled=True)
+    await _set(mcx_gate_enabled=True)
     restore, placed = install_mocks()
     ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=2.5))
     try:
@@ -267,7 +270,7 @@ async def test_6_healthy_mcx_volume_not_blocked():
 
 
 async def test_7_missing_volume_data_fails_open_mcx():
-    _set(mcx_gate_enabled=True)
+    await _set(mcx_gate_enabled=True)
     restore, placed = install_mocks()
     ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(None)
     try:
@@ -282,7 +285,7 @@ async def test_7_missing_volume_data_fails_open_mcx():
 
 
 async def test_8_healthy_nse_volume_not_blocked():
-    _set(mcx_gate_enabled=False, nse_gate_enabled=True)
+    await _set(mcx_gate_enabled=False, nse_gate_enabled=True)
     restore, placed = install_mocks()
     ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(_fake_st(volume_ratio=2.5))
     try:
@@ -296,7 +299,7 @@ async def test_8_healthy_nse_volume_not_blocked():
 
 
 async def test_9_missing_volume_data_fails_open_nse():
-    _set(mcx_gate_enabled=False, nse_gate_enabled=True)
+    await _set(mcx_gate_enabled=False, nse_gate_enabled=True)
     restore, placed = install_mocks()
     ste.signals.get_supertrend_state = lambda symbol, interval_minutes=None: _async(None)
     try:

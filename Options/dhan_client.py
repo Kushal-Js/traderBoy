@@ -1138,6 +1138,31 @@ class DhanWrapper:
         self._mcx_underlying_cache[underlying] = result
         return result
 
+    def is_mcx_commodity(self, underlying_symbol: str) -> bool:
+        """Public, cached counterpart to _expected_exchange_for for callers
+        that already have a bare underlying symbol (e.g. a Swing watchlist
+        entry like "SILVER100"), not Tradehull's space-separated
+        trading_symbol format _expected_exchange_for parses via .split()[0].
+        Added 25 Sep 2026 so Swing/config.py's old MCX_SYMBOLS - a static
+        set built once from SWING_MCX_SYMBOLS at process startup, requiring
+        an .env edit AND a restart before a newly added MCX symbol's
+        regime/Supertrend data would even start flowing - could be replaced
+        with a real, always-current instrument-master answer: no config,
+        no restart, and it can never drift from what Dhan can actually
+        trade right now (see Swing/mcx_registry.py for the two things this
+        genuinely CAN'T tell you - whether a symbol should always trade
+        options regardless of the global BASKET_TYPE, and its real per-lot
+        P&L multiplier - which stay manually configured there instead).
+        Shares _mcx_underlying_cache with _expected_exchange_for since both
+        answer the exact same static per-underlying question."""
+        symbol = underlying_symbol.upper()
+        cached = self._mcx_underlying_cache.get(symbol)
+        if cached is not None:
+            return cached == "MCX"
+        result = "MCX" if self._is_mcx_commodity(symbol) else "NSE"
+        self._mcx_underlying_cache[symbol] = result
+        return result == "MCX"
+
     def subscribe_option_price(self, trading_symbol: str) -> None:
         if not config.ENABLE_WS_FEED:
             return

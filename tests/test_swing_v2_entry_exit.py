@@ -108,7 +108,12 @@ def install_mocks(broker_net_quantity=250, fail_stop_loss_placement=False, entry
         "get_last_historical_close": odc.dhan_wrapper.get_last_historical_close,
         "get_cached_option_ltp": odc.dhan_wrapper.get_cached_option_ltp,
         "note_rest_ltp": odc.dhan_wrapper.note_rest_ltp,
+        "is_mcx_commodity": odc.dhan_wrapper.is_mcx_commodity,
     }
+    # Every symbol in this file (RELIANCE) is a plain NSE underlying -
+    # avoids a real instrument-master/Dhan-login call. Moved off the old
+    # static sc.MCX_SYMBOLS set 25 Sep 2026 (see Swing/mcx_registry.py).
+    odc.dhan_wrapper.is_mcx_commodity = lambda symbol: False
     # get_cached_option_ltp/note_rest_ltp both call the REAL _instrument_
     # meta internally, which touches dhan_wrapper.client - a lazy property
     # that triggers a genuine Dhan login if unmocked. Found the hard way

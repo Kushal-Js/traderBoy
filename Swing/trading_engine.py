@@ -43,6 +43,7 @@ import paper_mode_control
 from trade_history import append_jsonl, attribute_open_broker_position
 
 from . import config, signals
+from .mcx_registry import mcx_registry
 from .position_store import (
     EXIT_CLAIMED, OrderRecord, Position, position_store,
     broker_stop_trigger_and_limit, entry_transaction_type, exit_transaction_type,
@@ -147,7 +148,7 @@ def _is_friday_square_off_time() -> bool:
 
 
 def _is_mcx_friday_square_off_time() -> bool:
-    """MCX_SYMBOLS-only counterpart to _is_friday_square_off_time - see
+    """MCX-only counterpart to _is_friday_square_off_time - see
     config.MCX_FRIDAY_SQUARE_OFF_TIME's own docstring. Same weekday==4
     (Friday) gate, just a later time-of-day since MCX's own Friday session
     runs well past NSE's close."""
@@ -498,20 +499,21 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
         return {"symbol": symbol, "status": "ignored", "reason": "strategy_disabled"}
 
     basket_type = config.BASKET_TYPE.upper()
-    is_mcx = symbol in config.MCX_SYMBOLS
-    # Only the symbols in MCX_OPTIONS_ONLY_SYMBOLS (Copper, today) ALWAYS
-    # trade OPTIONS, completely independent of what BASKET_TYPE is set to
-    # for the rest of the watchlist - user request 12 Sep 2026: "whatever
-    # is the BASKET_TYPE, it should not impact COPPER as it only has to
-    # trade in options", explicitly NOT a blanket rule for every MCX
-    # symbol ("this doesn't apply to all instruments under MCX but only
-    # for COPPER"). A future MCX symbol in MCX_SYMBOLS but not in
-    # MCX_OPTIONS_ONLY_SYMBOLS would just follow the global BASKET_TYPE
-    # like any NSE symbol. The futures contract for an MCX symbol is still
-    # resolved separately (see Swing/signals.py) purely as the regime/
-    # Supertrend signal reference - that's unrelated to which instrument
-    # actually gets traded here.
-    effective_basket_type = "OPTIONS" if symbol in config.MCX_OPTIONS_ONLY_SYMBOLS else basket_type
+    is_mcx = dhan_wrapper.is_mcx_commodity(symbol)
+    # Only symbols registered with options_only=True in mcx_registry
+    # (Copper, today) ALWAYS trade OPTIONS, completely independent of what
+    # BASKET_TYPE is set to for the rest of the watchlist - user request 12
+    # Sep 2026: "whatever is the BASKET_TYPE, it should not impact COPPER
+    # as it only has to trade in options", explicitly NOT a blanket rule
+    # for every MCX symbol ("this doesn't apply to all instruments under
+    # MCX but only for COPPER"). An MCX symbol not registered as
+    # options_only just follows the global BASKET_TYPE like any NSE
+    # symbol. The futures contract for an MCX symbol is still resolved
+    # separately (see Swing/signals.py) purely as the regime/Supertrend
+    # signal reference - that's unrelated to which instrument actually
+    # gets traded here. See Swing/mcx_registry.py's own docstring for why
+    # this moved off a static config.py set (25 Sep 2026).
+    effective_basket_type = "OPTIONS" if await mcx_registry.options_only(symbol) else basket_type
     side = resolve_instrument_side(effective_basket_type, regime)
     if side is None:
         # Only EQUITY+BEARISH takes this path today (see resolve_instrument_
@@ -568,11 +570,26 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
         option_type = resolved_option_type_for(effective_basket_type, regime)
         try:
             if effective_basket_type == "FUTURES":
-                # A symbol in MCX_OPTIONS_ONLY_SYMBOLS always forces
-                # effective_basket_type="OPTIONS" above, so this branch
-                # only ever runs for an NSE underlying (or a hypothetical
-                # future MCX symbol NOT in MCX_OPTIONS_ONLY_SYMBOLS -
-                # unsupported today, no such symbol exists).
+                # A symbol registered options_only=True in mcx_registry
+                # always forces effective_basket_type="OPTIONS" above, so
+                # this branch is meant only for an NSE underlying -
+                # get_futures_contract below is NSE_FNO-only, there is no
+                # working MCX-futures execution path in this codebase. An
+                # MCX symbol that ISN'T options_only (e.g. SILVER100, which
+                # has no options contracts on MCX at all) would misroute
+                # here if BASKET_TYPE were ever globally "futures" - guard
+                # explicitly rather than silently resolving the wrong
+                # exchange's instrument for a real order.
+                if is_mcx:
+                    logger.error(
+                        "%s: is an MCX commodity but effective_basket_type=FUTURES has no working MCX-"
+                        "futures execution path (get_futures_contract below is NSE-only) - skipping "
+                        "entry rather than resolving the wrong exchange's instrument. Either register "
+                        "it options_only=true in data/mcx_config (if it has real MCX options) or leave "
+                        "BASKET_TYPE off \"futures\" while this symbol is on the watchlist.",
+                        symbol,
+                    )
+                    return {"symbol": symbol, "status": "skipped", "reason": "mcx_futures_execution_unsupported"}
                 contract = await loop.run_in_executor(None, dhan_wrapper.get_futures_contract, symbol)
                 trading_symbol, security_id, lot_size = contract.trading_symbol, contract.security_id, contract.lot_size
                 exchange_segment, product_type = "NSE_FNO", config.FUTURES_PRODUCT
@@ -608,8 +625,23 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
                     # docstring for why MCX needs a real, separately-
                     # configured rupee-per-point multiplier here instead
                     # of the tiny lot-count `quantity` (correct for order
-                    # placement, wrong for rupee-threshold math).
-                    pnl_multiplier = config.MCX_PNL_MULTIPLIERS[symbol] * config.QUANTITY_LOTS
+                    # placement, wrong for rupee-threshold math). Looked up
+                    # from mcx_registry (live-reloadable, see that module's
+                    # docstring), not a static config dict - a symbol with
+                    # NO configured multiplier must SKIP the real order
+                    # rather than guess (the old static dict silently
+                    # defaulted an unconfigured symbol to Copper's own real
+                    # 2500 multiplier, which is wrong for anything else).
+                    raw_multiplier = await mcx_registry.pnl_multiplier(symbol)
+                    if raw_multiplier is None:
+                        logger.error(
+                            "%s: no pnl_multiplier configured in data/mcx_config for this MCX symbol - "
+                            "skipping entry rather than guessing (would misprice every rupee-threshold "
+                            "check). Add a line to data/mcx_config, e.g. \"%s,false,<real_per_lot_qty>\".",
+                            symbol, symbol,
+                        )
+                        return {"symbol": symbol, "status": "skipped", "reason": "mcx_pnl_multiplier_not_configured"}
+                    pnl_multiplier = raw_multiplier * config.QUANTITY_LOTS
                 else:
                     exchange_segment, product_type = "NSE_FNO", config.OPTIONS_PRODUCT
                     pnl_multiplier = quantity
@@ -1296,11 +1328,15 @@ async def _monitor_tick() -> None:
     friday_square_off_now = config.FRIDAY_SQUARE_OFF_ENABLED and _is_friday_square_off_time()
     if friday_square_off_now:
         # Weekly, not daily - see config.FRIDAY_SQUARE_OFF_TIME's own
-        # docstring. Scoped to non-MCX symbols only since 25 Sep 2026 -
-        # MCX_SYMBOLS positions get their own, later square-off below
-        # instead (config.MCX_FRIDAY_SQUARE_OFF_TIME), since MCX's Friday
-        # session runs well past this NSE-close-based time.
-        non_mcx_open = {s for s in position_store.live_positions if s not in config.MCX_SYMBOLS}
+        # docstring. Scoped to non-MCX symbols only since 25 Sep 2026 - MCX
+        # positions get their own, later square-off below instead
+        # (config.MCX_FRIDAY_SQUARE_OFF_TIME), since MCX's Friday session
+        # runs well past this NSE-close-based time. MCX-ness is read
+        # straight off each OPEN position's own exchange_segment (ground
+        # truth, set at entry/reconciliation) rather than a symbol-name
+        # list - moved off the old static config.MCX_SYMBOLS 25 Sep 2026,
+        # see Swing/mcx_registry.py's own docstring for why.
+        non_mcx_open = {s for s, p in position_store.live_positions.items() if p.exchange_segment != "MCX_COMM"}
         await _square_off_all("FRIDAY_SQUARE_OFF", symbols=non_mcx_open)
 
     mcx_friday_square_off_now = config.FRIDAY_SQUARE_OFF_ENABLED and _is_mcx_friday_square_off_time()
@@ -1311,7 +1347,8 @@ async def _monitor_tick() -> None:
         # MCX's own much-later close instead. Retried harmlessly every
         # tick until actually flat, same pattern as every other
         # _square_off_all usage here.
-        await _square_off_all("MCX_FRIDAY_SQUARE_OFF", symbols=config.MCX_SYMBOLS)
+        mcx_open = {s for s, p in position_store.live_positions.items() if p.exchange_segment == "MCX_COMM"}
+        await _square_off_all("MCX_FRIDAY_SQUARE_OFF", symbols=mcx_open)
 
     if friday_square_off_now:
         # No point evaluating new entries for the rest of Friday - they'd
@@ -1368,6 +1405,10 @@ async def _monitor_tick() -> None:
     # though nothing was actually slow). Additive-only and fails open (see
     # sync_from_file's own docstring), so this is always safe to call.
     await watchlist_store.sync_from_file()
+    # Same live-reload treatment, same tick, for the MCX per-symbol
+    # registry (options_only/pnl_multiplier) - added 25 Sep 2026 alongside
+    # the watchlist fix above, see Swing/mcx_registry.py's own docstring.
+    await mcx_registry.sync_from_file()
     symbols = await watchlist_store.symbols()
     # Rotate the scan's starting point each tick (see _watchlist_scan_turn's
     # own docstring) - same fairness idiom as breakout_signal.py's
@@ -1530,20 +1571,23 @@ async def reconcile_broker_positions() -> list[Position]:
                     bp["trading_symbol"],
                 )
         # pnl_multiplier: identical to quantity for NSE (see Position's own
-        # docstring) - looked up from MCX_PNL_MULTIPLIERS for a reconciled
-        # MCX position instead, same as a fresh entry would compute it.
-        # Fails open to `quantity` (a WRONG but at least non-crashing
-        # value) if this underlying was somehow never configured, logging
-        # loudly so it doesn't go unnoticed - a KeyError here would break
-        # startup reconciliation for every OTHER already-open position too.
+        # docstring) - looked up from mcx_registry for a reconciled MCX
+        # position instead, same as a fresh entry would compute it (see
+        # Swing/mcx_registry.py's own docstring for why this moved off a
+        # static config.py dict 25 Sep 2026). Fails open to `quantity` (a
+        # WRONG but at least non-crashing value) if this underlying was
+        # somehow never configured, logging loudly so it doesn't go
+        # unnoticed - this must never raise, or it'd break startup
+        # reconciliation for every OTHER already-open position too.
         if exchange_segment == "MCX_COMM":
-            if underlying_symbol in config.MCX_PNL_MULTIPLIERS:
-                pnl_multiplier = config.MCX_PNL_MULTIPLIERS[underlying_symbol] * config.QUANTITY_LOTS
+            raw_multiplier = await mcx_registry.pnl_multiplier(underlying_symbol)
+            if raw_multiplier is not None:
+                pnl_multiplier = raw_multiplier * config.QUANTITY_LOTS
             else:
                 logger.error(
-                    "%s: reconciled MCX position has no configured MCX_PNL_MULTIPLIERS entry - "
+                    "%s: reconciled MCX position has no pnl_multiplier configured in data/mcx_config - "
                     "falling back to quantity (%d) as the P&L multiplier, which is almost certainly "
-                    "WRONG for a commodity. Add SWING_MCX_PNL_MULTIPLIER_%s to .env.",
+                    "WRONG for a commodity. Add a line to data/mcx_config, e.g. \"%s,false,<real_per_lot_qty>\".",
                     underlying_symbol, quantity, underlying_symbol,
                 )
                 pnl_multiplier = quantity

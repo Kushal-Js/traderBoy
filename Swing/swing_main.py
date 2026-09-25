@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from Options.dhan_client import dhan_wrapper
 
 from . import candle_feed, config, signals
+from .mcx_registry import mcx_registry
 from .position_store import position_store
 from .trading_engine import monitor_loop, on_price_tick, reconcile_broker_positions
 from .watchlist import watchlist_store
@@ -50,6 +51,14 @@ async def lifespan(app: FastAPI):
         await watchlist_store.sync_from_file()
     except Exception:  # noqa: BLE001
         logger.exception("Could not sync watchlist from data/watchlist at startup - continuing without it.")
+
+    try:
+        # Must run before reconcile_broker_positions below - a reconciled
+        # MCX position's pnl_multiplier is looked up from this registry
+        # (see Swing/mcx_registry.py's own docstring).
+        await mcx_registry.sync_from_file()
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not sync MCX registry from data/mcx_config at startup - continuing without it.")
 
     try:
         reconciled = await reconcile_broker_positions()
@@ -173,6 +182,34 @@ async def replace_watchlist(payload: WatchlistReplacePayload):
 @router.get("/swing/watchlist")
 async def get_watchlist():
     return await watchlist_store.snapshot()
+
+
+class MCXConfigPayload(BaseModel):
+    """Per-symbol MCX config (Swing/mcx_registry.py) - see that module's
+    own docstring for what options_only/pnl_multiplier mean and why
+    they're the only two things still manually configured (MCX membership
+    itself is now derived live from Dhan's instrument master, no config
+    needed)."""
+    symbol: str
+    options_only: bool = False
+    pnl_multiplier: Optional[int] = None
+
+
+@router.post("/swing/mcx-config/set")
+async def set_mcx_config(payload: MCXConfigPayload):
+    """Immediate live effect (in-memory) AND persists to data/mcx_config
+    (backed up first) so it survives a restart too - same two-step
+    convention as /swing/watchlist/add's own persistence note. Example
+    body: {"symbol": "SILVER100", "options_only": false, "pnl_multiplier": 10}"""
+    symbol = payload.symbol.strip().upper()
+    await mcx_registry.set_symbol(symbol, payload.options_only, payload.pnl_multiplier)
+    await mcx_registry.persist_to_file()
+    return {"symbol": symbol, "options_only": payload.options_only, "pnl_multiplier": payload.pnl_multiplier}
+
+
+@router.get("/swing/mcx-config")
+async def get_mcx_config():
+    return await mcx_registry.snapshot()
 
 
 # --------------------------------------------------------------------------- #

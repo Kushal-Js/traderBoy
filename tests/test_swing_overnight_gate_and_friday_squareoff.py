@@ -43,12 +43,23 @@ import trade_history
 scratch_dir = Path(tempfile.mkdtemp(prefix="dhanboy_swing_overnight_gate_test_"))
 trade_history.HISTORY_DIR = scratch_dir
 
+import Options.dhan_client as odc
 from Options.dhan_client import IST
 import Swing.config as sc
 import Swing.signals as ssig
 import Swing.trading_engine as ste
 
 from test_swing_v2_entry_exit import install_mocks, _set  # noqa: E402 - reuses the proven entry-flow mock harness
+
+# Permanent for this whole standalone script (tests 1-3 call ssig.
+# _symbol_market_open directly, outside install_mocks' own try/finally
+# scope, so it needs to always be mocked, not just during install_mocks'
+# window) - avoids a real instrument-master/Dhan-login call. Moved off
+# the old static sc.MCX_SYMBOLS={"COPPER","CRUDEOIL","NATURALGAS"} default
+# 25 Sep 2026 (see Swing/mcx_registry.py) - same three symbols preserved
+# here since every test below still assumes NATURALGAS (and nothing else
+# used in this file) is the MCX one.
+odc.dhan_wrapper.is_mcx_commodity = lambda symbol: symbol.upper() in {"COPPER", "CRUDEOIL", "NATURALGAS"}
 
 
 def _at(year, month, day, hh, mm) -> datetime:
@@ -86,7 +97,7 @@ def test_1_nse_symbol_gated_to_nse_hours():
 
 
 def test_2_mcx_symbol_open_in_its_own_longer_evening_session():
-    assert "NATURALGAS" in sc.MCX_SYMBOLS, "test assumes NATURALGAS is configured as an MCX symbol"
+    assert odc.dhan_wrapper.is_mcx_commodity("NATURALGAS"), "test assumes NATURALGAS is mocked as an MCX symbol"
     with _frozen_now(_at(2026, 9, 23, 20, 10)):  # Wed - closed for NSE, still open for MCX
         assert ssig._symbol_market_open("NATURALGAS") is True, \
             "an MCX symbol must report open at 20:10 IST - this is exactly the real incident's own gap"
@@ -383,7 +394,7 @@ async def test_11_monitor_tick_mcx_square_off_timing_and_scoping():
             quantity=1, lot_size=1, entry_price=250.0, best_price=250.0, target_price=260.0, hard_stop_loss=240.0,
             order_id="O2", pnl_multiplier=1250,
         )
-        assert "NATURALGAS" in sc.MCX_SYMBOLS, "test assumes NATURALGAS is configured as an MCX symbol"
+        assert odc.dhan_wrapper.is_mcx_commodity("NATURALGAS"), "test assumes NATURALGAS is mocked as an MCX symbol"
 
         ste._square_off_all = _fake_square_off_all
         ste._check_one_position = _fake_check_one_position
@@ -407,7 +418,7 @@ async def test_11_monitor_tick_mcx_square_off_timing_and_scoping():
                 fake_dt.now.return_value = _at(2026, 9, 25, 23, 30)  # Friday, past MCX's cutoff too
                 await ste._monitor_tick()
                 assert squareoff_calls == [
-                    ("FRIDAY_SQUARE_OFF", {"ASHOKLEY"}), ("MCX_FRIDAY_SQUARE_OFF", sc.MCX_SYMBOLS),
+                    ("FRIDAY_SQUARE_OFF", {"ASHOKLEY"}), ("MCX_FRIDAY_SQUARE_OFF", {"NATURALGAS"}),
                 ], f"once MCX's own cutoff has also passed, it must get its own scoped square-off call too, got {squareoff_calls}"
         finally:
             ste._square_off_all, ste._check_one_position = original_square_off_all, original_check_one_position
