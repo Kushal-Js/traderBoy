@@ -107,6 +107,41 @@ def test_5_persist_to_file_writes_back_and_backs_up_the_old_file():
           "the old content first: PASSED")
 
 
+def test_6_line_splitting_matches_plain_readlines_byte_for_byte():
+    """25 Sep 2026 - sync_from_file's file read was moved to run_in_
+    executor (PERFORMANCE_AUDIT_2026-09-25.md Part A). Self-caught while
+    reviewing that exact change for silent behavior drift: the first
+    version used Path.read_text().splitlines(keepends=True), which is
+    NOT equivalent to the original open().readlines() - str.splitlines()
+    treats several Unicode line-separator characters (e.g. U+2028 LINE
+    SEPARATOR) as line breaks that a text-mode file's own readlines()
+    never would, silently splitting one watchlist line into two. Fixed
+    to dispatch a real open().readlines() via executor instead
+    (_read_lines_sync). This test locks that fix in with the exact
+    character that exposed the discrepancy."""
+    store = WatchlistStore()
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "watchlist"
+        # A U+2028 LINE SEPARATOR embedded mid-line - splitlines() would
+        # treat this as two lines ("REL IANCE" -> ["REL", "IANCE"]);
+        # a real file's readlines() must NOT, since   has no special
+        # meaning at the file/OS newline level.
+        f.write_text("REL IANCE\nTCS\n")
+        import Swing.watchlist as wl_module
+        real_file = wl_module.WATCHLIST_FILE
+        wl_module.WATCHLIST_FILE = f
+        try:
+            added = asyncio.run(store.sync_from_file())
+            assert set(added) == {"REL IANCE", "TCS"}, (
+                f"a Unicode line-separator character mid-line must NOT be treated as a line break "
+                f"(that's what str.splitlines() would incorrectly do) - got {added}"
+            )
+            print("6. Line-splitting matches plain readlines() byte-for-byte, including NOT treating "
+                  "Unicode line-separator characters as breaks (the exact drift self-review caught): PASSED")
+        finally:
+            wl_module.WATCHLIST_FILE = real_file
+
+
 def main():
     print("=== Swing v2 watchlist file-sync test suite ===\n")
     test_1_old_date_suffix_lines_are_stripped_to_just_the_symbol()
@@ -114,6 +149,7 @@ def main():
     test_3_missing_file_fails_open()
     test_4_replace_symbols_wipes_and_replaces_not_adds()
     test_5_persist_to_file_writes_back_and_backs_up_the_old_file()
+    test_6_line_splitting_matches_plain_readlines_byte_for_byte()
     print("\nALL SWING V2 WATCHLIST CHECKS PASSED")
 
 

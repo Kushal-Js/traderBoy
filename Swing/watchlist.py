@@ -33,6 +33,17 @@ logger = logging.getLogger("swing_watchlist")
 WATCHLIST_FILE = Path("data/watchlist")
 
 
+def _read_lines_sync() -> list[str]:
+    """Plain open().readlines() - kept as a standalone module-level
+    function (not inlined) so sync_from_file can dispatch it through
+    run_in_executor while keeping line-splitting byte-for-byte identical
+    to what this file always did (raises FileNotFoundError exactly like
+    the original code, letting the caller's own except FileNotFoundError
+    handle it)."""
+    with open(WATCHLIST_FILE) as f:
+        return f.readlines()
+
+
 class WatchlistStore:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -131,11 +142,17 @@ class WatchlistStore:
         old once-at-startup call frequency, but this method is now wired
         into _monitor_tick and runs every 5s tick (see that fix's own
         note below), so a direct synchronous read here would block the
-        whole process's single event loop, however briefly, on every tick."""
+        whole process's single event loop, however briefly, on every tick.
+        Dispatches to _read_lines_sync (a plain open().readlines(), not
+        read_text().splitlines()) so line-splitting stays byte-for-byte
+        identical to the original synchronous code - str.splitlines()
+        treats several Unicode line-separator characters (e.g. U+2028) as
+        breaks that a text-mode file's own readlines() never would,
+        caught while self-reviewing this exact change for silent
+        behavior drift."""
         loop = asyncio.get_running_loop()
         try:
-            lines = await loop.run_in_executor(None, WATCHLIST_FILE.read_text)
-            lines = lines.splitlines(keepends=True)
+            lines = await loop.run_in_executor(None, _read_lines_sync)
         except FileNotFoundError:
             return []
         except Exception:  # noqa: BLE001
