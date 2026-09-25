@@ -109,7 +109,8 @@ DISK_RESTORE_LOOKBACK_DAYS = 55
 
 class _SymbolState:
     __slots__ = ("security_id", "day", "current_bar_start", "bar_open", "bar_high", "bar_low",
-                 "bar_close", "cum_volume_at_bar_start", "cum_volume_now", "last_tick_at", "bars")
+                 "bar_close", "cum_volume_at_bar_start", "cum_volume_now", "last_tick_at", "bars",
+                 "last_persisted_candle_start")
 
     def __init__(self, security_id: str) -> None:
         self.security_id = security_id
@@ -123,6 +124,22 @@ class _SymbolState:
         self.cum_volume_now: float = 0.0
         self.last_tick_at: Optional[datetime] = None
         self.bars: list[dict] = []  # completed 5-min bars only, oldest first
+        # The candle_start of the most recently PERSISTED bar (from disk on
+        # restore, or from this process's own _on_tick since) - added 25
+        # Sep 2026, real incident: after a restart, current_bar_start above
+        # starts fresh at None (deliberately - it's the CURRENTLY FORMING
+        # bar, unrelated to history), so the first live ticks after restart
+        # re-form and re-COMPLETE whatever 5-min window they land in, even
+        # when that exact candle_start was already completed and persisted
+        # by the process instance that just died. Confirmed live: COPPER/
+        # NATURALGAS (MCX's long session means far more restarts land
+        # mid-session than for NSE-hours-only symbols) had the same
+        # candle_start persisted 2-3x with different partial OHLC each
+        # time. This field is checked before every persist/append below so
+        # a candle_start already on disk can never be written again in the
+        # same process's lifetime, regardless of what current_bar_start's
+        # own (unrelated) bootstrap does.
+        self.last_persisted_candle_start: Optional[datetime] = None
 
 
 _lock = threading.Lock()
@@ -161,7 +178,19 @@ def _persist_bar(symbol: str, security_id: str, day: date, bar: dict) -> None:
 
 
 def _load_persisted_bars(symbol: str, security_id: str, as_of: date, lookback_days: int) -> list[dict]:
-    bars: list[dict] = []
+    """Dedupes by candle_start (added 25 Sep 2026, real incident - see
+    last_persisted_candle_start's docstring in _SymbolState) - a restart
+    landing mid-candle could persist the SAME candle_start more than once
+    across process instances before this was fixed at the write side, and
+    old on-disk files from before that fix still have real duplicate
+    lines. Reads day files in chronological (oldest-first) order and a
+    plain dict write naturally keeps the LAST occurrence of any repeated
+    candle_start - confirmed live this is also the most-complete version
+    (each successive persist of the "same" candle showed progressively
+    more accurate high/low/close as later ticks fed it), so this is a
+    real repair, not an arbitrary pick, for old files - and a pure no-op
+    for files with no duplicates."""
+    by_candle_start: dict[datetime, dict] = {}
     for i in range(lookback_days, -1, -1):
         day = as_of - timedelta(days=i)
         path = _persist_path(symbol, security_id, day)
@@ -175,13 +204,13 @@ def _load_persisted_bars(symbol: str, security_id: str, as_of: date, lookback_da
                         continue
                     row = json.loads(line)
                     row["candle_start"] = datetime.fromisoformat(row["candle_start"])
-                    bars.append(row)
+                    by_candle_start[row["candle_start"]] = row
         except Exception:  # noqa: BLE001
             logger.exception(
                 "swing_candle_feed: failed to restore persisted bars for %s from %s - skipping that "
                 "file, reconstruction continues from live ticks only", symbol, path,
             )
-    bars.sort(key=lambda b: b["candle_start"])
+    bars = sorted(by_candle_start.values(), key=lambda b: b["candle_start"])
     return bars[-MAX_BARS_KEPT:]
 
 
@@ -236,9 +265,20 @@ def _on_tick(underlying_symbol: str, ltp: float, cum_volume: float, t: datetime)
             st.cum_volume_now = 0.0
         completed = _update_bar(st, ltp, cum_volume, t)
         if completed is not None:
-            st.bars.append(completed)
-            if len(st.bars) > MAX_BARS_KEPT:
-                del st.bars[: len(st.bars) - MAX_BARS_KEPT]
+            # Guard against re-completing a candle_start this process (or a
+            # prior instance, restored via ensure_subscribed) already
+            # persisted - see last_persisted_candle_start's own docstring.
+            # current_bar_start's fresh-None bootstrap after a restart is
+            # deliberately left alone (it's what makes the FIRST tick after
+            # subscribe start a bar at all) - this check is what stops that
+            # bootstrap from ever re-writing a bar that's already on disk.
+            if st.last_persisted_candle_start is not None and completed["candle_start"] <= st.last_persisted_candle_start:
+                completed = None
+            else:
+                st.bars.append(completed)
+                if len(st.bars) > MAX_BARS_KEPT:
+                    del st.bars[: len(st.bars) - MAX_BARS_KEPT]
+                st.last_persisted_candle_start = completed["candle_start"]
         st.last_tick_at = t
         security_id = st.security_id
     if completed is not None:
@@ -304,6 +344,11 @@ def ensure_subscribed(symbol: str, security_id: str, exchange_segment: str) -> N
             st = _state.get(symbol)
             if st is not None and not st.bars:
                 st.bars = bars
+                # Seed the re-persist guard from the restored history's own
+                # last entry - see last_persisted_candle_start's docstring.
+                # Without this, a restart's first live ticks would treat
+                # this exact candle_start as fair game to re-complete.
+                st.last_persisted_candle_start = bars[-1]["candle_start"]
         logger.info(
             "swing_candle_feed: restored %d persisted bar(s) for %s (security_id=%s) from disk - "
             "reconciliation after a possible restart, not starting cold", len(bars), symbol, security_id,
