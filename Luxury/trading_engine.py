@@ -385,6 +385,23 @@ async def _process_one_entry(symbol: str, option_type: str) -> dict:
                     "adx": adx, "er": er,
                 }
 
+    # Volume-floor entry gate (added 25 Sep 2026 - see config.VOLUME_FLOOR_
+    # GATE_ENABLED's own docstring for the backtest evidence and why Luxury
+    # never had this wired in until now). Checked last among the guard
+    # checks (needs a real REST call, unlike the cheap disk-read checks
+    # above) but still before any capacity/cross-strategy claim, so a
+    # thin-volume signal never burns either for a trade that's about to be
+    # rejected anyway. Same placement as Futures/trading_engine.py's own
+    # identical gate.
+    if config.VOLUME_FLOOR_GATE_ENABLED:
+        passes, vol_ratio = await reversal_filters.check_volume_floor(symbol, config.VOLUME_FLOOR_RATIO_MIN)
+        if not passes:
+            logger.info(
+                "%s: skipped - volume floor gate (entry-candle volume %.3fx 20-bar avg, below %.2fx floor)",
+                symbol, vol_ratio, config.VOLUME_FLOOR_RATIO_MIN,
+            )
+            return {"symbol": symbol, "status": "skipped", "reason": "volume_floor_gate", "vol_ratio": vol_ratio}
+
     if not await cross_strategy_registry.try_claim(symbol, "Luxury"):
         logger.info("%s: skipped - another strategy is currently entering it", symbol)
         return {"symbol": symbol, "status": "skipped", "reason": "claimed_by_another_strategy"}

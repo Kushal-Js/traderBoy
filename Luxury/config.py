@@ -126,6 +126,22 @@ LOSS_REPEAT_BLOCK_EXIT_REASONS = ("MAX_LOSS_HIT", "STOP_LOSS_HIT")
 # own LOSS_REENTRY_TREND_CHECK_ENABLED comment for the full rationale.
 LOSS_REENTRY_TREND_CHECK_ENABLED = os.getenv("LUXURY_LOSS_REENTRY_TREND_CHECK_ENABLED", "true").lower() == "true"
 
+# Volume-floor entry gate (added 25 Sep 2026 - same mechanism, threshold,
+# and rationale as Futures/config.py's own VOLUME_FLOOR_GATE_ENABLED
+# (ported there 17 Sep 2026 from Options, 16 Sep 2026, after backtesting
+# showed it's the single strongest reversal-prevention filter across real
+# Options/Futures/Luxury trades - see reversal_filters.py's own module
+# docstring, which names Luxury data as part of that evidence). This was
+# the one package that filter was validated FOR but never actually wired
+# into - audit finding 1.2, CODE_AUDIT_2026-09-24.md. Blocks a new entry
+# if the underlying's own 5-min entry candle traded on less than
+# VOLUME_FLOOR_RATIO_MIN times its 20-bar average volume. Fails OPEN
+# (never blocks) on a fetch failure or insufficient data - see
+# reversal_filters.check_volume_floor's own docstring for why a
+# diagnostic check's own failure must never itself cause a missed entry.
+VOLUME_FLOOR_GATE_ENABLED = os.getenv("LUXURY_VOLUME_FLOOR_GATE_ENABLED", "true").lower() == "true"
+VOLUME_FLOOR_RATIO_MIN = float(os.getenv("LUXURY_VOLUME_FLOOR_RATIO_MIN", "1.2"))
+
 # Broker-side stop-loss order (added 8 Sep 2026, user request: "broker-
 # side stop order that fires instantly regardless of polling interval
 # would be a better approach" - a follow-up to the same backtest that
