@@ -993,6 +993,27 @@ class DhanWrapper:
             ltp_val = float(ltp)
         except (TypeError, ValueError):
             return
+        if ltp_val <= 0:
+            # Real incident (25 Sep 2026): a malformed/keepalive packet with
+            # LTP=0 for COPPER (pre-market, before this guard existed) got
+            # cached and dispatched like any real tick - it became a WS
+            # candle's bootstrap price in Swing/candle_feed.py's own
+            # _update_bar (now separately guarded there too - see that
+            # module's comment), corrupting a structure-break regime read.
+            # Investigating that led here: this single dispatch point feeds
+            # EVERY subscriber (on_price_tick AND on_quote_tick) across all
+            # four packages (Options/Futures/Luxury/Swing all reuse this one
+            # Dhan connection) - including on_price_tick's own live exit
+            # check (_exit_reason_for in each package's trading_engine.py),
+            # where `ltp <= trailing_sl` is unconditional: a single ltp=0
+            # tick for ANY symbol with an open real position would have
+            # forced an immediate false STOP_LOSS_HIT exit, no candle-feed
+            # involvement needed. A zero/negative price is never a real
+            # trade on any exchange this feed subscribes to - reject it
+            # here, once, before it reaches anything downstream (self.
+            # _ltp_cache included - a stale-but-real cached value is safer
+            # left untouched than overwritten with 0).
+            return
 
         security_id = str(security_id)
         now = datetime.now(IST)

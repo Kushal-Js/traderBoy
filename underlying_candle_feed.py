@@ -266,7 +266,25 @@ def _update_bar(st: _SymbolState, ltp: float, cum_volume: float, t: datetime) ->
     callback so backtest_ws_candle_reconstruction_parity.py can drive it
     directly with synthetic ticks. Returns the just-COMPLETED bar dict if
     this tick started a new 5-min window, else None. Caller (on_tick)
-    handles day-rollover and MAX_BARS_KEPT trimming."""
+    handles day-rollover and MAX_BARS_KEPT trimming.
+
+    Same ltp<=0 guard as Swing/candle_feed.py's own _update_bar, added
+    25 Sep 2026 after a real incident there (a malformed/keepalive tick
+    with ltp=0, arriving right after a day-rollover reset, became a
+    bar's bootstrap price and produced a real persisted open=high=low=
+    close=0.0 bar - see that module's own comment for the full write-up).
+    This module shares the identical algorithm (by design, per this
+    function's own original docstring), so it shares the identical
+    exposure: any symbol this dispatcher subscribes mid-day is just as
+    capable of bootstrapping a bar off a stray zero-price tick as COPPER
+    was. Applied here pre-emptively - no zero-bar has been observed in
+    this module's own persisted logs yet, but the trigger condition
+    (a bad tick landing exactly on a fresh-subscribe/day-rollover
+    boundary) isn't COPPER-specific and recurs every time the dispatcher
+    subscribes a new symbol into a pool, which happens constantly
+    through the session."""
+    if ltp <= 0:
+        return None
     bar_start = _candle_start_for(t)
     completed = None
     if st.current_bar_start is None:
