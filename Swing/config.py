@@ -443,14 +443,27 @@ WS_STALE_AFTER_SECONDS = float(os.getenv("SWING_WS_STALE_AFTER_SECONDS", "90"))
 #     single EMA-regime filter, so v2 never rejects a signal v1 would
 #     have taken - it only ever admits MORE entries.
 #
+#   "v3" is an ALIAS for "v2", not a distinct code path (added 25 Sep
+#     2026, source of a real naming confusion this fixes: the level-
+#     based regime leg + Day Range Bull/Bear feature set - made the
+#     default for every non-COPPER symbol on 24 Sep 2026, commit
+#     f083b9d - lives entirely inside trading_engine.py's existing
+#     `ENTRY_STRATEGY_VERSION == "v2"` branch and was never given its
+#     own flag value. Commit messages/conversation call that feature set
+#     "v3" informally; the flag itself was still only ever "v1"/"v2".
+#     Accepting "v3" here as a literal synonym means SWING_ENTRY_
+#     STRATEGY_VERSION=v3 in .env, and the startup log's own echo of
+#     whatever was configured, both say what everyone already means by
+#     "v3" - see trading_engine.py's own `in ("v2", "v3")` check.
+#
 # Default stays "v1" - a fresh deploy with no explicit override must
 # reproduce today's live behavior byte-for-byte, never silently switch
-# strategies. Switching to "v2" is a deliberate, explicit .env change.
+# strategies. Switching to "v2"/"v3" is a deliberate, explicit .env change.
 ENTRY_STRATEGY_VERSION = os.getenv("SWING_ENTRY_STRATEGY_VERSION", "v1").lower()
-if ENTRY_STRATEGY_VERSION not in ("v1", "v2"):
+if ENTRY_STRATEGY_VERSION not in ("v1", "v2", "v3"):
     import logging
     logging.getLogger(__name__).error(
-        "SWING_ENTRY_STRATEGY_VERSION=%r is not one of v1/v2 - falling back to v1.",
+        "SWING_ENTRY_STRATEGY_VERSION=%r is not one of v1/v2/v3 - falling back to v1.",
         ENTRY_STRATEGY_VERSION,
     )
     ENTRY_STRATEGY_VERSION = "v1"

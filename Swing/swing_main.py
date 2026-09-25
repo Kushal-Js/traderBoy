@@ -102,10 +102,14 @@ async def lifespan(app: FastAPI):
     # with none of v2/v3's backtested improvements (including the entire
     # NIFTY/BANKNIFTY Day Range/regime-leg path), and nothing would flag
     # it. This makes that state impossible to miss in the startup logs.
-    if config.ENTRY_STRATEGY_VERSION != "v2":
+    if config.ENTRY_STRATEGY_VERSION not in ("v2", "v3"):
+        # "v3" is a literal alias for "v2", not a separate branch - see
+        # config.py's own ENTRY_STRATEGY_VERSION docstring (25 Sep 2026
+        # fix, user-flagged naming confusion: "v3" is what this feature
+        # set is called everywhere except the flag itself).
         logger.warning(
-            "Swing ENTRY_STRATEGY_VERSION=%r (NOT v2) - running on the OLDER v1 entry logic. If v2 was "
-            "intended (check SWING_ENTRY_STRATEGY_VERSION in .env), this deploy is silently missing the "
+            "Swing ENTRY_STRATEGY_VERSION=%r (NOT v2/v3) - running on the OLDER v1 entry logic. If v2/v3 "
+            "was intended (check SWING_ENTRY_STRATEGY_VERSION in .env), this deploy is silently missing the "
             "backtested v2/v3 improvements, including the entire NIFTY/BANKNIFTY Day Range/regime-leg path.",
             config.ENTRY_STRATEGY_VERSION,
         )

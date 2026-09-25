@@ -205,7 +205,10 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
 
     config.ENTRY_STRATEGY_VERSION ("v1" default / "v2", added 14 Sep
     2026 - see Swing/config.py's own docstring for the full backtest
-    numbers behind this):
+    numbers behind this). "v3" is accepted as a literal alias for "v2"
+    (see config.py's own docstring on ENTRY_STRATEGY_VERSION for why -
+    the informal "v3" name for this feature set was never given its own
+    flag value until 25 Sep 2026) - both land in the branch below:
 
     v1 (original design, unchanged): regime bullish (5-min EMA200 >
       15-min EMA200 - a plain LEVEL check, regime.is_bullish) AND 5-min
@@ -331,7 +334,7 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
     st = await signals.get_supertrend_state(symbol)
     if st is None:
         return None
-    if config.ENTRY_STRATEGY_VERSION == "v2":
+    if config.ENTRY_STRATEGY_VERSION in ("v2", "v3"):
         st15 = await signals.get_supertrend_state(symbol, config.REGIME_SLOW_INTERVAL_MINUTES)
         if st15 is None:
             return None

@@ -214,6 +214,52 @@ def test_6_v2_rejects_when_all_three_legs_disagree_with_the_crossover():
         ste.signals.get_supertrend_state = _REAL_GET_SUPERTREND_STATE
 
 
+def test_7_v3_is_a_literal_alias_for_v2():
+    """Added 25 Sep 2026 - user-flagged naming confusion: "v3" is what
+    this feature set is called everywhere (commit messages, conversation)
+    except the flag itself, which only ever accepted "v1"/"v2". "v3" is
+    now a literal synonym, not a separate code path - same scenario as
+    test_2 (15-min-Supertrend-alone), just with ENTRY_STRATEGY_VERSION
+    set to "v3" instead of "v2", must produce the byte-identical result."""
+    real_version = sc.ENTRY_STRATEGY_VERSION
+    sc.ENTRY_STRATEGY_VERSION = "v3"
+    try:
+        _install(_regime(is_bullish=False), _supertrend(is_above=True, prev_is_above=False),
+                  _supertrend(is_above=True, prev_is_above=True))
+        result = asyncio.run(ste._evaluate_entry_signal("TESTSTOCK"))
+        assert result == "BULLISH", f"expected v3 to behave identically to v2 (15-min-ST-alone OR branch), got {result!r}"
+        print("7. ENTRY_STRATEGY_VERSION='v3' behaves byte-identically to 'v2' (a literal alias, not a "
+              "separate branch): PASSED")
+    finally:
+        sc.ENTRY_STRATEGY_VERSION = real_version
+        ste.signals.get_regime_state = _REAL_GET_REGIME_STATE
+        ste.signals.get_supertrend_state = _REAL_GET_SUPERTREND_STATE
+
+
+def test_8_config_validation_accepts_v3_without_falling_back_to_v1():
+    """Swing/config.py's own SWING_ENTRY_STRATEGY_VERSION validation must
+    accept "v3" as valid (not log an error and silently fall back to
+    "v1" the way an actually-invalid value would)."""
+    import importlib
+    import os as _os
+    real_env = _os.environ.get("SWING_ENTRY_STRATEGY_VERSION")
+    _os.environ["SWING_ENTRY_STRATEGY_VERSION"] = "v3"
+    try:
+        import Swing.config as reloaded_sc
+        importlib.reload(reloaded_sc)
+        assert reloaded_sc.ENTRY_STRATEGY_VERSION == "v3", \
+            f"expected config to accept 'v3' as-is, got {reloaded_sc.ENTRY_STRATEGY_VERSION!r} (a fallback " \
+            f"to 'v1' here would mean 'v3' was rejected as invalid)"
+        print("8. Swing/config.py's SWING_ENTRY_STRATEGY_VERSION validation accepts 'v3' without falling "
+              "back to 'v1': PASSED")
+    finally:
+        if real_env is None:
+            _os.environ.pop("SWING_ENTRY_STRATEGY_VERSION", None)
+        else:
+            _os.environ["SWING_ENTRY_STRATEGY_VERSION"] = real_env
+        importlib.reload(sc)  # restore the module-level sc reference's own state for any later test
+
+
 if __name__ == "__main__":
     test_1_v1_ignores_15min_supertrend_entirely()
     test_2_v2_admits_bullish_via_15min_supertrend_alone()
@@ -221,4 +267,6 @@ if __name__ == "__main__":
     test_4_v2_mirrors_bearish_case()
     test_5_v2_admits_bullish_via_regime_crossover_alone()
     test_6_v2_rejects_when_all_three_legs_disagree_with_the_crossover()
+    test_7_v3_is_a_literal_alias_for_v2()
+    test_8_config_validation_accepts_v3_without_falling_back_to_v1()
     print("\nAll tests passed.")
