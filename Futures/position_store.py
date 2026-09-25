@@ -27,6 +27,7 @@ from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from . import config
+from Options.dhan_client import OrderStatus
 from trade_history import fire_and_forget, record_closed_trade, record_opened_position
 import reversal_filters
 
@@ -147,11 +148,18 @@ class PositionStore:
 
     async def maybe_reset_for_new_day(self) -> None:
         """See Options/position_store.py's identical function - same
-        ENABLE_SQUARE_OFF-gated rationale. Doubly important here since this
-        package doesn't run broker reconciliation at startup at all (see
-        trading_engine.py's module docstring) - an in-memory clear of a
-        real overnight position here would have NO recovery path, ever,
-        not even after a future restart."""
+        ENABLE_SQUARE_OFF-gated rationale.
+
+        (Corrected 25 Sep 2026 - audit finding 2.6, CODE_AUDIT_2026-09-24.
+        md: this docstring used to claim "this package doesn't run broker
+        reconciliation at startup at all... an in-memory clear here would
+        have NO recovery path, ever." That's been false since
+        reconcile_broker_positions() was added and wired into futures_
+        main.py's lifespan (31 Aug 2026) - a real overnight position IS
+        recovered on restart via broker reconciliation, subject to
+        attribute_open_broker_position's own ambiguity-skip caveat. Left
+        misleading here for weeks; fixing it now so a future incident
+        investigation doesn't get sent down the wrong path.)"""
         async with self._lock:
             today = date.today()
             if today != self._trading_day:
@@ -164,6 +172,37 @@ class PositionStore:
                         "ENABLE_SQUARE_OFF=false - carrying %d live position(s) over the day boundary: %s",
                         len(self.live_positions), list(self.live_positions.keys()),
                     )
+                # Before clearing orders_today, release the reservation for
+                # any entry order that's still non-terminal and never got
+                # promoted to a live Position - audit finding 1.4,
+                # CODE_AUDIT_2026-09-24.md: orders_today used to be
+                # cleared unconditionally here even when ENABLE_SQUARE_
+                # OFF=false (this package's actual deployed mode) leaves
+                # reserved_symbols untouched above, so such an order's
+                # OrderRecord vanished (making _sync_pending_orders unable
+                # to ever find/resolve/release it) while its reserved_
+                # symbols entry survived - permanently blocking new
+                # entries on that underlying, and leaving an unmanaged
+                # real position with no trade_history record if the order
+                # filled anyway after this. Same non-terminal/not-yet-
+                # live/not-owned-by-an-in-flight-placer filter
+                # trading_engine.py's own _sync_pending_orders already
+                # uses to find these. Harmless no-op when ENABLE_SQUARE_
+                # OFF=true - reserved_symbols.clear() above already wiped
+                # everything.
+                for order in self.orders_today.values():
+                    if (order.transaction_type == "BUY"
+                            and order.status not in OrderStatus.TERMINAL_STATUSES
+                            and order.underlying_symbol not in self.live_positions
+                            and not order.owned_by_placer):
+                        logger.warning(
+                            "%s: entry order %s still non-terminal (status=%s) at day rollover - releasing "
+                            "its reservation now since orders_today (and this order's own trackability) is "
+                            "about to be cleared; a late fill from this specific order would otherwise "
+                            "become an untracked real position.",
+                            order.underlying_symbol, order.order_id, order.status,
+                        )
+                        self.reserved_symbols.pop(order.underlying_symbol, None)
                 self.closed_positions_today.clear()
                 self.orders_today.clear()
                 self._trading_day = today

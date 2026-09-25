@@ -32,6 +32,7 @@ from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from . import config
+from Options.dhan_client import OrderStatus
 from trade_history import fire_and_forget, record_closed_trade, record_opened_position
 import reversal_filters
 
@@ -256,6 +257,38 @@ class PositionStore:
                         "ENABLE_SQUARE_OFF=false - carrying %d live position(s) over the day boundary: %s",
                         len(self.live_positions), list(self.live_positions.keys()),
                     )
+                # Before clearing orders_today, release the reservation for
+                # any entry order that's still non-terminal and never got
+                # promoted to a live Position - audit finding 1.4,
+                # CODE_AUDIT_2026-09-25.md: this exact Futures/Luxury bug
+                # (orders_today cleared unconditionally even when
+                # ENABLE_SQUARE_OFF=false leaves reserved_symbols
+                # untouched above) turned out to apply here too - Options'
+                # own ENABLE_SQUARE_OFF=false ("MARGIN" carry-forward) is a
+                # real, supported deployment mode. Without this, such an
+                # order's OrderRecord vanishes (making _sync_pending_
+                # orders unable to ever find/resolve/release it) while its
+                # reserved_symbols entry survives - permanently blocking
+                # new entries on that underlying, and leaving an unmanaged
+                # real position with no trade_history record if the order
+                # filled anyway after this. Same non-terminal/not-yet-
+                # live/not-owned-by-an-in-flight-placer filter trading_
+                # engine.py's own _sync_pending_orders already uses to
+                # find these. Harmless no-op when ENABLE_SQUARE_OFF=true -
+                # reserved_symbols.clear() above already wiped everything.
+                for order in self.orders_today.values():
+                    if (order.transaction_type == "BUY"
+                            and order.status not in OrderStatus.TERMINAL_STATUSES
+                            and order.underlying_symbol not in self.live_positions
+                            and not order.owned_by_placer):
+                        logger.warning(
+                            "%s: entry order %s still non-terminal (status=%s) at day rollover - releasing "
+                            "its reservation now since orders_today (and this order's own trackability) is "
+                            "about to be cleared; a late fill from this specific order would otherwise "
+                            "become an untracked real position.",
+                            order.underlying_symbol, order.order_id, order.status,
+                        )
+                        self.reserved_symbols.pop(order.underlying_symbol, None)
                 self.closed_positions_today.clear()
                 self.orders_today.clear()
                 self._trading_day = today
