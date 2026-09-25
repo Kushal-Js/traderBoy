@@ -518,7 +518,21 @@ def fetch_timeframe(symbol: str, timeframe: str, params: Optional[StructureBreak
                     ws_data = None
                 if ws_data and (ws_data.get("close") or []):
                     ws_o, ws_h, ws_l, ws_c, ws_v, ws_t = _drop_forming_candle(ws_data, interval)
-                    if len(ws_c) >= params.atr_len + 1:
+                    # warm=True only means the SMA-seeded EMA chain has
+                    # produced its first non-None value - NOT that it has
+                    # actually converged (found 25 Sep 2026, CODE_AUDIT_
+                    # 2026-09-25.md: the bare atr_len+1 floor above already
+                    # fixed the crash a naive bar-count check caused, but
+                    # a freshly-subscribed WS series can cross warm=True
+                    # with as few as ~params.length bars while still being
+                    # meaningfully biased by the SMA seed - REST's own
+                    # _INTRADAY_LOOKBACK_DAYS deliberately fetches many
+                    # multiples of that for exactly this reason). Require
+                    # real margin past the technical warm threshold - not
+                    # just crossing it - before trusting a WS candidate
+                    # over REST's properly-converged history.
+                    convergence_floor = max(params.atr_len + 1, params.length * 3)
+                    if len(ws_c) >= convergence_floor:
                         candidate = compute_structure_break(ws_o, ws_h, ws_l, ws_c, ws_v, ws_t, params)
                         if not candidate.error and candidate.warm:
                             return candidate
