@@ -62,6 +62,32 @@ logger = logging.getLogger("swing_trading_engine")
 # timestamp left over from a PREVIOUS, already-closed position.
 _ltp_failure_since: dict[tuple[str, datetime], datetime] = {}
 
+# Fairness rotation for the per-tick watchlist scan below (added 25 Sep
+# 2026, real incident: VEDL, added to the watchlist the day before, sat
+# LAST in the watchlist order and its entry fired 5 minutes late at a
+# 13.5% worse price than the same formula replayed against real data said
+# it should have - a live backtest comparison confirmed the signal itself
+# was correct, just evaluated late). Root cause: _monitor_tick's entry
+# scan below iterates the watchlist in a FIXED order every tick, sleeping
+# config.SYMBOL_PACING_SECONDS before each symbol after the first - so a
+# symbol late in the list is delayed by every earlier symbol's pacing
+# sleep AND any real fetch latency (REST congestion, retries) those
+# earlier symbols hit that tick, before its own signal is even checked.
+# This is a structural, watchlist-position-dependent bias, not a VEDL-
+# specific fluke - it gets worse the longer the watchlist grows, and
+# whichever symbol happens to sit last inherits the full accumulated
+# delay every single tick. Same class of problem breakout_signal.py's
+# UniverseDispatcher already solved for its own CE-target dispatch order
+# ("rotates for fairness" - see its own _dispatch_turn) - this reuses the
+# identical idiom: start each tick's scan from a rotating offset into the
+# watchlist instead of always index 0, so the "evaluated first, no
+# upstream delay ahead of it" advantage cycles across every symbol over
+# successive ticks rather than being permanently owned by whichever
+# symbols happen to sit early in watchlist order. Does not change total
+# REST call volume, pacing, or rate-limit behavior in any way - purely
+# changes which symbol goes first.
+_watchlist_scan_turn: dict[str, int] = {"i": 0}
+
 # Order-placement dispatch, keyed by Position.exchange_segment - added 12
 # Sep 2026 (Swing v2's Copper/MCX options support) to replace what used to
 # be a 2-way `if exchange_segment == "NSE_FNO": ... else: ...` at every
@@ -1267,6 +1293,15 @@ async def _monitor_tick() -> None:
 
     from .watchlist import watchlist_store  # local import - avoids a circular import at module load time
     symbols = await watchlist_store.symbols()
+    # Rotate the scan's starting point each tick (see _watchlist_scan_turn's
+    # own docstring) - same fairness idiom as breakout_signal.py's
+    # UniverseDispatcher, applied here so no symbol is permanently stuck
+    # behind every other symbol's pacing delay/fetch latency on every tick.
+    n = len(symbols)
+    if n:
+        start = _watchlist_scan_turn["i"] % n
+        symbols = symbols[start:] + symbols[:start]
+        _watchlist_scan_turn["i"] = (_watchlist_scan_turn["i"] + 1) % n
     candidates: list[tuple[str, str]] = []
     for i, symbol in enumerate(symbols):
         if symbol in position_store.reserved_symbols:
