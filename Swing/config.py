@@ -684,18 +684,30 @@ MARKET_OPEN_TIME = os.getenv("SWING_MARKET_OPEN_TIME", "09:00")
 
 # Weekly square-off (user request 22/23 Sep 2026): Swing positions are
 # meant to carry across DAYS by design (see this module's own docstring),
-# but never across a WEEKEND - a Friday-evening MCX position in particular
+# but never across a WEEKEND - a Friday-evening position in particular
 # would otherwise sit unmonitored (no live ticks, no exit-signal refresh -
 # see _symbol_market_open's own docstring) through two full non-trading
-# days of gap risk before Monday. Every open Swing position (NSE and MCX
-# alike) gets force-closed at this time every Friday, and no new entry is
-# taken for the rest of the week (see trading_engine.py's _monitor_tick) -
-# 15:25, 5 minutes before NSE's own 15:30 close, deliberately EARLIER than
-# MCX's own much-later 23:30 close since the point is avoiding the
-# weekend gap entirely, not trading MCX's Friday evening session right up
-# to its own close.
+# days of gap risk before Monday. Every open NON-MCX Swing position (NSE
+# equities/futures/options) gets force-closed at this time every Friday,
+# and no new entry is taken for the rest of the week (see trading_engine.
+# py's _monitor_tick) - 15:25, 5 minutes before NSE's own 15:30 close.
+# MCX_SYMBOLS positions are excluded here - see MCX_FRIDAY_SQUARE_OFF_
+# TIME below (added 25 Sep 2026, user request: MCX should square off 5
+# minutes before ITS OWN Friday-night close, not NSE's much earlier one).
 FRIDAY_SQUARE_OFF_ENABLED = os.getenv("SWING_FRIDAY_SQUARE_OFF_ENABLED", "true").lower() == "true"
 FRIDAY_SQUARE_OFF_TIME = os.getenv("SWING_FRIDAY_SQUARE_OFF_TIME", "15:25")
+
+# MCX's own Friday square-off time (user request 25 Sep 2026: "For MCX
+# trades square off time should be 5 mins before market closes on Friday
+# night"). MCX_SYMBOLS (COPPER/CRUDEOIL/NATURALGAS) trade a much longer
+# Friday session than NSE (close ~23:30 IST vs NSE's 15:30), so they get
+# their own, later square-off instead of being swept up in
+# FRIDAY_SQUARE_OFF_TIME above - same 5-minutes-before-close idea, just
+# timed off MCX's own close. Gated by the SAME FRIDAY_SQUARE_OFF_ENABLED
+# flag as the NSE one (no separate on/off switch - this is a timing split
+# of one feature, not a second feature). See trading_engine.py's
+# _monitor_tick for where this is checked and enforced.
+MCX_FRIDAY_SQUARE_OFF_TIME = os.getenv("SWING_MCX_FRIDAY_SQUARE_OFF_TIME", "23:25")
 
 # Daily (not just weekly) square-off, INDEX_SYMBOLS (NIFTY/BANKNIFTY) ONLY -
 # user request 24 Sep 2026 ("all open positions for NIFTY and BANKNIFTY to

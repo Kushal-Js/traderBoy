@@ -11,9 +11,13 @@ Two independent pieces, both covered here:
      (entry-evaluation only, never the exit-check) and by this module's
      own structure_break_refresh_loop.
   2. Swing/trading_engine.py's weekly Friday square-off (config.FRIDAY_
-     SQUARE_OFF_ENABLED/_TIME) - every open Swing position (NSE and MCX
-     alike) force-closed by 15:25 IST every Friday, no new entries taken
-     for the rest of the week, to avoid weekend gap risk.
+     SQUARE_OFF_ENABLED/_TIME) - every open NON-MCX Swing position
+     force-closed by 15:25 IST every Friday, no new entries taken for the
+     rest of the week, to avoid weekend gap risk. MCX_SYMBOLS positions
+     get their own, later square-off instead (config.MCX_FRIDAY_SQUARE_
+     OFF_TIME, added 25 Sep 2026, user request: MCX should square off 5
+     minutes before ITS OWN Friday-night close, not NSE's much earlier
+     one) - covered separately below.
 
 HOW TO RUN:
     uv run python tests/test_swing_overnight_gate_and_friday_squareoff.py
@@ -159,11 +163,12 @@ def test_5_is_friday_square_off_time():
 
 
 async def test_6_monitor_tick_square_offs_and_skips_normal_flow_on_friday():
-    """Confirms _monitor_tick calls _square_off_all with the right reason
-    and returns early - no ordinary exit-check, no new-entry evaluation -
-    once the Friday cutoff has passed, so nothing carries into the
-    weekend and no new position gets opened only to need the same
-    treatment moments later."""
+    """Confirms _monitor_tick calls _square_off_all (scoped to non-MCX
+    symbols) with the right reason, then skips new-entry evaluation for
+    the rest of Friday - nothing carries into the weekend and no new
+    position gets opened only to need the same treatment moments later.
+    MCX's own (later, 23:25) square-off does NOT fire yet at 15:30, and
+    is covered separately by test_10/test_11 below."""
     _set("options", max_concurrent=2)
     restore, placed, _ = install_mocks(entry_fill_status="TRADED")
     try:
@@ -180,17 +185,20 @@ async def test_6_monitor_tick_square_offs_and_skips_normal_flow_on_friday():
         squareoff_calls = []
         original_square_off_all = ste._square_off_all
 
-        async def _fake_square_off_all(reason):
-            squareoff_calls.append(reason)
+        async def _fake_square_off_all(reason, symbols=None):
+            squareoff_calls.append((reason, symbols))
 
         original_evaluate = ste._evaluate_entry_signal
         ste._evaluate_entry_signal = _fake_evaluate
         ste._square_off_all = _fake_square_off_all
         try:
             with mock.patch("Swing.trading_engine.datetime") as fake_dt:
-                fake_dt.now.return_value = _at(2026, 9, 25, 15, 30)  # Friday, past cutoff
+                fake_dt.now.return_value = _at(2026, 9, 25, 15, 30)  # Friday, past NSE cutoff, well before MCX's
                 await ste._monitor_tick()
-                assert squareoff_calls == ["FRIDAY_SQUARE_OFF"], squareoff_calls
+                assert squareoff_calls == [("FRIDAY_SQUARE_OFF", set())], (
+                    f"only the non-MCX square-off should fire (empty set here - no open positions in this "
+                    f"test), and MCX's own later square-off must NOT have fired yet, got {squareoff_calls}"
+                )
                 assert eval_calls == [], \
                     f"no new entry should be evaluated once the Friday square-off window is active, got {eval_calls}"
         finally:
@@ -199,8 +207,8 @@ async def test_6_monitor_tick_square_offs_and_skips_normal_flow_on_friday():
             watchlist_store.symbols = original_symbols
     finally:
         restore()
-    print("6. _monitor_tick calls _square_off_all('FRIDAY_SQUARE_OFF') and skips the ordinary "
-          "exit-check/entry-scan entirely once the Friday cutoff has passed: PASSED")
+    print("6. _monitor_tick calls _square_off_all('FRIDAY_SQUARE_OFF', symbols=<non-MCX>) and skips "
+          "new-entry evaluation once the Friday cutoff has passed, without yet touching MCX: PASSED")
 
 
 # --------------------------------------------------------------------------- #
@@ -316,6 +324,100 @@ async def test_9_monitor_tick_squares_off_index_only_and_keeps_normal_flow_for_o
           "ASHOKLEY keeps its normal exit-check/entry-scan, and no fresh same-day index entry is taken: PASSED")
 
 
+# --------------------------------------------------------------------------- #
+# 4. MCX's own, later Friday square-off (user request 25 Sep 2026: "For
+# MCX trades square off time should be 5 mins before market closes on
+# Friday night" - MCX's Friday session runs to ~23:30 IST, well past
+# NSE's 15:30 close, so it needs its own cutoff instead of sharing the
+# NSE-close-based FRIDAY_SQUARE_OFF_TIME above.)
+# --------------------------------------------------------------------------- #
+def test_10_is_mcx_friday_square_off_time():
+    with mock.patch("Swing.trading_engine.datetime") as fake_dt:
+        fake_dt.now.return_value = _at(2026, 9, 25, 23, 24)  # Friday, 1 min before MCX's cutoff
+        assert ste._is_mcx_friday_square_off_time() is False, "23:24 IST Friday is still 1 min before MCX's cutoff"
+        fake_dt.now.return_value = _at(2026, 9, 25, 23, 25)
+        assert ste._is_mcx_friday_square_off_time() is True, "23:25 IST Friday is exactly MCX's configured cutoff"
+        fake_dt.now.return_value = _at(2026, 9, 25, 23, 59)
+        assert ste._is_mcx_friday_square_off_time() is True, "stays True for the rest of Friday once crossed"
+        fake_dt.now.return_value = _at(2026, 9, 24, 23, 30)  # Thursday, same time-of-day
+        assert ste._is_mcx_friday_square_off_time() is False, "only Friday - Thursday night must not trigger it"
+        fake_dt.now.return_value = _at(2026, 9, 25, 15, 30)  # Friday, past NSE's cutoff but not MCX's
+        assert ste._is_mcx_friday_square_off_time() is False, \
+            "MCX must NOT be considered square-off time yet at 15:30 Friday - only NSE's earlier cutoff has passed"
+    print("10. _is_mcx_friday_square_off_time fires only at/after 23:25 IST on a Friday, independently "
+          "of (and later than) the NSE-scoped _is_friday_square_off_time: PASSED")
+
+
+async def test_11_monitor_tick_mcx_square_off_timing_and_scoping():
+    """THE real regression test for the 25 Sep 2026 change: at 15:30
+    Friday (past NSE's cutoff, well before MCX's), an open NSE position
+    is squared off but an open MCX position is left alone AND still gets
+    its normal exit-check this same tick (not silently ignored until
+    tonight - it just isn't FORCE-closed yet). At 23:30 Friday (past
+    MCX's own cutoff too), the MCX position finally gets squared off via
+    its own reason, scoped correctly to config.MCX_SYMBOLS."""
+    from Swing.position_store import Position
+    saved_live = dict(ste.position_store.live_positions)
+    checked = []
+
+    async def _fake_check_one_position(symbol, position):
+        checked.append(symbol)
+
+    squareoff_calls = []
+
+    async def _fake_square_off_all(reason, symbols=None):
+        squareoff_calls.append((reason, symbols))
+
+    original_check_one_position, original_square_off_all = ste._check_one_position, ste._square_off_all
+    try:
+        ste.position_store.live_positions.clear()
+        ste.position_store.live_positions["ASHOKLEY"] = Position(
+            underlying_symbol="ASHOKLEY", trading_symbol="ASHOKLEY FAKE CE", basket_type="OPTIONS", regime="BULLISH",
+            instrument_side="LONG", exchange_segment="NSE_FNO", product_type="MARGIN", quantity=500, lot_size=500,
+            entry_price=50.0, best_price=50.0, target_price=60.0, hard_stop_loss=40.0, order_id="O1",
+            pnl_multiplier=500,
+        )
+        ste.position_store.live_positions["NATURALGAS"] = Position(
+            underlying_symbol="NATURALGAS", trading_symbol="NATURALGAS FAKE FUT", basket_type="FUTURES",
+            regime="BULLISH", instrument_side="LONG", exchange_segment="MCX_COMM", product_type="MARGIN",
+            quantity=1, lot_size=1, entry_price=250.0, best_price=250.0, target_price=260.0, hard_stop_loss=240.0,
+            order_id="O2", pnl_multiplier=1250,
+        )
+        assert "NATURALGAS" in sc.MCX_SYMBOLS, "test assumes NATURALGAS is configured as an MCX symbol"
+
+        ste._square_off_all = _fake_square_off_all
+        ste._check_one_position = _fake_check_one_position
+        try:
+            with mock.patch("Swing.trading_engine.datetime") as fake_dt:
+                fake_dt.now.return_value = _at(2026, 9, 25, 15, 30)  # Friday, past NSE cutoff only
+                await ste._monitor_tick()
+                assert squareoff_calls == [("FRIDAY_SQUARE_OFF", {"ASHOKLEY"})], (
+                    f"only the non-MCX position should be squared off at 15:30 - NATURALGAS must not appear "
+                    f"in any square-off call yet, got {squareoff_calls}"
+                )
+                assert checked == ["ASHOKLEY", "NATURALGAS"], (
+                    f"BOTH positions must still get their normal exit-check this tick (ASHOKLEY's square-off "
+                    f"claim makes this a harmless no-op in the real function; NATURALGAS hasn't been squared "
+                    f"off at all yet and needs a REAL exit-check so it can still exit on its own signals "
+                    f"before tonight's forced close), got {checked}"
+                )
+
+            squareoff_calls.clear()
+            with mock.patch("Swing.trading_engine.datetime") as fake_dt:
+                fake_dt.now.return_value = _at(2026, 9, 25, 23, 30)  # Friday, past MCX's cutoff too
+                await ste._monitor_tick()
+                assert squareoff_calls == [
+                    ("FRIDAY_SQUARE_OFF", {"ASHOKLEY"}), ("MCX_FRIDAY_SQUARE_OFF", sc.MCX_SYMBOLS),
+                ], f"once MCX's own cutoff has also passed, it must get its own scoped square-off call too, got {squareoff_calls}"
+        finally:
+            ste._square_off_all, ste._check_one_position = original_square_off_all, original_check_one_position
+    finally:
+        ste.position_store.live_positions.clear()
+        ste.position_store.live_positions.update(saved_live)
+    print("11. _monitor_tick leaves an open MCX position alone (with a normal exit-check) past NSE's "
+          "Friday cutoff, and only force-closes it once MCX's own later cutoff arrives: PASSED")
+
+
 async def main():
     print("=== Swing overnight market-hours gate + Friday square-off test suite ===\n")
     test_1_nse_symbol_gated_to_nse_hours()
@@ -327,6 +429,8 @@ async def main():
     test_7_is_index_square_off_time()
     await test_8_square_off_all_symbol_scoping()
     await test_9_monitor_tick_squares_off_index_only_and_keeps_normal_flow_for_others()
+    test_10_is_mcx_friday_square_off_time()
+    await test_11_monitor_tick_mcx_square_off_timing_and_scoping()
     print("\nALL SWING OVERNIGHT-GATE + FRIDAY-SQUARE-OFF CHECKS PASSED")
 
 

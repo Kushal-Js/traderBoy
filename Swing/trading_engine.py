@@ -139,9 +139,20 @@ def _is_friday_square_off_time() -> bool:
     so _monitor_tick's square-off call fires - harmlessly, _square_off_all
     is a no-op once positions are actually flat - on every remaining tick
     of the day, and the entry-evaluation section it gates out alongside
-    stays skipped for the rest of Friday too."""
+    stays skipped for the rest of Friday too. NON-MCX symbols only since
+    25 Sep 2026 - see _is_mcx_friday_square_off_time for MCX's own,
+    later-in-the-day counterpart."""
     now = _now_ist()
     return now.weekday() == 4 and now >= _parse_hhmm_today(config.FRIDAY_SQUARE_OFF_TIME)
+
+
+def _is_mcx_friday_square_off_time() -> bool:
+    """MCX_SYMBOLS-only counterpart to _is_friday_square_off_time - see
+    config.MCX_FRIDAY_SQUARE_OFF_TIME's own docstring. Same weekday==4
+    (Friday) gate, just a later time-of-day since MCX's own Friday session
+    runs well past NSE's close."""
+    now = _now_ist()
+    return now.weekday() == 4 and now >= _parse_hhmm_today(config.MCX_FRIDAY_SQUARE_OFF_TIME)
 
 
 def _is_index_square_off_time() -> bool:
@@ -1264,14 +1275,38 @@ async def _sync_pending_exit_orders() -> None:
 # Monitor loop
 # --------------------------------------------------------------------------- #
 async def _monitor_tick() -> None:
-    if config.FRIDAY_SQUARE_OFF_ENABLED and _is_friday_square_off_time():
+    friday_square_off_now = config.FRIDAY_SQUARE_OFF_ENABLED and _is_friday_square_off_time()
+    if friday_square_off_now:
         # Weekly, not daily - see config.FRIDAY_SQUARE_OFF_TIME's own
-        # docstring. Skips the ordinary exit-check/entry-scan below
-        # entirely for the rest of Friday: _square_off_all is itself the
-        # exit path once this fires (retried harmlessly every tick until
-        # actually flat), and there is no point evaluating new entries
-        # that would just have to carry over the weekend anyway.
-        await _square_off_all("FRIDAY_SQUARE_OFF")
+        # docstring. Scoped to non-MCX symbols only since 25 Sep 2026 -
+        # MCX_SYMBOLS positions get their own, later square-off below
+        # instead (config.MCX_FRIDAY_SQUARE_OFF_TIME), since MCX's Friday
+        # session runs well past this NSE-close-based time.
+        non_mcx_open = {s for s in position_store.live_positions if s not in config.MCX_SYMBOLS}
+        await _square_off_all("FRIDAY_SQUARE_OFF", symbols=non_mcx_open)
+
+    mcx_friday_square_off_now = config.FRIDAY_SQUARE_OFF_ENABLED and _is_mcx_friday_square_off_time()
+    if mcx_friday_square_off_now:
+        # MCX's own Friday square-off, 5 minutes before ITS OWN close (see
+        # config.MCX_FRIDAY_SQUARE_OFF_TIME's own docstring) - same
+        # weekend-gap-avoidance point as the NSE one above, just timed off
+        # MCX's own much-later close instead. Retried harmlessly every
+        # tick until actually flat, same pattern as every other
+        # _square_off_all usage here.
+        await _square_off_all("MCX_FRIDAY_SQUARE_OFF", symbols=config.MCX_SYMBOLS)
+
+    if friday_square_off_now:
+        # No point evaluating new entries for the rest of Friday - they'd
+        # just have to be immediately closed again (non-MCX) or carry into
+        # tonight's MCX square-off anyway. MCX positions still get their
+        # normal exit-check below (unlike before 25 Sep 2026, when this
+        # branch returned early for every symbol) since they aren't forced
+        # flat until MCX_FRIDAY_SQUARE_OFF_TIME fires later in the day -
+        # _check_one_position's own pending_exit_order_id guard makes this
+        # a harmless no-op for the non-MCX positions just squared off
+        # above.
+        for symbol, position in list(position_store.live_positions.items()):
+            await _check_one_position(symbol, position)
         return
 
     index_square_off_now = config.INDEX_DAILY_SQUARE_OFF_ENABLED and _is_index_square_off_time()
