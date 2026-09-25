@@ -222,7 +222,24 @@ def _candle_start_for(t: datetime, interval_minutes: int) -> datetime:
 def _update_bar(st: _SymbolState, ltp: float, cum_volume: float, t: datetime) -> Optional[dict]:
     """Identical algorithm to underlying_candle_feed.py's own _update_bar -
     see that module's docstring for the mid-day-subscribe volume-baseline
-    reasoning, not re-derived here."""
+    reasoning, not re-derived here.
+
+    Real incident (25 Sep 2026): COPPER's very first tick of the day
+    (05:30 IST, pre-market - MCX doesn't open COPPER until ~09:00) arrived
+    with ltp=0 (a malformed/keepalive packet, not a real trade) and, since
+    it landed right after the day-rollover reset below set current_bar_
+    start=None, became that bar's bootstrap price - producing a real,
+    persisted open=high=low=close=0.0 bar. That one corrupted bar then
+    fed structure_break.py's adaptive EMA/ATR bands for the 5m and 15m
+    legs (via Swing/signals.py's own ws_candles_fn hook), flipping both to
+    a false BEARISH regime while a clean REST-only read of the same
+    period showed BULLISH on all three timeframes - directly caused
+    combined==0 (no 3-way agreement) when it should have been +1. Fix:
+    reject ltp<=0 outright, before it can seed OR update any bar - a
+    zero/negative price is never a real trade, on any exchange this feed
+    subscribes to."""
+    if ltp <= 0:
+        return None
     bar_start = _candle_start_for(t, BASE_INTERVAL_MINUTES)
     completed = None
     if st.current_bar_start is None:
