@@ -213,6 +213,7 @@ def price_past_giveback_floor(side: str, ltp: float, floor: float) -> bool:
 
 def broker_stop_trigger_and_limit(
     side: str, fill_price: float, quantity: int, cap_rs: float, gap_multiple: float,
+    hard_stop_pct: Optional[float] = None,
 ) -> Tuple[float, float]:
     """The broker-side SL-L order's (trigger_price, limit_price) - direct
     port of Options/trading_engine.py's own formula for LONG; the SHORT
@@ -224,14 +225,35 @@ def broker_stop_trigger_and_limit(
     inverted from a LONG's protective SELL, whose stop sits BELOW price
     with its limit BELOW the trigger. Getting this sign wrong produces a
     stop that can never fire (or fires backwards) - see this module's own
-    test file for the case that catches it."""
+    test file for the case that catches it.
+
+    hard_stop_pct (optional): when given, the trigger is the TIGHTER
+    (smaller-loss) of this flat cap_rs/quantity formula and the position's
+    own percentage-based hard_stop_loss (see hard_stop_for) - not just the
+    cap_rs one alone. Added 25 Sep 2026 after a real incident: for a
+    cheap, large-quantity option (VEDL, fill 2.95 x qty 1150), cap_rs/
+    quantity (3.91) EXCEEDED the fill price itself, driving the trigger
+    negative and getting the whole SL-L order rejected by Dhan (DH-905
+    Invalid Price) - the position was left with no broker-side stop until
+    the internal poll-loop's own MAX_LOSS_HIT check eventually caught it,
+    ~20 minutes later. Taking the tighter of the two - not just falling
+    back to the pct-based one when the cap_rs one is outright invalid -
+    also self-heals any future case where the cap_rs trigger is
+    technically positive but still looser than a sane percentage stop.
+    Defaults to None (old cap_rs-only behavior) so any caller that
+    doesn't pass it - including this module's own test file - is
+    unaffected; only trading_engine.py's real entry path passes it."""
     per_unit_cap = cap_rs / quantity
     gap = cap_rs * gap_multiple / quantity
     if side == "LONG":
         trigger = fill_price - per_unit_cap
+        if hard_stop_pct is not None:
+            trigger = max(trigger, fill_price * (1 - hard_stop_pct))
         limit = trigger - gap
     else:
         trigger = fill_price + per_unit_cap
+        if hard_stop_pct is not None:
+            trigger = min(trigger, fill_price * (1 + hard_stop_pct))
         limit = trigger + gap
     return trigger, limit
 

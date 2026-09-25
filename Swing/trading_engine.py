@@ -709,6 +709,7 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
             # pnl_multiplier's own docstring.
             trigger_price, limit_price = broker_stop_trigger_and_limit(
                 side, fill_price, pnl_multiplier, config.MAX_LOSS_PROTECTION_RS, config.BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE,
+                hard_stop_pct=config.HARD_STOP_LOSS_PCT,
             )
             try:
                 stop_tag = _gen_tag("SL", symbol)
