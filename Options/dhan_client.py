@@ -2132,7 +2132,14 @@ class DhanWrapper:
         wherever a stale streak left off."""
         remarks = str(resp.get("remarks")) if isinstance(resp, dict) else ""
         if not ("DH-904" in remarks or "Rate_Limit" in remarks or "Too many" in remarks):
-            self._market_data_consecutive_rate_limit_hits = 0
+            # Same lock as the increment below - audit finding, CODE_AUDIT_
+            # 2026-09-25.md (round 2): this reset used to run unlocked
+            # while called concurrently from executor threads across all
+            # four packages, racing the increment's own read-modify-write
+            # and potentially corrupting the shared streak count (too
+            # short or stale-doubled cooldown).
+            with self._market_data_lock:
+                self._market_data_consecutive_rate_limit_hits = 0
             return
         with self._market_data_lock:
             self._market_data_consecutive_rate_limit_hits += 1
