@@ -1594,20 +1594,34 @@ class DhanWrapper:
         when Tradehull's per-leg lookup came back empty. Same filter
         columns/logic as _nearby_option_candidates below, just without an
         already-known expiry_date to filter by (that's the whole point -
-        this is how it gets discovered)."""
-        df = self.instruments().copy()
-        df["ContractExpiration"] = pd.to_datetime(df["SEM_EXPIRY_DATE"], errors="coerce").dt.date
+        this is how it gets discovered).
+
+        Two-stage filter (25 Sep 2026 perf fix, see trading-skills'
+        memory-audit findings): the full instrument master is ~206k rows /
+        ~125MB in memory (measured live) - copying and date-parsing the
+        WHOLE thing before filtering down to one underlying's handful of
+        rows was a real, avoidable multi-hundred-KB-to-125MB allocation on
+        every call, on a ~960MB droplet. Filters on the cheap, already-
+        typed columns (exchange/symbol-prefix/option-type - none need
+        parsing) FIRST to shrink to a tiny subset, copies THAT, then only
+        date-parses the subset. AND is order-independent, so the final
+        row set and values are byte-identical to before - this only
+        changes how much gets copied/parsed to reach them."""
         exchange = "MCX" if is_mcx else "NSE"
-        today = datetime.now(IST).date()
-        mask = (
-            (df["SEM_EXM_EXCH_ID"] == exchange)
-            & (df["SEM_CUSTOM_SYMBOL"].str.startswith(f"{underlying_symbol.upper()} "))
-            & (df["SEM_OPTION_TYPE"] == option_type)
-            & (df["ContractExpiration"] >= today)
+        full = self.instruments()
+        prefilter = (
+            (full["SEM_EXM_EXCH_ID"] == exchange)
+            & (full["SEM_CUSTOM_SYMBOL"].str.startswith(f"{underlying_symbol.upper()} "))
+            & (full["SEM_OPTION_TYPE"] == option_type)
         )
-        if is_mcx and "SM_SYMBOL_NAME" in df.columns:
-            mask = mask & (df["SM_SYMBOL_NAME"] == underlying_symbol.upper())
-        rows = df[mask]
+        if is_mcx and "SM_SYMBOL_NAME" in full.columns:
+            prefilter = prefilter & (full["SM_SYMBOL_NAME"] == underlying_symbol.upper())
+        df = full[prefilter].copy()
+        if df.empty:
+            return None
+        df["ContractExpiration"] = pd.to_datetime(df["SEM_EXPIRY_DATE"], errors="coerce").dt.date
+        today = datetime.now(IST).date()
+        rows = df[df["ContractExpiration"] >= today]
         if rows.empty:
             return None
         return rows["ContractExpiration"].min()
@@ -1637,19 +1651,26 @@ class DhanWrapper:
         Tradehull's own ATM_Strike_Selection adds this exact extra
         condition only for its MCX branch (commodity naming needs the
         disambiguation the NSE stock/index branches don't), so this
-        mirrors that rather than inventing a new filter."""
-        df = self.instruments().copy()
-        df["ContractExpiration"] = pd.to_datetime(df["SEM_EXPIRY_DATE"], errors="coerce").dt.date
+        mirrors that rather than inventing a new filter.
+
+        Two-stage filter (25 Sep 2026 perf fix) - same reasoning as
+        _nearest_listed_expiry above: filter on the cheap columns first to
+        shrink from ~206k rows to one underlying's handful before copying
+        or date-parsing anything. Byte-identical result, far less copied."""
         exchange = "MCX" if is_mcx else "NSE"
-        mask = (
-            (df["SEM_EXM_EXCH_ID"] == exchange)
-            & (df["SEM_CUSTOM_SYMBOL"].str.startswith(f"{underlying_symbol.upper()} "))
-            & (df["ContractExpiration"] == atm.expiry_date)
-            & (df["SEM_OPTION_TYPE"] == option_type)
+        full = self.instruments()
+        prefilter = (
+            (full["SEM_EXM_EXCH_ID"] == exchange)
+            & (full["SEM_CUSTOM_SYMBOL"].str.startswith(f"{underlying_symbol.upper()} "))
+            & (full["SEM_OPTION_TYPE"] == option_type)
         )
-        if is_mcx and "SM_SYMBOL_NAME" in df.columns:
-            mask = mask & (df["SM_SYMBOL_NAME"] == underlying_symbol.upper())
-        rows = df[mask].copy()
+        if is_mcx and "SM_SYMBOL_NAME" in full.columns:
+            prefilter = prefilter & (full["SM_SYMBOL_NAME"] == underlying_symbol.upper())
+        df = full[prefilter].copy()
+        if df.empty:
+            return [atm]
+        df["ContractExpiration"] = pd.to_datetime(df["SEM_EXPIRY_DATE"], errors="coerce").dt.date
+        rows = df[df["ContractExpiration"] == atm.expiry_date].copy()
         if rows.empty:
             return [atm]
         rows["SEM_STRIKE_PRICE"] = rows["SEM_STRIKE_PRICE"].astype(float)
