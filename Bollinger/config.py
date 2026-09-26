@@ -17,10 +17,19 @@ strategy-30day-backtest.md and this repo's own
 backtest_bollinger_vortex_9symbols_30day.py, which this package's
 Bollinger/signals.py ports its indicator math from verbatim.
 
-SCOPE, v1: NSE EQUITY symbols only. No MCX/index handling - the backtest
-never covered those, and this is a brand-new strategy, not a place to add
-untested scope. data/bollinger_watchlist starts empty; the user adds
-symbols explicitly post-deploy.
+SCOPE: NSE EQUITY symbols, plus MCX commodities and NSE INDEX options
+(NIFTY/BANKNIFTY) - added 26 Sep 2026, user request ("Update Bollinger
+strategy to trade in MCX and Index Options also"), direct follow-up to
+that day's own MCX/index backtest (see trading-skills' learnings/
+bollinger-vortex-strategy-30day-backtest.md's "MCX (COPPER, NATURALGAS) +
+index (NIFTY, BANKNIFTY) backtest" section). Underlying-reference/market-
+hours dispatch (Bollinger/signals.py) and instrument resolution/pnl_
+multiplier (Bollinger/trading_engine.py) mirror Swing's own MCX/INDEX
+handling exactly - MCX pnl_multiplier is read from the SAME shared
+Swing.mcx_registry (not a duplicate Bollinger-local copy - it's a
+physical-instrument fact, not a strategy parameter). data/bollinger_
+watchlist starts empty; the user adds symbols explicitly post-deploy -
+same file already holds NIFTY/BANKNIFTY as of this change.
 
 PAPER_MODE_ENABLED defaults to FALSE, deliberately, unlike every other
 strategy in this codebase's history (Options/Futures/Luxury/Swing all
@@ -62,10 +71,22 @@ MAX_CONCURRENT_TRADES = int(os.getenv("BOLLINGER_MAX_CONCURRENT_TRADES", "5"))
 BASKET_TYPE = "OPTIONS"  # only mode this package implements - always a LONG CE/PE, never futures/equity/short
 QUANTITY_LOTS = int(os.getenv("BOLLINGER_QUANTITY_LOTS", "1"))
 OPTIONS_PRODUCT = os.getenv("BOLLINGER_OPTIONS_PRODUCT", "MARGIN")
+# MCX's own product type (26 Sep 2026, MCX support) - same default as
+# Swing's own SWING_MCX_PRODUCT, independently configurable.
+MCX_PRODUCT = os.getenv("BOLLINGER_MCX_PRODUCT", "MARGIN")
 ORDER_TAG_PREFIX = os.getenv("BOLLINGER_ORDER_TAG_PREFIX", "Bol")
 FUND_BUCKET = "primary"  # see module docstring - shares Swing's bucket, not a new one
 FUNDS_CHECK_ENABLED = os.getenv("BOLLINGER_FUNDS_CHECK_ENABLED", "true").lower() == "true"
 FUNDS_CHECK_BUFFER_RS = float(os.getenv("BOLLINGER_FUNDS_CHECK_BUFFER_RS", "0"))
+
+# Which watchlist symbols are NSE index options rather than plain NSE
+# equity options (26 Sep 2026, MCX/index support) - same default set and
+# same "just a symbol-name set, membership resolved live" convention as
+# Swing's own config.INDEX_SYMBOLS. MCX membership itself is NEVER a
+# static set (see Swing/mcx_registry.py's own docstring) - it's resolved
+# live via dhan_wrapper.is_mcx_commodity, config-free, and reused as-is
+# here rather than duplicated.
+INDEX_SYMBOLS = {s.strip().upper() for s in os.getenv("BOLLINGER_INDEX_SYMBOLS", "NIFTY,BANKNIFTY").split(",") if s.strip()}
 
 # ---------------------------------------------------------------------------
 # Risk - MAX_LOSS_PROTECTION_RS is an absolute rupee circuit-breaker, same
@@ -82,6 +103,25 @@ BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE = float(os.getenv("BOLLINGER_BROKER_STOP_LOS
 ENTRY_RETRY_COOLDOWN_SECONDS = int(os.getenv("BOLLINGER_ENTRY_RETRY_COOLDOWN_SECONDS", "180"))
 LTP_STALE_FORCE_EXIT_MINUTES = float(os.getenv("BOLLINGER_LTP_STALE_FORCE_EXIT_MINUTES", "5"))
 MARKET_OPEN_TIME = os.getenv("BOLLINGER_MARKET_OPEN_TIME", "09:00")
+
+# ---------------------------------------------------------------------------
+# Market hours / square-off policy (26 Sep 2026, user request: "Update
+# market hours and timings and Square OFF policies as we have for SWING
+# strategy currently") - same three rules, same default timings, same
+# reasoning as Swing/config.py's own FRIDAY_SQUARE_OFF_TIME/MCX_FRIDAY_
+# SQUARE_OFF_TIME/INDEX_DAILY_SQUARE_OFF_TIME (see those docstrings for
+# the full incident history - weekend-gap protection for every
+# non-MCX/non-index symbol, MCX's own later Friday close, and NIFTY/
+# BANKNIFTY's own daily (not just weekly) no-overnight-carry rule).
+# Independently configurable from Swing's own via the BOLLINGER_ prefix,
+# but same defaults - see Swing/trading_engine.py's _monitor_tick for the
+# enforcement logic this package's own _monitor_tick now mirrors.
+# ---------------------------------------------------------------------------
+FRIDAY_SQUARE_OFF_ENABLED = os.getenv("BOLLINGER_FRIDAY_SQUARE_OFF_ENABLED", "true").lower() == "true"
+FRIDAY_SQUARE_OFF_TIME = os.getenv("BOLLINGER_FRIDAY_SQUARE_OFF_TIME", "15:25")
+MCX_FRIDAY_SQUARE_OFF_TIME = os.getenv("BOLLINGER_MCX_FRIDAY_SQUARE_OFF_TIME", "23:25")
+INDEX_DAILY_SQUARE_OFF_ENABLED = os.getenv("BOLLINGER_INDEX_DAILY_SQUARE_OFF_ENABLED", "true").lower() == "true"
+INDEX_DAILY_SQUARE_OFF_TIME = os.getenv("BOLLINGER_INDEX_DAILY_SQUARE_OFF_TIME", "15:25")
 
 # ---------------------------------------------------------------------------
 # Monitor loop cadence - own values, independent of Swing's own tick loop

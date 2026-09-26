@@ -36,7 +36,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from Options.dhan_client import dhan_wrapper, IST
@@ -52,22 +52,51 @@ def _now_ist() -> datetime:
 
 def _symbol_market_open(symbol: str) -> bool:
     """Same per-symbol market-hours gate reasoning as Swing/signals.py's
-    own _symbol_market_open - v1 scope is NSE equity only, so this is
-    always the NSE_EQ segment (no MCX branch needed here)."""
+    own _symbol_market_open (26 Sep 2026: extended to match it exactly,
+    now that this package also trades MCX/index - see config.py's own
+    module docstring). An index (config.INDEX_SYMBOLS) shares NSE cash-
+    market hours with a plain equity, same as Swing's own version - only
+    MCX gets its own, longer session."""
     now = _now_ist()
-    if now.weekday() >= 5:
+    if now.weekday() >= 5:  # Saturday/Sunday - neither exchange trades
         return False
-    return dhan_wrapper.is_market_open(exchange_segment="NSE_EQ")
+    segment = "MCX_COMM" if dhan_wrapper.is_mcx_commodity(symbol) else "NSE_EQ"
+    return dhan_wrapper.is_market_open(exchange_segment=segment)
+
+
+# Resolved MCX futures contract's security_id, cached per calendar day -
+# same caching rationale as Swing/signals.py's own _mcx_contract_cache
+# (added 26 Sep 2026 alongside this package's MCX support).
+_mcx_contract_cache: dict[str, tuple[date, str]] = {}
 
 
 def _underlying_reference(symbol: str) -> tuple[str, str, str]:
-    """NSE-equity-only underlying reference - see config.py's own v1 scope
-    note. WS-subscribes via Swing.candle_feed (shared feed, confirmed
-    idempotent/safe for a second package to call - see this package's own
-    architecture plan) when config.USE_WS_CANDLES is on, exactly mirroring
-    Swing/signals.py's own _underlying_reference."""
-    security_id = dhan_wrapper._equity_security_id(symbol)
-    exchange_segment, instrument_type = "NSE_EQ", "EQUITY"
+    """Underlying reference for the regime series - extended 26 Sep 2026
+    (see config.py's own module docstring) to mirror Swing/signals.py's
+    own _underlying_reference exactly: an MCX commodity resolves its
+    current futures contract (no continuous "spot" exists for one), an
+    index (config.INDEX_SYMBOLS) resolves its own index security_id
+    (IDX_I/INDEX - no SEM_INSTRUMENT_NAME=="EQUITY" row exists for an
+    index), everything else keeps the original NSE-equity path unchanged.
+    WS-subscribes via Swing.candle_feed (shared feed, confirmed idempotent/
+    safe for a second package to call - see this package's own
+    architecture plan) for all three branches when config.USE_WS_CANDLES
+    is on."""
+    is_index = symbol in config.INDEX_SYMBOLS
+    if dhan_wrapper.is_mcx_commodity(symbol):
+        today = _now_ist().date()
+        cached = _mcx_contract_cache.get(symbol)
+        if not cached or cached[0] != today:
+            contract = dhan_wrapper.get_mcx_futures_contract(symbol)
+            _mcx_contract_cache[symbol] = (today, contract.security_id)
+            logger.info("%s: resolved MCX futures contract for today's Bollinger signal reference: security_id=%s",
+                        symbol, contract.security_id)
+        security_id, exchange_segment, instrument_type = _mcx_contract_cache[symbol][1], "MCX_COMM", "FUTCOM"
+    elif is_index:
+        security_id, exchange_segment, instrument_type = dhan_wrapper.index_security_id(symbol), "IDX_I", "INDEX"
+    else:
+        security_id, exchange_segment, instrument_type = dhan_wrapper._equity_security_id(symbol), "NSE_EQ", "EQUITY"
+
     if config.USE_WS_CANDLES:
         try:
             candle_feed.ensure_subscribed(symbol, security_id, exchange_segment)

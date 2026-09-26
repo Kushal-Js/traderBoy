@@ -1,11 +1,15 @@
 """
 Core Bollinger strategy logic - structurally mirrors Swing/trading_engine.py
 (same monitor-loop/reconciliation/exit-order-management shape), simplified
-throughout for this package's narrower v1 scope: NSE EQUITY underlyings
-only, always a single-leg LONG CE or LONG PE (never futures/equity/short,
-never MCX), no profit target (MAX_LOSS_HIT -> STOP_LOSS_HIT ->
-TRAILING_STOP_HIT only - see Bollinger/position_store.py's own Position
-docstring), no Friday/index square-off (out of v1 scope).
+throughout: always a single-leg LONG CE or LONG PE (never futures/equity/
+short), no profit target (MAX_LOSS_HIT -> STOP_LOSS_HIT -> TRAILING_
+STOP_HIT only - see Bollinger/position_store.py's own Position docstring).
+
+Underlyings: NSE equity, MCX commodities, and NSE index options (NIFTY/
+BANKNIFTY) - MCX/index support and Swing's own market-hours/Friday/index
+square-off policy added 26 Sep 2026 (user request), mirroring Swing/
+trading_engine.py's identical dispatch/predicates - see config.py's own
+module docstring.
 
 Every exit/order-sync mechanic below (the stale-order-cancel-and-broker-
 quantity-reconcile sequence in _exit_position, the broker-side SL-L
@@ -44,6 +48,7 @@ from .position_store import (
 from Swing.position_store import (
     broker_stop_trigger_and_limit, hard_stop_for, unrealized_pnl_rs,
 )
+from Swing.mcx_registry import mcx_registry
 from Options.dhan_client import IST, OrderResult, OrderStatus, dhan_wrapper
 
 logger = logging.getLogger("bollinger_trading_engine")
@@ -70,6 +75,26 @@ def _parse_hhmm_today(hhmm: str) -> datetime:
     now = _now_ist()
     hour, minute = map(int, hhmm.split(":"))
     return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+# Market-hours/square-off predicates (26 Sep 2026, user request: "Update
+# market hours and timings and Square OFF policies as we have for SWING
+# strategy currently") - direct, byte-for-byte port of Swing/trading_
+# engine.py's own three predicates. See config.py's own FRIDAY_SQUARE_OFF_
+# TIME/MCX_FRIDAY_SQUARE_OFF_TIME/INDEX_DAILY_SQUARE_OFF_TIME docstrings.
+def _is_friday_square_off_time() -> bool:
+    now = _now_ist()
+    return now.weekday() == 4 and now >= _parse_hhmm_today(config.FRIDAY_SQUARE_OFF_TIME)
+
+
+def _is_mcx_friday_square_off_time() -> bool:
+    now = _now_ist()
+    return now.weekday() == 4 and now >= _parse_hhmm_today(config.MCX_FRIDAY_SQUARE_OFF_TIME)
+
+
+def _is_index_square_off_time() -> bool:
+    now = _now_ist()
+    return now.weekday() < 5 and now >= _parse_hhmm_today(config.INDEX_DAILY_SQUARE_OFF_TIME)
 
 
 def _gen_tag(prefix: str, symbol: str) -> str:
@@ -133,9 +158,16 @@ async def enter_position_for_stock(symbol: str, entry_signal: str, trigger_price
         return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
 
     loop = asyncio.get_running_loop()
+    is_mcx = dhan_wrapper.is_mcx_commodity(symbol)
     try:
         option_type = "CE" if entry_signal == "BULLISH" else "PE"
         try:
+            # get_liquid_atm_option is already MCX-capable (same call Swing
+            # uses for COPPER - see Swing/trading_engine.py's own comment on
+            # this) and index-capable (Tradehull's own ATM_Strike_Selection
+            # resolves NIFTY/BANKNIFTY natively, same as any NSE underlying -
+            # confirmed via Swing's own identical, unbranched call for
+            # INDEX_SYMBOLS) - one call for all three underlying types.
             atm = await loop.run_in_executor(None, dhan_wrapper.get_liquid_atm_option, symbol, option_type)
             if atm is None:
                 logger.info("%s: skipped - no liquid, actively-traded %s contract found nearby", symbol, option_type)
@@ -146,8 +178,32 @@ async def enter_position_for_stock(symbol: str, entry_signal: str, trigger_price
                 return {"symbol": symbol, "status": "skipped_expiry_day", "option_trading_symbol": atm.trading_symbol}
             trading_symbol, security_id, lot_size = atm.trading_symbol, atm.security_id, atm.lot_size
             quantity = lot_size * config.QUANTITY_LOTS
-            exchange_segment, product_type = "NSE_FNO", config.OPTIONS_PRODUCT
-            pnl_multiplier = quantity
+            if is_mcx:
+                exchange_segment, product_type = "MCX_COMM", config.MCX_PRODUCT
+                # NOT quantity - see Swing/position_store.py's own Position.
+                # pnl_multiplier docstring (reused here verbatim) for why
+                # MCX needs a real, separately-configured rupee-per-point
+                # multiplier instead of the tiny lot-count `quantity`.
+                # Looked up from the SAME shared Swing.mcx_registry Swing
+                # itself uses (live-reloadable, kept fresh by Swing's own
+                # monitor tick) rather than a duplicate Bollinger-local
+                # copy - it's a physical-instrument fact, not a strategy
+                # parameter. A symbol with NO configured multiplier SKIPS
+                # the real order rather than guessing (same discipline as
+                # Swing's own identical check).
+                raw_multiplier = await mcx_registry.pnl_multiplier(symbol)
+                if raw_multiplier is None:
+                    logger.error(
+                        "%s: no pnl_multiplier configured in data/mcx_config for this MCX symbol - "
+                        "skipping entry rather than guessing (would misprice every rupee-threshold "
+                        "check). Add a line to data/mcx_config, e.g. \"%s,false,<real_per_lot_qty>\".",
+                        symbol, symbol,
+                    )
+                    return {"symbol": symbol, "status": "skipped", "reason": "mcx_pnl_multiplier_not_configured"}
+                pnl_multiplier = raw_multiplier * config.QUANTITY_LOTS
+            else:
+                exchange_segment, product_type = "NSE_FNO", config.OPTIONS_PRODUCT
+                pnl_multiplier = quantity
         except Exception:  # noqa: BLE001
             logger.exception("%s: could not resolve the OPTIONS instrument for entry", symbol)
             return {"symbol": symbol, "status": "error", "reason": "instrument_resolution_failed"}
@@ -175,7 +231,8 @@ async def enter_position_for_stock(symbol: str, entry_signal: str, trigger_price
         # identical guard for the real COALINDIA incident this prevents.
         try:
             existing_order_id = await loop.run_in_executor(
-                None, dhan_wrapper.get_pending_order_id, trading_symbol, transaction_type, "NSE",
+                None, dhan_wrapper.get_pending_order_id, trading_symbol, transaction_type,
+                "MCX" if exchange_segment == "MCX_COMM" else "NSE",
             )
         except Exception:  # noqa: BLE001
             logger.exception("%s: could not check for an already-resting entry order - proceeding anyway", symbol)
@@ -322,13 +379,16 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
     """Caller MUST have already claimed via position_store.try_start_exit.
     Direct, deliberately unmodified port of Swing/trading_engine.py's own
     _exit_position, simplified: always a SELL (every position here is
-    LONG), always NSE_FNO."""
+    LONG). exchange_segment is NSE_FNO or MCX_COMM depending on the
+    underlying (26 Sep 2026, MCX support) - read off the position itself,
+    set at entry/reconciliation."""
     loop = asyncio.get_running_loop()
     net_qty_fn = dhan_wrapper.get_broker_net_quantity
+    order_exchange = "MCX" if position.exchange_segment == "MCX_COMM" else "NSE"
 
     try:
         stale_order_id = await loop.run_in_executor(
-            None, dhan_wrapper.get_pending_order_id, position.trading_symbol, "SELL", "NSE",
+            None, dhan_wrapper.get_pending_order_id, position.trading_symbol, "SELL", order_exchange,
         )
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not check for an already-outstanding SELL order before placing a new "
@@ -462,8 +522,10 @@ def _exit_on_cooldown(position: Position) -> bool:
 
 
 async def _get_ltp(position: Position) -> float:
-    """WS-cache-then-REST-fallback, direct port of Swing's own _get_ltp,
-    NSE_FNO-only (no MCX branch needed - v1 scope)."""
+    """WS-cache-then-REST-fallback, direct port of Swing's own _get_ltp -
+    trading_symbol-only, no exchange-segment branch needed here (Tradehull
+    resolves the right segment internally), same as Swing's identical
+    NSE_FNO/MCX_COMM-agnostic usage."""
     loop = asyncio.get_running_loop()
     ltp = await loop.run_in_executor(None, dhan_wrapper.get_cached_option_ltp, position.trading_symbol)
     if ltp is not None:
@@ -547,12 +609,17 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
         logger.exception("on_price_tick failed for %s", trading_symbol)
 
 
-async def _square_off_all(reason: str) -> None:
-    """Manual kill-switch - closes every open Bollinger position."""
-    positions = dict(position_store.live_positions)
+async def _square_off_all(reason: str, symbols: Optional[set[str]] = None) -> None:
+    """symbols=None (default - the manual kill-switch's own usage) closes
+    every open Bollinger position. A non-None set scopes this to just
+    those symbols (26 Sep 2026, MCX/index square-off support) - same
+    scoping Swing/trading_engine.py's own _square_off_all uses for its
+    INDEX_DAILY_SQUARE_OFF_ENABLED/Friday-MCX-split rules."""
+    positions = {s: p for s, p in position_store.live_positions.items() if symbols is None or s in symbols}
     if not positions:
         return
-    logger.info("Square-off triggered (%s) for %d open Bollinger position(s)", reason, len(positions))
+    logger.info("Square-off triggered (%s) for %d open Bollinger position(s)%s", reason, len(positions),
+                f" (scoped to {sorted(symbols)})" if symbols is not None else "")
     for symbol, position in positions.items():
         if position.pending_exit_order_id or _exit_on_cooldown(position):
             continue
@@ -594,6 +661,40 @@ async def _sync_pending_exit_orders() -> None:
 # Monitor loop
 # --------------------------------------------------------------------------- #
 async def _monitor_tick() -> None:
+    # Market-hours/square-off policy (26 Sep 2026, user request - ported
+    # from Swing/trading_engine.py's own _monitor_tick, same structure,
+    # same predicates, same reasoning - see that module's own extensive
+    # comments on each rule for the real incidents that shaped it).
+    friday_square_off_now = config.FRIDAY_SQUARE_OFF_ENABLED and _is_friday_square_off_time()
+    if friday_square_off_now:
+        # Weekly, not daily - non-MCX symbols only, MCX gets its own later
+        # square-off below (MCX's Friday session runs well past NSE's
+        # close). MCX-ness read straight off each OPEN position's own
+        # exchange_segment (ground truth), not a symbol-name list.
+        non_mcx_open = {s for s, p in position_store.live_positions.items() if p.exchange_segment != "MCX_COMM"}
+        await _square_off_all("FRIDAY_SQUARE_OFF", symbols=non_mcx_open)
+
+    mcx_friday_square_off_now = config.FRIDAY_SQUARE_OFF_ENABLED and _is_mcx_friday_square_off_time()
+    if mcx_friday_square_off_now:
+        mcx_open = {s for s, p in position_store.live_positions.items() if p.exchange_segment == "MCX_COMM"}
+        await _square_off_all("MCX_FRIDAY_SQUARE_OFF", symbols=mcx_open)
+
+    if friday_square_off_now:
+        # No point evaluating new entries for the rest of Friday. MCX
+        # positions still get their normal exit-check below (not forced
+        # flat until MCX_FRIDAY_SQUARE_OFF_TIME fires later) - concurrent
+        # (asyncio.gather), same as the normal path below.
+        positions = list(position_store.live_positions.items())
+        await asyncio.gather(*[_check_one_position(sym, pos) for sym, pos in positions])
+        return
+
+    index_square_off_now = config.INDEX_DAILY_SQUARE_OFF_ENABLED and _is_index_square_off_time()
+    if index_square_off_now:
+        # Scoped to config.INDEX_SYMBOLS (NIFTY/BANKNIFTY) only - does NOT
+        # return early: every other Bollinger symbol still gets its normal
+        # exit-check/entry-scan this tick.
+        await _square_off_all("INDEX_DAILY_SQUARE_OFF", symbols=config.INDEX_SYMBOLS)
+
     # Exits first - more urgent than looking for new entries. Concurrent
     # (asyncio.gather), same rationale as Swing's own (PERFORMANCE_AUDIT_
     # 2026-09-25.md finding).
@@ -607,6 +708,12 @@ async def _monitor_tick() -> None:
 
     from .watchlist import watchlist_store  # local import - avoids a circular import at module load time
     await watchlist_store.sync_from_file()
+    # Same live-reload treatment for the shared MCX registry (options_only/
+    # pnl_multiplier) as Swing's own monitor tick already does - cheap and
+    # idempotent even though Swing (running in the same process) already
+    # keeps this fresh; decouples Bollinger from depending on Swing's tick
+    # ordering or continued presence.
+    await mcx_registry.sync_from_file()
     symbols = await watchlist_store.symbols()
     n = len(symbols)
     if n:
@@ -619,6 +726,11 @@ async def _monitor_tick() -> None:
         if symbol in position_store.reserved_symbols:
             continue
         if await position_store.is_in_entry_cooldown(symbol):
+            continue
+        if index_square_off_now and symbol in config.INDEX_SYMBOLS:
+            # No fresh same-day NIFTY/BANKNIFTY entry once today's index
+            # square-off has fired - would defeat the entire "never carry
+            # index overnight" point within minutes.
             continue
         if not signals._symbol_market_open(symbol):
             continue
@@ -665,8 +777,10 @@ async def monitor_loop() -> None:
 async def reconcile_broker_positions() -> list[Position]:
     """Best-effort import of positions already open at Dhan and attributed
     to "Bollinger" specifically by our own opened-position history (never
-    guessed - see attribute_open_broker_position's own docstring). NSE_FNO
-    only - v1 scope never opens an MCX/equity position.
+    guessed - see attribute_open_broker_position's own docstring). Scans
+    both NSE_FNO (plain equity + index options) and MCX_COMM (26 Sep 2026,
+    MCX support) - a Bollinger position is always a LONG option in one of
+    these two segments, never equity/futures.
 
     A reconciled position's stop_pct/trailing_armed state cannot be
     recovered (it depended on the exact swing distance at entry, which
@@ -678,9 +792,12 @@ async def reconcile_broker_positions() -> list[Position]:
     here per this package's own architecture plan."""
     loop = asyncio.get_running_loop()
     fno_positions = await loop.run_in_executor(None, dhan_wrapper.get_open_fno_positions)
+    mcx_positions = await loop.run_in_executor(None, dhan_wrapper.get_open_mcx_positions)
 
     positions: list[Position] = []
-    for bp in fno_positions:
+    for bp, exchange_segment in (
+        [(p, "NSE_FNO") for p in fno_positions] + [(p, "MCX_COMM") for p in mcx_positions]
+    ):
         avg_price = bp["avg_price"]
         if not avg_price:
             logger.warning("Skipping Bollinger reconciliation for %s - broker reported no average price.",
@@ -699,11 +816,35 @@ async def reconcile_broker_positions() -> list[Position]:
         trailing_stop_dist = avg_price * stop_pct * config.TRAILING_STOP_FRACTION
         trailing_step = trailing_stop_dist * config.TRAILING_STEP_FRACTION
 
+        # pnl_multiplier: identical to quantity for NSE - looked up from
+        # the shared Swing.mcx_registry for a reconciled MCX position
+        # instead, same as a fresh entry computes it above. Fails open to
+        # `quantity` (a WRONG but non-crashing value) if somehow
+        # unconfigured, logging loudly - must never raise, or it'd break
+        # reconciliation for every OTHER already-open position too. Same
+        # pattern as Swing/trading_engine.py's own identical fallback.
+        if exchange_segment == "MCX_COMM":
+            raw_multiplier = await mcx_registry.pnl_multiplier(underlying_symbol)
+            if raw_multiplier is not None:
+                pnl_multiplier = raw_multiplier * config.QUANTITY_LOTS
+            else:
+                logger.error(
+                    "%s: reconciled MCX Bollinger position has no pnl_multiplier configured in "
+                    "data/mcx_config - falling back to quantity (%d) as the P&L multiplier, which is "
+                    "almost certainly WRONG for a commodity. Add a line to data/mcx_config, e.g. "
+                    "\"%s,false,<real_per_lot_qty>\".",
+                    underlying_symbol, quantity, underlying_symbol,
+                )
+                pnl_multiplier = quantity
+        else:
+            pnl_multiplier = quantity
+
         stop_loss_order_id = None
         if config.BROKER_STOP_LOSS_ENABLED:
             try:
                 stop_loss_order_id = await loop.run_in_executor(
-                    None, dhan_wrapper.get_pending_order_id, bp["trading_symbol"], "SELL", "NSE",
+                    None, dhan_wrapper.get_pending_order_id, bp["trading_symbol"], "SELL",
+                    "MCX" if exchange_segment == "MCX_COMM" else "NSE",
                 )
                 if stop_loss_order_id:
                     logger.info(
@@ -720,11 +861,12 @@ async def reconcile_broker_positions() -> list[Position]:
         positions.append(Position(
             underlying_symbol=underlying_symbol, trading_symbol=bp["trading_symbol"],
             resolved_option_type=bp["option_type"], instrument_side="LONG",
-            exchange_segment="NSE_FNO", product_type=bp.get("product_type") or config.OPTIONS_PRODUCT,
+            exchange_segment=exchange_segment,
+            product_type=bp.get("product_type") or (config.MCX_PRODUCT if exchange_segment == "MCX_COMM" else config.OPTIONS_PRODUCT),
             quantity=quantity, lot_size=bp.get("lot_size"), entry_price=avg_price, best_price=avg_price,
             stop_pct=stop_pct, hard_stop_loss=hard_stop_loss,
             trailing_stop_dist=trailing_stop_dist, trailing_step=trailing_step,
-            pnl_multiplier=quantity, order_id="", reconciled=True, stop_loss_order_id=stop_loss_order_id,
+            pnl_multiplier=pnl_multiplier, order_id="", reconciled=True, stop_loss_order_id=stop_loss_order_id,
         ))
 
     for pos in positions:

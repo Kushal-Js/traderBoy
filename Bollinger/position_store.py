@@ -62,7 +62,7 @@ class Position:
     trading_symbol: str
     resolved_option_type: str      # "CE" | "PE"
     instrument_side: str           # always "LONG" - a PE position is itself entered LONG, same convention as every OPTIONS entry in this repo
-    exchange_segment: str          # always "NSE_FNO" - v1 scope is NSE equity options only, see config.py's own docstring
+    exchange_segment: str          # "NSE_FNO" (NSE equity/index options) or "MCX_COMM" (MCX commodities) - see config.py's own docstring
     product_type: str
     quantity: int
     lot_size: Optional[int]
@@ -77,11 +77,13 @@ class Position:
     trailing_stop_dist: float
     trailing_step: float
     # Deliberately NO default (see Swing/position_store.py's own Position.
-    # pnl_multiplier docstring for the exact reasoning) - always identical
-    # to `quantity` for every position this package ever opens (NSE
-    # options, no MCX), but every construction site must still pass it
-    # explicitly so a future call site can never silently default to 0
-    # and make every rupee-threshold exit check permanently no-op.
+    # pnl_multiplier docstring for the exact reasoning) - identical to
+    # `quantity` for an NSE (equity/index) position, but a REAL, separately
+    # configured rupee-per-point multiplier (from the shared Swing.
+    # mcx_registry, 26 Sep 2026 MCX support) for an MCX one. Every
+    # construction site must still pass it explicitly so a future call
+    # site can never silently default to 0 and make every rupee-threshold
+    # exit check permanently no-op.
     pnl_multiplier: int
     trailing_armed: bool = False
     trailing_stop_price: Optional[float] = None
