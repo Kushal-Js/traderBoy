@@ -26,7 +26,7 @@ from Options.dhan_client import dhan_wrapper
 from . import candle_feed, config, signals
 from .mcx_registry import mcx_registry
 from .position_store import position_store
-from .trading_engine import monitor_loop, on_price_tick, reconcile_broker_positions
+from .trading_engine import _entry_backlog, monitor_loop, on_price_tick, reconcile_broker_positions
 from .watchlist import watchlist_store
 
 logger = logging.getLogger("swing_main")
@@ -218,6 +218,20 @@ async def get_mcx_config():
 @router.get("/swing/positions")
 async def get_positions():
     return await position_store.snapshot()
+
+
+@router.get("/swing/entry-backlog")
+async def get_entry_backlog():
+    """Signals that fired but couldn't be placed yet because capacity was
+    full - added 26 Sep 2026 alongside the freshness-priority entry
+    backlog (see entry_backlog.py's own module docstring). Freshest
+    (most-recently generated) first - this is also the order the next
+    freed slot will be filled in. Empty most of the time; a growing list
+    here for an extended period means capacity is the binding constraint,
+    not signal generation - a good first thing to check via
+    /capacity/max-concurrent-trades."""
+    pending = await _entry_backlog.snapshot()
+    return {"count": len(pending), "pending": pending}
 
 
 @router.get("/swing/signals")

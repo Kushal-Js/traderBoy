@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
+import capacity_control
 import reversal_filters
 from . import config
 from Options.dhan_client import IST
@@ -273,7 +274,13 @@ def broker_stop_trigger_and_limit(
 
 # --------------------------------------------------------------------------- #
 def _cap_reached(reserved_count: int) -> bool:
-    return reserved_count >= config.MAX_CONCURRENT_TRADES
+    # capacity_control.get_max_concurrent_trades checks a runtime override
+    # first (set via POST /capacity/max-concurrent-trades), falling back
+    # to config.MAX_CONCURRENT_TRADES only if none was ever set - added 26
+    # Sep 2026, user request: "this max concurrent trade capacity ... able
+    # to change without a deployment by simply updating it using an
+    # endpoint." See capacity_control.py's own module docstring.
+    return reserved_count >= capacity_control.get_max_concurrent_trades("Swing")
 
 
 class SwingPositionStore:
@@ -289,7 +296,7 @@ class SwingPositionStore:
         # a system clock jump/DST shift falsely resetting or extending it.
         self._last_failed_entry_at: Dict[str, float] = {}
 
-    async def maybe_reset_for_new_day(self) -> None:
+    async def maybe_reset_for_new_day(self) -> bool:
         """Unlike Options/position_store.py's version, this NEVER clears
         live_positions/reserved_symbols on a day boundary - Swing
         positions are meant to carry across days by design (no EOD/Friday
@@ -298,7 +305,13 @@ class SwingPositionStore:
         recovery path until the next process restart (reconcile_broker_
         positions only runs at startup) - see Options/position_store.py's
         own maybe_reset_for_new_day docstring for the identical reasoning
-        it applies when ENABLE_SQUARE_OFF is False."""
+        it applies when ENABLE_SQUARE_OFF is False.
+
+        Returns True the one tick a day boundary was actually crossed -
+        trading_engine.py's monitor_loop uses this to also clear the
+        entry_backlog (a pending signal is a "right now" read of a setup,
+        unlike a position, and should NOT survive overnight - added 26 Sep
+        2026 alongside the freshness-priority entry backlog)."""
         async with self._lock:
             today = date.today()
             if today != self._trading_day:
@@ -310,6 +323,8 @@ class SwingPositionStore:
                 self.closed_positions_today.clear()
                 self.orders_today.clear()
                 self._trading_day = today
+                return True
+            return False
 
     async def reserve_symbol(self, underlying_symbol: str) -> bool:
         """Atomic check-and-claim, one shared MAX_CONCURRENT_TRADES counter
@@ -348,7 +363,7 @@ class SwingPositionStore:
 
     async def remaining_capacity(self) -> int:
         async with self._lock:
-            return max(0, config.MAX_CONCURRENT_TRADES - len(self.reserved_symbols))
+            return max(0, capacity_control.get_max_concurrent_trades("Swing") - len(self.reserved_symbols))
 
     async def add_position(self, pos: Position) -> None:
         async with self._lock:

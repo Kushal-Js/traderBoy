@@ -107,6 +107,7 @@ from Bollinger import bollinger_main
 import universe_bucket
 import breakout_signal
 import breakout_paper_engine
+import capacity_control
 import paper_mode_control
 import underlying_candle_feed
 from Options.dhan_client import dhan_wrapper
@@ -490,6 +491,70 @@ async def set_paper_mode(payload: PaperModeRequest):
     Example body: {"strategy": "Swing", "enabled": true}"""
     await paper_mode_control.set_paper_mode(payload.strategy, payload.enabled)
     return {"strategy": payload.strategy, **_paper_mode_snapshot()[payload.strategy]}
+
+
+CAPACITY_STRATEGIES = capacity_control.STRATEGIES  # ("Swing", "Bollinger")
+
+
+class CapacityRequest(BaseModel):
+    strategy: str
+    value: int
+
+    @field_validator("strategy")
+    @classmethod
+    def valid_strategy(cls, v: str) -> str:
+        if v not in CAPACITY_STRATEGIES:
+            raise ValueError(f"strategy must be one of {CAPACITY_STRATEGIES}, got {v!r}")
+        return v
+
+    @field_validator("value")
+    @classmethod
+    def valid_value(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("value must be >= 0")
+        return v
+
+
+def _capacity_snapshot() -> dict:
+    return {
+        strategy: {
+            "max_concurrent_trades": capacity_control.get_max_concurrent_trades(strategy),
+            "source": capacity_control.capacity_source(strategy),
+        }
+        for strategy in CAPACITY_STRATEGIES
+    }
+
+
+@app.get("/capacity/max-concurrent-trades")
+async def get_max_concurrent_trades():
+    """Current MAX_CONCURRENT_TRADES for Swing/Bollinger - "source" is
+    "runtime_override" if POST /capacity/max-concurrent-trades has ever
+    set it (persisted, survives a restart), else "env_default" (that
+    strategy's own .env default - SWING_MAX_CONCURRENT_TRADES /
+    BOLLINGER_MAX_CONCURRENT_TRADES, unchanged since before this endpoint
+    existed)."""
+    return _capacity_snapshot()
+
+
+@app.post("/capacity/max-concurrent-trades")
+async def set_max_concurrent_trades(payload: CapacityRequest):
+    """Runtime capacity change, per strategy (user request 26 Sep 2026:
+    "max concurrent trade capacity is a configurable item which should be
+    able to change without a deployment by simply updating it using an
+    endpoint"). Takes effect on the very next monitor tick (position_
+    store.remaining_capacity/_cap_reached read this live, not a value
+    cached at startup - see capacity_control.py's own module docstring).
+    Persisted to data/capacity_overrides.json so it SURVIVES a restart,
+    including the automatic 08:00 IST morning-refresh restart.
+
+    Lowering this below the number of symbols currently reserved/open
+    does NOT touch any already-open or already-reserved position - it
+    only blocks new entries until enough of them close to get back under
+    the new cap.
+
+    Example body: {"strategy": "Swing", "value": 3}"""
+    await capacity_control.set_max_concurrent_trades(payload.strategy, payload.value)
+    return {"strategy": payload.strategy, **_capacity_snapshot()[payload.strategy]}
 
 
 # --------------------------------------------------------------------------- #

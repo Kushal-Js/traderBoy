@@ -38,6 +38,7 @@ import string
 from datetime import datetime
 from typing import Optional
 
+import entry_backlog
 import fund_allocation
 import paper_mode_control
 from trade_history import append_jsonl, attribute_open_broker_position
@@ -88,6 +89,14 @@ _ltp_failure_since: dict[tuple[str, datetime], datetime] = {}
 # REST call volume, pacing, or rate-limit behavior in any way - purely
 # changes which symbol goes first.
 _watchlist_scan_turn: dict[str, int] = {"i": 0}
+
+# Freshness-priority backlog for entry signals that couldn't be placed the
+# tick they fired (capacity full) - added 26 Sep 2026, user request. See
+# entry_backlog.py's own module docstring for the full design. One
+# instance per strategy (this one is Swing's own, entirely separate from
+# Bollinger's) - cleared at Swing's own day-boundary reset, see
+# monitor_loop below.
+_entry_backlog = entry_backlog.EntryBacklog()
 
 # Order-placement dispatch, keyed by Position.exchange_segment - added 12
 # Sep 2026 (Swing v2's Copper/MCX options support) to replace what used to
@@ -1478,20 +1487,28 @@ async def _monitor_tick() -> None:
         if regime:
             candidates.append((symbol, regime))
 
-    for symbol, regime in candidates:
-        # Paper-mode REPLACES real trading (23 Sep 2026, user request) - see
-        # swing_paper_engine.py's own module docstring. Checked here rather
-        # than inside enter_position_for_stock itself so a real capacity
-        # check never gates a paper-mode entry attempt. See _should_paper_
-        # trade's own docstring for the full MCX-carve-out/index/global-flag
-        # precedence (added 26 Sep 2026, user request).
-        if _should_paper_trade(symbol):
-            from . import swing_paper_engine
-            await swing_paper_engine.process_paper_entry(symbol, regime)
-            continue
-        if await position_store.remaining_capacity() <= 0:
-            break
-        await enter_position_for_stock(symbol, regime)
+    # Freshness-priority dispatch (26 Sep 2026, user request) - this tick's
+    # fresh candidates are merged into _entry_backlog alongside anything
+    # still waiting from a previous tick (capacity was full then), and the
+    # WHOLE pool is walked freshest-first: a paper-mode symbol always goes
+    # straight through (never competes for real capacity - same "paper-
+    # mode replaces real trading" semantic as before, see _should_paper_
+    # trade's own docstring), a real-mode symbol is placed only while
+    # capacity remains, and anything that misses out this tick is put back
+    # UNCHANGED (original timestamp) to compete again next tick - see
+    # entry_backlog.py's own module docstring for the full design.
+    async def _place_paper(symbol: str, regime: str) -> None:
+        from . import swing_paper_engine
+        await swing_paper_engine.process_paper_entry(symbol, regime)
+
+    await entry_backlog.dispatch(
+        _entry_backlog,
+        candidates,
+        is_paper_trade=_should_paper_trade,
+        remaining_capacity=position_store.remaining_capacity,
+        place_paper=_place_paper,
+        place_real=enter_position_for_stock,
+    )
 
 
 async def monitor_loop() -> None:
@@ -1505,7 +1522,11 @@ async def monitor_loop() -> None:
     logger.info("Swing v2 monitor loop started.")
     while True:
         try:
-            await position_store.maybe_reset_for_new_day()
+            if await position_store.maybe_reset_for_new_day():
+                # A pending entry signal is a "right now" read of a setup,
+                # unlike a position - it should NOT survive overnight (see
+                # entry_backlog.py's own module docstring).
+                await _entry_backlog.clear()
             await _sync_pending_exit_orders()
             await _monitor_tick()
         except Exception:  # noqa: BLE001

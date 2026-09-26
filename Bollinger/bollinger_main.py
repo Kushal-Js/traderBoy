@@ -19,7 +19,7 @@ from Options.dhan_client import dhan_wrapper
 
 from . import config, signals
 from .position_store import position_store
-from .trading_engine import monitor_loop, on_price_tick, reconcile_broker_positions
+from .trading_engine import _entry_backlog, monitor_loop, on_price_tick, reconcile_broker_positions
 from .watchlist import watchlist_store
 
 logger = logging.getLogger("bollinger_main")
@@ -127,6 +127,15 @@ async def get_watchlist():
 @router.get("/bollinger/positions")
 async def get_positions():
     return await position_store.snapshot()
+
+
+@router.get("/bollinger/entry-backlog")
+async def get_entry_backlog():
+    """Same freshness-priority entry backlog as Swing's own - see
+    Swing/swing_main.py's /swing/entry-backlog and entry_backlog.py's
+    module docstring. This is Bollinger's own separate instance/state."""
+    pending = await _entry_backlog.snapshot()
+    return {"count": len(pending), "pending": pending}
 
 
 @router.get("/bollinger/signals")

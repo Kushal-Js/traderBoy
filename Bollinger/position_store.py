@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
+import capacity_control
 import reversal_filters
 from . import config
 from Options.dhan_client import IST
@@ -116,7 +117,11 @@ class Position:
 
 
 def _cap_reached(reserved_count: int) -> bool:
-    return reserved_count >= config.MAX_CONCURRENT_TRADES
+    # capacity_control.get_max_concurrent_trades checks a runtime override
+    # first (set via POST /capacity/max-concurrent-trades), falling back
+    # to config.MAX_CONCURRENT_TRADES only if none was ever set - added 26
+    # Sep 2026, see capacity_control.py's own module docstring.
+    return reserved_count >= capacity_control.get_max_concurrent_trades("Bollinger")
 
 
 class BollingerPositionStore:
@@ -129,11 +134,15 @@ class BollingerPositionStore:
         self._trading_day: date = date.today()
         self._last_failed_entry_at: Dict[str, float] = {}
 
-    async def maybe_reset_for_new_day(self) -> None:
+    async def maybe_reset_for_new_day(self) -> bool:
         """Same "never clear live_positions on a day boundary" rule as
         Swing's own store - Bollinger has no EOD/Friday square-off either,
         clearing here would silently orphan real money from all future
-        exit monitoring until the next restart."""
+        exit monitoring until the next restart.
+
+        Returns True the one tick a day boundary was actually crossed -
+        see Swing/position_store.py's own version of this method for why
+        (used to also clear the entry_backlog)."""
         async with self._lock:
             today = date.today()
             if today != self._trading_day:
@@ -144,6 +153,8 @@ class BollingerPositionStore:
                 self.closed_positions_today.clear()
                 self.orders_today.clear()
                 self._trading_day = today
+                return True
+            return False
 
     async def reserve_symbol(self, underlying_symbol: str) -> bool:
         async with self._lock:
@@ -170,7 +181,7 @@ class BollingerPositionStore:
 
     async def remaining_capacity(self) -> int:
         async with self._lock:
-            return max(0, config.MAX_CONCURRENT_TRADES - len(self.reserved_symbols))
+            return max(0, capacity_control.get_max_concurrent_trades("Bollinger") - len(self.reserved_symbols))
 
     async def add_position(self, pos: Position) -> None:
         async with self._lock:

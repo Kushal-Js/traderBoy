@@ -37,6 +37,7 @@ import string
 from datetime import datetime
 from typing import Optional
 
+import entry_backlog
 import fund_allocation
 import paper_mode_control
 from trade_history import append_jsonl, attribute_open_broker_position
@@ -59,6 +60,13 @@ _ltp_failure_since: dict[tuple[str, datetime], datetime] = {}
 # Swing/trading_engine.py's own _watchlist_scan_turn (see that module's
 # docstring for the real VEDL incident this prevents).
 _watchlist_scan_turn: dict[str, int] = {"i": 0}
+
+# Freshness-priority backlog for entry signals that couldn't be placed the
+# tick they fired (capacity full) - added 26 Sep 2026, user request. See
+# entry_backlog.py's own module docstring for the full design. Bollinger's
+# own instance, entirely separate from Swing's - cleared at Bollinger's
+# own day-boundary reset, see monitor_loop below.
+_entry_backlog = entry_backlog.EntryBacklog()
 
 _LTP_FETCH_TIMEOUT_SECONDS = 10.0
 _ORDER_STATUS_TIMEOUT_SECONDS = 10.0
@@ -721,7 +729,7 @@ async def _monitor_tick() -> None:
         symbols = symbols[start:] + symbols[:start]
         _watchlist_scan_turn["i"] = (_watchlist_scan_turn["i"] + 1) % n
 
-    candidates: list[tuple[str, str, float, float, float]] = []
+    candidates: list[tuple[str, tuple[str, float, float, float]]] = []
     for i, symbol in enumerate(symbols):
         if symbol in position_store.reserved_symbols:
             continue
@@ -743,27 +751,43 @@ async def _monitor_tick() -> None:
             continue
         if result:
             side, trigger_price, stop_price, last_close = result
-            candidates.append((symbol, side, trigger_price, stop_price, last_close))
+            candidates.append((symbol, (side, trigger_price, stop_price, last_close)))
 
-    for symbol, side, trigger_price, stop_price, last_close in candidates:
-        if paper_mode_control.is_paper_mode_enabled("Bollinger"):
-            # Runtime kill-switch - see paper_mode_control.py's own
-            # docstring. No dedicated Bollinger paper engine exists (v1
-            # scope) - flipping this on simply stops real entries; any
-            # already-open real position keeps being managed for real.
-            logger.info("%s: paper mode is ON for Bollinger - skipping real entry (signal=%s)", symbol, side)
-            await _record_bollinger_event("ENTRY_SKIPPED_PAPER_MODE", symbol, {"entry_signal": side})
-            continue
-        if await position_store.remaining_capacity() <= 0:
-            break
+    # Freshness-priority dispatch (26 Sep 2026, user request) - same
+    # algorithm/rationale as Swing's own, see entry_backlog.py's module
+    # docstring and Swing/trading_engine.py's own dispatch call site.
+    async def _place_paper(symbol: str, payload: tuple[str, float, float, float]) -> None:
+        # Runtime kill-switch - see paper_mode_control.py's own docstring.
+        # No dedicated Bollinger paper engine exists (v1 scope) - flipping
+        # this on simply stops real entries; any already-open real
+        # position keeps being managed for real.
+        side, _trigger_price, _stop_price, _last_close = payload
+        logger.info("%s: paper mode is ON for Bollinger - skipping real entry (signal=%s)", symbol, side)
+        await _record_bollinger_event("ENTRY_SKIPPED_PAPER_MODE", symbol, {"entry_signal": side})
+
+    async def _place_real(symbol: str, payload: tuple[str, float, float, float]) -> None:
+        side, trigger_price, stop_price, last_close = payload
         await enter_position_for_stock(symbol, side, trigger_price, stop_price, last_close)
+
+    await entry_backlog.dispatch(
+        _entry_backlog,
+        candidates,
+        is_paper_trade=lambda _symbol: paper_mode_control.is_paper_mode_enabled("Bollinger"),
+        remaining_capacity=position_store.remaining_capacity,
+        place_paper=_place_paper,
+        place_real=_place_real,
+    )
 
 
 async def monitor_loop() -> None:
     logger.info("Bollinger monitor loop started.")
     while True:
         try:
-            await position_store.maybe_reset_for_new_day()
+            if await position_store.maybe_reset_for_new_day():
+                # A pending entry signal is a "right now" read of a setup,
+                # unlike a position - it should NOT survive overnight (see
+                # entry_backlog.py's own module docstring).
+                await _entry_backlog.clear()
             await _sync_pending_exit_orders()
             await _monitor_tick()
         except Exception:  # noqa: BLE001
