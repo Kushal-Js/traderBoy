@@ -94,6 +94,28 @@ PAPER_MODE_ENABLED = os.getenv("SWING_PAPER_MODE_ENABLED", "false").lower() == "
 # keeps managing it through to its own exit regardless.
 INDEX_PAPER_MODE_ENABLED = os.getenv("SWING_INDEX_PAPER_MODE_ENABLED", "false").lower() == "true"
 
+# MCX-only real-trading CARVE-OUT (added 26 Sep 2026, user request:
+# "Enable paper trading for SWING V3 (disable real trading) by flag but
+# only allow MCX trades to be through for SWING (allow real trading for
+# MCX entries only)... keep it disabled for paper trading for MCX only").
+# Structurally the OPPOSITE relationship to INDEX_PAPER_MODE_ENABLED above:
+# that flag ADDS paper mode for index on top of PAPER_MODE_ENABLED (ORed
+# in - either flag alone is enough). This one EXEMPTS MCX from
+# PAPER_MODE_ENABLED entirely - an MCX candidate (COPPER/NATURALGAS,
+# resolved live via dhan_wrapper.is_mcx_commodity, same config-free check
+# used everywhere else in this codebase) checks ONLY this flag, never the
+# global one. That is precisely why this needed a NEW flag rather than
+# reusing PAPER_MODE_ENABLED with an MCX exception hardcoded in: the user
+# wants MCX's real-vs-paper decision to be independently controllable, not
+# just immune to the global switch. Defaults FALSE, matching the user's
+# own explicit instruction ("keep it disabled") - MCX entries trade REAL
+# by default even while PAPER_MODE_ENABLED=true globally. See
+# Swing/trading_engine.py's _monitor_tick for where this is checked (NOT
+# ORed with PAPER_MODE_ENABLED or INDEX_PAPER_MODE_ENABLED - a genuinely
+# separate branch, since MCX is deliberately carved OUT of the global
+# flag's effect, not added into it).
+MCX_PAPER_MODE_ENABLED = os.getenv("SWING_MCX_PAPER_MODE_ENABLED", "false").lower() == "true"
+
 # ---------------------------------------------------------------------------
 # Basket-type - the ONE configurable instrument choice for every watchlist
 # stock (user request: "This basket can contain either that stock Future

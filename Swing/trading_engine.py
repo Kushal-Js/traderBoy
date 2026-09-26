@@ -166,6 +166,41 @@ def _is_index_square_off_time() -> bool:
     return now.weekday() < 5 and now >= _parse_hhmm_today(config.INDEX_DAILY_SQUARE_OFF_TIME)
 
 
+def _should_paper_trade(symbol: str) -> bool:
+    """Whether a fresh entry candidate for `symbol` should be routed to
+    swing_paper_engine.process_paper_entry instead of the real
+    enter_position_for_stock - added 26 Sep 2026, user request: "Enable
+    paper trading for SWING V3 (disable real trading) by flag but only
+    allow MCX trades to be through for SWING... have a separate flag for
+    them and keep it disabled for paper trading for MCX only."
+
+    Extracted into its own predicate (mirroring _is_friday_square_off_
+    time/_is_index_square_off_time's own precedent) specifically so this
+    real-money routing decision is directly unit-testable without
+    exercising the whole watchlist-scan/signal-evaluation loop it's
+    normally called from.
+
+    MCX (dhan_wrapper.is_mcx_commodity, config-free live check - same
+    everywhere else in this codebase) is a CARVE-OUT: it checks ONLY
+    config.MCX_PAPER_MODE_ENABLED, never the global
+    paper_mode_control.is_paper_mode_enabled("Swing") flag or config.
+    INDEX_PAPER_MODE_ENABLED. This is the opposite relationship to the
+    index flag below (which ADDS paper mode on top of the global one,
+    ORed in) - MCX is deliberately EXEMPTED from the global flag's effect
+    in either direction, so flipping Swing's global paper mode on/off for
+    the NSE-equity book never silently changes COPPER/NATURALGAS's own
+    real-vs-paper state, and vice versa. See config.py's own
+    MCX_PAPER_MODE_ENABLED docstring for the full reasoning.
+
+    Every other symbol (plain NSE equity, or INDEX_SYMBOLS) keeps the
+    original, unchanged logic: paper if EITHER the global flag OR (for an
+    index symbol specifically) config.INDEX_PAPER_MODE_ENABLED is true."""
+    if dhan_wrapper.is_mcx_commodity(symbol):
+        return config.MCX_PAPER_MODE_ENABLED
+    index_paper_only = symbol in config.INDEX_SYMBOLS and config.INDEX_PAPER_MODE_ENABLED
+    return paper_mode_control.is_paper_mode_enabled("Swing") or index_paper_only
+
+
 def _gen_tag(prefix: str, symbol: str) -> str:
     """See Options/trading_engine.py's identical helper - same DH-905
     special-character rationale (GVT&D)."""
@@ -1444,27 +1479,13 @@ async def _monitor_tick() -> None:
             candidates.append((symbol, regime))
 
     for symbol, regime in candidates:
-        index_paper_only = symbol in config.INDEX_SYMBOLS and config.INDEX_PAPER_MODE_ENABLED
-        if paper_mode_control.is_paper_mode_enabled("Swing") or index_paper_only:
-            # Paper-mode REPLACES real trading (23 Sep 2026, user request) -
-            # see swing_paper_engine.py's own module docstring. Real entry
-            # never runs while this is true - checked here rather than
-            # inside enter_position_for_stock itself so a real capacity
-            # check never gates a paper-mode entry attempt. Runtime-
-            # togglable since 24 Sep 2026 via POST /paper-mode
-            # (strategy="Swing") - see paper_mode_control.py's own
-            # docstring; config.PAPER_MODE_ENABLED remains the .env
-            # fallback when no runtime override has been set.
-            #
-            # index_paper_only (added 24 Sep 2026, user request - "add a
-            # flag to turn off real trading and start paper trading" for
-            # NIFTY/BANKNIFTY specifically) is the SAME reroute, scoped to
-            # just the two index symbols via config.INDEX_PAPER_MODE_
-            # ENABLED - every non-index symbol is completely unaffected by
-            # this flag and keeps trading real, even while it's on. This
-            # narrower flag is intentionally NOT part of the runtime
-            # /paper-mode endpoint (see that endpoint's own docstring) -
-            # still .env-only, unchanged.
+        # Paper-mode REPLACES real trading (23 Sep 2026, user request) - see
+        # swing_paper_engine.py's own module docstring. Checked here rather
+        # than inside enter_position_for_stock itself so a real capacity
+        # check never gates a paper-mode entry attempt. See _should_paper_
+        # trade's own docstring for the full MCX-carve-out/index/global-flag
+        # precedence (added 26 Sep 2026, user request).
+        if _should_paper_trade(symbol):
             from . import swing_paper_engine
             await swing_paper_engine.process_paper_entry(symbol, regime)
             continue
