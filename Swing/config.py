@@ -377,6 +377,15 @@ REGIME_REFRESH_SECONDS = int(os.getenv("SWING_REGIME_REFRESH_SECONDS", "60"))
 # ("Super trend signals... like all other brokers do").
 SUPERTREND_PERIOD = int(os.getenv("SWING_SUPERTREND_PERIOD", "10"))
 SUPERTREND_MULTIPLIER = float(os.getenv("SWING_SUPERTREND_MULTIPLIER", "3.0"))
+# Drives the entry-trigger/exit-reversal Supertrend (signals.get_supertrend_
+# state(symbol), no explicit interval passed) AND the Day Range branch's own
+# Supertrend (signals._fetch_day_range_state_once, index symbols only) -
+# NOT the 15-min filter-leg Supertrend, which always passes its own interval
+# explicitly (REGIME_SLOW_INTERVAL_MINUTES) regardless of this value.
+# Overridden to 1 when ENTRY_STRATEGY_VERSION="v4" - see that flag's own
+# docstring below for the backtest this is named after and a known gap:
+# the live WS candle feed (Swing/candle_feed.py, BASE_INTERVAL_MINUTES=5)
+# cannot yet serve 1-min bars, so v4 has no live effect until that's fixed.
 SUPERTREND_INTERVAL_MINUTES = int(os.getenv("SWING_SUPERTREND_INTERVAL_MINUTES", "5"))
 SUPERTREND_REFRESH_SECONDS = int(os.getenv("SWING_SUPERTREND_REFRESH_SECONDS", "15"))
 ENABLE_SUPERTREND_EXIT = os.getenv("SWING_ENABLE_SUPERTREND_EXIT", "true").lower() == "true"
@@ -478,17 +487,53 @@ WS_STALE_AFTER_SECONDS = float(os.getenv("SWING_WS_STALE_AFTER_SECONDS", "90"))
 #     whatever was configured, both say what everyone already means by
 #     "v3" - see trading_engine.py's own `in ("v2", "v3")` check.
 #
+#   "v4" (added 25 Sep 2026, user request, named after the SONACOMS
+#     30-day backtest comparison - see trading-skills' config-tuning-
+#     history.md for the full numbers: +Rs 40,670/44.1% WR over 60 trades
+#     vs v2/v3's +Rs 17,946/80% WR over 10 trades on the same window).
+#     SAME v2/v3 combined entry filter and exit ladder - takes the exact
+#     same trading_engine.py branch as v2/v3 (see that file's own `in
+#     ("v2", "v3", "v4")` check) - the ONLY difference is that the entry-
+#     trigger/exit-reversal (and Day Range, for index symbols) Supertrend
+#     reads 1-min candles instead of the default 5-min, via the
+#     SUPERTREND_INTERVAL_MINUTES override just below. The 15-min filter-
+#     leg Supertrend and the regime EMA200 5m/15m reading are UNCHANGED -
+#     those never read SUPERTREND_INTERVAL_MINUTES (see that constant's
+#     own docstring).
+#     KNOWN LIVE GAP, not yet fixed (see that same docstring): Swing's WS
+#     candle feed (Swing/candle_feed.py) only ever buckets raw ticks into
+#     5-min BASE_INTERVAL_MINUTES bars and can only resample UP to
+#     multiples of 5 - asking it for 1-min bars raises ValueError, which
+#     get_supertrend_state's broad except/fail-open swallows silently
+#     (logs "could not fetch Supertrend state (1min)", keeps stale/None
+#     state) whenever the WS feed is fresh - i.e. during ordinary market
+#     hours. v4 will NOT get real live signals until candle_feed.py's own
+#     base bucket is changed (a materially larger, separate change - every
+#     Swing signal derives from that same feed, not just v4's) or its REST
+#     fallback path is made to trigger for a 1-min request specifically.
+#     Backtests above use real historical 1-min REST data directly, so
+#     they are NOT affected by this gap - it is a live-only limitation.
+#
 # Default stays "v1" - a fresh deploy with no explicit override must
 # reproduce today's live behavior byte-for-byte, never silently switch
-# strategies. Switching to "v2"/"v3" is a deliberate, explicit .env change.
+# strategies. Switching to "v2"/"v3"/"v4" is a deliberate, explicit .env
+# change.
 ENTRY_STRATEGY_VERSION = os.getenv("SWING_ENTRY_STRATEGY_VERSION", "v1").lower()
-if ENTRY_STRATEGY_VERSION not in ("v1", "v2", "v3"):
+if ENTRY_STRATEGY_VERSION not in ("v1", "v2", "v3", "v4"):
     import logging
     logging.getLogger(__name__).error(
-        "SWING_ENTRY_STRATEGY_VERSION=%r is not one of v1/v2/v3 - falling back to v1.",
+        "SWING_ENTRY_STRATEGY_VERSION=%r is not one of v1/v2/v3/v4 - falling back to v1.",
         ENTRY_STRATEGY_VERSION,
     )
     ENTRY_STRATEGY_VERSION = "v1"
+
+# v4 forces the entry-trigger/exit-reversal (and Day Range) Supertrend
+# onto 1-min candles by overriding SUPERTREND_INTERVAL_MINUTES (already
+# defined above, defaults to 5) - see ENTRY_STRATEGY_VERSION's own "v4"
+# docstring above for the backtest this is named after and the known
+# live-feed gap (candle_feed.py can't yet serve 1-min bars over WS).
+if ENTRY_STRATEGY_VERSION == "v4":
+    SUPERTREND_INTERVAL_MINUTES = 1
 
 # ---------------------------------------------------------------------------
 # Capacity (user request: "Keep Max Concurrent Trade capacity as 2 as of

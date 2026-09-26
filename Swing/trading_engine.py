@@ -349,7 +349,7 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
     blocking IS the volume-floor incident above) and those retries must
     keep happening.
 
-    Every OTHER symbol (the v1/v2/v3 branches below) gets the same "wait
+    Every OTHER symbol (the v1/v2/v3/v4 branches below) gets the same "wait
     for the agreement to break and reform" rule, generalized rather than
     duplicated (user request 24 Sep 2026 - the same failure mode is
     possible here too: a price-based exit firing mid-candle while the
@@ -379,7 +379,7 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
     st = await signals.get_supertrend_state(symbol)
     if st is None:
         return None
-    if config.ENTRY_STRATEGY_VERSION in ("v2", "v3"):
+    if config.ENTRY_STRATEGY_VERSION in ("v2", "v3", "v4"):
         st15 = await signals.get_supertrend_state(symbol, config.REGIME_SLOW_INTERVAL_MINUTES)
         if st15 is None:
             return None
