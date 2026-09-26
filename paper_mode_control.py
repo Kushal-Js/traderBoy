@@ -51,7 +51,7 @@ from pathlib import Path
 
 logger = logging.getLogger("paper_mode_control")
 
-STRATEGIES = ("Options", "Futures", "Luxury", "Swing")
+STRATEGIES = ("Options", "Futures", "Luxury", "Swing", "Bollinger")
 
 OVERRIDE_FILE = Path("data/paper_mode_overrides.json")
 
@@ -79,6 +79,9 @@ def _env_default(strategy: str) -> bool:
         return bool(cfg.BREAKOUT_PAPER_MODE_ENABLED)
     if strategy == "Swing":
         from Swing import config as cfg
+        return bool(cfg.PAPER_MODE_ENABLED)
+    if strategy == "Bollinger":
+        from Bollinger import config as cfg
         return bool(cfg.PAPER_MODE_ENABLED)
     raise ValueError(f"unknown strategy {strategy!r} - must be one of {STRATEGIES}")
 
