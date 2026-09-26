@@ -1477,7 +1477,14 @@ async def _monitor_tick() -> None:
             continue
         if not signals._symbol_market_open(symbol):
             continue
-        if i:
+        # Only pace before a symbol likely to actually hit Dhan's REST API
+        # this tick - a WS-fresh symbol is served entirely from candle_
+        # feed's in-memory cache, no network call at all, so pacing it was
+        # pure dead time (audit finding, 26 Sep 2026: at 15 watchlist
+        # symbols this was burning 4.9 of every 5s tick on nothing). See
+        # signals.is_symbol_ws_fresh's own docstring for the heuristic and
+        # why an occasional miss is an acceptable tradeoff.
+        if i and not signals.is_symbol_ws_fresh(symbol):
             await asyncio.sleep(config.SYMBOL_PACING_SECONDS)
         try:
             regime = await _evaluate_entry_signal(symbol)

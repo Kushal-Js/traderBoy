@@ -214,6 +214,30 @@ def _get_intraday_series(
     return data
 
 
+def is_symbol_ws_fresh(symbol: str) -> bool:
+    """True when `symbol`'s WS-reconstructed candle feed has ticked within
+    config.WS_STALE_AFTER_SECONDS - the same freshness check
+    `_get_intraday_series` itself uses to decide WS-cache vs. REST-fallback,
+    exposed here for `trading_engine.py`'s entry-scan loop (added 26 Sep
+    2026, user-flagged audit finding): SYMBOL_PACING_SECONDS between
+    watchlist symbols exists to protect Dhan's REST rate limit, but was
+    being applied unconditionally, even for a symbol that's about to be
+    served entirely from this in-memory WS cache with no network call at
+    all - at today's 15-symbol Swing watchlist that was burning 4.9 of
+    every 5-second tick on pacing nothing. The scan loop now only pays the
+    pacing cost before a symbol that's actually likely to hit REST.
+
+    Heuristic, not a guarantee - a WS-fresh symbol can still fall through
+    to REST inside `_get_intraday_series` if it doesn't yet have enough
+    bars or doesn't span the prior day (e.g. right after being added to
+    the watchlist). That's an acceptable, rare miss: the worst case is one
+    unpaced REST call, not a burst of them, and the existing per-cache-key
+    dedup (`RAW_SERIES_DEDUP_SECONDS`) and DH-904 backoff handling remain
+    in place as the real rate-limit safety nets regardless of this
+    heuristic's accuracy."""
+    return config.USE_WS_CANDLES and candle_feed.is_fresh(symbol, config.WS_STALE_AFTER_SECONDS)
+
+
 # --------------------------------------------------------------------------- #
 # Regime: 5-min EMA(200) vs 15-min EMA(200)
 # --------------------------------------------------------------------------- #

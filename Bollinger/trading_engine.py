@@ -742,7 +742,11 @@ async def _monitor_tick() -> None:
             continue
         if not signals._symbol_market_open(symbol):
             continue
-        if i:
+        # Only pace before a symbol likely to actually hit Dhan's REST API
+        # this tick - see Swing/trading_engine.py's identical comment and
+        # signals.is_symbol_ws_fresh's own docstring for the full
+        # rationale (audit finding, 26 Sep 2026).
+        if i and not signals.is_symbol_ws_fresh(symbol):
             await asyncio.sleep(config.SYMBOL_PACING_SECONDS)
         try:
             result = await _evaluate_entry_signal(symbol)

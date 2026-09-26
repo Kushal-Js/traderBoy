@@ -310,6 +310,30 @@ async def record_alert(strategy: str, option_type: str, stocks: list[str], cfg=N
         w = _watchlist(strategy, option_type)
         now = datetime.now(IST).isoformat()
         cleaned = [s for s in (str(raw).strip().upper() for raw in stocks) if s]
+        # This is an NSE-equity-only scanner (_equity_security_id is its
+        # only resolution path, via _fetch_5m_hybrid/_evaluate_signal_sync)
+        # - an index or MCX-commodity symbol can never resolve there and
+        # was failing every single scan cycle forever once added (audit
+        # finding, 26 Sep 2026: NIFTY/BANKNIFTY/NATURALGAS - legitimately
+        # Swing's watchlist symbols, handled through Swing's own dedicated
+        # index/MCX path, not this one - were repeatedly reaching here via
+        # the shared universe_bucket/curated-universe seed and burning a
+        # thread-pool submission + a traceback every cycle for nothing).
+        # Filtered at this single insertion point (the only place any
+        # symbol enters w.items, whether from a live Chartink alert or the
+        # curated-universe/universe_bucket seed) so the fix covers every
+        # source uniformly, not just one caller.
+        if cleaned:
+            from Options.dhan_client import dhan_wrapper
+            skipped = [s for s in cleaned if s in dhan_wrapper.INDEX_SECURITY_ID or dhan_wrapper.is_mcx_commodity(s)]
+            if skipped:
+                logger.info(
+                    "%s %s: skipping %s - index/MCX-commodity symbol(s), this is an NSE-equity-only scanner",
+                    strategy, option_type, skipped,
+                )
+                cleaned = [s for s in cleaned if s not in skipped]
+        if not cleaned:
+            return
         async with _LOCK:
             await _ensure_today_locked(w)
             for sym in cleaned:

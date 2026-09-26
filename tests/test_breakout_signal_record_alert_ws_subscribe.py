@@ -36,6 +36,7 @@ import sys
 import tempfile
 import types
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -46,6 +47,7 @@ load_dotenv(REPO_ROOT / ".env")
 
 import breakout_signal as bs  # noqa: E402
 import trade_history  # noqa: E402
+from Options.dhan_client import dhan_wrapper  # noqa: E402
 
 
 def _fake_cfg(ws_on: bool) -> types.SimpleNamespace:
@@ -149,11 +151,17 @@ def main():
     trade_history.HISTORY_DIR = tmp_history
     try:
         print("=== breakout_signal.py record_alert() WS-subscribe coverage fix test suite ===\n")
-        test_1_ws_on_subscribes_cleaned_uppercased_symbols()
-        test_2_ws_off_never_subscribes()
-        test_3_cfg_none_never_subscribes_from_record_alert_itself()
-        test_4_watchlist_contents_identical_regardless_of_cfg()
-        test_5_empty_stocks_never_subscribes()
+        # record_alert now also calls dhan_wrapper.is_mcx_commodity (the 26
+        # Sep 2026 index/MCX filter, see test_breakout_signal_index_mcx_
+        # filter.py for that fix's own tests) - mocked here since none of
+        # this file's symbols are index/MCX and this suite predates, and
+        # is not about, that check.
+        with mock.patch.object(dhan_wrapper, "is_mcx_commodity", return_value=False):
+            test_1_ws_on_subscribes_cleaned_uppercased_symbols()
+            test_2_ws_off_never_subscribes()
+            test_3_cfg_none_never_subscribes_from_record_alert_itself()
+            test_4_watchlist_contents_identical_regardless_of_cfg()
+            test_5_empty_stocks_never_subscribes()
         print("\nALL RECORD_ALERT WS-SUBSCRIBE TESTS PASSED")
     finally:
         trade_history.HISTORY_DIR = saved_history_dir

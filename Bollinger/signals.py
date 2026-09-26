@@ -132,6 +132,19 @@ def _get_intraday_series(symbol: str, security_id: str, exchange_segment: str, i
     return data
 
 
+def is_symbol_ws_fresh(symbol: str) -> bool:
+    """True when `symbol`'s WS-reconstructed candle feed has ticked within
+    config.WS_STALE_AFTER_SECONDS - same freshness check `_get_intraday_
+    series` itself uses, exposed for `trading_engine.py`'s entry-scan loop
+    (added 26 Sep 2026, user-flagged audit finding, same fix as Swing's own
+    - see Swing/signals.py's own `is_symbol_ws_fresh` docstring for the
+    full rationale: SYMBOL_PACING_SECONDS was being applied unconditionally
+    even for a symbol about to be served entirely from this in-memory
+    cache with no network call at all. Heuristic, not a guarantee - see
+    that same docstring for why an occasional miss is acceptable here."""
+    return config.USE_WS_CANDLES and candle_feed.is_fresh(symbol, config.WS_STALE_AFTER_SECONDS)
+
+
 # --------------------------------------------------------------------------- #
 # Pure indicator/state-machine math - ported verbatim from
 # backtest_bollinger_vortex_9symbols_30day.py. See that file's own
