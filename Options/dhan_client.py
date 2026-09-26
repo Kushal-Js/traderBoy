@@ -740,11 +740,21 @@ class DhanWrapper:
     def _equity_security_id(self, underlying_symbol: str) -> str:
         """Resolves an underlying's own NSE cash-segment security_id (for
         Supertrend candle fetches) - distinct from any of its option
-        contracts' security_ids."""
+        contracts' security_ids. Filters SEM_SERIES=="EQ" (not just
+        SEM_INSTRUMENT_NAME=="EQUITY") - found live 26 Sep 2026: MOTHERSON
+        has TWO NSE EQUITY rows sharing the exact SEM_TRADING_SYMBOL
+        "MOTHERSON", a live equity share (SEM_SERIES="EQ") and an unrelated
+        listed non-convertible debenture (SEM_SERIES="D1", SEM_CUSTOM_SYMBOL
+        "SMIL-6.5%-20092027-NCD") - row.iloc[0] silently picked the bond,
+        which has its own (near-empty) intraday candle history, so a
+        Supertrend/regime fetch for MOTHERSON would silently get zero bars
+        instead of a clean error. "EQ" is NSE's standard cash-equity series
+        code; a bond/debenture series (D1 etc.) is never a valid answer here."""
         df = self.instruments()
         row = df[
             (df["SEM_EXM_EXCH_ID"] == "NSE")
             & (df["SEM_INSTRUMENT_NAME"] == "EQUITY")
+            & (df["SEM_SERIES"] == "EQ")
             & (df["SEM_TRADING_SYMBOL"] == underlying_symbol)
         ]
         if row.empty:
@@ -758,14 +768,17 @@ class DhanWrapper:
         alone and takes row.iloc[-1], the exact non-uniqueness footgun that
         function's own docstring warns about (it's built for options/
         futures trading symbols, not plain equity). This uses the same
-        precise EQUITY+exact-symbol filter as _equity_security_id above,
-        so there's exactly one matching row, and returns the tick size in
+        precise EQUITY+SEM_SERIES=="EQ"+exact-symbol filter as
+        _equity_security_id above (see that function's docstring for the
+        real MOTHERSON bond/equity collision this guards against), so
+        there's exactly one matching row, and returns the tick size in
         the same rupee-converted form _instrument_meta does (Dhan reports
         SEM_TICK_SIZE in paise)."""
         df = self.instruments()
         row = df[
             (df["SEM_EXM_EXCH_ID"] == "NSE")
             & (df["SEM_INSTRUMENT_NAME"] == "EQUITY")
+            & (df["SEM_SERIES"] == "EQ")
             & (df["SEM_TRADING_SYMBOL"] == underlying_symbol)
         ]
         if row.empty:

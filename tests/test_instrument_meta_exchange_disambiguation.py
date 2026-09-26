@@ -138,10 +138,43 @@ def test_5_is_mcx_commodity_distinguishes_real_mcx_from_nse():
         W._client = saved
 
 
+def _equity_row(security_id, series, custom_symbol, lot_units=1.0, tick_size=5.0):
+    return {
+        "SEM_EXM_EXCH_ID": "NSE", "SEM_INSTRUMENT_NAME": "EQUITY", "SEM_SERIES": series,
+        "SEM_TRADING_SYMBOL": "MOTHERSON", "SEM_CUSTOM_SYMBOL": custom_symbol,
+        "SEM_SMST_SECURITY_ID": security_id, "SEM_LOT_UNITS": lot_units, "SEM_TICK_SIZE": tick_size,
+    }
+
+
+def test_6_equity_security_id_skips_a_colliding_debenture_row():
+    """Reproduces the actual 26 Sep 2026 incident found while running a
+    52-week-high backtest: MOTHERSON has TWO NSE EQUITY rows sharing the
+    exact SEM_TRADING_SYMBOL "MOTHERSON" - the real equity share
+    (SEM_SERIES="EQ") and an unrelated listed non-convertible debenture
+    (SEM_SERIES="D1", custom symbol "SMIL-6.5%-20092027-NCD"). Before the
+    fix, row.iloc[0] silently picked whichever came first in the scrip
+    master - for MOTHERSON that was the bond, which returns a near-empty
+    intraday candle history (0 bars), silently breaking every Supertrend/
+    regime signal for that symbol instead of raising a clear error."""
+    saved = _install_fake_instruments(pd.DataFrame([
+        _equity_row(25510, "D1", "SMIL-6.5%-20092027-NCD", lot_units=1.0, tick_size=5.0),
+        _equity_row(4204, "EQ", "Samvardhana Motherson International", lot_units=1.0, tick_size=1.0),
+    ]))
+    try:
+        sid = W._equity_security_id("MOTHERSON")
+        assert sid == "4204", f"expected the real equity row (4204), got {sid!r} - the colliding debenture row won"
+        meta = W._equity_instrument_meta("MOTHERSON")
+        assert meta["security_id"] == "4204", f"expected 4204, got {meta['security_id']!r}"
+        print("6. _equity_security_id/_equity_instrument_meta skip a colliding debenture row for the same trading symbol: PASSED")
+    finally:
+        W._client = saved
+
+
 if __name__ == "__main__":
     test_1_expected_exchange_mcx_picks_the_real_row_over_the_colliding_nse_one()
     test_2_expected_exchange_nse_picks_a_genuine_nse_row()
     test_3_expected_exchange_with_no_match_raises_instead_of_falling_back()
     test_4_no_expected_exchange_still_resolves_an_unambiguous_symbol()
     test_5_is_mcx_commodity_distinguishes_real_mcx_from_nse()
+    test_6_equity_security_id_skips_a_colliding_debenture_row()
     print("\nAll tests passed.")
