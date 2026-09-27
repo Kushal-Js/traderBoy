@@ -393,15 +393,17 @@ def _paper_mode_snapshot() -> dict:
 
 @app.get("/paper-mode")
 async def get_paper_mode():
-    """Current paper-mode state for Options/Futures/Luxury/Swing -
-    "source" is "runtime_override" if POST /paper-mode has ever set it
-    (persisted, survives a restart), else "env_default" (that strategy's
-    own .env default - BREAKOUT_PAPER_MODE_ENABLED for Options/Futures/
-    Luxury, PAPER_MODE_ENABLED for Swing - unchanged since before this
-    endpoint existed). Swing's separate, narrower INDEX_PAPER_MODE_ENABLED
-    (NIFTY/BANKNIFTY-only) is NOT part of this - see POST /paper-mode's
-    own docstring for why. See POST /paper-mode's own docstring for the
-    full design."""
+    """Current paper-mode state for Options/Luxury/Swing/Bollinger -
+    "source" is normally "env_default" (that strategy's own .env default -
+    BREAKOUT_PAPER_MODE_ENABLED for Options/Luxury, PAPER_MODE_ENABLED for
+    Swing/Bollinger). "runtime_override" should only ever show up
+    transiently, right after a POST /paper-mode call that couldn't write
+    .env for some reason (see paper_mode_control._sync_env_file's own
+    docstring, added 27 Sep 2026 after a real incident where an
+    undated override silently disagreed with .env for days). Swing's
+    separate, narrower INDEX_PAPER_MODE_ENABLED (NIFTY/BANKNIFTY-only) is
+    NOT part of this - see POST /paper-mode's own docstring for why. See
+    POST /paper-mode's own docstring for the full design."""
     return _paper_mode_snapshot()
 
 
@@ -411,17 +413,20 @@ async def set_paper_mode(payload: PaperModeRequest):
     2026: "turn paper trading on or off... without deployment just by
     calling an endpoint", extended same day to cover Swing: "update the
     swing strategy method with a similar kind of a dynamic endpoint").
-    Options/Futures/Luxury each already had their own
-    BREAKOUT_PAPER_MODE_ENABLED flag (added 22 Sep 2026); Swing already
-    had its own PAPER_MODE_ENABLED flag (added 23 Sep 2026) - this makes
-    each one a runtime override instead of a fixed .env value read once
-    at startup, persisted to data/paper_mode_overrides.json (gitignored,
-    same convention as Swing/watchlist.py's own runtime-editable file) so
-    it SURVIVES a restart - including the automatic 08:00 IST morning-
-    refresh restart - rather than silently reverting to whatever .env
-    says. See paper_mode_control.py for the actual state and full design
-    reasoning (including why it lives in its own small shared module
-    rather than inside breakout_paper_engine.py or swing_paper_engine.py).
+    Options/Luxury each already had their own BREAKOUT_PAPER_MODE_ENABLED
+    flag (added 22 Sep 2026); Swing/Bollinger already had their own
+    PAPER_MODE_ENABLED flag - this call rewrites `.env`'s own line for
+    that strategy to match (added 27 Sep 2026, after a real incident
+    where a runtime override silently disagreed with .env for days with
+    nothing surfacing it), so a restart - including the automatic 08:00
+    IST morning-refresh restart - comes up in the SAME mode this call
+    set, without depending on a separate override file at all. If .env
+    genuinely can't be written, a runtime override (data/paper_mode_
+    overrides.json, gitignored) is kept as a fail-safe so the in-process
+    behavior is still correct even though restart-survival isn't - see
+    paper_mode_control.py for the actual state and full design reasoning
+    (including why it lives in its own small shared module rather than
+    inside breakout_paper_engine.py or swing_paper_engine.py).
 
     Swing-specific scope note: this controls ONLY Swing's global
     PAPER_MODE_ENABLED equivalent (real trading on/off for every Swing

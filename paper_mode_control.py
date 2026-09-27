@@ -41,12 +41,28 @@ strategy INTO paper mode leaves its current real position(s) to be
 managed for real through to their own close; flipping OUT of paper mode
 leaves any currently-open PAPER position simulated to its own close
 too. Only entries from the toggle point on are affected.
-"""
+
+**`.env` sync, added 27 Sep 2026 (real incident):** the runtime-override
+design above has a real gap - an override can silently diverge from
+`.env`'s own default for days with nothing surfacing the disagreement,
+which is exactly what happened to Swing (its `.env` said paper-mode-on,
+but an undated runtime override had it real-trading instead, discovered
+by chance while investigating an unrelated finding). `set_paper_mode`
+now also rewrites `.env`'s own line for that strategy to match, then
+DROPS the override entirely - collapsing back to a single source of
+truth (`.env`) instead of leaving two mechanisms that can quietly
+disagree. This means `GET /paper-mode` reporting `source: "env_default"`
+is now the normal, expected state after any change, not just the
+never-touched state; `"runtime_override"` should only ever be seen
+transiently, if `.env` couldn't be written for some reason (see
+`_sync_env_file`'s own docstring for the fail-safe behavior in that
+case)."""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 
 logger = logging.getLogger("paper_mode_control")
@@ -54,6 +70,14 @@ logger = logging.getLogger("paper_mode_control")
 STRATEGIES = ("Options", "Luxury", "Swing", "Bollinger")
 
 OVERRIDE_FILE = Path("data/paper_mode_overrides.json")
+ENV_FILE = Path(".env")
+
+_ENV_VAR_NAMES = {
+    "Options": "OPTIONS_BREAKOUT_PAPER_MODE_ENABLED",
+    "Luxury": "LUXURY_BREAKOUT_PAPER_MODE_ENABLED",
+    "Swing": "SWING_PAPER_MODE_ENABLED",
+    "Bollinger": "BOLLINGER_PAPER_MODE_ENABLED",
+}
 
 _overrides: dict[str, bool] = {}
 _overrides_loaded = False
@@ -114,11 +138,70 @@ def paper_mode_source(strategy: str) -> str:
     return "runtime_override" if strategy in _overrides else "env_default"
 
 
+def _sync_env_file(strategy: str, enabled: bool) -> bool:
+    """Rewrites `strategy`'s own paper-mode line in ENV_FILE to match
+    `enabled` - or appends it if the line doesn't exist yet. Returns
+    True on success. Best-effort by design: a failure here (e.g. no
+    .env in this working directory) must never block the runtime change
+    itself, which has already taken effect via the in-memory override
+    regardless of whether this succeeds - only the "survives a restart
+    without needing the override" guarantee depends on it."""
+    var_name = _ENV_VAR_NAMES.get(strategy)
+    if var_name is None:
+        return False
+    try:
+        if not ENV_FILE.exists():
+            logger.warning(
+                "%s: %s not found (cwd=%s) - the runtime override still fully applies for "
+                "this process, but .env's own default was NOT updated to match, so a future "
+                "restart would revert to whatever .env currently says",
+                strategy, ENV_FILE, Path.cwd(),
+            )
+            return False
+        new_value = "true" if enabled else "false"
+        lines = ENV_FILE.read_text().splitlines(keepends=True)
+        pattern = re.compile(rf"^{re.escape(var_name)}\s*=")
+        for i, line in enumerate(lines):
+            if pattern.match(line):
+                lines[i] = f"{var_name}={new_value}\n"
+                ENV_FILE.write_text("".join(lines))
+                logger.info("%s: .env's own %s rewritten to %s", strategy, var_name, new_value)
+                return True
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(f"{var_name}={new_value}\n")
+        ENV_FILE.write_text("".join(lines))
+        logger.info("%s: .env had no %s line - appended %s=%s", strategy, var_name, var_name, new_value)
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s: could not update .env's own %s - the runtime override still fully applies "
+            "for this process, but a restart before this is fixed manually would revert to "
+            "whatever .env currently says",
+            strategy, var_name,
+        )
+        return False
+
+
 async def set_paper_mode(strategy: str, enabled: bool) -> None:
     _load_overrides()
     async with _lock:
         _overrides[strategy] = enabled
         OVERRIDE_FILE.parent.mkdir(parents=True, exist_ok=True)
         OVERRIDE_FILE.write_text(json.dumps(_overrides, indent=2))
-    logger.info("%s: paper mode set to %s via runtime override (persisted to %s)",
-                strategy, enabled, OVERRIDE_FILE)
+        env_synced = _sync_env_file(strategy, enabled)
+        if env_synced:
+            # .env now agrees with the requested state - the override is
+            # redundant going forward, and dropping it is what actually
+            # closes the "override silently disagrees with .env" gap
+            # this whole mechanism exists to prevent. If .env couldn't be
+            # written, the override is deliberately KEPT so the runtime
+            # behavior stays correct even though the restart-survival
+            # guarantee doesn't (see _sync_env_file's own docstring).
+            del _overrides[strategy]
+            OVERRIDE_FILE.write_text(json.dumps(_overrides, indent=2))
+    logger.info(
+        "%s: paper mode set to %s (%s)", strategy, enabled,
+        ".env updated, no runtime override needed" if env_synced
+        else f"runtime override only, persisted to {OVERRIDE_FILE} - .env NOT updated, see warning above",
+    )
