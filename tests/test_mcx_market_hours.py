@@ -51,10 +51,17 @@ from Options.dhan_client import IST, DhanWrapper
 
 
 def _at(hh: int, mm: int):
-    """A datetime on today's date at the given IST wall-clock time, for
-    patching datetime.now(IST) inside dhan_client's own module namespace."""
-    today = datetime.now(IST).date()
-    return datetime.combine(today, dtime(hh, mm), tzinfo=IST)
+    """A datetime at the given IST wall-clock time, on a FIXED known
+    weekday (Wed 23 Sep 2026), for patching datetime.now(IST) inside
+    dhan_client's own module namespace. NOT "today's real date" (that was
+    the original, pre-27-Sep-2026 version of this helper) - is_market_
+    open() is now weekday-aware (27 Sep 2026 fix), so a test date that
+    silently drifts with whatever day it's actually run on would pass or
+    fail depending on the calendar - confirmed the hard way: this file's
+    own tests started failing the first time it happened to run on a
+    Sunday, exposing that every assertion here was implicitly assuming a
+    weekday all along."""
+    return datetime(2026, 9, 23, hh, mm, tzinfo=IST)  # a Wednesday
 
 
 def test_1_default_segment_is_unchanged_nse_hours():
@@ -116,12 +123,37 @@ def test_4_both_segments_still_report_closed_outside_their_own_hours():
           "(the fix widens MCX's window, it doesn't make everything look perpetually open): PASSED")
 
 
+def test_5_weekend_reports_closed_regardless_of_time_of_day():
+    """27 Sep 2026 fix: is_market_open() used to check ONLY time-of-day,
+    so a Saturday/Sunday during what would otherwise be live hours was
+    wrongly reported as open - confirmed live via journalctl: IndexScalping
+    /paper_engine.py's own separate, unrelated time-only check had the
+    exact same gap and produced 73 real DH-904 rate-limit hits over one
+    weekend. Fixing is_market_open() itself closes this for every current
+    caller (Options/Futures/Luxury's monitor_loop `elif is_market_open():`
+    branch, the is_amo checks in place_market_order/place_equity_market_
+    order/place_mcx_market_order) without needing a separate fix at each
+    call site."""
+    w = DhanWrapper.__new__(DhanWrapper)
+    with mock.patch("Options.dhan_client.datetime") as fake_dt:
+        fake_dt.strptime = datetime.strptime
+        fake_dt.now.return_value = datetime(2026, 9, 26, 11, 0, tzinfo=IST)  # Saturday, well within NSE hours
+        assert w.is_market_open() is False, \
+            "a Saturday at 11:00 IST must report closed even though 11:00 is within 09:15-15:30"
+        assert w.is_market_open(exchange_segment="MCX_COMM") is False, \
+            "MCX must also report closed on Saturday - this codebase treats no exchange as weekend-open"
+        fake_dt.now.return_value = datetime(2026, 9, 27, 11, 0, tzinfo=IST)  # Sunday
+        assert w.is_market_open() is False
+    print("5. Saturday/Sunday reports closed regardless of time-of-day, for both NSE and MCX segments: PASSED")
+
+
 def main():
     print("=== MCX-aware is_market_open() fix test suite ===\n")
     test_1_default_segment_is_unchanged_nse_hours()
     test_2_mcx_segment_checks_mcx_hours_and_catches_the_real_incident_time()
     test_3_place_mcx_market_order_passes_mcx_segment_through()
     test_4_both_segments_still_report_closed_outside_their_own_hours()
+    test_5_weekend_reports_closed_regardless_of_time_of_day()
     print("\nALL MCX market-hours FIX CHECKS PASSED")
 
 

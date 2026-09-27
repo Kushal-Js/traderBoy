@@ -317,8 +317,7 @@ async def test_9_monitor_tick_squares_off_index_only_and_keeps_normal_flow_for_o
         ste._evaluate_entry_signal = _fake_evaluate
         ste._square_off_all = _fake_square_off_all
         try:
-            with mock.patch("Swing.trading_engine.datetime") as fake_dt:
-                fake_dt.now.return_value = _at(2026, 9, 21, 15, 30)  # plain Monday, past 15:25 cutoff
+            with _frozen_now(_at(2026, 9, 21, 15, 30)):  # plain Monday, past 15:25 cutoff
                 await ste._monitor_tick()
                 assert squareoff_calls == [("INDEX_DAILY_SQUARE_OFF", sc.INDEX_SYMBOLS)], squareoff_calls
                 assert eval_calls == ["ASHOKLEY"], (

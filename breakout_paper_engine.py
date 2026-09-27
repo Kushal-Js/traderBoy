@@ -481,18 +481,31 @@ async def paper_engine_monitor_loop() -> None:
     """Started once from main.py's own lifespan (like UniverseDispatcher) -
     cheap no-op when no package has BREAKOUT_PAPER_MODE_ENABLED on (nothing
     in _positions to check). Reuses Options.config.MONITOR_INTERVAL_SECONDS
-    for cadence, same as every other monitor loop in this codebase."""
+    for cadence, same as every other monitor loop in this codebase.
+
+    Market-hours gated since 27 Sep 2026 - _check_one had NO time/weekday
+    check anywhere (unlike every other monitor loop in this codebase), and
+    this engine has no EOD/Friday square-off of its own either, so a real
+    open paper position would have been polled (LTP + Supertrend/EMA-
+    cross/liquidity refresh, all real Dhan calls) every MONITOR_INTERVAL_
+    SECONDS continuously - nights, weekends, all of it - for however many
+    days it took to organically hit its own exit condition. Found via a
+    proactive sweep after the same gap was confirmed live in IndexScalping/
+    paper_engine.py (73 DH-904 hits/weekend) and fixed in dhan_wrapper.
+    is_market_open() itself (now weekday-aware) - reusing that single
+    fixed function here rather than reimplementing the check."""
     from Options import config as options_cfg
     logger.info("Breakout-scanner paper-trading engine monitor loop started.")
     while True:
         try:
             _reset_daily_counters_if_new_day()
-            async with _lock:
-                snapshot = list(_positions.items())
-            await asyncio.gather(*[
-                _check_one(strategy, symbol, position)
-                for (strategy, symbol), position in snapshot if position is not None
-            ])
+            if dhan_wrapper.is_market_open():
+                async with _lock:
+                    snapshot = list(_positions.items())
+                await asyncio.gather(*[
+                    _check_one(strategy, symbol, position)
+                    for (strategy, symbol), position in snapshot if position is not None
+                ])
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001

@@ -805,8 +805,28 @@ class DhanWrapper:
         fixed: an MCX order placed well within MCX's live evening session
         used to be wrongly tagged AMO because this checked only NSE hours,
         which caused Swing to treat it as a failed entry and rapid-retry,
-        placing several duplicate real orders before this was fixed)."""
-        now = datetime.now(IST).time()
+        placing several duplicate real orders before this was fixed).
+
+        Weekday-checked since 27 Sep 2026 - this used to check ONLY time-
+        of-day, so a Saturday/Sunday at (say) 11:00 IST was wrongly
+        reported as "open" (11:00 falls inside 09:15-15:30 regardless of
+        the day). Confirmed live via journalctl: IndexScalping/paper_
+        engine.py's own separate, unrelated time-only check had the exact
+        same gap and produced 73 real DH-904 rate-limit hits over one
+        weekend - fixing THIS function closes the same hole for every
+        current caller of is_market_open() itself: Options/Futures/
+        Luxury's monitor_loop `elif is_market_open():` branch (real
+        positions, currently only dormant-safe because Friday square-off
+        happens to be enabled for all three today) and the is_amo checks
+        in place_market_order/place_equity_market_order (a Saturday order
+        attempt must be tagged AMO, never treated as a live regular
+        order). Swing/Bollinger's own _symbol_market_open already checks
+        weekday before ever calling this, so this addition is redundant-
+        but-harmless there - not a behavior change for either."""
+        now_dt = datetime.now(IST)
+        if now_dt.weekday() >= 5:  # Saturday/Sunday - no exchange this codebase trades on is open
+            return False
+        now = now_dt.time()
         if exchange_segment == "MCX_COMM":
             open_t = datetime.strptime(config.MCX_MARKET_OPEN_TIME, "%H:%M").time()
             close_t = datetime.strptime(config.MCX_MARKET_CLOSE_TIME, "%H:%M").time()

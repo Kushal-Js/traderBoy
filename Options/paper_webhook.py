@@ -297,11 +297,25 @@ async def poll_loop() -> None:
     """Mirrors trading_engine.monitor_loop's exit logic exactly (reusing
     _exit_reason_for/_supertrend_signal_for directly), applied to the
     separate paper position pool. Also applies the same one-time EOD
-    square-off as the real strategy."""
+    square-off as the real strategy.
+
+    Weekday-gated since 27 Sep 2026 - this had no day-of-week check at
+    all, only a time-of-day EOD boundary (square_off_at), so a paper
+    position that happened to survive into a weekend (or simply existed
+    on one, since nothing here ever checked) would either get polled
+    continuously (the `now < square_off_at` branch, same real Dhan LTP/
+    Supertrend calls every MONITOR_INTERVAL_SECONDS as any weekday) or
+    force-closed against stale weekend data (the EOD branch) - found via
+    a proactive sweep after the identical gap was confirmed live in
+    IndexScalping/paper_engine.py (73 DH-904 hits/weekend) and fixed at
+    the source in dhan_wrapper.is_market_open() (now weekday-aware)."""
     logger.info("Paper-trade poll loop started (PAPER ONLY - no real orders will be placed).")
     squared_off_today_for: set = set()
     while True:
         try:
+            if not dhan_wrapper.is_market_open():
+                await asyncio.sleep(config.MONITOR_INTERVAL_SECONDS)
+                continue
             loop = asyncio.get_running_loop()
             now = datetime.now(IST)
             square_off_at = _parse_hhmm_today(config.SQUARE_OFF_TIME)
