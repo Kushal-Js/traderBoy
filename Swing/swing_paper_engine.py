@@ -346,15 +346,24 @@ async def _check_one(symbol: str, position: Position) -> None:
 async def paper_engine_monitor_loop() -> None:
     """Started once from main.py's own lifespan, alongside breakout_paper_
     engine's own task - cheap no-op when config.PAPER_MODE_ENABLED is off
-    (nothing in _positions to check)."""
+    (nothing in _positions to check).
+
+    Market-hours gated since 27 Sep 2026 - found via a proactive sweep
+    (this module isn't currently imported/scheduled by main.py at all, so
+    this was dead code with zero live impact when found - see main.py's
+    own "DISABLED 26 Sep 2026" comment - but breakout_paper_engine.py had
+    the identical gap in code that WAS live, confirmed 24/7 weekend
+    polling there, so this is fixed defensively for whenever this module
+    is eventually re-enabled rather than left as a landmine)."""
     logger.info("Swing paper-trading engine monitor loop started.")
     while True:
         try:
-            async with _lock:
-                snapshot = list(_positions.items())
-            await asyncio.gather(*[
-                _check_one(symbol, position) for symbol, position in snapshot if position is not None
-            ])
+            if dhan_wrapper.is_market_open():
+                async with _lock:
+                    snapshot = list(_positions.items())
+                await asyncio.gather(*[
+                    _check_one(symbol, position) for symbol, position in snapshot if position is not None
+                ])
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
