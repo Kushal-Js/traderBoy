@@ -3,7 +3,7 @@ Shadow trade evaluator - the "arm" (user request 10 Sep 2026: "deploy an
 arm to continuously monitor trades based on incoming alerts and evaluate
 PnL").
 
-For EVERY distinct symbol alerted to Options / Luxury / Futures today
+For EVERY distinct symbol alerted to Options / Luxury today
 (whether or not the real bot took it - blocked by a trading window, a
 capacity cap, the old cutoff, a cooldown, choppy filter, whatever), open
 ONE simulated CE-ATM position at the first alert time and track it through
@@ -47,7 +47,7 @@ IST = ZoneInfo("Asia/Kolkata")
 UTC = ZoneInfo("UTC")
 HISTORY = REPO_ROOT / "history"
 ST_PERIOD, ST_MULT, ENTRY_TF, OPTION_TF = 10, 3.0, 5, 1
-SHADOW_STRATEGIES = {"Options", "Luxury", "Futures"}
+SHADOW_STRATEGIES = {"Options", "Luxury"}
 PACE_SECONDS = 1.6
 
 _run_cache: dict = {}
