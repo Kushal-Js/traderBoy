@@ -202,6 +202,27 @@ async def _poll_one_index(loop: asyncio.AbstractEventLoop, state: IndexState) ->
     now = datetime.now(IST)
     today = now.date()
 
+    if now.weekday() >= 5:
+        # Saturday/Sunday - neither exchange trades. Added 27 Sep 2026: this
+        # loop had NO day-of-week check at all before this fix - only the
+        # time-of-day window further down (market_open_dt/square_off_dt),
+        # computed off *today's* date regardless of what day of the week
+        # today actually is. Confirmed live: this polled NIFTY/BANKNIFTY
+        # (interval=1, every POLL_INTERVAL_SECONDS - 15s default) 24/7,
+        # including weekends - a real, continuous drain on the account's
+        # SHARED Dhan rate-limit budget for a PAPER-ONLY strategy that was
+        # never going to place a real order regardless (73 DH-904 hits
+        # logged over one weekend, confirmed via journalctl). Same bug
+        # class Swing already found and fixed on 22 Sep 2026 for its own
+        # entry-evaluation loop (see Swing/signals.py's _symbol_market_open
+        # docstring: "39 DH-904 rate-limit hits in under an hour, overnight,
+        # entirely from this") - just never ported to this file. Returning
+        # here doesn't affect the stale-carryover check right below: it
+        # only needs to run once the date actually changes, and Monday's
+        # first poll (weekday 0) still sees gate_date != today and runs it
+        # correctly.
+        return
+
     if state.gate_date != today:
         state.gate_date = today
         state.bullish_gate = None
