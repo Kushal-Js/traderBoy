@@ -289,14 +289,14 @@ async def _enter_paper_basket(symbol: str) -> None:
     loop = asyncio.get_running_loop()
     try:
         fut = await loop.run_in_executor(None, dhan_wrapper.get_futures_contract, symbol)
-        fut_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, fut.trading_symbol)
+        fut_ltp = await dhan_wrapper.get_option_ltp_async(fut.trading_symbol)
     except Exception:  # noqa: BLE001
         logger.exception("%s: SWING PAPER entry skipped - could not resolve/price the futures leg", symbol)
         return
 
     try:
         atm = await loop.run_in_executor(None, dhan_wrapper.get_atm_option, symbol, "PE")
-        option_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, atm.trading_symbol)
+        option_ltp = await dhan_wrapper.get_option_ltp_async(atm.trading_symbol)
     except Exception:  # noqa: BLE001
         logger.exception(
             "%s: SWING PAPER entry skipped - could not resolve/price the PE leg "
@@ -377,9 +377,7 @@ async def _exit_paper_basket(symbol: str, reason: str) -> None:
         return
     loop = asyncio.get_running_loop()
     try:
-        fut_exit_price = await loop.run_in_executor(
-            None, dhan_wrapper.get_option_ltp, basket.futures_leg.trading_symbol
-        )
+        fut_exit_price = await dhan_wrapper.get_option_ltp_async(basket.futures_leg.trading_symbol)
     except Exception:  # noqa: BLE001
         logger.exception(
             "%s: could not fetch exit LTP for the futures leg - falling back to entry price "
@@ -387,9 +385,7 @@ async def _exit_paper_basket(symbol: str, reason: str) -> None:
         )
         fut_exit_price = basket.futures_leg.entry_price
     try:
-        option_exit_price = await loop.run_in_executor(
-            None, dhan_wrapper.get_option_ltp, basket.option_leg.trading_symbol
-        )
+        option_exit_price = await dhan_wrapper.get_option_ltp_async(basket.option_leg.trading_symbol)
     except Exception:  # noqa: BLE001
         logger.exception(
             "%s: could not fetch exit LTP for the PE leg - falling back to entry price "
@@ -536,7 +532,7 @@ async def _enter_paper_futures(symbol: str) -> None:
     loop = asyncio.get_running_loop()
     try:
         fut = await loop.run_in_executor(None, dhan_wrapper.get_futures_contract, symbol)
-        fut_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, fut.trading_symbol)
+        fut_ltp = await dhan_wrapper.get_option_ltp_async(fut.trading_symbol)
     except Exception:  # noqa: BLE001
         logger.exception("%s: SWING SEQUENTIAL PAPER entry skipped - could not resolve/price the futures leg", symbol)
         return
@@ -558,7 +554,7 @@ async def _swap_paper_futures_to_pe(symbol: str, futures_leg: PaperLeg) -> None:
     this is even simpler than the real version's fail-safe handling)."""
     loop = asyncio.get_running_loop()
     try:
-        exit_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, futures_leg.trading_symbol)
+        exit_ltp = await dhan_wrapper.get_option_ltp_async(futures_leg.trading_symbol)
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not fetch exit LTP for the futures leg - falling back to entry price", symbol)
         exit_ltp = futures_leg.entry_price
@@ -566,7 +562,7 @@ async def _swap_paper_futures_to_pe(symbol: str, futures_leg: PaperLeg) -> None:
 
     try:
         atm = await loop.run_in_executor(None, dhan_wrapper.get_atm_option, symbol, "PE")
-        option_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, atm.trading_symbol)
+        option_ltp = await dhan_wrapper.get_option_ltp_async(atm.trading_symbol)
     except Exception:  # noqa: BLE001
         logger.exception(
             "%s: futures leg closed but could not resolve/price the ATM PE hedge - symbol left "
@@ -589,7 +585,7 @@ async def _exit_paper_pe_to_watching(symbol: str, pe_leg: PaperLeg, reason: str)
     NOT re-buy futures (same choice confirmed for real trading)."""
     loop = asyncio.get_running_loop()
     try:
-        exit_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, pe_leg.trading_symbol)
+        exit_ltp = await dhan_wrapper.get_option_ltp_async(pe_leg.trading_symbol)
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not fetch exit LTP for the PE leg - falling back to entry price", symbol)
         exit_ltp = pe_leg.entry_price
@@ -600,7 +596,7 @@ async def _swap_paper_pe_to_futures(symbol: str, pe_leg: PaperLeg) -> None:
     """PE -> FUTURES (paper) - the "keep this loop going" transition."""
     loop = asyncio.get_running_loop()
     try:
-        exit_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, pe_leg.trading_symbol)
+        exit_ltp = await dhan_wrapper.get_option_ltp_async(pe_leg.trading_symbol)
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not fetch exit LTP for the PE leg - falling back to entry price", symbol)
         exit_ltp = pe_leg.entry_price
@@ -608,7 +604,7 @@ async def _swap_paper_pe_to_futures(symbol: str, pe_leg: PaperLeg) -> None:
 
     try:
         fut = await loop.run_in_executor(None, dhan_wrapper.get_futures_contract, symbol)
-        fut_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, fut.trading_symbol)
+        fut_ltp = await dhan_wrapper.get_option_ltp_async(fut.trading_symbol)
     except Exception:  # noqa: BLE001
         logger.exception(
             "%s: PE leg closed but could not resolve/price the futures contract - symbol left "
@@ -633,7 +629,7 @@ async def _evaluate_paper_pe_exit_signal(symbol: str, pe_leg: PaperLeg) -> Optio
     symbol`) rather than reusing the real function directly."""
     loop = asyncio.get_running_loop()
     try:
-        ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, pe_leg.trading_symbol)
+        ltp = await dhan_wrapper.get_option_ltp_async(pe_leg.trading_symbol)
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not fetch PE LTP for the paper loss-cap check", symbol)
         return None

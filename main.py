@@ -2,28 +2,9 @@
 Shared entry point across all trading strategies. Each strategy owns its
 own package (its own lifespan, its own FastAPI router, its own state) -
 this file just composes them onto one app so they can run side by side
-in the same process. Three are mounted today:
+in the same process. Mounted today:
   - Options/option_main.py - the live options-buying strategy (real
     orders, real money).
-  - IndexScalping/index_main.py - a NIFTY/BankNifty scalping strategy,
-    PAPER TRADING ONLY (see IndexScalping/paper_engine.py's safety
-    invariant) - runs its own signal/exit logic and logs what it would
-    have done, places no real orders.
-  - Futures/futures_main.py - PLACEHOLDER strategy (buys ATM CE options
-    via the identical mechanics as Options/, standing in until real
-    futures-contract buying replaces it, by explicit request), REAL
-    orders, own separate position pool/capacity - see
-    Futures/trading_engine.py's module docstring for why it skips broker
-    reconciliation at startup.
-  - K01/screener_main.py - "K01", the daily F&O stock screener (Minervini
-    Trend Template + liquidity floor, run once/day, feeding intraday
-    Supertrend/RSI/ROC momentum entries), PAPER TRADING ONLY (see
-    K01/paper_engine.py's safety invariant). Named/documented 30 Aug 2026
-    (was FnoScreener/ until this rename - no trade history existed yet to
-    migrate). MVP scope shipped the same day for first live test - full
-    design in the separate trading-skills repo (designs/k01.md); OI-buildup
-    gating and VCP detection are
-    explicit phase-2 items, not yet built.
   - Luxury/luxury_main.py - user request 31 Aug 2026: a same-account
     duplicate of Options (same ranking/ATM-buying/exit logic, own CE+PE
     webhooks, own separate position pool/capacity/config), REAL orders -
@@ -42,15 +23,20 @@ in the same process. Three are mounted today:
     defined. The first package in this codebase to trade an actual
     futures contract (Options/dhan_client.py's new get_futures_contract())
     rather than buying an ATM option as a placeholder for one.
-  - Paper01/paper01_main.py - user request 15 Sep 2026: a real-time,
-    paper-only twin of the Options strategy - exact same entry/exit rules
-    (reuses Options' own ranking/exit-ladder/Position code directly, see
-    Paper01/trading_engine.py's own docstring), own CE+PE webhooks, own
-    separate paper-only position pool/capacity, PAPER TRADING ONLY (see
-    Paper01/config.py's safety invariant) - never places a real order.
-An eighth strategy would be added the same way - its own package,
-exporting `router` + `lifespan`, mounted below - without touching any
-existing one.
+  - Bollinger/bollinger_main.py - live BB-ribbon + Vortex breakout
+    strategy, real trades from day one - see Bollinger/trading_engine.py's
+    module docstring.
+
+Futures/, K01/, IndexScalping/, and Paper01/ (a placeholder CE-buying
+strategy, a paper-only daily F&O screener, a paper-only NIFTY/BankNifty
+scalper, and a paper-only Options twin, respectively) were removed
+entirely 27 Sep 2026 (user request) - all four were either already
+disabled/dormant (Futures, K01, Paper01, since the 26 Sep 2026
+memory/CPU-freeing change) or paper-only with no real-money exposure
+(IndexScalping), confirmed flat (zero open positions) before deletion.
+
+A new strategy is added the same way - its own package, exporting
+`router` + `lifespan`, mounted below - without touching any existing one.
 
 Run with:
     uv run uvicorn main:app --host 0.0.0.0 --port 8000
@@ -75,18 +61,6 @@ import cross_strategy_registry
 import fund_allocation
 from Options import option_main
 from Options import config as options_config
-from IndexScalping import index_main
-# DISABLED 26 Sep 2026 (user request, freeing memory/CPU headroom on the
-# droplet for the new Bollinger strategy) - Futures/futures_main.py stays
-# on disk untouched, just not started/routed. Code is dormant, not
-# removed - a later session may delete Futures/ entirely once this has
-# proven stable. Re-enable by uncommenting this import plus every other
-# block tagged "DISABLED 26 Sep 2026 (Futures)" below.
-# from Futures import futures_main
-# from Futures import config as futures_config
-# DISABLED 26 Sep 2026 (user request, same reasoning as Futures above) -
-# K01/screener_main.py stays on disk untouched, dormant not removed.
-# from K01 import screener_main
 from Luxury import luxury_main
 from Luxury import config as luxury_config
 from Swing import swing_main
@@ -98,11 +72,6 @@ from Swing import swing_main
 # exit. Swing/swing_paper_engine.py itself is untouched, just not
 # imported/scheduled here.
 # from Swing import swing_paper_engine
-# DISABLED 26 Sep 2026 (user request) - Paper01/paper01_main.py is a
-# fully standalone paper-only twin of Options (its own webhooks, own
-# position store, own monitor loop) - disabling it has no effect on any
-# other package. Dormant, not removed.
-# from Paper01 import paper01_main
 from Bollinger import bollinger_main
 import universe_bucket
 import breakout_signal
@@ -123,7 +92,7 @@ logger = logging.getLogger("main")
 # reconciliation) go through `loop.run_in_executor(None, ...)`, which
 # without this would fall back to Python's default pool sized
 # min(32, cpu_count()+4) - just 5 threads on the droplet's 1 vCPU, shared
-# across ALL FOUR live strategies (Options/Futures/Luxury/Swing) at once.
+# across every live strategy (Options/Luxury/Swing/Bollinger) at once.
 # Raised 13 Sep 2026 (user-requested, after identifying this as the real
 # bottleneck under simultaneous multi-stock/multi-strategy entries -
 # TOP_N_STOCKS=4 stocks already enter concurrently via asyncio.gather,
@@ -152,10 +121,9 @@ async def lifespan(app: FastAPI):
     """Combines every mounted strategy's own lifespan. Add a new
     strategy's context manager to this stack the same way to bring its
     startup/shutdown along without touching the others. Options' lifespan
-    runs first since IndexScalping/Futures reuse its already-authenticated
-    Dhan connection (see IndexScalping/paper_engine.py's and
-    Futures/futures_main.py's docstrings) - keep it first in this nesting
-    if more strategies are added later that also depend on it.
+    runs first since it's the one that authenticates against Dhan - every
+    other strategy reuses that already-authenticated connection - keep it
+    first in this nesting if more strategies are added later.
 
     The executor is sized BEFORE any strategy's lifespan starts, since
     Options' own lifespan authenticates against Dhan immediately and that
@@ -164,86 +132,69 @@ async def lifespan(app: FastAPI):
         ThreadPoolExecutor(max_workers=EXECUTOR_MAX_WORKERS)
     )
     logger.info("Default executor sized to max_workers=%d", EXECUTOR_MAX_WORKERS)
-    # DISABLED 26 Sep 2026 (user request): Futures/K01/Paper01 dropped out
-    # of this nesting chain entirely (freeing an asyncio task + a WS
-    # candle-feed subscriber + a monitor-loop tick each, on a 1-vCPU/
-    # ~1GB droplet). Nesting depth reduced from 7 levels to 4 - see the
-    # commented-out imports above for exactly what was removed and why
-    # each one was judged safe to disable right now.
     async with option_main.lifespan(app):
-        async with index_main.lifespan(app):
-            async with luxury_main.lifespan(app):
-                async with swing_main.lifespan(app):
-                    # Bollinger nests HERE (after Swing, before the
-                    # dispatcher/paper-engine tasks) - added 26 Sep 2026.
-                    # Options' Dhan auth is already done by this point and
-                    # Swing.candle_feed is importable regardless of nesting
-                    # (ensure_subscribed is idempotent - see Bollinger/
-                    # signals.py's own docstring), but nesting after Swing
-                    # keeps the dependency ordering legible given Bollinger
-                    # reuses Swing's own WS candle-feed module directly.
-                    # Bollinger has no breakout/CE-PE dispatch relationship
-                    # with Options/Luxury, so it doesn't sit alongside the
-                    # dispatcher-task block below.
-                    async with bollinger_main.lifespan(app):
-                        dispatcher_task = None
-                        if options_config.UNIVERSE_DISPATCHER_ENABLED:
-                            # Started here, not inside any one package's own
-                            # lifespan, since it spans two of them - see
-                            # breakout_signal.py's own dispatcher-section
-                            # docstring. By this point every nested lifespan
-                            # above has already run, so Luxury's own
-                            # _breakout_entry_fn is ready to call.
-                            # Futures entries removed from both lists 26 Sep
-                            # 2026 (Futures disabled, see above) - CE is now
-                            # Luxury-only, PE is Options-then-Luxury. Restore
-                            # the ("Futures", futures_config, futures_main.
-                            # _breakout_entry_fn) tuples in both lists if
-                            # Futures is ever re-enabled.
-                            dispatcher_task = asyncio.create_task(breakout_signal.universe_dispatcher_loop({
-                                "CE": [
-                                    ("Luxury", luxury_config, luxury_main._breakout_entry_fn),
-                                ],
-                                "PE": [
-                                    ("Options", options_config, option_main._breakout_entry_fn),
-                                    ("Luxury", luxury_config, luxury_main._breakout_entry_fn),
-                                ],
-                            }))
-                            logger.info("UniverseDispatcher task started (CE: Luxury, PE: Options>Luxury - Futures disabled).")
-                        # Started unconditionally (cheap no-op when no package has
-                        # BREAKOUT_PAPER_MODE_ENABLED on - see breakout_paper_
-                        # engine.py's own docstring), same reasoning as the
-                        # dispatcher_task above: it spans Options/Luxury, so it
-                        # can't live inside any one package's own lifespan.
-                        # KEPT RUNNING 26 Sep 2026 despite the "disable the paper
-                        # engines" request - Options and Luxury both currently
-                        # have their own BREAKOUT_PAPER_MODE_ENABLED=true in .env
-                        # and stay enabled here, so this is the ONLY thing
-                        # monitoring their open paper positions for exit. Removing
-                        # it would silently orphan any paper position either of
-                        # them opens (entered, logged, never exited) the next time
-                        # the market is open - a real bug, not a cosmetic one, so
-                        # this was deliberately left out of the disable set even
-                        # though "the paper engines" as literally requested would
-                        # have included it. Flagged to the user in the same
-                        # response that made this change.
-                        paper_engine_task = asyncio.create_task(breakout_paper_engine.paper_engine_monitor_loop())
-                        try:
-                            yield
-                        finally:
-                            if dispatcher_task:
-                                dispatcher_task.cancel()
-                            paper_engine_task.cancel()
+        async with luxury_main.lifespan(app):
+            async with swing_main.lifespan(app):
+                # Bollinger nests HERE (after Swing, before the
+                # dispatcher/paper-engine tasks) - added 26 Sep 2026.
+                # Options' Dhan auth is already done by this point and
+                # Swing.candle_feed is importable regardless of nesting
+                # (ensure_subscribed is idempotent - see Bollinger/
+                # signals.py's own docstring), but nesting after Swing
+                # keeps the dependency ordering legible given Bollinger
+                # reuses Swing's own WS candle-feed module directly.
+                # Bollinger has no breakout/CE-PE dispatch relationship
+                # with Options/Luxury, so it doesn't sit alongside the
+                # dispatcher-task block below.
+                async with bollinger_main.lifespan(app):
+                    dispatcher_task = None
+                    if options_config.UNIVERSE_DISPATCHER_ENABLED:
+                        # Started here, not inside any one package's own
+                        # lifespan, since it spans two of them - see
+                        # breakout_signal.py's own dispatcher-section
+                        # docstring. By this point every nested lifespan
+                        # above has already run, so Luxury's own
+                        # _breakout_entry_fn is ready to call.
+                        dispatcher_task = asyncio.create_task(breakout_signal.universe_dispatcher_loop({
+                            "CE": [
+                                ("Luxury", luxury_config, luxury_main._breakout_entry_fn),
+                            ],
+                            "PE": [
+                                ("Options", options_config, option_main._breakout_entry_fn),
+                                ("Luxury", luxury_config, luxury_main._breakout_entry_fn),
+                            ],
+                        }))
+                        logger.info("UniverseDispatcher task started (CE: Luxury, PE: Options>Luxury).")
+                    # Started unconditionally (cheap no-op when no package has
+                    # BREAKOUT_PAPER_MODE_ENABLED on - see breakout_paper_
+                    # engine.py's own docstring), same reasoning as the
+                    # dispatcher_task above: it spans Options/Luxury, so it
+                    # can't live inside any one package's own lifespan.
+                    # KEPT RUNNING 26 Sep 2026 despite the "disable the paper
+                    # engines" request - Options and Luxury both currently
+                    # have their own BREAKOUT_PAPER_MODE_ENABLED=true in .env
+                    # and stay enabled here, so this is the ONLY thing
+                    # monitoring their open paper positions for exit. Removing
+                    # it would silently orphan any paper position either of
+                    # them opens (entered, logged, never exited) the next time
+                    # the market is open - a real bug, not a cosmetic one, so
+                    # this was deliberately left out of the disable set even
+                    # though "the paper engines" as literally requested would
+                    # have included it. Flagged to the user in the same
+                    # response that made this change.
+                    paper_engine_task = asyncio.create_task(breakout_paper_engine.paper_engine_monitor_loop())
+                    try:
+                        yield
+                    finally:
+                        if dispatcher_task:
+                            dispatcher_task.cancel()
+                        paper_engine_task.cancel()
 
 
 app = FastAPI(title="Chartink -> Dhan Algo Bot", lifespan=lifespan)
 app.include_router(option_main.router)
-app.include_router(index_main.router)
-# app.include_router(futures_main.router)   # DISABLED 26 Sep 2026 - see imports above
-# app.include_router(screener_main.router)  # DISABLED 26 Sep 2026 - see imports above
 app.include_router(luxury_main.router)
 app.include_router(swing_main.router)
-# app.include_router(paper01_main.router)   # DISABLED 26 Sep 2026 - see imports above
 app.include_router(bollinger_main.router)
 app.include_router(universe_bucket.router)
 
@@ -261,9 +212,9 @@ async def nifty_gap_block_status():
     """Read-only status of the global Nifty gap-down block (added 24 Sep
     2026 - see nifty_market_guard.py's own module docstring and
     dhan_client.should_block_all_entries_today). Shared across Options/
-    Futures/Luxury (each gated independently by its own NIFTY_GAP_BLOCK_
-    ENABLED flag, but they all read the SAME underlying Nifty condition)
-    - one status view here rather than three near-identical endpoints."""
+    Luxury (each gated independently by its own NIFTY_GAP_BLOCK_ENABLED
+    flag, but they both read the SAME underlying Nifty condition) - one
+    status view here rather than two near-identical endpoints."""
     cond = dhan_wrapper.evaluate_nifty_open_condition()
     blocked = dhan_wrapper.should_block_all_entries_today() if cond.get("evaluated") else False
     return {
@@ -272,7 +223,6 @@ async def nifty_gap_block_status():
         "prev_close": cond.get("prev_close"), "today_open": cond.get("today_open"),
         "gap_points": cond.get("gap_points"),
         "options_enabled": options_config.NIFTY_GAP_BLOCK_ENABLED,
-        # "futures_enabled" removed 26 Sep 2026 - Futures disabled, see imports above
         "luxury_enabled": luxury_config.NIFTY_GAP_BLOCK_ENABLED,
     }
 

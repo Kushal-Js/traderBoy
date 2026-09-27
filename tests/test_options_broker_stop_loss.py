@@ -105,7 +105,7 @@ def install_all_dhan_mocks(stop_loss_order_id_factory=None, fail_stop_loss_place
     partial-fill/fully-filled-during-the-race paths."""
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
-        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "_get_option_ltp_once": odc.dhan_wrapper._get_option_ltp_once,
         "get_margin_required": odc.dhan_wrapper.get_margin_required,
         "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "has_open_position_for_underlying": odc.dhan_wrapper.has_open_position_for_underlying,
@@ -145,7 +145,7 @@ def install_all_dhan_mocks(stop_loss_order_id_factory=None, fail_stop_loss_place
     odc.dhan_wrapper.get_cached_option_ltp = lambda trading_symbol: None
     odc.dhan_wrapper.note_rest_ltp = lambda trading_symbol, ltp: None
     odc.dhan_wrapper.get_atm_option = fake_atm_option
-    odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 50.0
+    odc.dhan_wrapper._get_option_ltp_once = lambda trading_symbol: 50.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 999.0}
     odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 10_000_000.0}
     odc.dhan_wrapper.has_open_position_for_underlying = lambda symbol: False
@@ -726,7 +726,7 @@ async def test_13_ltp_stale_for_too_long_forces_a_market_exit_and_cancels_broker
     # install_all_dhan_mocks() mocks them, not after.
     real_get_pending = odc.dhan_wrapper.get_pending_order_id
     real_cancel = odc.dhan_wrapper.cancel_order
-    real_get_ltp = odc.dhan_wrapper.get_option_ltp
+    real_get_ltp = odc.dhan_wrapper._get_option_ltp_once
     restore, placed_orders, stop_loss_calls = install_all_dhan_mocks(
         stop_loss_order_id_factory=lambda: "OID-RESTING-SL",
     )
@@ -741,7 +741,7 @@ async def test_13_ltp_stale_for_too_long_forces_a_market_exit_and_cancels_broker
         # Simulate Dhan's live-quote endpoint going dark for this contract -
         # both the WS cache (already empty/disabled in this test env) and
         # the REST fallback now fail on every call.
-        odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: (_ for _ in ()).throw(
+        odc.dhan_wrapper._get_option_ltp_once = lambda trading_symbol: (_ for _ in ()).throw(
             ValueError(f"No LTP returned for {trading_symbol}")
         )
         odc.dhan_wrapper.get_pending_order_id = lambda ts, tt: ("OID-RESTING-SL" if tt == "SELL" else None)
@@ -772,7 +772,7 @@ async def test_13_ltp_stale_for_too_long_forces_a_market_exit_and_cancels_broker
               "unmonitorable position indefinitely (ANGELONE 17 Sep 2026 / ICICIPRULI 10 Sep 2026 "
               "regression): PASSED")
     finally:
-        odc.dhan_wrapper.get_option_ltp = real_get_ltp
+        odc.dhan_wrapper._get_option_ltp_once = real_get_ltp
         odc.dhan_wrapper.get_pending_order_id = real_get_pending
         odc.dhan_wrapper.cancel_order = real_cancel
         restore()

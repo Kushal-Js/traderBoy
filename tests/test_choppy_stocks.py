@@ -147,7 +147,7 @@ def fake_atm_option(symbol: str, option_type: str) -> AtmOption:
 def install_all_dhan_mocks():
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
-        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "_get_option_ltp_once": odc.dhan_wrapper._get_option_ltp_once,
         "get_margin_required": odc.dhan_wrapper.get_margin_required,
         "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "has_open_position_for_underlying": odc.dhan_wrapper.has_open_position_for_underlying,
@@ -179,7 +179,7 @@ def install_all_dhan_mocks():
     # MAHABANK phantom-exit incident), discovered because a full test
     # suite run happened to immediately precede a real /funds/buckets
     # Internal Server Error on the live droplet.
-    odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 50.0
+    odc.dhan_wrapper._get_option_ltp_once = lambda trading_symbol: 50.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 999.0}
     odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 100000.0}
     odc.dhan_wrapper.has_open_position_for_underlying = lambda symbol: False

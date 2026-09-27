@@ -5,8 +5,8 @@ incident: ATHERENERG 29 SEP 1540 PUT's broker-side stop-loss was
 REJECTED with "EXCH:17181: Contract not traded. Market order not
 allowed" because the natural ATM strike had never printed a single
 trade before the position was already opened. User request: a single
-shared function all 4 live-trading packages (Options/Futures/Luxury/
-Swing) route their contract resolution through, that (1) refuses a
+shared function every live-trading package (Options/Luxury/Swing)
+routes its contract resolution through, that (1) refuses a
 currently-illiquid or never-recently-traded strike, and (2) substitutes
 a nearby, actively-traded strike instead of just blocking the entry.
 
@@ -34,8 +34,8 @@ Covers, against the REAL production functions (not reimplemented):
      safety net used everywhere else in this test suite - returns the
      plain ATM pick without attempting a real fetch, so this new gate
      never breaks a test that never authenticates.
-  10-13. Full integration, one per live-trading package (Futures,
-      Options, Luxury, Swing): the package's own real entry function
+  11-13. Full integration, one per live-trading package (Options,
+      Luxury, Swing): the package's own real entry function
       returns {"status": "skipped", "reason": "no_liquid_contract_
       available"} and places ZERO orders when get_liquid_atm_option
       finds nothing tradeable - proving the new skip path is correctly
@@ -426,13 +426,6 @@ async def _assert_process_one_entry_skips_cleanly(package_label, position_store_
             setattr(odc.dhan_wrapper, name, fn)
 
 
-async def test_10_futures_process_one_entry_skips_cleanly_when_no_liquid_contract():
-    import Futures.position_store as fps
-    import Futures.trading_engine as fte
-    print("10.", end=" ")
-    await _assert_process_one_entry_skips_cleanly("Futures", fps, fte)
-
-
 async def test_11_options_process_one_entry_skips_cleanly_when_no_liquid_contract():
     import Options.position_store as ops
     import Options.trading_engine as ote
@@ -580,7 +573,6 @@ def main():
     test_8b_mcx_liquid_and_active_uses_the_real_mcx_segment_codes()
     test_8c_nearby_option_candidates_filters_mcx_rows_correctly()
     test_9_not_authenticated_bypass()
-    asyncio.run(test_10_futures_process_one_entry_skips_cleanly_when_no_liquid_contract())
     asyncio.run(test_11_options_process_one_entry_skips_cleanly_when_no_liquid_contract())
     asyncio.run(test_12_luxury_process_one_entry_skips_cleanly_when_no_liquid_contract())
     asyncio.run(test_13_swing_enter_position_for_stock_skips_cleanly_when_no_liquid_contract())

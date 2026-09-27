@@ -90,7 +90,7 @@ def install_mocks(broker_net_quantity=250, fail_stop_loss_placement=False, entry
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
         "get_futures_contract": odc.dhan_wrapper.get_futures_contract,
         "_equity_instrument_meta": odc.dhan_wrapper._equity_instrument_meta,
-        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "_get_option_ltp_once": odc.dhan_wrapper._get_option_ltp_once,
         "get_margin_required": odc.dhan_wrapper.get_margin_required,
         "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "get_pending_order_id": odc.dhan_wrapper.get_pending_order_id,
@@ -127,7 +127,7 @@ def install_mocks(broker_net_quantity=250, fail_stop_loss_placement=False, entry
     odc.dhan_wrapper.get_atm_option = fake_atm_option
     odc.dhan_wrapper.get_futures_contract = fake_futures_contract
     odc.dhan_wrapper._equity_instrument_meta = lambda sym: {"security_id": f"EQSEC-{sym}", "lot_size": 1, "tick_size": 0.05}
-    odc.dhan_wrapper.get_option_ltp = lambda ts: 50.0
+    odc.dhan_wrapper._get_option_ltp_once = lambda ts: 50.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 100.0 if funds_sufficient else 10_000_000.0}
     odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 1_000_000.0}
     odc.dhan_wrapper.get_pending_order_id = lambda trading_symbol, transaction_type, *_: None
@@ -461,7 +461,7 @@ async def test_14_ltp_stale_for_too_long_forces_a_market_exit_and_cancels_broker
     protective order together, exactly as requested."""
     _set("options", broker_stop=True)
     restore, placed, sl_calls = install_mocks()
-    real_get_ltp = odc.dhan_wrapper.get_option_ltp
+    real_get_ltp = odc.dhan_wrapper._get_option_ltp_once
     real_get_pending = odc.dhan_wrapper.get_pending_order_id
     real_cancel = odc.dhan_wrapper.cancel_order
     cancelled_order_ids = []
@@ -472,7 +472,7 @@ async def test_14_ltp_stale_for_too_long_forces_a_market_exit_and_cancels_broker
         pos = ste.position_store.live_positions["RELIANCE"]
         assert pos.stop_loss_order_id is not None
 
-        odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: (_ for _ in ()).throw(
+        odc.dhan_wrapper._get_option_ltp_once = lambda trading_symbol: (_ for _ in ()).throw(
             ValueError(f"No LTP returned for {trading_symbol}")
         )
         odc.dhan_wrapper.get_pending_order_id = lambda ts, tt, *_: (
@@ -509,7 +509,7 @@ async def test_14_ltp_stale_for_too_long_forces_a_market_exit_and_cancels_broker
               "unmonitorable position indefinitely (the real ANGELONE 17 Sep 2026 incident this fix was "
               "written for): PASSED")
     finally:
-        odc.dhan_wrapper.get_option_ltp = real_get_ltp
+        odc.dhan_wrapper._get_option_ltp_once = real_get_ltp
         odc.dhan_wrapper.get_pending_order_id = real_get_pending
         odc.dhan_wrapper.cancel_order = real_cancel
         restore()

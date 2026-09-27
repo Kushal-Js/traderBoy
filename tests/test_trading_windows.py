@@ -12,7 +12,7 @@ windows are on (is_past_allowed_trading_time() short-circuits to False)
 so the two can't fight - the end-to-end rejection path for the single
 cutoff itself is already covered by test_luxury_allowed_trading_time.py.
 
-Covers, for all three packages (Options / Luxury / Futures), against the
+Covers, for both packages (Options / Luxury), against the
 REAL production functions:
   1. Feature OFF -> is_within_trading_windows() always True (no gate).
   2. Feature ON, "09:15-11:00,14:00-15:28":
@@ -42,11 +42,10 @@ load_dotenv(REPO_ROOT / ".env")
 
 import Options.trading_engine as ote
 import Luxury.trading_engine as lte
-import Futures.trading_engine as fte
 
 IST = ZoneInfo("Asia/Kolkata")
 SPEC = "09:15-11:00,14:00-15:28"
-PACKAGES = (("Options", ote), ("Luxury", lte), ("Futures", fte))
+PACKAGES = (("Options", ote), ("Luxury", lte))
 
 
 def _at(h, m):
@@ -70,7 +69,7 @@ def test_1_feature_off_never_gates():
         finally:
             restore()
     print("1. ENABLE_TRADING_WINDOWS=False -> is_within_trading_windows() is always True (no gate), "
-          "all three packages: PASSED")
+          "both packages: PASSED")
 
 
 def test_2_windows_gate_the_right_times():
@@ -86,7 +85,7 @@ def test_2_windows_gate_the_right_times():
         finally:
             restore()
     print("2. Windows '09:15-11:00,14:00-15:28': inside either zone -> True; before 09:15, the 11:00-14:00 "
-          "gap, and >=15:28 -> False; start inclusive / end exclusive, all three packages: PASSED")
+          "gap, and >=15:28 -> False; start inclusive / end exclusive, both packages: PASSED")
 
 
 def test_3_parse_is_fail_closed_on_bad_input():
@@ -103,7 +102,7 @@ def test_3_parse_is_fail_closed_on_bad_input():
         finally:
             restore()
     print("3. _parse_trading_windows() skips malformed chunks, '' -> []; an unparseable spec makes the "
-          "gate fail CLOSED (no new entries), all three packages: PASSED")
+          "gate fail CLOSED (no new entries), both packages: PASSED")
 
 
 def test_4_windows_supersede_the_single_cutoff():
@@ -124,7 +123,7 @@ def test_4_windows_supersede_the_single_cutoff():
             restore()
             mod._now_ist = real_now
     print("4. ENABLE_TRADING_WINDOWS ON makes is_past_allowed_trading_time() short-circuit to False even "
-          "with the single cutoff enabled and the clock past it, all three packages: PASSED")
+          "with the single cutoff enabled and the clock past it, both packages: PASSED")
 
 
 def main():

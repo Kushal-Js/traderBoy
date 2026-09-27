@@ -105,7 +105,7 @@ def install_all_dhan_mocks():
     symbol across this file's several scenarios never collide."""
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
-        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "_get_option_ltp_once": odc.dhan_wrapper._get_option_ltp_once,
         "get_margin_required": odc.dhan_wrapper.get_margin_required,
         "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "has_open_position_for_underlying": odc.dhan_wrapper.has_open_position_for_underlying,
@@ -127,7 +127,7 @@ def install_all_dhan_mocks():
         "wait_for_order_result": odc.dhan_wrapper.wait_for_order_result,
     }
     odc.dhan_wrapper.get_atm_option = fake_atm_option
-    odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 50.0
+    odc.dhan_wrapper._get_option_ltp_once = lambda trading_symbol: 50.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 999.0}
     odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 10_000_000.0}
     odc.dhan_wrapper.has_open_position_for_underlying = lambda symbol: False

@@ -145,7 +145,7 @@ def test_6_enter_position_dispatches_mcx_exchange_and_pnl_multiplier():
 
     with mock.patch.object(trading_engine.dhan_wrapper, "is_mcx_commodity", return_value=True), \
          mock.patch.object(trading_engine.dhan_wrapper, "get_liquid_atm_option", return_value=fake_atm), \
-         mock.patch.object(trading_engine.dhan_wrapper, "get_option_ltp", return_value=42.0), \
+         mock.patch.object(trading_engine.dhan_wrapper, "_get_option_ltp_once", return_value=42.0), \
          mock.patch.object(trading_engine.mcx_registry, "pnl_multiplier", side_effect=fake_pnl_multiplier), \
          mock.patch.object(trading_engine.position_store, "reserve_symbol", side_effect=fake_reserve_symbol), \
          mock.patch.object(trading_engine.position_store, "release_symbol", side_effect=fake_release_symbol), \

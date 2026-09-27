@@ -80,7 +80,7 @@ def fake_copper_atm_option(symbol: str, option_type: str) -> AtmOption:
 def install_mocks():
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
-        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "_get_option_ltp_once": odc.dhan_wrapper._get_option_ltp_once,
         "get_margin_required": odc.dhan_wrapper.get_margin_required,
         "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "place_market_order": odc.dhan_wrapper.place_market_order,
@@ -100,7 +100,7 @@ def install_mocks():
     # (real Dhan auth) if unmocked.
     odc.dhan_wrapper.get_pending_order_id = lambda trading_symbol, transaction_type, *_: None
     odc.dhan_wrapper.get_atm_option = fake_copper_atm_option
-    odc.dhan_wrapper.get_option_ltp = lambda ts: 25.0
+    odc.dhan_wrapper._get_option_ltp_once = lambda ts: 25.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 100.0}
     odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 1_000_000.0}
 
@@ -285,10 +285,10 @@ async def test_6_get_ltp_falls_back_to_mcx_historical_close_when_rest_ltp_fails(
     that retry ever doesn't recover, unlike the NSE-tuned _get_ltp in
     Options/Futures/Luxury (built earlier the same day for the ABB
     incident). This is the MCX equivalent of that same fix."""
-    real_get_ltp = odc.dhan_wrapper.get_option_ltp
+    real_get_ltp = odc.dhan_wrapper._get_option_ltp_once
     real_historical = odc.dhan_wrapper.get_last_historical_close
     calls = []
-    odc.dhan_wrapper.get_option_ltp = lambda ts: (_ for _ in ()).throw(
+    odc.dhan_wrapper._get_option_ltp_once = lambda ts: (_ for _ in ()).throw(
         ValueError(f"No LTP returned for {ts}")
     )
 
@@ -306,14 +306,14 @@ async def test_6_get_ltp_falls_back_to_mcx_historical_close_when_rest_ltp_fails(
         print("6. _get_ltp falls back to the MCX historical close (real MCX_COMM/OPTFUT segment codes) "
               "when get_option_ltp fails for an MCX position, instead of going blind: PASSED")
     finally:
-        odc.dhan_wrapper.get_option_ltp = real_get_ltp
+        odc.dhan_wrapper._get_option_ltp_once = real_get_ltp
         odc.dhan_wrapper.get_last_historical_close = real_historical
 
 
 async def test_7_get_ltp_still_raises_when_both_mcx_sources_fail():
-    real_get_ltp = odc.dhan_wrapper.get_option_ltp
+    real_get_ltp = odc.dhan_wrapper._get_option_ltp_once
     real_historical = odc.dhan_wrapper.get_last_historical_close
-    odc.dhan_wrapper.get_option_ltp = lambda ts: (_ for _ in ()).throw(
+    odc.dhan_wrapper._get_option_ltp_once = lambda ts: (_ for _ in ()).throw(
         ValueError(f"No LTP returned for {ts}")
     )
     odc.dhan_wrapper.get_last_historical_close = lambda *a, **k: None
@@ -327,7 +327,7 @@ async def test_7_get_ltp_still_raises_when_both_mcx_sources_fail():
         print("7. _get_ltp still raises (preserving the existing LTP-staleness escalation path) when "
               "BOTH get_option_ltp AND the MCX historical-close fallback fail: PASSED")
     finally:
-        odc.dhan_wrapper.get_option_ltp = real_get_ltp
+        odc.dhan_wrapper._get_option_ltp_once = real_get_ltp
         odc.dhan_wrapper.get_last_historical_close = real_historical
 
 

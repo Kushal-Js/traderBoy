@@ -16,10 +16,11 @@ This test proves:
   2. refresh_supertrend_signal routes through it - so the Supertrend line
      is computed on the continuous series (warm bands from bar 1), and a
      bearish read on today's first bar registers immediately.
-  3. Swing's intraday _fetch_supertrend_state_once routes through it too.
-  4. Every paper engine's intraday fetch helper (IndexScalping /
-     CopperOptions / K01) routes through it - no lingering today-only
-     intraday_minute_data call anywhere.
+  3. Swing's intraday _fetch_supertrend_state_once/_fetch_regime_state_once
+     and dhan_client's own signal refreshers route through it too - no
+     lingering today-only intraday_minute_data call anywhere. (IndexScalping/
+     K01/CopperOptions each had their own paper-engine fetch helper here
+     too, until those packages were deleted.)
 
 HOW TO RUN:
     uv run python tests/test_continuous_intraday.py
@@ -142,8 +143,6 @@ def test_4_no_today_only_intraday_fetch_remains_in_any_strategy():
     fetch_continuous_intraday. Guard against a regression that reintroduces
     a `from_date=today, to_date=today` intraday_minute_data call."""
     import Swing.signals as ssig
-    import IndexScalping.paper_engine as ise
-    import K01.paper_engine as k01
 
     offenders = []
     checks = [
@@ -152,11 +151,12 @@ def test_4_no_today_only_intraday_fetch_remains_in_any_strategy():
         # state_once is new in that rewrite (the 200-EMA regime signal) and
         # gets the identical guard from day one.
         (ssig, ["_fetch_supertrend_state_once", "_fetch_regime_state_once"]),
-        (ise, ["_fetch_index_intraday"]),
-        # CopperOptions.paper_engine removed 12 Sep 2026 (user request -
-        # "older Copper paper testing module can be deleted as not needed
-        # now", ahead of Swing v2 gaining its own Copper/MCX support).
-        (k01, ["_fetch_intraday"]),
+        # IndexScalping and K01 (each had their own guarded _fetch_*
+        # helper here) were deleted entirely 27 Sep 2026 - see main.py's
+        # own module docstring. CopperOptions.paper_engine was removed
+        # earlier, 12 Sep 2026 (user request - "older Copper paper
+        # testing module can be deleted as not needed now", ahead of
+        # Swing v2 gaining its own Copper/MCX support).
     ]
     for mod, fns in checks:
         for fn in fns:

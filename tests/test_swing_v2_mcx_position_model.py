@@ -65,7 +65,7 @@ def fake_copper_atm_option(symbol: str, option_type: str) -> AtmOption:
 def install_mocks():
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
-        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "_get_option_ltp_once": odc.dhan_wrapper._get_option_ltp_once,
         "get_margin_required": odc.dhan_wrapper.get_margin_required,
         "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "place_mcx_market_order": odc.dhan_wrapper.place_mcx_market_order,
@@ -76,7 +76,7 @@ def install_mocks():
         "get_pending_order_id": odc.dhan_wrapper.get_pending_order_id,
     }
     odc.dhan_wrapper.get_atm_option = fake_copper_atm_option
-    odc.dhan_wrapper.get_option_ltp = lambda ts: 25.0
+    odc.dhan_wrapper._get_option_ltp_once = lambda ts: 25.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 100.0}
     odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 1_000_000.0}
     # Avoids a real instrument-master/Dhan-login call - moved off the old

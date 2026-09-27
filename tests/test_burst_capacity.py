@@ -3,7 +3,7 @@ Tests for the opening-burst extra CE capacity slot (added 19 Sep 2026,
 user request following the opening-burst-capacity backtest - see
 trading-skills' designs/opening-burst-slot-and-sl-target-sensitivity.md
 for the full rationale/numbers). Deployed flag-on by default per that
-request, across all 3 CE-issuing packages: Options, Futures, Luxury.
+request, across both CE-issuing packages: Options, Luxury.
 
 Coverage:
   1. Outside the burst window, _cap_for("CE") returns the ordinary base
@@ -20,8 +20,8 @@ Coverage:
      a 3rd CE reservation is accepted during the burst window and
      rejected outside it - proves the mechanism is wired through the
      actual capacity-enforcement path, not just the pure helper function.
-  7. Same coverage repeated (lighter) for Futures and Luxury, to catch a
-     copy-paste mistake in either package's own env-var prefix wiring.
+  7. Same coverage repeated (lighter) for Luxury, to catch a copy-paste
+     mistake in its own env-var prefix wiring.
 
 Pure in-memory logic - no Dhan calls, no auth risk. Uses pytest's own
 monkeypatch fixture to flip config values per test without leaking
@@ -46,8 +46,6 @@ os.environ.setdefault("DHAN_CLIENT_ID", "test")
 
 import Options.config as ocfg
 import Options.position_store as ops
-import Futures.config as fcfg
-import Futures.position_store as fps
 import Luxury.config as lcfg
 import Luxury.position_store as lps
 
@@ -60,7 +58,6 @@ AT_END = datetime(2026, 9, 19, 10, 0, tzinfo=IST)
 
 PACKAGES = [
     ("Options", ocfg, ops),
-    ("Futures", fcfg, fps),
     ("Luxury", lcfg, lps),
 ]
 

@@ -12,18 +12,18 @@ existed and are covered elsewhere; this file covers the new disable).
 Covers, against the REAL production functions (not reimplemented):
   1. current_max_loss_per_trade_rs()/current_profit_protection_threshold_rs()
      return the correct value on each side of config.RISK_THRESHOLD_CUTOFF_TIME,
-     for both Options and Futures independently.
+     for both packages independently.
   2. The exact boundary instant (11:30:00) already counts as "after" -
      consistent with every other time-of-day gate in this codebase
      (is_past_square_off_time, is_past_allowed_trading_time all use the
      same >= semantics).
   3. _exit_reason_for itself - not just the lookup functions - actually
      fires MAX_LOSS_HIT/PROFIT_PROTECTION_HIT at the correct threshold on
-     each side of the cutoff, for Options/Futures/Luxury.
+     each side of the cutoff, for Options/Luxury.
   4. With ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF at its default (False),
      MAX_LOSS_HIT never fires before the cutoff REGARDLESS of loss size
      (not just "under the old 1200/1300 cap" - a much bigger loss too),
-     for Options/Futures/Luxury, but fires normally the instant the
+     for Options/Luxury, but fires normally the instant the
      clock crosses the cutoff.
   5. ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF=True restores the original
      always-on behavior (fires before the cutoff at the BEFORE_CUTOFF
@@ -49,10 +49,8 @@ from dotenv import load_dotenv
 load_dotenv(REPO_ROOT / ".env")
 
 import Options.trading_engine as ote
-import Futures.trading_engine as fte
 import Luxury.trading_engine as lte
 from Options.position_store import Position as OptionsPosition
-from Futures.position_store import Position as FuturesPosition
 from Luxury.position_store import Position as LuxuryPosition
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -60,7 +58,7 @@ BEFORE_CUTOFF = datetime(2026, 8, 31, 11, 0, tzinfo=IST)   # 11:00 AM
 AT_CUTOFF = datetime(2026, 8, 31, 11, 30, tzinfo=IST)      # exactly 11:30
 AFTER_CUTOFF = datetime(2026, 8, 31, 11, 45, tzinfo=IST)   # 11:45 AM
 
-ALL_PACKAGES = (("Options", ote), ("Futures", fte), ("Luxury", lte))
+ALL_PACKAGES = (("Options", ote), ("Luxury", lte))
 
 
 def _freeze_time(module, dt: datetime):
@@ -95,7 +93,7 @@ def test_1_lookup_functions_switch_at_the_cutoff():
     suite run - the exact "pinned test, live constant changed" class of
     staleness this docstring already warns about for the MAX_LOSS values
     above, just not applied to this one too at the time."""
-    for label, module in (("Options", ote), ("Futures", fte), ("Luxury", lte)):
+    for label, module in (("Options", ote), ("Luxury", lte)):
         before_pp = module.config.PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF
         after_pp = module.config.PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF
         restore = _freeze_time(module, BEFORE_CUTOFF)
@@ -127,7 +125,7 @@ def test_2_exact_boundary_instant_counts_as_after():
     PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF is read live off config -
     see test_1's own docstring for why (it moved 1000 -> 1500 on 17 Sep
     2026's .env resync)."""
-    for label, module in (("Options", ote), ("Futures", fte), ("Luxury", lte)):
+    for label, module in (("Options", ote), ("Luxury", lte)):
         after_pp = module.config.PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF
         restore = _freeze_time(module, AT_CUTOFF)
         try:
@@ -152,17 +150,6 @@ def _make_options_position(**overrides) -> OptionsPosition:
     return OptionsPosition(**defaults)
 
 
-def _make_futures_position(**overrides) -> FuturesPosition:
-    defaults = dict(
-        underlying_symbol="TESTSTOCK", option_trading_symbol="TESTSTOCK 25 SEP 100 CALL",
-        option_type="CE", quantity=1, lot_size=1, entry_price=2000.0, highest_price=2000.0,
-        target_price=1_000_000.0, hard_stop_loss=-1_000_000.0,
-        order_id="OID", product_type="MARGIN", opened_at=datetime.now(),
-    )
-    defaults.update(overrides)
-    return FuturesPosition(**defaults)
-
-
 def _make_luxury_position(**overrides) -> LuxuryPosition:
     defaults = dict(
         underlying_symbol="TESTSTOCK", option_trading_symbol="TESTSTOCK 25 SEP 100 CALL",
@@ -176,7 +163,6 @@ def _make_luxury_position(**overrides) -> LuxuryPosition:
 
 ALL_MAKE_POSITION = (
     ("Options", ote, _make_options_position),
-    ("Futures", fte, _make_futures_position),
     ("Luxury", lte, _make_luxury_position),
 )
 
@@ -185,7 +171,7 @@ def test_3_exit_reason_for_uses_the_correct_cap_on_each_side():
     """quantity=1 so 1 rupee of LTP movement = Rs 1 of P&L. The MAX_LOSS_HIT
     straddle loss is computed from each module's OWN before/after cap
     (rather than a single hardcoded number) since Luxury now runs a
-    genuinely different pair (4500/2100) from Options/Futures (1500/1000,
+    genuinely different pair (4500/2100) from Options (1500/1000,
     11 Sep 2026) - this keeps the test meaningful regardless of any one
     package's own independently-tuned values, present or future.
     hard_stop_loss/target_price are pushed far away on every position
@@ -204,7 +190,7 @@ def test_3_exit_reason_for_uses_the_correct_cap_on_each_side():
         module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF = True
         # MAX_LOSS_HIT: a loss strictly between this module's own AFTER cap
         # (tighter) and BEFORE cap (looser) - must NOT trip before 11:30,
-        # MUST trip after. Options/Futures: (1000, 1500) -> 1250. Luxury:
+        # MUST trip after. Options: (1000, 1500) -> 1250. Luxury:
         # (2100, 4500) -> 3300.
         before_cap = module.config.MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF
         after_cap = module.config.MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF
@@ -260,7 +246,7 @@ def test_3_exit_reason_for_uses_the_correct_cap_on_each_side():
             module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF = real_enabled
 
     print("3. _exit_reason_for() itself fires MAX_LOSS_HIT/PROFIT_PROTECTION_HIT at the "
-          "correct before/after-11:30 threshold, for Options/Futures/Luxury "
+          "correct before/after-11:30 threshold, for Options/Luxury "
           "(with ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF forced on): PASSED")
 
 
@@ -305,7 +291,7 @@ def test_4_max_loss_hit_disabled_before_cutoff_regardless_of_loss_size():
             restore()
             module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF = real_enabled
     print("4. ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF=False suppresses MAX_LOSS_HIT before "
-          "the cutoff regardless of loss size, for Options/Futures/Luxury, while firing normally "
+          "the cutoff regardless of loss size, for Options/Luxury, while firing normally "
           "the instant the clock crosses into the afternoon: PASSED")
 
 
@@ -323,7 +309,7 @@ def test_5_flag_on_restores_the_original_always_on_behavior():
             restore()
             module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF = real_enabled
     print("5. ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF=True cleanly restores the original always-on "
-          "behavior, for Options/Futures/Luxury: PASSED")
+          "behavior, for Options/Luxury: PASSED")
 
 
 def test_6_disable_is_scoped_to_max_loss_hit_only():
@@ -353,7 +339,7 @@ def test_6_disable_is_scoped_to_max_loss_hit_only():
             restore()
             module.config.ENABLE_MAX_LOSS_HIT_BEFORE_CUTOFF = real_enabled
     print("6. The MAX_LOSS_HIT-before-cutoff disable is scoped to that ONE exit - the percentage "
-          "stop-loss still fires normally before the cutoff, for Options/Futures/Luxury: PASSED")
+          "stop-loss still fires normally before the cutoff, for Options/Luxury: PASSED")
 
 
 def main():

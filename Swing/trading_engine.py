@@ -703,7 +703,7 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
 
         if config.FUNDS_CHECK_ENABLED:
             try:
-                price = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, trading_symbol)
+                price = await dhan_wrapper.get_option_ltp_async(trading_symbol)
                 sufficient = await fund_allocation.has_sufficient_bucket_funds(
                     config.FUND_BUCKET, symbol,
                     [(security_id, product_type, quantity, price, exchange_segment)],
@@ -801,7 +801,7 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
                             symbol, order_id, result.status, result.remark)
             return {"symbol": symbol, "status": "failed", "order_status": result.status, "trading_symbol": trading_symbol}
 
-        fill_price = result.fill_price or await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, trading_symbol)
+        fill_price = result.fill_price or await dhan_wrapper.get_option_ltp_async(trading_symbol)
 
         st = await signals.get_supertrend_state(symbol)
         entry_candle_start = st.candle_start if st else None
@@ -1167,7 +1167,7 @@ async def _get_ltp(position: Position) -> float:
     loop = asyncio.get_running_loop()
     if position.exchange_segment not in ("NSE_FNO", "MCX_COMM"):
         return await asyncio.wait_for(
-            loop.run_in_executor(None, dhan_wrapper.get_option_ltp, position.trading_symbol),
+            dhan_wrapper.get_option_ltp_async(position.trading_symbol),
             timeout=_LTP_FETCH_TIMEOUT_SECONDS,
         )
     ltp = await loop.run_in_executor(None, dhan_wrapper.get_cached_option_ltp, position.trading_symbol)
@@ -1176,7 +1176,7 @@ async def _get_ltp(position: Position) -> float:
     async with dhan_wrapper.ltp_rest_fallback_semaphore:
         try:
             ltp = await asyncio.wait_for(
-                loop.run_in_executor(None, dhan_wrapper.get_option_ltp, position.trading_symbol),
+                dhan_wrapper.get_option_ltp_async(position.trading_symbol),
                 timeout=_LTP_FETCH_TIMEOUT_SECONDS,
             )
             await loop.run_in_executor(None, dhan_wrapper.note_rest_ltp, position.trading_symbol, ltp)

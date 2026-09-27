@@ -2005,6 +2005,48 @@ class DhanWrapper:
             raise ValueError(f"No LTP returned for {trading_symbol}")
         return float(ltp)
 
+    async def get_option_ltp_async(
+        self, trading_symbol: str, *, retries: int = 2, delay: float = 1.5,
+    ) -> float:
+        """Async-native counterpart of get_option_ltp() - every real call
+        site (Options/Futures/Luxury/Swing/Bollinger, live and paper
+        engines alike) should `await` this directly instead of wrapping
+        the sync get_option_ltp() in `loop.run_in_executor(None, ...)`.
+
+        Same retry policy as get_option_ltp() (2 retries, 1.5s backoff),
+        but each attempt is its own separate `run_in_executor` submission
+        and the backoff between attempts is `asyncio.sleep`, not `_retry`'s
+        `time.sleep`. Fixes a real congestion pattern found in the 27 Sep
+        2026 audit: get_option_ltp's old blocking-sleep retry held one of
+        only EXECUTOR_MAX_WORKERS (5) shared threads hostage for the
+        entire backoff window on every failed attempt - live evidence
+        from 25 Sep showed 656 such failures in one session (224 for
+        SONACOMS, 221 for CIPLA alone, both thinly-traded held options
+        where the WS cache legitimately goes stale often, per
+        get_cached_option_ltp's own docstring). This version releases the
+        thread back to the pool between attempts instead, since the sleep
+        now happens on the event loop, not inside a worker thread.
+
+        get_option_ltp() itself is left unchanged (still used directly by
+        tests/test_get_option_ltp_retry.py and by any genuinely
+        synchronous caller) - this is an additive fix, not a behavior
+        change to the sync path."""
+        loop = asyncio.get_running_loop()
+        last_exc: Optional[Exception] = None
+        for attempt in range(retries + 1):
+            try:
+                return await loop.run_in_executor(None, self._get_option_ltp_once, trading_symbol)
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt < retries:
+                    logger.warning(
+                        "get_option_ltp_async failed (attempt %s/%s): %s - retrying in %ss "
+                        "(asyncio.sleep, not holding a worker thread)",
+                        attempt + 1, retries + 1, exc, delay,
+                    )
+                    await asyncio.sleep(delay)
+        raise last_exc
+
     def get_margin_required(
         self, security_id: str, exchange_segment: str, transaction_type: str,
         quantity: int, product_type: str, price: float,

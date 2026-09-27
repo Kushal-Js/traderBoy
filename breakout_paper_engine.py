@@ -58,7 +58,7 @@ loss today never blocks a paper re-entry and vice versa):
      the real function, resolves a real contract, places no order)
   9. Option-liquidity entry gate (LIQUIDITY_ENTRY_GATE_ENABLED -
      reversal_filters.check_option_liquidity on the resolved contract;
-     defaults true in all 3 packages, added here explicitly - Paper01's
+     defaults true in both packages, added here explicitly - Paper01's
      own template omits it, but "real conditions" for a data-quality
      gate that's live-on-by-default is worth the one extra REST call)
   10. FUNDS_CHECK_ENABLED (added 23 Sep 2026, same user request) - the
@@ -89,7 +89,7 @@ even called - see that function's own docstring.
 
 MONITORING/EXITS: one shared loop (paper_engine_monitor_loop, started
 once from main.py's own lifespan, like UniverseDispatcher) polls every
-open paper position across all 3 packages, using each position's OWN
+open paper position across both packages, using each position's OWN
 strategy's real _get_ltp/_supertrend_signal_for/_ema_cross_signal_for/
 _exit_reason_for - the exact same functions, same priority order
 (MAX_LOSS_HIT -> TARGET_HIT -> PROFIT_PROTECTION_HIT -> TRAILING_SL_HIT/
@@ -139,18 +139,15 @@ class _StrategyHooks:
 
 def _build_hooks() -> dict[str, _StrategyHooks]:
     """Deferred import (avoids a circular import at module load time -
-    Options/Luxury/Futures' own *_main.py modules import breakout_signal.py
+    Options/Luxury's own *_main.py modules import breakout_signal.py
     which is imported early; this module is only imported by them at
-    lifespan-start time, well after all 3 packages' own modules exist)."""
+    lifespan-start time, well after both packages' own modules exist)."""
     from Options import config as options_cfg
     from Options import trading_engine as options_te
     from Options.position_store import Position as OptionsPosition
     from Luxury import config as luxury_cfg
     from Luxury import trading_engine as luxury_te
     from Luxury.position_store import Position as LuxuryPosition
-    from Futures import config as futures_cfg
-    from Futures import trading_engine as futures_te
-    from Futures.position_store import Position as FuturesPosition
 
     return {
         "Options": _StrategyHooks(
@@ -162,11 +159,6 @@ def _build_hooks() -> dict[str, _StrategyHooks]:
             LuxuryPosition, luxury_cfg, luxury_te._get_ltp, luxury_te._supertrend_signal_for,
             luxury_te._ema_cross_signal_for, luxury_te._underlying_move_confirms_exit,
             luxury_te._exit_reason_for, luxury_te._capture_supertrend_entry_candle,
-        ),
-        "Futures": _StrategyHooks(
-            FuturesPosition, futures_cfg, futures_te._get_ltp, futures_te._supertrend_signal_for,
-            futures_te._ema_cross_signal_for, futures_te._underlying_move_confirms_exit,
-            futures_te._exit_reason_for, futures_te._capture_supertrend_entry_candle,
         ),
     }
 
@@ -325,7 +317,7 @@ async def process_paper_entry(strategy: str, symbol: str, option_type: str) -> d
             try:
                 price_for_funds = await h.get_ltp(atm.trading_symbol)
                 if not price_for_funds:
-                    price_for_funds = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, atm.trading_symbol)
+                    price_for_funds = await dhan_wrapper.get_option_ltp_async(atm.trading_symbol)
                 sufficient = await fund_allocation.has_sufficient_bucket_funds(
                     "secondary", symbol, [(atm.security_id, cfg.OPTIONS_PRODUCT, quantity, price_for_funds)],
                 )
@@ -343,7 +335,7 @@ async def process_paper_entry(strategy: str, symbol: str, option_type: str) -> d
 
         entry_price = await h.get_ltp(atm.trading_symbol)
         if not entry_price:
-            entry_price = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, atm.trading_symbol)
+            entry_price = await dhan_wrapper.get_option_ltp_async(atm.trading_symbol)
         if not entry_price:
             await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, atm.trading_symbol)
             async with _lock:
@@ -515,7 +507,7 @@ async def paper_engine_monitor_loop() -> None:
 
 async def snapshot() -> dict:
     """Read-only observability - every currently-open paper position
-    across all 3 packages."""
+    across both packages."""
     async with _lock:
         items = list(_positions.items())
     return {

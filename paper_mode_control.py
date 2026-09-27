@@ -1,12 +1,12 @@
 """
 Runtime paper-mode ON/OFF switch, shared across every strategy that has
-its own paper-mode kill switch (Options/Futures/Luxury/Swing) - added 24
+its own paper-mode kill switch (Options/Luxury/Swing/Bollinger) - added 24
 Sep 2026, user request: "turn paper trading on or off... without
 deployment just by calling an endpoint", extended same day to cover
 Swing too.
 
 Each strategy already had its OWN static .env-configured flag (Options/
-Futures/Luxury's BREAKOUT_PAPER_MODE_ENABLED, added 22 Sep 2026; Swing's
+Luxury's BREAKOUT_PAPER_MODE_ENABLED, added 22 Sep 2026; Swing's
 PAPER_MODE_ENABLED, added 23 Sep 2026) - read once at process startup,
 requiring a redeploy+restart to change. This module makes that a runtime
 override instead: `is_paper_mode_enabled(strategy)` checks an in-memory
@@ -25,8 +25,8 @@ table, its own paper-position bookkeeping) or swing_paper_engine.py
 nothing about EITHER engine's internals, only "given a strategy name,
 what's its current paper-mode state." Each strategy's own dispatch point
 still decides what "paper mode" actually means for it:
-  - Options/option_main.py, Futures/futures_main.py, Luxury/luxury_main.py
-    (_resolve_entry): reroutes to breakout_paper_engine.process_paper_entry
+  - Options/option_main.py, Luxury/luxury_main.py (_resolve_entry):
+    reroutes to breakout_paper_engine.process_paper_entry
     instead of that package's own trading_engine._process_one_entry.
   - Swing/trading_engine.py (_monitor_tick): reroutes to
     swing_paper_engine.process_paper_entry instead of
@@ -51,7 +51,7 @@ from pathlib import Path
 
 logger = logging.getLogger("paper_mode_control")
 
-STRATEGIES = ("Options", "Futures", "Luxury", "Swing", "Bollinger")
+STRATEGIES = ("Options", "Luxury", "Swing", "Bollinger")
 
 OVERRIDE_FILE = Path("data/paper_mode_overrides.json")
 
@@ -70,9 +70,6 @@ def _env_default(strategy: str) -> bool:
     import at module load time."""
     if strategy == "Options":
         from Options import config as cfg
-        return bool(cfg.BREAKOUT_PAPER_MODE_ENABLED)
-    if strategy == "Futures":
-        from Futures import config as cfg
         return bool(cfg.BREAKOUT_PAPER_MODE_ENABLED)
     if strategy == "Luxury":
         from Luxury import config as cfg

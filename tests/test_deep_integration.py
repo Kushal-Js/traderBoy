@@ -40,7 +40,7 @@ asyncio.run(main()) script, matching every other test in this codebase's
 history - see scratchpad tests referenced in NOTES.md) - run manually
 whenever you want to validate the concurrency/exit/reconciliation logic
 still holds, e.g. after touching position_store.py, trading_engine.py, or
-trade_history.py in either Options/ or Futures/.
+trade_history.py in either Options/ or Luxury/.
 """
 import asyncio
 import os
@@ -84,7 +84,7 @@ def install_all_dhan_mocks():
     restore function; callers MUST call it in a finally block."""
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
-        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "_get_option_ltp_once": odc.dhan_wrapper._get_option_ltp_once,
         "get_margin_required": odc.dhan_wrapper.get_margin_required,
         "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "_get_open_fno_positions_once": odc.dhan_wrapper._get_open_fno_positions_once,
@@ -122,7 +122,7 @@ def install_all_dhan_mocks():
     # 2026) calls these before every entry attempt; unmocked, they'd
     # fall through to a REAL Dhan network call (and a real, slow
     # authentication attempt) via _retry. Not what's under test here.
-    odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 50.0
+    odc.dhan_wrapper._get_option_ltp_once = lambda trading_symbol: 50.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 999.0}
     odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 100000.0}
 
@@ -343,13 +343,13 @@ async def test_4_real_exit_path_target_and_stoploss():
 
 async def test_5_reconciliation_realistic_mixed_scenario():
     """3 broker positions in one get_open_fno_positions response - 2
-    genuinely opened by Options, 1 by Futures (via the real
+    genuinely opened by Options, 1 by Luxury (via the real
     record_opened_position calls, not fabricated) - confirms BOTH real
     reconcile_broker_positions functions pick up only their own, using the
     real attribute_open_broker_position filter, against a mocked
     get_open_fno_positions (no live broker state needed for this
     scenario)."""
-    import Futures.trading_engine as fte
+    import Luxury.trading_engine as lte
 
     class _FakePos:
         def __init__(self, symbol, ts, entry_price):
@@ -363,7 +363,7 @@ async def test_5_reconciliation_realistic_mixed_scenario():
 
     await trade_history.record_opened_position("Options", _FakePos("RELIANCE", "RELIANCE 25 SEP 1400 CALL", 20.0))
     await trade_history.record_opened_position("Options", _FakePos("TCS", "TCS 25 SEP 4000 CALL", 50.0))
-    await trade_history.record_opened_position("Futures", _FakePos("SBIN", "SBIN 25 SEP 800 CALL", 15.0))
+    await trade_history.record_opened_position("Luxury", _FakePos("SBIN", "SBIN 25 SEP 800 CALL", 15.0))
     await asyncio.sleep(0.2)
 
     fake_broker_positions = [
@@ -380,15 +380,15 @@ async def test_5_reconciliation_realistic_mixed_scenario():
     odc.dhan_wrapper.subscribe_option_price = lambda ts: None
     try:
         options_reconciled = await ote.reconcile_broker_positions()
-        futures_reconciled = await fte.reconcile_broker_positions()
+        luxury_reconciled = await lte.reconcile_broker_positions()
 
         options_syms = {p.underlying_symbol for p in options_reconciled}
-        futures_syms = {p.underlying_symbol for p in futures_reconciled}
+        luxury_syms = {p.underlying_symbol for p in luxury_reconciled}
         assert options_syms == {"RELIANCE", "TCS"}, f"Options reconciled wrong set: {options_syms}"
-        assert futures_syms == {"SBIN"}, f"Futures reconciled wrong set: {futures_syms}"
-        assert not (options_syms & futures_syms), "cross-contamination between strategies!"
+        assert luxury_syms == {"SBIN"}, f"Luxury reconciled wrong set: {luxury_syms}"
+        assert not (options_syms & luxury_syms), "cross-contamination between strategies!"
         print(f"5. Reconciliation with a realistic mixed 3-position scenario: Options correctly got "
-              f"{options_syms}, Futures correctly got {futures_syms}, zero cross-contamination: PASSED")
+              f"{options_syms}, Luxury correctly got {luxury_syms}, zero cross-contamination: PASSED")
     finally:
         odc.dhan_wrapper.get_open_fno_positions = real_get_open
         odc.dhan_wrapper.subscribe_option_price = real_subscribe

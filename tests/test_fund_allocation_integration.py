@@ -8,8 +8,8 @@ Unlike tests/test_fund_allocation.py (unit-level: the pure percentage
 math, and `_enter_single_position`/`_has_sufficient_funds` called
 directly in isolation), this file drives the FULL, REAL production
 pipeline for every package - the actual webhook handlers
-(`_handle_chartink_webhook` for Options/Luxury, `chartink_webhook_futures`
-for Futures, `chartink_webhook_swing_enter` for Swing) - so ranking,
+(`_handle_chartink_webhook` for Options/Luxury,
+`chartink_webhook_swing_enter` for Swing) - so ranking,
 `cross_strategy_registry` claim/release, `PositionStore` reservation/
 capacity, and `webhook_alerts` logging are all exercised for real
 alongside the funds check, not bypassed. Only the Dhan NETWORK boundary
@@ -23,10 +23,10 @@ Covers the three claims the whole feature exists to make good on:
      15% of it, and Swing's own entry (against the SAME account
      balance, but its own 85% share) succeeds regardless - the money
      was never actually at risk of being eaten by the Options attempt.
-  2. Options/Futures/Luxury genuinely share ONE secondary bucket, not
-     15% each - proven via three REAL, sequential, full-pipeline
-     webhook entries with a shrinking real account balance between
-     them (as if each one's own margin had actually just landed).
+  2. Options/Luxury genuinely share ONE secondary bucket, not 15%
+     each - proven via two REAL, sequential, full-pipeline webhook
+     entries with a shrinking real account balance between them (as if
+     the first one's own margin had actually just landed).
   3. The two buckets are PROPORTIONAL SHARES of the account's own
      current real balance, not frozen, mutually-exclusive silos -
      Swing's own primary-bucket figure correctly shrinks (in
@@ -77,9 +77,6 @@ import Options.dhan_client as odc
 import Options.position_store as ops
 import Options.trading_engine as ote
 import Options.option_main as om
-import Futures.position_store as fps
-import Futures.trading_engine as fte
-import Futures.futures_main as fm
 import Luxury.position_store as lps
 import Luxury.trading_engine as lte
 import Luxury.luxury_main as lm
@@ -148,7 +145,7 @@ def install_dhan_mocks(margin_per_leg=999.0, fund_limits_sequence=None, availabl
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
         "get_futures_contract": odc.dhan_wrapper.get_futures_contract,
-        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "_get_option_ltp_once": odc.dhan_wrapper._get_option_ltp_once,
         "get_margin_required": odc.dhan_wrapper.get_margin_required,
         "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "has_open_position_for_underlying": odc.dhan_wrapper.has_open_position_for_underlying,
@@ -173,7 +170,7 @@ def install_dhan_mocks(margin_per_leg=999.0, fund_limits_sequence=None, availabl
     }
     odc.dhan_wrapper.get_atm_option = fake_atm_option
     odc.dhan_wrapper.get_futures_contract = fake_futures_contract
-    odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 50.0
+    odc.dhan_wrapper._get_option_ltp_once = lambda trading_symbol: 50.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": margin_per_leg}
     odc.dhan_wrapper.has_open_position_for_underlying = lambda symbol: False
     odc.dhan_wrapper._get_open_fno_positions_once = lambda: []
@@ -285,25 +282,25 @@ async def test_1_secondary_bucket_protects_primary_share_across_real_packages():
         ste.config.STRATEGY_ENABLED = real_swing_enabled
 
 
-async def test_2_options_futures_luxury_share_one_secondary_bucket_full_pipeline():
-    """Sequential, REAL, full-pipeline webhook entries for all three
+async def test_2_options_luxury_share_one_secondary_bucket_full_pipeline():
+    """Sequential, REAL, full-pipeline webhook entries for both
     secondary-bucket packages, with the account's own real balance
-    shrinking between each (as if each one's own margin had actually
-    just been blocked/utilized) - proves they draw from ONE shared 15%
-    pool, not 15% each, through their own actual webhook handlers."""
+    shrinking between them (as if Options' own margin had actually just
+    been blocked/utilized) - proves they draw from ONE shared 15% pool,
+    not 15% each, through their own actual webhook handlers. (Originally
+    a three-way version including Futures - reduced to two-way 27 Sep
+    2026 when the Futures package was deleted entirely, see main.py's
+    own module docstring.)"""
     options_store = ops.PositionStore()
     om.position_store = options_store
     ote.position_store = options_store
-    futures_store = fps.PositionStore()
-    fm.position_store = futures_store
-    fte.position_store = futures_store
     luxury_store = lps.PositionStore()
     lm.position_store = luxury_store
     lte.position_store = luxury_store
 
     _time_gates_saved = [(cfg, cfg.ENABLE_TRADING_TIME_LIMIT, cfg.ENABLE_TRADING_WINDOWS)
-                         for cfg in (ote.config, fte.config, lte.config)]
-    for cfg in (ote.config, fte.config, lte.config):
+                         for cfg in (ote.config, lte.config)]
+    for cfg in (ote.config, lte.config):
         cfg.MAX_LIVE_POSITIONS_CE = 5
         # this test doesn't freeze the clock and asserts entries proceed - pin
         # both entry-time gates OFF so it doesn't break when run after 11:00 IST
@@ -317,46 +314,35 @@ async def test_2_options_futures_luxury_share_one_secondary_bucket_full_pipeline
     # exchange margin blocking is typically higher than a standalone
     # per-leg sum - the same conservatism this whole check already
     # accounts for via Swing's own buffer). So: Options' own check sees
-    # the fresh 15,000 share and enters; by the time Futures checks, the
-    # real balance has already dropped to 60,000 (secondary share
-    # 9,000) - still enough for its own 6,000 ask, so it also enters;
-    # by the time Luxury checks, the real balance is down to 30,000
-    # (secondary share 4,500) - too small for its own 6,000 ask, so it
-    # correctly gets skipped, even though no SINGLE package's own
-    # 6,000 request ever exceeded 15,000 in isolation.
+    # the fresh 15,000 share and enters; by the time Luxury checks, the
+    # real balance is down to 30,000 (secondary share 4,500) - too small
+    # for its own 6,000 ask, so it correctly gets skipped, even though
+    # no SINGLE package's own 6,000 request ever exceeded 15,000 in
+    # isolation.
     restore, placed_orders = install_dhan_mocks(
         margin_per_leg=6000.0,
         fund_limits_sequence=[
             {"availabelBalance": 100000.0},   # Options' own check
-            {"availabelBalance": 60000.0},    # Futures' own check - Options' real fill already landed
-            {"availabelBalance": 30000.0},    # Luxury's own check - both prior real fills already landed
+            {"availabelBalance": 30000.0},    # Luxury's own check - Options' real fill already landed
         ],
     )
     real_options_rank = om.rank_and_pick_top_stocks
-    real_futures_rank = fm.rank_and_pick_top_stocks
     real_luxury_rank = lm.rank_and_pick_top_stocks
     om.rank_and_pick_top_stocks = fake_ranked
-    fm.rank_and_pick_top_stocks = fake_ranked
     lm.rank_and_pick_top_stocks = fake_ranked
     # This test is about the shared fund-allocation bucket, not ranking -
-    # force the original day-change% ranking in all 3 packages so
+    # force the original day-change% ranking in both packages so
     # fake_ranked above actually takes effect (added 18 Sep 2026: with
     # RIBBON_RANKING_ENABLED on, a CE alert takes reversal_filters.rank_
     # by_ribbon_expansion instead, which this mock doesn't touch).
     real_options_ribbon = om.config.RIBBON_RANKING_ENABLED
-    real_futures_ribbon = fm.config.RIBBON_RANKING_ENABLED
     real_luxury_ribbon = lm.config.RIBBON_RANKING_ENABLED
     om.config.RIBBON_RANKING_ENABLED = False
-    fm.config.RIBBON_RANKING_ENABLED = False
     lm.config.RIBBON_RANKING_ENABLED = False
     try:
         options_payload = om.ChartinkWebhookPayload(
             stocks="SHAREDBUCKETOPT", trigger_prices="1", triggered_at="9:20 am",
             scan_name="fund-bucket-test-2", scan_url="fund-bucket-test-2", alert_name="shared bucket - Options",
-        )
-        futures_payload = fm.ChartinkWebhookPayload(
-            stocks="SHAREDBUCKETFUT", trigger_prices="1", triggered_at="9:20 am",
-            scan_name="fund-bucket-test-2", scan_url="fund-bucket-test-2", alert_name="shared bucket - Futures",
         )
         luxury_payload = lm.ChartinkWebhookPayload(
             stocks="SHAREDBUCKETLUX", trigger_prices="1", triggered_at="9:20 am",
@@ -364,32 +350,27 @@ async def test_2_options_futures_luxury_share_one_secondary_bucket_full_pipeline
         )
 
         options_result = await om._handle_chartink_webhook(options_payload, "CE", True)
-        futures_result = await fm.chartink_webhook_futures(futures_payload)
         luxury_result = await lm._handle_chartink_webhook(luxury_payload, "CE", True)
 
         assert options_result["entries"][0]["status"] == "entered", options_result
-        assert futures_result["entries"][0]["status"] == "entered", futures_result
         luxury_entry = luxury_result["entries"][0]
         assert luxury_entry["status"] == "skipped" and luxury_entry["reason"] == "insufficient_funds", \
             f"Luxury's own attempt must be rejected - the shared secondary bucket is already " \
-            f"exhausted by Options+Futures, even though NEITHER alone exceeded it, got {luxury_entry}"
+            f"exhausted by Options, even though it alone didn't exceed it, got {luxury_entry}"
 
         entered_symbols = {o["trading_symbol"].split(" ")[0] for o in placed_orders}
-        assert entered_symbols == {"SHAREDBUCKETOPT", "SHAREDBUCKETFUT"}, \
-            f"only Options' and Futures' own orders should have been placed, got {placed_orders}"
+        assert entered_symbols == {"SHAREDBUCKETOPT"}, \
+            f"only Options' own order should have been placed, got {placed_orders}"
 
-        print("2. Options, Futures, and Luxury genuinely share ONE secondary bucket through their own "
-              "REAL, full webhook pipelines - Options and Futures both succeed against the fresh "
-              "15,000 allowance, but Luxury's own attempt correctly fails once the shared pool is "
-              "already spent, even though no SINGLE package's own request ever exceeded 15,000 by "
-              "itself: PASSED")
+        print("2. Options and Luxury genuinely share ONE secondary bucket through their own "
+              "REAL, full webhook pipelines - Options succeeds against the fresh 15,000 "
+              "allowance, but Luxury's own attempt correctly fails once the shared pool is "
+              "already spent, even though its own request never exceeded 15,000 by itself: PASSED")
     finally:
         restore()
         om.rank_and_pick_top_stocks = real_options_rank
-        fm.rank_and_pick_top_stocks = real_futures_rank
         lm.rank_and_pick_top_stocks = real_luxury_rank
         om.config.RIBBON_RANKING_ENABLED = real_options_ribbon
-        fm.config.RIBBON_RANKING_ENABLED = real_futures_ribbon
         lm.config.RIBBON_RANKING_ENABLED = real_luxury_ribbon
         for cfg, tl, tw in _time_gates_saved:
             cfg.ENABLE_TRADING_TIME_LIMIT, cfg.ENABLE_TRADING_WINDOWS = tl, tw
@@ -521,7 +502,7 @@ async def main():
     fa.BUCKET_PCTS = {"primary": 85.0, "secondary": 15.0}
     try:
         await test_1_secondary_bucket_protects_primary_share_across_real_packages()
-        await test_2_options_futures_luxury_share_one_secondary_bucket_full_pipeline()
+        await test_2_options_luxury_share_one_secondary_bucket_full_pipeline()
         await test_3_buckets_are_proportional_shares_of_the_same_shifting_total()
         await test_4_funds_rejected_stock_is_genuinely_retriable_on_a_later_alert()
     finally:

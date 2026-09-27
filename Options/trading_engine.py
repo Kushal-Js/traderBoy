@@ -709,7 +709,7 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
     # either way.
     if config.FUNDS_CHECK_ENABLED:
         try:
-            option_ltp = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, atm.trading_symbol)
+            option_ltp = await dhan_wrapper.get_option_ltp_async(atm.trading_symbol)
             sufficient = await fund_allocation.has_sufficient_bucket_funds(
                 "secondary", symbol, [(atm.security_id, config.OPTIONS_PRODUCT, quantity, option_ltp)],
             )
@@ -835,9 +835,7 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
         # Order reached a terminal "filled" status but the fill price field
         # hasn't populated yet (rare) - fall back to LTP so target/SL levels
         # aren't computed off zero.
-        fill_price = await loop.run_in_executor(
-            None, dhan_wrapper.get_option_ltp, atm.trading_symbol
-        )
+        fill_price = await dhan_wrapper.get_option_ltp_async(atm.trading_symbol)
 
     entry_candle_start, entry_underlying_price = await _capture_supertrend_entry_candle(loop, symbol)
 
@@ -1233,7 +1231,7 @@ async def _get_ltp(trading_symbol: str) -> Optional[float]:
     async with dhan_wrapper.ltp_rest_fallback_semaphore:
         try:
             ltp = await asyncio.wait_for(
-                loop.run_in_executor(None, dhan_wrapper.get_option_ltp, trading_symbol),
+                dhan_wrapper.get_option_ltp_async(trading_symbol),
                 timeout=_LTP_FETCH_TIMEOUT_SECONDS,
             )
         except Exception:
@@ -1731,9 +1729,7 @@ async def _sync_pending_orders() -> None:
         if result.status in OrderStatus.TERMINAL_STATUSES:
             fill_price = result.fill_price
             if not fill_price:
-                fill_price = await loop.run_in_executor(
-                    None, dhan_wrapper.get_option_ltp, order.trading_symbol
-                )
+                fill_price = await dhan_wrapper.get_option_ltp_async(order.trading_symbol)
             entry_candle_start, entry_underlying_price = await _capture_supertrend_entry_candle(loop, order.underlying_symbol)
             option_type = order.option_type or config.OPTION_TYPE
             lot_size = order.lot_size or config.LOT_SIZE_FALLBACK
@@ -1819,7 +1815,7 @@ async def _sync_pending_orders() -> None:
             broker_qty = 0
 
         if broker_qty > 0:
-            fill_price = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, order.trading_symbol)
+            fill_price = await dhan_wrapper.get_option_ltp_async(order.trading_symbol)
             entry_candle_start, entry_underlying_price = await _capture_supertrend_entry_candle(loop, order.underlying_symbol)
             option_type = order.option_type or config.OPTION_TYPE
             lot_size = order.lot_size or config.LOT_SIZE_FALLBACK

@@ -1,16 +1,18 @@
 """
-Smoke tests confirming Futures/trading_engine.py's and Luxury/trading_engine.py's
-own _sync_pending_orders (near-verbatim copies of Options/trading_engine.py's,
-which tests/test_stale_entry_order_retry.py covers in full depth) correctly
-carry the same 15 Sep 2026 stale-entry-order retry/abandon fix - same
-scenario (test_1) from that file, run against each package's own module to
-catch any package-specific import/attribute-name issue the copy-paste
-might have introduced, without re-deriving the full 5-case suite three
-times over (the logic itself is byte-identical, already proven correct
+Smoke test confirming Luxury/trading_engine.py's own _sync_pending_orders
+(a near-verbatim copy of Options/trading_engine.py's, which tests/
+test_stale_entry_order_retry.py covers in full depth) correctly carries
+the same 15 Sep 2026 stale-entry-order retry/abandon fix - same scenario
+(test_1) from that file, run against Luxury's own module to catch any
+package-specific import/attribute-name issue the copy-paste might have
+introduced (the logic itself is byte-identical, already proven correct
 against Options).
 
+(Originally covered Futures too - removed 27 Sep 2026 when the Futures
+package was deleted entirely, see main.py's own module docstring.)
+
 HOW TO RUN:
-    uv run python tests/test_stale_entry_order_retry_futures_luxury.py
+    uv run python tests/test_stale_entry_order_retry_luxury.py
 """
 import asyncio
 import os
@@ -31,8 +33,6 @@ from datetime import datetime
 import Options.dhan_client as odc
 from Options.dhan_client import OrderResult, OrderStatus
 
-import Futures.position_store as fps
-import Futures.trading_engine as fte
 import Luxury.position_store as lps
 import Luxury.trading_engine as lte
 
@@ -42,7 +42,7 @@ def install_mocks():
         "refresh_order_status": odc.dhan_wrapper.refresh_order_status,
         "cancel_order": odc.dhan_wrapper.cancel_order,
         "get_broker_net_quantity": odc.dhan_wrapper.get_broker_net_quantity,
-        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "_get_option_ltp_once": odc.dhan_wrapper._get_option_ltp_once,
         "place_market_order": odc.dhan_wrapper.place_market_order,
         "refresh_supertrend_signal": odc.dhan_wrapper.refresh_supertrend_signal,
         "get_cached_supertrend_candle_start": odc.dhan_wrapper.get_cached_supertrend_candle_start,
@@ -108,10 +108,9 @@ async def _run_stale_retry_smoke_test(package_name, position_store_module, tradi
 
 
 async def main():
-    print("=== Futures/Luxury stale entry-order retry smoke test suite ===\n")
-    await _run_stale_retry_smoke_test("Futures", fps, fte)
+    print("=== Luxury stale entry-order retry smoke test suite ===\n")
     await _run_stale_retry_smoke_test("Luxury", lps, lte)
-    print("\nALL FUTURES/LUXURY STALE ENTRY-ORDER SMOKE CHECKS PASSED")
+    print("\nALL LUXURY STALE ENTRY-ORDER SMOKE CHECKS PASSED")
 
 
 if __name__ == "__main__":

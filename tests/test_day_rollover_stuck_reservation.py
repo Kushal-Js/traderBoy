@@ -19,8 +19,9 @@ entry explicitly, since this is its last chance to ever be released.
 A symbol that already has a live Position must NOT be touched (that's
 a legitimate, separate reservation carrying overnight by design).
 
-Covers all three packages with the identical scenario, since the fix
-is a near-verbatim copy across Options/Futures/Luxury.
+Covers both remaining packages with the identical scenario, since the
+fix is a near-verbatim copy across Options/Luxury (Futures deleted 27
+Sep 2026 - see main.py's own module docstring).
 
 HOW TO RUN:
     uv run python tests/test_day_rollover_stuck_reservation.py
@@ -46,7 +47,6 @@ trade_history.HISTORY_DIR = scratch_dir
 from Options.dhan_client import OrderStatus
 
 import Options.position_store as ops
-import Futures.position_store as fps
 import Luxury.position_store as lps
 
 
@@ -100,10 +100,9 @@ async def _run_for_package(name, module, config):
         config.ENABLE_SQUARE_OFF = real_square_off
 
 
-async def test_1_stuck_reservation_released_at_rollover_all_three_packages():
-    print("1. Day-rollover stuck-reservation fix, ENABLE_SQUARE_OFF=False, all three packages:")
+async def test_1_stuck_reservation_released_at_rollover_both_packages():
+    print("1. Day-rollover stuck-reservation fix, ENABLE_SQUARE_OFF=False, both packages:")
     await _run_for_package("Options", ops, ops.config)
-    await _run_for_package("Futures", fps, fps.config)
     await _run_for_package("Luxury", lps, lps.config)
     print("   ALL PASSED")
 
@@ -132,7 +131,7 @@ async def test_2_enable_square_off_true_still_clears_everything_as_before():
 
 async def main():
     print("=== Day-rollover stuck-reservation fix test suite ===\n")
-    await test_1_stuck_reservation_released_at_rollover_all_three_packages()
+    await test_1_stuck_reservation_released_at_rollover_both_packages()
     await test_2_enable_square_off_true_still_clears_everything_as_before()
     print("\nALL day-rollover stuck-reservation tests PASSED")
 

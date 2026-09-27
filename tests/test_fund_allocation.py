@@ -39,12 +39,12 @@ ONLY the Dhan network boundary mocked:
   5. Options' own `_enter_single_position` skips an entry BEFORE placing
      any real order when the secondary bucket can't afford it - zero
      orders placed, capacity released back to the position store.
-  6. Futures' and Luxury's own `_enter_single_position` do the same -
-     confirming ALL THREE packages genuinely share the ONE "secondary"
-     bucket (a shrinking real account balance across the 3 packages'
-     own successive checks correctly shrinks what each one sees as
-     available, since every check reads the SAME live broker balance,
-     not an independently-tracked reservation).
+  6. Options' and Luxury's own `_enter_single_position` prove they
+     genuinely share the ONE "secondary" bucket (a shrinking real
+     account balance across their own successive checks correctly
+     shrinks what each one sees as available, since every check reads
+     the SAME live broker balance, not an independently-tracked
+     reservation).
   7. Feature flag: config.FUNDS_CHECK_ENABLED=False (checked
      independently per package) disables the proactive check for that
      ONE package without needing to call fund_allocation at all.
@@ -75,8 +75,6 @@ import fund_allocation as fa
 import Options.dhan_client as odc
 import Options.position_store as ops
 import Options.trading_engine as ote
-import Futures.position_store as fps
-import Futures.trading_engine as fte
 import Luxury.position_store as lps
 import Luxury.trading_engine as lte
 from Options.dhan_client import AtmOption, OrderResult, OrderStatus
@@ -97,7 +95,7 @@ def install_dhan_mocks(available_balance=100000.0, margin_per_leg=999.0, fund_li
     SAME live figure rather than an independently-tracked reservation."""
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
-        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "_get_option_ltp_once": odc.dhan_wrapper._get_option_ltp_once,
         "get_margin_required": odc.dhan_wrapper.get_margin_required,
         "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "has_open_position_for_underlying": odc.dhan_wrapper.has_open_position_for_underlying,
@@ -120,7 +118,7 @@ def install_dhan_mocks(available_balance=100000.0, margin_per_leg=999.0, fund_li
         "wait_for_order_result": odc.dhan_wrapper.wait_for_order_result,
     }
     odc.dhan_wrapper.get_atm_option = fake_atm_option
-    odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 50.0
+    odc.dhan_wrapper._get_option_ltp_once = lambda trading_symbol: 50.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": margin_per_leg}
     odc.dhan_wrapper.has_open_position_for_underlying = lambda symbol: False
     odc.dhan_wrapper._get_open_fno_positions_once = lambda: []
@@ -291,37 +289,37 @@ async def test_5_options_entry_skips_when_secondary_bucket_insufficient():
         ote.config.FUNDS_CHECK_ENABLED = real_enabled
 
 
-async def test_6_futures_and_luxury_share_the_same_shrinking_secondary_bucket():
-    """The crux of 'all three draw from ONE shared secondary bucket' -
+async def test_6_options_and_luxury_share_the_same_shrinking_secondary_bucket():
+    """The crux of 'both packages draw from ONE shared secondary bucket' -
     simulates the REAL account balance actually shrinking between
-    Futures' own check and Luxury's own check (as if Futures' own order
+    Options' own check and Luxury's own check (as if Options' own order
     had just landed for real) and confirms Luxury's own check reflects
     that SAME live figure, not an independently-tracked allowance."""
-    futures_store = fps.PositionStore()
-    fte.position_store = futures_store
+    options_store = ops.PositionStore()
+    ote.position_store = options_store
     luxury_store = lps.PositionStore()
     lte.position_store = luxury_store
-    real_futures_enabled = fte.config.FUNDS_CHECK_ENABLED
+    real_options_enabled = ote.config.FUNDS_CHECK_ENABLED
     real_luxury_enabled = lte.config.FUNDS_CHECK_ENABLED
-    fte.config.FUNDS_CHECK_ENABLED = True
+    ote.config.FUNDS_CHECK_ENABLED = True
     lte.config.FUNDS_CHECK_ENABLED = True
 
     # Secondary bucket at balance=100000 -> 15000 (default 15%). Margin
     # per leg = 10000, so TWO such entries (20000 total) can't both fit
-    # even though ONE alone (10000) would - proving Futures' own entry
+    # even though ONE alone (10000) would - proving Options' own entry
     # and Luxury's own entry are competing for the SAME shared allowance,
     # not each getting their own independent 15%.
     restore, placed_orders = install_dhan_mocks(
         available_balance=100000.0, margin_per_leg=10000.0,
         fund_limits_sequence=[
-            {"availabelBalance": 100000.0},  # Futures' own check - full balance, 10000 fits easily
-            {"availabelBalance": 100000.0 - 10000.0},  # Luxury's own check - Futures' fill already landed for real
+            {"availabelBalance": 100000.0},  # Options' own check - full balance, 10000 fits easily
+            {"availabelBalance": 100000.0 - 10000.0},  # Luxury's own check - Options' fill already landed for real
         ],
     )
     try:
-        futures_result = await fte._enter_single_position("TCS", "CE")
-        assert futures_result["status"] not in ("skipped",), \
-            f"Futures' own entry should succeed against the fresh, unspent secondary bucket, got {futures_result}"
+        options_result = await ote._enter_single_position("TCS", "CE")
+        assert options_result["status"] not in ("skipped",), \
+            f"Options' own entry should succeed against the fresh, unspent secondary bucket, got {options_result}"
 
         luxury_result = await lte._enter_single_position("WIPRO", "CE")
         # secondary bucket share of 90000 = 13500; required 10000 still
@@ -330,13 +328,13 @@ async def test_6_futures_and_luxury_share_the_same_shrinking_secondary_bucket():
         # for EACH package rather than cached/shared incorrectly across them.
         assert luxury_result["status"] not in ("skipped",), luxury_result
 
-        print("6. Futures' and Luxury's own _enter_single_position each independently re-fetch the "
-              "account's REAL current balance for their own secondary-bucket check - confirming all "
-              "three packages share ONE live bucket rather than each getting an independently-"
+        print("6. Options' and Luxury's own _enter_single_position each independently re-fetch the "
+              "account's REAL current balance for their own secondary-bucket check - confirming both "
+              "packages share ONE live bucket rather than each getting an independently-"
               "tracked 15% allowance: PASSED")
     finally:
         restore()
-        fte.config.FUNDS_CHECK_ENABLED = real_futures_enabled
+        ote.config.FUNDS_CHECK_ENABLED = real_options_enabled
         lte.config.FUNDS_CHECK_ENABLED = real_luxury_enabled
 
 
@@ -367,7 +365,7 @@ async def main():
     test_3_warn_if_buckets_dont_sum_to_100()
     await test_4_has_sufficient_bucket_funds_core_logic()
     await test_5_options_entry_skips_when_secondary_bucket_insufficient()
-    await test_6_futures_and_luxury_share_the_same_shrinking_secondary_bucket()
+    await test_6_options_and_luxury_share_the_same_shrinking_secondary_bucket()
     await test_7_feature_flag_disables_check_independently_per_package()
     print("\nALL FUND ALLOCATION CHECKS PASSED")
 

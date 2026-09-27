@@ -56,7 +56,7 @@ def install_mocks():
         "refresh_order_status": odc.dhan_wrapper.refresh_order_status,
         "cancel_order": odc.dhan_wrapper.cancel_order,
         "get_broker_net_quantity": odc.dhan_wrapper.get_broker_net_quantity,
-        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "_get_option_ltp_once": odc.dhan_wrapper._get_option_ltp_once,
         "place_market_order": odc.dhan_wrapper.place_market_order,
         "refresh_supertrend_signal": odc.dhan_wrapper.refresh_supertrend_signal,
         "get_cached_supertrend_candle_start": odc.dhan_wrapper.get_cached_supertrend_candle_start,
@@ -185,7 +185,7 @@ async def test_3_actually_filled_during_the_cancel_race_is_promoted_to_a_real_po
         odc.dhan_wrapper.cancel_order = lambda order_id: None
         # Broker shows it's actually filled now (race: filled right as we tried to cancel).
         odc.dhan_wrapper.get_broker_net_quantity = lambda trading_symbol, segment="NSE_FNO": 500
-        odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 12.5
+        odc.dhan_wrapper._get_option_ltp_once = lambda trading_symbol: 12.5
 
         await ote._sync_pending_orders()
 

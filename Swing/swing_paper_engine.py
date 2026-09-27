@@ -201,7 +201,7 @@ async def process_paper_entry(symbol: str, regime: str) -> dict:
 
         if config.FUNDS_CHECK_ENABLED:
             try:
-                price = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, trading_symbol)
+                price = await dhan_wrapper.get_option_ltp_async(trading_symbol)
                 sufficient = await fund_allocation.has_sufficient_bucket_funds(
                     config.FUND_BUCKET, symbol,
                     [(security_id, product_type, quantity, price, exchange_segment)],
@@ -234,7 +234,7 @@ async def process_paper_entry(symbol: str, regime: str) -> dict:
         if exchange_segment in ("NSE_FNO", "MCX_COMM"):
             await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, trading_symbol)
 
-        fill_price = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, trading_symbol)
+        fill_price = await dhan_wrapper.get_option_ltp_async(trading_symbol)
         if not fill_price:
             if exchange_segment in ("NSE_FNO", "MCX_COMM"):
                 await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, trading_symbol)

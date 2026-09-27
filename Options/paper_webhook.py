@@ -251,7 +251,7 @@ async def chartink_webhook_papertrade(payload: ChartinkWebhookPayload):
             atm = await loop.run_in_executor(None, dhan_wrapper.get_atm_option, symbol, "CE")
             entry_price = await _get_ltp(atm.trading_symbol)
             if not entry_price:
-                entry_price = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, atm.trading_symbol)
+                entry_price = await dhan_wrapper.get_option_ltp_async(atm.trading_symbol)
             quantity = atm.lot_size * config.QUANTITY_LOTS
             # Unpack both values, matching every other call site (Options/
             # trading_engine.py:842,1737,1823) - audit finding 2.5,

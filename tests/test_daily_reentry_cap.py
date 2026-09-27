@@ -1,7 +1,9 @@
 """
-Tests for the daily re-entry cap on Options/Futures/Luxury - user request
+Tests for the daily re-entry cap on Options/Luxury - user request
 1 Sep 2026: "only allow entry into same trade max 3 times a day for
-Luxury, Options and Future package."
+Luxury, Options and Future package." (Futures package deleted 27 Sep
+2026 - see main.py's own module docstring; this file's own coverage of
+it removed accordingly.)
 
 Independent of MAX_LIVE_POSITIONS_CE/_PE (that caps how many can be LIVE
 at once); this caps how many times the SAME underlying can be entered
@@ -28,10 +30,10 @@ Covers, against the REAL production functions (not reimplemented):
      still blocks a 4th real entry attempt for it - proving this is
      backed by the durable log, not an in-memory counter that a restart
      would silently reset to 0.
-  4. Futures and Luxury each enforce their own independent
-     MAX_DAILY_ENTRIES_PER_SYMBOL / count_opened_today("Futures"/
-     "Luxury", ...) wiring - seeded via the real record_opened_position,
-     confirmed via each package's own real _process_one_entry.
+  4. Luxury enforces its own independent MAX_DAILY_ENTRIES_PER_SYMBOL /
+     count_opened_today("Luxury", ...) wiring - seeded via the real
+     record_opened_position, confirmed via Luxury's own real
+     _process_one_entry.
   5. The cap is genuinely configurable, not hardcoded to 3.
 
 HOW TO RUN:
@@ -60,8 +62,6 @@ trade_history.HISTORY_DIR = scratch_dir
 import Options.dhan_client as odc
 import Options.position_store as ops
 import Options.trading_engine as ote
-import Futures.position_store as fps
-import Futures.trading_engine as fte
 import Luxury.position_store as lps
 import Luxury.trading_engine as lte
 from Options.dhan_client import AtmOption, OrderResult, OrderStatus
@@ -83,7 +83,7 @@ def install_all_dhan_mocks():
     across this file's several enter->exit cycles never collide."""
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
-        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "_get_option_ltp_once": odc.dhan_wrapper._get_option_ltp_once,
         "get_margin_required": odc.dhan_wrapper.get_margin_required,
         "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "_get_open_fno_positions_once": odc.dhan_wrapper._get_open_fno_positions_once,
@@ -120,7 +120,7 @@ def install_all_dhan_mocks():
     # 2026) calls these before every entry attempt; unmocked, they'd
     # fall through to a REAL Dhan network call (and a real, slow
     # authentication attempt) via _retry. Not what's under test here.
-    odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 50.0
+    odc.dhan_wrapper._get_option_ltp_once = lambda trading_symbol: 50.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 999.0}
     odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 100000.0}
 
@@ -171,11 +171,11 @@ async def test_1_count_opened_today():
 
         # Isolated by strategy - the SAME symbol opened by a different
         # strategy must not add to Options' own count.
-        await trade_history.record_opened_position("Futures", pos)
+        await trade_history.record_opened_position("Luxury", pos)
         await asyncio.sleep(0.2)
         assert trade_history.count_opened_today("Options", "RELIANCE") == 2, \
             "a different strategy's own open of the same symbol must not count toward Options"
-        assert trade_history.count_opened_today("Futures", "RELIANCE") == 1
+        assert trade_history.count_opened_today("Luxury", "RELIANCE") == 1
 
         # Isolated by symbol - a different symbol for the SAME strategy
         # must not add to RELIANCE's own count.
@@ -265,39 +265,7 @@ async def test_3_cap_survives_a_simulated_restart():
         ote.config.MAX_DAILY_ENTRIES_PER_SYMBOL = real_cap
 
 
-async def test_4_futures_and_luxury_enforce_their_own_independent_cap():
-    # Futures
-    f_store = fps.PositionStore()
-    fte.position_store = f_store
-    real_f_cap = fte.config.MAX_DAILY_ENTRIES_PER_SYMBOL
-    fte.config.MAX_DAILY_ENTRIES_PER_SYMBOL = 2
-    restore, placed_orders = install_all_dhan_mocks()
-    try:
-        symbol = "WIPRO"
-        pos = fps.Position(
-            underlying_symbol=symbol, option_trading_symbol=f"{symbol} FAKE EXP CE",
-            option_type="CE", quantity=500, lot_size=500, entry_price=50.0, highest_price=50.0,
-            target_price=62.5, hard_stop_loss=42.0, order_id="OID-F1", product_type="MARGIN",
-        )
-        await trade_history.record_opened_position("Futures", pos)
-        await trade_history.record_opened_position("Futures", pos)
-        await asyncio.sleep(0.2)
-
-        result = await fte._process_one_entry(symbol, "CE")
-        assert result["status"] == "skipped", result
-        assert result["reason"] == "daily_reentry_cap_reached", result
-        assert placed_orders == [], "Futures must place no order once its OWN cap (2) is reached"
-
-        # Options' own count for the SAME symbol is untouched by Futures'
-        # activity - independent strategies, independent caps.
-        assert trade_history.count_opened_today("Options", symbol) == 0
-        print("4a. Futures enforces its own independent daily re-entry cap "
-              "(config.MAX_DAILY_ENTRIES_PER_SYMBOL / count_opened_today('Futures', ...)): PASSED")
-    finally:
-        restore()
-        fte.config.MAX_DAILY_ENTRIES_PER_SYMBOL = real_f_cap
-
-    # Luxury
+async def test_4_luxury_enforces_its_own_independent_cap():
     l_store = lps.PositionStore()
     lte.position_store = l_store
     real_l_cap = lte.config.MAX_DAILY_ENTRIES_PER_SYMBOL
@@ -318,7 +286,7 @@ async def test_4_futures_and_luxury_enforce_their_own_independent_cap():
         assert result["status"] == "skipped", result
         assert result["reason"] == "daily_reentry_cap_reached", result
         assert placed_orders == [], "Luxury must place no order once its OWN cap (2) is reached"
-        print("4b. Luxury enforces its own independent daily re-entry cap "
+        print("4. Luxury enforces its own independent daily re-entry cap "
               "(config.MAX_DAILY_ENTRIES_PER_SYMBOL / count_opened_today('Luxury', ...)): PASSED")
     finally:
         restore()
@@ -352,11 +320,11 @@ async def test_5_cap_is_genuinely_configurable():
 
 
 async def main():
-    print("=== Daily re-entry cap test suite (Options/Futures/Luxury) ===\n")
+    print("=== Daily re-entry cap test suite (Options/Luxury) ===\n")
     await test_1_count_opened_today()
     await test_2_options_full_cycle_blocks_the_fourth_entry()
     await test_3_cap_survives_a_simulated_restart()
-    await test_4_futures_and_luxury_enforce_their_own_independent_cap()
+    await test_4_luxury_enforces_its_own_independent_cap()
     await test_5_cap_is_genuinely_configurable()
     print("\nALL DAILY RE-ENTRY CAP CHECKS PASSED")
 

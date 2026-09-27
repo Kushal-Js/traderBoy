@@ -8,7 +8,7 @@ them measure the UNDERLYING's own price/volume, never the OPTION's).
 
 This gate reuses dhan_wrapper.refresh_liquidity_signal/get_cached_
 illiquid - the option's OWN "last N completed bars all zero volume"
-check, already built and live for EXIT decisions (Options/Futures/Luxury
+check, already built and live for EXIT decisions (Options/Luxury
 each already have LIQUIDITY_GUARD_ENABLED) - but wires it into the ENTRY
 path too, for the first time, via reversal_filters.check_option_
 liquidity. Checked in each package's own _enter_single_position, right
@@ -28,7 +28,7 @@ Coverage:
   4. check_option_liquidity_sync fails OPEN when get_cached_illiquid
      returns None (not enough data yet) - never treats missing
      information as a confirmed illiquid reading.
-  5-7. Wiring: for EACH of Options/Futures/Luxury (each keeps its own
+  5-7. Wiring: for EACH of Options/Luxury (each keeps its own
      copy of _enter_single_position), an illiquid option is BLOCKED when
      LIQUIDITY_ENTRY_GATE_ENABLED=True (zero real orders placed), the
      SAME illiquid signal is allowed through when the flag is False, and
@@ -61,9 +61,6 @@ import Options.config as ocfg
 import Options.dhan_client as odc
 import Options.position_store as ops
 import Options.trading_engine as ote
-import Futures.config as fcfg
-import Futures.position_store as fps
-import Futures.trading_engine as fte
 import Luxury.config as lcfg
 import Luxury.position_store as lps
 import Luxury.trading_engine as lte
@@ -83,7 +80,7 @@ def install_all_dhan_mocks():
     all three packages since they read the SAME dhan_wrapper singleton."""
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
-        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "_get_option_ltp_once": odc.dhan_wrapper._get_option_ltp_once,
         "get_margin_required": odc.dhan_wrapper.get_margin_required,
         "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "has_open_position_for_underlying": odc.dhan_wrapper.has_open_position_for_underlying,
@@ -105,7 +102,7 @@ def install_all_dhan_mocks():
         "wait_for_order_result": odc.dhan_wrapper.wait_for_order_result,
     }
     odc.dhan_wrapper.get_atm_option = fake_atm_option
-    odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 50.0
+    odc.dhan_wrapper._get_option_ltp_once = lambda trading_symbol: 50.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 999.0}
     odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 10_000_000.0}
     odc.dhan_wrapper.has_open_position_for_underlying = lambda symbol: False
@@ -259,26 +256,6 @@ async def test_7_options_liquid_option_not_blocked():
             restore()
 
 
-async def test_8_futures_entry_blocked_when_illiquid():
-    store = fps.PositionStore()
-    fte.position_store = store
-    fcfg.MAX_LIVE_POSITIONS_CE, fcfg.MAX_LIVE_POSITIONS_PE = 5, 5
-    fcfg.LOSS_REPEAT_BLOCK_ENABLED = False
-    fcfg.ENABLE_RSI_LOSS_REENTRY_BLOCK = False
-    fcfg.VOLUME_FLOOR_GATE_ENABLED = False
-    fcfg.LIQUIDITY_ENTRY_GATE_ENABLED = True
-    restore, placed_orders = install_all_dhan_mocks()
-    with mock.patch.object(reversal_filters, "check_option_liquidity", new=AsyncMock(return_value=(False, True))):
-        try:
-            result = await fte._process_one_entry("SOLARINDS", "PE")
-            assert result["status"] == "skipped" and result["reason"] == "option_illiquid_at_entry", result
-            assert len(placed_orders) == 0
-            print("8. Futures: an already-illiquid option is BLOCKED at entry when the gate is enabled - "
-                  "zero real orders placed: PASSED")
-        finally:
-            restore()
-
-
 async def test_9_luxury_entry_blocked_when_illiquid():
     store = lps.PositionStore()
     lte.position_store = store
@@ -307,7 +284,6 @@ async def main():
     await test_5_options_entry_blocked_when_illiquid()
     await test_6_options_entry_allowed_when_flag_disabled()
     await test_7_options_liquid_option_not_blocked()
-    await test_8_futures_entry_blocked_when_illiquid()
     await test_9_luxury_entry_blocked_when_illiquid()
     print("\nALL option-liquidity entry gate CHECKS PASSED")
 

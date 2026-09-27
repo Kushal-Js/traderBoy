@@ -220,7 +220,7 @@ async def enter_position_for_stock(symbol: str, entry_signal: str, trigger_price
 
         if config.FUNDS_CHECK_ENABLED:
             try:
-                price = await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, trading_symbol)
+                price = await dhan_wrapper.get_option_ltp_async(trading_symbol)
                 sufficient = await fund_allocation.has_sufficient_bucket_funds(
                     config.FUND_BUCKET, symbol,
                     [(security_id, product_type, quantity, price, exchange_segment)],
@@ -287,7 +287,7 @@ async def enter_position_for_stock(symbol: str, entry_signal: str, trigger_price
                             symbol, order_id, result.status, result.remark)
             return {"symbol": symbol, "status": "failed", "order_status": result.status, "trading_symbol": trading_symbol}
 
-        fill_price = result.fill_price or await loop.run_in_executor(None, dhan_wrapper.get_option_ltp, trading_symbol)
+        fill_price = result.fill_price or await dhan_wrapper.get_option_ltp_async(trading_symbol)
 
         # Dynamic, per-trade stop percentage from the actual swing distance
         # this entry fired against - see Bollinger/config.py's own module
@@ -540,7 +540,7 @@ async def _get_ltp(position: Position) -> float:
         return ltp
     async with dhan_wrapper.ltp_rest_fallback_semaphore:
         ltp = await asyncio.wait_for(
-            loop.run_in_executor(None, dhan_wrapper.get_option_ltp, position.trading_symbol),
+            dhan_wrapper.get_option_ltp_async(position.trading_symbol),
             timeout=_LTP_FETCH_TIMEOUT_SECONDS,
         )
         await loop.run_in_executor(None, dhan_wrapper.note_rest_ltp, position.trading_symbol, ltp)

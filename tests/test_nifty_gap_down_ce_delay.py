@@ -435,7 +435,7 @@ def install_all_dhan_mocks():
     dhan_wrapper singleton, network boundary only."""
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
-        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "_get_option_ltp_once": odc.dhan_wrapper._get_option_ltp_once,
         "get_margin_required": odc.dhan_wrapper.get_margin_required,
         "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "_get_open_fno_positions_once": odc.dhan_wrapper._get_open_fno_positions_once,
@@ -465,7 +465,7 @@ def install_all_dhan_mocks():
     odc.dhan_wrapper.get_cached_rsi = lambda sym: None
     odc.dhan_wrapper.get_cached_prev_rsi = lambda sym: None
     odc.dhan_wrapper.rsi_loss_reentry_reason = lambda sym: None
-    odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 50.0
+    odc.dhan_wrapper._get_option_ltp_once = lambda trading_symbol: 50.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 999.0}
     odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 100000.0}
     odc.dhan_wrapper.place_market_order = lambda trading_symbol, quantity, transaction_type, tag=None, product_type=None: {

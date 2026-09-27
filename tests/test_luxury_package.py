@@ -10,18 +10,17 @@ Options, confirmed in scenario 1 below).
 Covers:
   1. Real concurrent CE entry through Luxury's own webhook handler -
      capacity enforced, ranking works, using Luxury's OWN position_store
-     (not Options'/Futures').
+     (not Options').
   2. The PE webhook (bearish scan -> buys ATM PE, ranks lowest %change
-     first) - Options has this too but Futures doesn't, so this is new
-     coverage specific to what makes Luxury different from Futures.
+     first) - Options has this too, so this is new coverage specific to
+     what makes Luxury different.
   3. Duplicate webhook delivery race - each symbol enters exactly once
      despite 2 concurrent identical deliveries.
   4. Real exit path (target + stop-loss) via Luxury's own
      _exit_reason_for/close_position.
-  5. Three-way reconciliation: Options-owned, Futures-owned, AND
-     Luxury-owned broker positions in one response - Luxury's own
-     reconcile_broker_positions picks up only its own, zero
-     cross-contamination with either sibling strategy.
+  5. Two-way reconciliation: Options-owned AND Luxury-owned broker
+     positions in one response - Luxury's own reconcile_broker_positions
+     picks up only its own, zero cross-contamination with Options.
   6. Malformed webhook payload rejected cleanly.
 
 HOW TO RUN:
@@ -84,7 +83,7 @@ def install_all_dhan_mocks():
     import time) - no live Dhan session needed."""
     originals = {
         "get_atm_option": odc.dhan_wrapper.get_atm_option,
-        "get_option_ltp": odc.dhan_wrapper.get_option_ltp,
+        "_get_option_ltp_once": odc.dhan_wrapper._get_option_ltp_once,
         "get_margin_required": odc.dhan_wrapper.get_margin_required,
         "get_fund_limits": odc.dhan_wrapper.get_fund_limits,
         "_get_open_fno_positions_once": odc.dhan_wrapper._get_open_fno_positions_once,
@@ -122,7 +121,7 @@ def install_all_dhan_mocks():
     # 2026) calls these before every entry attempt; unmocked, they'd
     # fall through to a REAL Dhan network call (and a real, slow
     # authentication attempt) via _retry. Not what's under test here.
-    odc.dhan_wrapper.get_option_ltp = lambda trading_symbol: 50.0
+    odc.dhan_wrapper._get_option_ltp_once = lambda trading_symbol: 50.0
     odc.dhan_wrapper.get_margin_required = lambda *a, **k: {"totalMargin": 999.0}
     odc.dhan_wrapper.get_fund_limits = lambda: {"availabelBalance": 100000.0}
     odc.dhan_wrapper.place_market_order = lambda trading_symbol, quantity, transaction_type, tag=None, product_type=None: {
@@ -186,7 +185,7 @@ async def test_1_real_concurrent_ce_entry_through_luxury_webhook():
         opened = trade_history.read_all_jsonl("position_opened")
         assert len(opened) == 2, f"expected 2 position_opened log entries, got {len(opened)}"
         assert all(r["strategy"] == "Luxury" for r in opened), \
-            f"position_opened log must tag these as Luxury, not Options/Futures: {opened}"
+            f"position_opened log must tag these as Luxury, not Options: {opened}"
         print("1. Real concurrent CE entry through Luxury's own webhook handler: 2 entered "
               "(capacity=2), 1 skipped, own PositionStore, position_opened tagged 'Luxury': PASSED")
     finally:
@@ -204,7 +203,7 @@ async def test_2_pe_webhook_ranks_lowest_change_first():
 
     # rank_and_pick_top_stocks' own contrarian-selection nuance
     # (SELECT_BOTTOM_N_STOCKS) is shared, already-verified production logic
-    # (unchanged, copy-pasted from Options/Futures) - not re-tested here.
+    # (unchanged, copy-pasted from Options) - not re-tested here.
     # What IS new/Luxury-specific: does hitting the bearish endpoint with
     # option_type="PE" actually thread through to a real PUT entry, on
     # Luxury's own PE capacity pool, not a CALL. fake_ranked keeps
@@ -322,13 +321,15 @@ async def test_4_real_exit_path_target_and_stoploss():
           "close_position: both closed correctly, symbols freed, tagged 'Luxury' in trade_history: PASSED")
 
 
-async def test_5_three_way_reconciliation_no_cross_contamination():
-    """3 broker positions, one genuinely opened by each of Options,
-    Futures, and Luxury (via real record_opened_position calls) - confirms
-    all THREE real reconcile_broker_positions functions pick up only their
-    own, using the real attribute_open_broker_position filter."""
+async def test_5_two_way_reconciliation_no_cross_contamination():
+    """2 broker positions, one genuinely opened by each of Options and
+    Luxury (via real record_opened_position calls) - confirms both real
+    reconcile_broker_positions functions pick up only their own, using
+    the real attribute_open_broker_position filter. (Originally a
+    three-way test including Futures - reduced to two-way 27 Sep 2026
+    when the Futures package was deleted entirely, see main.py's own
+    module docstring.)"""
     import Options.trading_engine as ote
-    import Futures.trading_engine as fte
 
     class _FakePos:
         def __init__(self, symbol, ts, entry_price):
@@ -341,15 +342,12 @@ async def test_5_three_way_reconciliation_no_cross_contamination():
             self.order_id = "OID"
 
     await trade_history.record_opened_position("Options", _FakePos("RELIANCE", "RELIANCE 25 SEP 1400 CALL", 20.0))
-    await trade_history.record_opened_position("Futures", _FakePos("SBIN", "SBIN 25 SEP 800 CALL", 15.0))
     await trade_history.record_opened_position("Luxury", _FakePos("TCS", "TCS 25 SEP 4000 CALL", 50.0))
     await asyncio.sleep(0.2)
 
     fake_broker_positions = [
         {"trading_symbol": "RELIANCE 25 SEP 1400 CALL", "underlying_symbol": "RELIANCE", "option_type": "CE",
          "lot_size": 500, "quantity": 500, "avg_price": 20.0, "product_type": "MARGIN"},
-        {"trading_symbol": "SBIN 25 SEP 800 CALL", "underlying_symbol": "SBIN", "option_type": "CE",
-         "lot_size": 750, "quantity": 750, "avg_price": 15.0, "product_type": "MARGIN"},
         {"trading_symbol": "TCS 25 SEP 4000 CALL", "underlying_symbol": "TCS", "option_type": "CE",
          "lot_size": 150, "quantity": 150, "avg_price": 50.0, "product_type": "MARGIN"},
     ]
@@ -359,18 +357,15 @@ async def test_5_three_way_reconciliation_no_cross_contamination():
     odc.dhan_wrapper.subscribe_option_price = lambda ts: None
     try:
         options_reconciled = await ote.reconcile_broker_positions()
-        futures_reconciled = await fte.reconcile_broker_positions()
         luxury_reconciled = await lte.reconcile_broker_positions()
 
         options_syms = {p.underlying_symbol for p in options_reconciled}
-        futures_syms = {p.underlying_symbol for p in futures_reconciled}
         luxury_syms = {p.underlying_symbol for p in luxury_reconciled}
         assert options_syms == {"RELIANCE"}, f"Options reconciled wrong set: {options_syms}"
-        assert futures_syms == {"SBIN"}, f"Futures reconciled wrong set: {futures_syms}"
         assert luxury_syms == {"TCS"}, f"Luxury reconciled wrong set: {luxury_syms}"
-        assert not (options_syms & futures_syms & luxury_syms), "cross-contamination between strategies!"
-        print(f"5. Three-way reconciliation (Options/Futures/Luxury) with zero cross-"
-              f"contamination: Options={options_syms} Futures={futures_syms} Luxury={luxury_syms}: PASSED")
+        assert not (options_syms & luxury_syms), "cross-contamination between strategies!"
+        print(f"5. Two-way reconciliation (Options/Luxury) with zero cross-"
+              f"contamination: Options={options_syms} Luxury={luxury_syms}: PASSED")
     finally:
         odc.dhan_wrapper.get_open_fno_positions = real_get_open
         odc.dhan_wrapper.subscribe_option_price = real_subscribe
@@ -394,7 +389,7 @@ async def main():
     await test_2_pe_webhook_ranks_lowest_change_first()
     await test_3_duplicate_webhook_delivery_race()
     await test_4_real_exit_path_target_and_stoploss()
-    await test_5_three_way_reconciliation_no_cross_contamination()
+    await test_5_two_way_reconciliation_no_cross_contamination()
     await test_6_malformed_payload_rejected_cleanly()
     print("\nALL LUXURY PACKAGE CHECKS PASSED")
 

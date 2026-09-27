@@ -10,7 +10,7 @@ copy of the webhook handler, since (per this codebase's own established
 convention) a wiring mistake in one package's copy wouldn't be caught by
 another's tests.
 
-Coverage, for EACH of Options/Futures/Luxury:
+Coverage, for EACH of Options/Luxury:
   1. A multi-stock alert calls log_alert_candidates exactly once, with
      the full candidate list and the actual selected symbols.
   2. A single-stock alert never calls it at all - no ranking DECISION
@@ -41,8 +41,6 @@ trade_history.HISTORY_DIR = scratch_dir
 import reversal_filters
 import Options.option_main as om
 import Options.position_store as ops
-import Futures.futures_main as fm
-import Futures.position_store as fps
 import Luxury.luxury_main as lm
 import Luxury.position_store as lps
 
@@ -126,25 +124,6 @@ async def test_2_options_single_stock_alert_never_calls_it():
           "decision exists to log: PASSED")
 
 
-async def test_3_futures_multi_stock_alert_calls_log_alert_candidates():
-    store = fps.PositionStore()
-    fake_log = await _drive_webhook(fm, fps, store, [("TCS", 2.5)])
-    fake_log.assert_called_once()
-    args = fake_log.call_args
-    assert args[0][0] == "Futures"
-    assert set(args[0][3]) == {"RELIANCE", "TCS"}
-    assert args[0][4] == ["TCS"]
-    print("3. Futures: a multi-stock alert calls log_alert_candidates once with the full candidate "
-          "list and the actual selected symbols: PASSED")
-
-
-async def test_4_futures_single_stock_alert_never_calls_it():
-    store = fps.PositionStore()
-    fake_log = await _drive_webhook_single_stock(fm, fps, store, [("RELIANCE", 2.5)])
-    fake_log.assert_not_called()
-    print("4. Futures: a single-stock alert never calls log_alert_candidates: PASSED")
-
-
 async def test_5_luxury_multi_stock_alert_calls_log_alert_candidates():
     store = lps.PositionStore()
     fake_log = await _drive_webhook(lm, lps, store, [("TCS", 2.5)])
@@ -168,8 +147,6 @@ async def main():
     print("=== Alert-candidate shadow-logging wiring test suite ===\n")
     await test_1_options_multi_stock_alert_calls_log_alert_candidates()
     await test_2_options_single_stock_alert_never_calls_it()
-    await test_3_futures_multi_stock_alert_calls_log_alert_candidates()
-    await test_4_futures_single_stock_alert_never_calls_it()
     await test_5_luxury_multi_stock_alert_calls_log_alert_candidates()
     await test_6_luxury_single_stock_alert_never_calls_it()
     print("\nALL alert-candidate shadow-logging wiring tests PASSED")
