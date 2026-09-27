@@ -21,14 +21,30 @@ paper_mode_control.py's own override file) so it SURVIVES a restart,
 including the automatic 08:00 IST morning-refresh restart.
 
 Scope: only Swing and Bollinger (the two strategies this was requested
-for) - Options/Futures/Luxury keep their own static MAX_CONCURRENT_TRADES-
+for) - Options/Luxury keep their own static MAX_CONCURRENT_TRADES-
 equivalent caps untouched, out of scope for this change.
+
+**`.env` sync, added 27 Sep 2026** - same fix, same reasoning, as
+paper_mode_control.py's own (see that module's docstring for the real
+incident that motivated it, and for why the override is KEPT rather
+than dropped after a successful sync - dropping it would make an
+already-running process silently fall back to whatever .env said at
+ITS OWN startup, which is wrong the instant a requested value differs
+from that; rewriting the .env FILE on disk does not change what the
+already-imported config module's cached value is for THIS process).
+Standing user instruction from that fix: whenever an explicit
+configuration change is requested, it must be durably written to BOTH
+the runtime override AND .env, so a restart can never silently revert
+an explicit ask - set_max_concurrent_trades now does both, every time.
+If .env can't be written, the override alone still keeps the in-process
+value correct (logged clearly) even though restart-survival doesn't.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 
 logger = logging.getLogger("capacity_control")
@@ -36,6 +52,12 @@ logger = logging.getLogger("capacity_control")
 STRATEGIES = ("Swing", "Bollinger")
 
 OVERRIDE_FILE = Path("data/capacity_overrides.json")
+ENV_FILE = Path(".env")
+
+_ENV_VAR_NAMES = {
+    "Swing": "SWING_MAX_CONCURRENT_TRADES",
+    "Bollinger": "BOLLINGER_MAX_CONCURRENT_TRADES",
+}
 
 _overrides: dict[str, int] = {}
 _overrides_loaded = False
@@ -88,6 +110,50 @@ def capacity_source(strategy: str) -> str:
     return "runtime_override" if strategy in _overrides else "env_default"
 
 
+def _sync_env_file(strategy: str, value: int) -> bool:
+    """Rewrites `strategy`'s own MAX_CONCURRENT_TRADES line in ENV_FILE
+    to match `value` - or appends it if the line doesn't exist yet.
+    Returns True on success. Best-effort by design, identical contract
+    to paper_mode_control._sync_env_file: a failure here must never
+    block the runtime change itself, which has already taken effect via
+    the in-memory override regardless - only the "survives a restart
+    without needing the override" guarantee depends on it."""
+    var_name = _ENV_VAR_NAMES.get(strategy)
+    if var_name is None:
+        return False
+    try:
+        if not ENV_FILE.exists():
+            logger.warning(
+                "%s: %s not found (cwd=%s) - the runtime override still fully applies for "
+                "this process, but .env's own default was NOT updated to match, so a future "
+                "restart would revert to whatever .env currently says",
+                strategy, ENV_FILE, Path.cwd(),
+            )
+            return False
+        lines = ENV_FILE.read_text().splitlines(keepends=True)
+        pattern = re.compile(rf"^{re.escape(var_name)}\s*=")
+        for i, line in enumerate(lines):
+            if pattern.match(line):
+                lines[i] = f"{var_name}={value}\n"
+                ENV_FILE.write_text("".join(lines))
+                logger.info("%s: .env's own %s rewritten to %d", strategy, var_name, value)
+                return True
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(f"{var_name}={value}\n")
+        ENV_FILE.write_text("".join(lines))
+        logger.info("%s: .env had no %s line - appended %s=%d", strategy, var_name, var_name, value)
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "%s: could not update .env's own %s - the runtime override still fully applies "
+            "for this process, but a restart before this is fixed manually would revert to "
+            "whatever .env currently says",
+            strategy, var_name,
+        )
+        return False
+
+
 async def set_max_concurrent_trades(strategy: str, value: int) -> None:
     if value < 0:
         raise ValueError("max concurrent trades cannot be negative")
@@ -96,5 +162,9 @@ async def set_max_concurrent_trades(strategy: str, value: int) -> None:
         _overrides[strategy] = value
         OVERRIDE_FILE.parent.mkdir(parents=True, exist_ok=True)
         OVERRIDE_FILE.write_text(json.dumps(_overrides, indent=2))
-    logger.info("%s: max concurrent trades set to %d via runtime override (persisted to %s)",
-                strategy, value, OVERRIDE_FILE)
+        env_synced = _sync_env_file(strategy, value)
+    logger.info(
+        "%s: max concurrent trades set to %d (override persisted to %s AND %s)", strategy, value, OVERRIDE_FILE,
+        ".env's own default updated to match" if env_synced
+        else ".env NOT updated - see warning above, a restart before this is fixed would revert to .env's old default",
+    )

@@ -394,16 +394,17 @@ def _paper_mode_snapshot() -> dict:
 @app.get("/paper-mode")
 async def get_paper_mode():
     """Current paper-mode state for Options/Luxury/Swing/Bollinger -
-    "source" is normally "env_default" (that strategy's own .env default -
-    BREAKOUT_PAPER_MODE_ENABLED for Options/Luxury, PAPER_MODE_ENABLED for
-    Swing/Bollinger). "runtime_override" should only ever show up
-    transiently, right after a POST /paper-mode call that couldn't write
-    .env for some reason (see paper_mode_control._sync_env_file's own
-    docstring, added 27 Sep 2026 after a real incident where an
-    undated override silently disagreed with .env for days). Swing's
-    separate, narrower INDEX_PAPER_MODE_ENABLED (NIFTY/BANKNIFTY-only) is
-    NOT part of this - see POST /paper-mode's own docstring for why. See
-    POST /paper-mode's own docstring for the full design."""
+    "source" is "runtime_override" for any strategy a POST /paper-mode
+    call has ever touched (which now also keeps `.env`'s own default in
+    sync on every such call - see paper_mode_control._sync_env_file's
+    own docstring, added 27 Sep 2026 after a real incident where an
+    undated override silently disagreed with .env for days), else
+    "env_default" (that strategy's own untouched .env default -
+    BREAKOUT_PAPER_MODE_ENABLED for Options/Luxury, PAPER_MODE_ENABLED
+    for Swing/Bollinger). Swing's separate, narrower INDEX_PAPER_MODE_
+    ENABLED (NIFTY/BANKNIFTY-only) is NOT part of this - see POST
+    /paper-mode's own docstring for why. See POST /paper-mode's own
+    docstring for the full design."""
     return _paper_mode_snapshot()
 
 
@@ -415,15 +416,17 @@ async def set_paper_mode(payload: PaperModeRequest):
     swing strategy method with a similar kind of a dynamic endpoint").
     Options/Luxury each already had their own BREAKOUT_PAPER_MODE_ENABLED
     flag (added 22 Sep 2026); Swing/Bollinger already had their own
-    PAPER_MODE_ENABLED flag - this call rewrites `.env`'s own line for
-    that strategy to match (added 27 Sep 2026, after a real incident
+    PAPER_MODE_ENABLED flag - this call ALSO rewrites `.env`'s own line
+    for that strategy to match (added 27 Sep 2026, after a real incident
     where a runtime override silently disagreed with .env for days with
-    nothing surfacing it), so a restart - including the automatic 08:00
-    IST morning-refresh restart - comes up in the SAME mode this call
-    set, without depending on a separate override file at all. If .env
-    genuinely can't be written, a runtime override (data/paper_mode_
-    overrides.json, gitignored) is kept as a fail-safe so the in-process
-    behavior is still correct even though restart-survival isn't - see
+    nothing surfacing it), so a FUTURE restart - including the automatic
+    08:00 IST morning-refresh restart - comes up in the SAME mode this
+    call set, without depending on the runtime override at all. The
+    override itself (data/paper_mode_overrides.json, gitignored) is
+    still set too and still what THIS process reads immediately -
+    rewriting .env on disk doesn't change what an already-running
+    process's config module cached at import time, so the override
+    remains the source of truth for the current process's lifetime; see
     paper_mode_control.py for the actual state and full design reasoning
     (including why it lives in its own small shared module rather than
     inside breakout_paper_engine.py or swing_paper_engine.py).
@@ -500,7 +503,11 @@ async def set_max_concurrent_trades(payload: CapacityRequest):
     store.remaining_capacity/_cap_reached read this live, not a value
     cached at startup - see capacity_control.py's own module docstring).
     Persisted to data/capacity_overrides.json so it SURVIVES a restart,
-    including the automatic 08:00 IST morning-refresh restart.
+    including the automatic 08:00 IST morning-refresh restart - and, as
+    of 27 Sep 2026 (same fix as paper_mode_control.py's own, after that
+    module's real override-vs-.env divergence incident), ALSO rewrites
+    `.env`'s own default for that strategy to match, so a restart stays
+    correct even if the override file were ever lost.
 
     Lowering this below the number of symbols currently reserved/open
     does NOT touch any already-open or already-reserved position - it

@@ -48,15 +48,23 @@ design above has a real gap - an override can silently diverge from
 which is exactly what happened to Swing (its `.env` said paper-mode-on,
 but an undated runtime override had it real-trading instead, discovered
 by chance while investigating an unrelated finding). `set_paper_mode`
-now also rewrites `.env`'s own line for that strategy to match, then
-DROPS the override entirely - collapsing back to a single source of
-truth (`.env`) instead of leaving two mechanisms that can quietly
-disagree. This means `GET /paper-mode` reporting `source: "env_default"`
-is now the normal, expected state after any change, not just the
-never-touched state; `"runtime_override"` should only ever be seen
-transiently, if `.env` couldn't be written for some reason (see
-`_sync_env_file`'s own docstring for the fail-safe behavior in that
-case)."""
+now also rewrites `.env`'s own line for that strategy to match, so a
+FUTURE restart no longer depends on the override file at all to come up
+correct. The override itself is deliberately KEPT, not dropped, after a
+successful sync - `_env_default` reads each package's config module,
+which cached `os.getenv(...)` once at process START, so rewriting the
+.env file on disk does NOT change what `_env_default` returns for the
+CURRENT process; dropping the override would make an already-running
+process silently fall back to whatever .env said at ITS OWN startup,
+which is wrong the instant a requested value differs from that (caught
+by this module's own test suite, 27 Sep 2026, before this ever shipped
+with the bug live: the first version of this fix dropped the override
+and only "worked" in the one real case tried because the requested
+value happened to already match .env). `GET /paper-mode` correctly
+keeps reporting `source: "runtime_override"` for the life of the
+process after any change - that's accurate, not a regression to the
+original gap, since .env and the override are now written together on
+every change and can never diverge again."""
 from __future__ import annotations
 
 import asyncio
@@ -190,18 +198,8 @@ async def set_paper_mode(strategy: str, enabled: bool) -> None:
         OVERRIDE_FILE.parent.mkdir(parents=True, exist_ok=True)
         OVERRIDE_FILE.write_text(json.dumps(_overrides, indent=2))
         env_synced = _sync_env_file(strategy, enabled)
-        if env_synced:
-            # .env now agrees with the requested state - the override is
-            # redundant going forward, and dropping it is what actually
-            # closes the "override silently disagrees with .env" gap
-            # this whole mechanism exists to prevent. If .env couldn't be
-            # written, the override is deliberately KEPT so the runtime
-            # behavior stays correct even though the restart-survival
-            # guarantee doesn't (see _sync_env_file's own docstring).
-            del _overrides[strategy]
-            OVERRIDE_FILE.write_text(json.dumps(_overrides, indent=2))
     logger.info(
-        "%s: paper mode set to %s (%s)", strategy, enabled,
-        ".env updated, no runtime override needed" if env_synced
-        else f"runtime override only, persisted to {OVERRIDE_FILE} - .env NOT updated, see warning above",
+        "%s: paper mode set to %s (override persisted to %s AND %s)", strategy, enabled, OVERRIDE_FILE,
+        ".env's own default updated to match" if env_synced
+        else ".env NOT updated - see warning above, a restart before this is fixed would revert to .env's old default",
     )

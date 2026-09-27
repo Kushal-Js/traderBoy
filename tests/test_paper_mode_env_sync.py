@@ -4,9 +4,17 @@ Tests for paper_mode_control.set_paper_mode's .env-sync fix (27 Sep
 undated runtime override had it real-trading instead - discovered by
 chance days later, not by anything surfacing the disagreement). Covers:
 
-  1. set_paper_mode rewrites the strategy's own .env line to match, and
-     drops the runtime override once .env agrees - source becomes
-     "env_default", not "runtime_override", after a successful sync.
+  1. set_paper_mode rewrites the strategy's own .env line to match, AND
+     keeps the runtime override (source stays "runtime_override") -
+     this module's own first version of this fix DROPPED the override
+     instead, which is wrong: rewriting the .env FILE on disk doesn't
+     change what the already-imported config module's cached value is
+     for the CURRENT process, so dropping the override would make an
+     already-running process silently fall back to whatever .env said
+     at ITS OWN startup the instant a requested value differs from
+     that. Caught by this exact test before it ever shipped with the
+     bug - test_1 below asserts the override survives specifically to
+     guard against that regression coming back.
   2. A strategy whose .env has no existing line for its own var gets one
      appended, not silently dropped.
   3. If .env can't be written, the runtime override is KEPT (so the
@@ -47,16 +55,20 @@ def _reset(env_text: str = "") -> Path:
     return env_path
 
 
-async def test_1_env_line_rewritten_and_override_dropped():
+async def test_1_env_line_rewritten_and_override_kept():
     env_path = _reset("SWING_PAPER_MODE_ENABLED=false\nOTHER_VAR=123\n")
     await pmc.set_paper_mode("Swing", True)
     text = env_path.read_text()
     assert "SWING_PAPER_MODE_ENABLED=true\n" in text, text
     assert "OTHER_VAR=123\n" in text, "an unrelated line must survive untouched"
-    assert "Swing" not in pmc._overrides, "override must be dropped once .env agrees"
-    assert pmc.paper_mode_source("Swing") == "env_default", pmc.paper_mode_source("Swing")
-    print("1. set_paper_mode rewrites .env's own line and drops the now-redundant "
-          "override - source reports 'env_default': PASSED")
+    assert pmc._overrides.get("Swing") is True, \
+        "the override must be KEPT (not dropped) so the CURRENT process reads the " \
+        "correct value immediately - .env on disk changing doesn't affect this " \
+        "process's already-imported config module"
+    assert pmc.paper_mode_source("Swing") == "runtime_override", pmc.paper_mode_source("Swing")
+    assert pmc.is_paper_mode_enabled("Swing") is True
+    print("1. set_paper_mode rewrites .env's own line AND keeps the override - "
+          "source correctly stays 'runtime_override': PASSED")
 
 
 async def test_2_missing_line_gets_appended():
@@ -82,7 +94,7 @@ async def test_3_env_write_failure_keeps_override_as_fallback():
 
 async def main():
     print("=== paper_mode_control .env-sync test suite ===\n")
-    await test_1_env_line_rewritten_and_override_dropped()
+    await test_1_env_line_rewritten_and_override_kept()
     await test_2_missing_line_gets_appended()
     await test_3_env_write_failure_keeps_override_as_fallback()
     print("\nALL PAPER-MODE ENV-SYNC CHECKS PASSED")
