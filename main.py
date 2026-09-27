@@ -87,6 +87,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
+# watchdog.py polls /health every 5s (see its own POLL_INTERVAL_SECONDS) -
+# harmless on its own, but at that cadence it's ~17k access-log lines/day,
+# which measured out to 97.5% of this service's entire journal volume on a
+# real weekday sample (27 Sep 2026 disk/journal audit). Dropped here rather
+# than at the journald/syslog level so it never reaches the journal at all -
+# every other access-logged request (webhooks, real endpoints) is untouched,
+# and this doesn't affect watchdog.py's own outage detection, which polls
+# and records independently of this app's own log output.
+class _DropHealthPollNoise(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "/health" not in record.getMessage()
+
+
+logging.getLogger("uvicorn.access").addFilter(_DropHealthPollNoise())
+
 # Every strategy's blocking Dhan/Tradehull calls (order placement, ATM/
 # futures resolution, margin checks, LTP REST fallback, position
 # reconciliation) go through `loop.run_in_executor(None, ...)`, which
