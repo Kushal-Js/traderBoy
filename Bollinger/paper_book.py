@@ -83,8 +83,13 @@ def _from_json(d: dict) -> Position:
 
 
 class PaperBook:
-    def __init__(self, path: str) -> None:
+    """One strategy's paper positions + trade log. `labels` (strategy name and
+    rule settings) are stamped on every closed-trade record so a log line
+    always says which strategy produced it."""
+    def __init__(self, path: str, log_name: str, labels: dict) -> None:
         self._path = Path(path)
+        self.log_name = log_name
+        self.labels = labels
         self._lock = asyncio.Lock()
         self.positions: dict[str, Position] = {}
 
@@ -100,7 +105,8 @@ class PaperBook:
             logger.exception("Could not load paper positions from %s - starting with none", self._path)
             self.positions = {}
         if self.positions:
-            logger.info("Restored %d open Bollinger PAPER position(s): %s", len(self.positions), sorted(self.positions))
+            logger.info("[%s] Restored %d open PAPER position(s): %s", self.labels["strategy"],
+                        len(self.positions), sorted(self.positions))
         return list(self.positions.values())
 
     def _save(self) -> None:
@@ -118,8 +124,8 @@ class PaperBook:
                 return False
             self.positions[pos.underlying_symbol] = pos
             self._save()
-        logger.info("PAPER position OPENED: %s (%s) entry=%.2f hard_stop=%.2f stop_pct=%.2f%% qty=%s",
-                    pos.underlying_symbol, pos.trading_symbol, pos.entry_price, pos.hard_stop_loss,
+        logger.info("[%s] PAPER position OPENED: %s (%s) entry=%.2f hard_stop=%.2f stop_pct=%.2f%% qty=%s",
+                    self.labels["strategy"], pos.underlying_symbol, pos.trading_symbol, pos.entry_price, pos.hard_stop_loss,
                     pos.stop_pct * 100, pos.pnl_multiplier)
         return True
 
@@ -147,8 +153,7 @@ class PaperBook:
         now = datetime.now(IST)
         record = {
             "underlying_symbol": symbol, "trading_symbol": pos.trading_symbol, "option_type": pos.resolved_option_type,
-            "entry_mode": config.ENTRY_MODE, "sides": config.SIDES, "exit_mode": config.EXIT_MODE,
-            "opened_at": pos.opened_at.isoformat(), "closed_at": now.isoformat(),
+            **self.labels, "opened_at": pos.opened_at.isoformat(), "closed_at": now.isoformat(),
             "hold_minutes": round((now - pos.opened_at).total_seconds() / 60, 1),
             "entry_price": pos.entry_price, "exit_price": exit_price, "best_price": pos.best_price,
             "exit_reason": reason, "stop_pct": pos.stop_pct, "trailing_armed": pos.trailing_armed,
@@ -156,9 +161,9 @@ class PaperBook:
             "pnl_raw": round((exit_price - pos.entry_price) * pos.pnl_multiplier, 2),
             "pnl_modeled": round((exit_filled - entry_filled) * pos.pnl_multiplier, 2),
         }
-        await asyncio.get_running_loop().run_in_executor(None, append_jsonl, PAPER_TRADES_LOG_NAME, record)
-        logger.info("PAPER position CLOSED: %s (%s) reason=%s entry=%.2f exit=%.2f pnl_raw=%.2f pnl_modeled=%.2f",
-                    symbol, pos.trading_symbol, reason, pos.entry_price, exit_price,
+        await asyncio.get_running_loop().run_in_executor(None, append_jsonl, self.log_name, record)
+        logger.info("[%s] PAPER position CLOSED: %s (%s) reason=%s entry=%.2f exit=%.2f pnl_raw=%.2f pnl_modeled=%.2f",
+                    self.labels["strategy"], symbol, pos.trading_symbol, reason, pos.entry_price, exit_price,
                     record["pnl_raw"], record["pnl_modeled"])
         return record
 
@@ -166,4 +171,14 @@ class PaperBook:
         return {"open_positions": [_to_json(p) for p in self.positions.values()]}
 
 
-paper_book = PaperBook(config.PAPER_POSITIONS_FILE)
+HOLD_LONG_PAPER_TRADES_LOG_NAME = "bollinger_hold_long_paper_trades"
+
+# The deployed Bollinger strategy's paper book.
+paper_book = PaperBook(config.PAPER_POSITIONS_FILE, PAPER_TRADES_LOG_NAME, {
+    "strategy": "Bollinger", "entry_mode": config.ENTRY_MODE, "sides": config.SIDES,
+    "exit_mode": config.EXIT_MODE, "roll_days": config.ROLL_EXPIRY_WITHIN_TRADING_DAYS})
+
+# The separate Bollinger Hold-Long paper strategy's book (see config.HOLD_LONG_*).
+hold_long_paper_book = PaperBook(config.HOLD_LONG_PAPER_POSITIONS_FILE, HOLD_LONG_PAPER_TRADES_LOG_NAME, {
+    "strategy": "BollingerHoldLong", "entry_mode": "resting", "sides": "long",
+    "exit_mode": "hold_to_close", "roll_days": config.HOLD_LONG_ROLL_EXPIRY_WITHIN_TRADING_DAYS})

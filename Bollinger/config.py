@@ -235,6 +235,10 @@ PAPER_POSITIONS_FILE = os.getenv("BOLLINGER_PAPER_POSITIONS_FILE", "data/bolling
 # deployed earlier the same day; the research-backed combination is
 # BOLLINGER_SIDES=long + BOLLINGER_EXIT_MODE=hold_to_close ("variant B" in
 # trading-skills learnings/bollinger-backtest-lookahead-bias-entry-timing.md).
+# Per user instruction (28 Sep 2026) that combination is NOT switched on
+# here - it runs as its own separate paper strategy, Bollinger Hold-Long
+# (see the HOLD_LONG_* block below), so its results never mix with this
+# deployed strategy's. Leave these two at their defaults.
 #
 # SIDES
 #   "both" - take BULLISH entries (buy CE) and BEARISH entries (buy PE).
@@ -296,4 +300,39 @@ DAILY_SQUARE_OFF_TIME = os.getenv("BOLLINGER_DAILY_SQUARE_OFF_TIME", "15:15")
 # this rule's first test is the paper book itself (the trade log shows which
 # contract each trade used).
 # ---------------------------------------------------------------------------
-ROLL_EXPIRY_WITHIN_TRADING_DAYS = int(os.getenv("BOLLINGER_ROLL_EXPIRY_WITHIN_TRADING_DAYS", "2"))
+# Default 0 (OFF) for this deployed Bollinger strategy, so its behaviour stays
+# exactly as deployed on the morning of 28 Sep. The roll is tested in the
+# separate Bollinger Hold-Long paper strategy below (HOLD_LONG_ROLL_...).
+ROLL_EXPIRY_WITHIN_TRADING_DAYS = int(os.getenv("BOLLINGER_ROLL_EXPIRY_WITHIN_TRADING_DAYS", "0"))
+
+# ---------------------------------------------------------------------------
+# Bollinger Hold-Long - a SEPARATE paper-only strategy (28 Sep 2026).
+#
+# WHAT: the same Bollinger/Vortex pending-order signal as the deployed
+# strategy above, traded with different rules:
+#   - BULLISH entries only (buy CE), never BEARISH;
+#   - resting-order entry (always - independent of ENTRY_MODE above);
+#   - no percentage or trailing stop - held until HOLD_LONG_DAILY_SQUARE_OFF_
+#     TIME, with MAX_LOSS_PROTECTION_RS as the only early exit;
+#   - rolls to the next expiry when HOLD_LONG_ROLL_EXPIRY_WITHIN_TRADING_DAYS
+#     or fewer trading days remain (see ROLL_EXPIRY_WITHIN_TRADING_DAYS above
+#     for how the roll works);
+#   - same Rs 5 minimum premium, same ATM contract selection and liquidity
+#     checks, same Friday/index square-off times.
+# See config.SIDES / config.EXIT_MODE above for the research behind each
+# rule.
+#
+# SEPARATE BY DESIGN (user instruction: "live deployed strategy results
+# shouldn't be mixed with this new approach"): its own paper positions file,
+# its own trade log (history/<date>_bollinger_hold_long_paper_trades.log),
+# its own event log (history/<date>_bollinger_hold_long_events.log) and its
+# own endpoint (GET /bollinger/hold-long/paper-trades). It only READS the
+# shared signal; acting on a signal here never consumes it for the deployed
+# strategy or vice versa, and an open position in one never blocks the
+# other. PAPER ONLY: this strategy has no real-order path at all.
+# ---------------------------------------------------------------------------
+HOLD_LONG_ENABLED = os.getenv("BOLLINGER_HOLD_LONG_ENABLED", "true").lower() == "true"
+HOLD_LONG_ROLL_EXPIRY_WITHIN_TRADING_DAYS = int(os.getenv("BOLLINGER_HOLD_LONG_ROLL_EXPIRY_WITHIN_TRADING_DAYS", "2"))
+HOLD_LONG_DAILY_SQUARE_OFF_TIME = os.getenv("BOLLINGER_HOLD_LONG_DAILY_SQUARE_OFF_TIME", "15:15")
+HOLD_LONG_PAPER_POSITIONS_FILE = os.getenv("BOLLINGER_HOLD_LONG_PAPER_POSITIONS_FILE",
+                                           "data/bollinger_hold_long_paper_positions.json")
