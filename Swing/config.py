@@ -434,6 +434,15 @@ COPPER_STRUCTURE_BREAK_ENABLED = os.getenv("SWING_COPPER_STRUCTURE_BREAK_ENABLED
 # exponential-backoff fix for why REST pressure here is a real, already-
 # incident-producing concern, not a hypothetical one). A 5-min-bar signal
 # has no real information gain from refreshing faster than this anyway.
+# COPPER 5-min Supertrend entry filter (user request 28 Sep 2026): on top of
+# the 5m/15m/1h structure-break agreement, a CALL also needs the last closed
+# 5-min candle to close ABOVE the 5-min Supertrend(10,3) line (a fresh cross
+# above included), a PUT needs it BELOW. Entry-only - exits are unchanged.
+# Backtest (real COPPER futures series, live fresh-formation + volume-floor
+# rules, next-bar-open fills, Rs 1,500 round-trip cost): +Rs 14,750 over 12
+# MCX days, +Rs 6,375 over 22, +Rs 2,625 over 30 vs structure-break alone;
+# +Rs 4,575 on the 7 trades replayable on real Oct option prints.
+COPPER_SUPERTREND_FILTER_ENABLED = os.getenv("SWING_COPPER_SUPERTREND_FILTER_ENABLED", "false").lower() == "true"
 STRUCTURE_BREAK_REFRESH_SECONDS = int(os.getenv("SWING_STRUCTURE_BREAK_REFRESH_SECONDS", "60"))
 
 # WS-based local candle reconstruction for the regime/Supertrend signals

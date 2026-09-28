@@ -389,6 +389,15 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
         combined = signals.structure_break_entry_signal(symbol)
         if combined is None:
             return None
+        if config.COPPER_SUPERTREND_FILTER_ENABLED:
+            # 5-min Supertrend confirmation (config.COPPER_SUPERTREND_FILTER_
+            # ENABLED): CALL only with the last closed 5-min candle above the
+            # line, PUT only below it. No Supertrend reading -> no entry.
+            # A blocked agreement stays eligible, so the entry can still
+            # happen later in the same agreement once the candle confirms.
+            st = await signals.get_supertrend_state(symbol)
+            if st is None or st.is_above != (combined == 1):
+                return None
         return "BULLISH" if combined == 1 else "BEARISH"
     regime = await signals.get_regime_state(symbol)
     if regime is None:
@@ -505,16 +514,21 @@ async def _evaluate_exit_signal(symbol: str, position: Position) -> Optional[str
     # Tick-based exit (config.EXIT_TIMING): the live price crossing the last
     # closed candle's line against the position - only once the forming
     # candle is a later one than the candle the position was opened in.
-    if config.EXIT_TIMING == "tick" and st.candle_start >= _candle_start_of(position.opened_at):
+    if config.EXIT_TIMING == "tick" and _as_ist(st.candle_start) >= _candle_start_of(position.opened_at):
         tick_bullish, tick_bearish = _tick_supertrend_touch(symbol, st, config.EXIT_TIMING)
         if tick_bearish if bullish_exposure else tick_bullish:
             return "SUPERTREND_REVERSAL_TICK"
     return None
 
 
+def _as_ist(ts: datetime) -> datetime:
+    """Timezone-aware IST; a naive datetime is taken to already be IST."""
+    return ts.replace(tzinfo=IST) if ts.tzinfo is None else ts.astimezone(IST)
+
+
 def _candle_start_of(ts: datetime) -> datetime:
     """Start of the Supertrend-interval candle containing `ts` (IST grid)."""
-    ts = ts.astimezone(IST)
+    ts = _as_ist(ts)
     minute = ts.minute - ts.minute % config.SUPERTREND_INTERVAL_MINUTES
     return ts.replace(minute=minute, second=0, microsecond=0)
 
