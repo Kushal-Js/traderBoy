@@ -474,7 +474,7 @@ WS_STALE_AFTER_SECONDS = float(os.getenv("SWING_WS_STALE_AFTER_SECONDS", "90"))
 # Entry timing (28 Sep 2026, user request: "Update entry timing for SWING to
 # Tick-based also, enter the moment the price touches the trigger").
 #
-#   "tick" (default) - the Supertrend-crossover entry (v1 trigger, and v2/v3/
+#   "tick" - the Supertrend-crossover entry (v1 trigger, and v2/v3/
 #       v4 "branch A") fires the moment the LIVE price crosses the Supertrend
 #       line of the last CLOSED 5-min candle, instead of waiting for a candle
 #       to close across it. Example: last closed candle at 812.0 with the
@@ -484,8 +484,17 @@ WS_STALE_AFTER_SECONDS = float(os.getenv("SWING_WS_STALE_AFTER_SECONDS", "90"))
 #       from closed candles, exactly as before. The candle-close crossover
 #       still fires too, as a fallback when the touch wasn't seen live (e.g.
 #       the tick feed was stale).
-#   "bar_close" - the original behaviour: only a candle CLOSING across the
-#       line triggers the entry.
+#   "bar_close" (default again since 28 Sep 2026 evening) - the original
+#       behaviour: only a candle CLOSING across the line triggers the entry.
+#
+# SWITCHED BACK TO bar_close, 28 Sep 2026 (user request: "build
+# SWING_ENTRY_TIMING=bar_close, which applies to all Swing symbol"), after the
+# real NATURALGAS 23 OCT 300 CALL entry at 15:36 IST: the live price poked
+# ONE tick (301.9) above a 301.81 Supertrend line twice, the 5-min candles
+# closed back below it both times, and the Supertrend never turned bullish.
+# 30 days of NATURALGAS 5-min data: 98 of 202 intrabar touches (49%) fell back
+# before the candle closed; false pokes had a median size of 1 tick, real
+# flips 3. A tick entry with an ATR buffer is the candidate follow-up.
 #
 # WHAT STAYS CLOSE-BASED, and why: only a signal with a price LEVEL can be
 # "touched". The Day Range branch (RSI(14) crossing 60/40) and COPPER's
@@ -502,7 +511,7 @@ WS_STALE_AFTER_SECONDS = float(os.getenv("SWING_WS_STALE_AFTER_SECONDS", "90"))
 # the WS tick feed (USE_WS_CANDLES) to see the forming candle; without it,
 # only the candle-close crossover can fire.
 # ---------------------------------------------------------------------------
-ENTRY_TIMING = os.getenv("SWING_ENTRY_TIMING", "tick").strip().lower()
+ENTRY_TIMING = os.getenv("SWING_ENTRY_TIMING", "bar_close").strip().lower()
 
 # ---------------------------------------------------------------------------
 # Exit timing for the Supertrend-reversal exit (28 Sep 2026, user request:
