@@ -35,7 +35,7 @@ import logging
 import random
 import re
 import string
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import entry_backlog
@@ -252,12 +252,13 @@ async def _record_swing_event(event: str, symbol: str, detail: dict) -> None:
 # --------------------------------------------------------------------------- #
 # Signal evaluation
 # --------------------------------------------------------------------------- #
-def _tick_supertrend_touch(symbol: str, st) -> tuple[bool, bool]:
-    """(bullish_touch, bearish_touch) for config.ENTRY_TIMING == "tick" - see
-    that setting and signals.tick_supertrend_cross. Always (False, False) in
-    "bar_close" mode, or when this symbol's live tick feed is stale (we can't
-    see the forming candle, so we don't guess)."""
-    if config.ENTRY_TIMING != "tick":
+def _tick_supertrend_touch(symbol: str, st, timing: str) -> tuple[bool, bool]:
+    """(bullish_touch, bearish_touch) when `timing` (config.ENTRY_TIMING for
+    entries, config.EXIT_TIMING for exits) is "tick" - see those settings and
+    signals.tick_supertrend_cross. Always (False, False) in "bar_close" mode,
+    or when this symbol's live tick feed is stale (we can't see the forming
+    candle, so we don't guess)."""
+    if timing != "tick":
         return False, False
     if not candle_feed.is_fresh(symbol, config.WS_STALE_AFTER_SECONDS):
         return False, False
@@ -407,7 +408,7 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
     # Tick-based trigger (config.ENTRY_TIMING, 28 Sep 2026): the live price
     # crossing the last closed candle's Supertrend line counts as the
     # crossover, in addition to (not instead of) a candle closing across it.
-    tick_bullish, tick_bearish = _tick_supertrend_touch(symbol, st)
+    tick_bullish, tick_bearish = _tick_supertrend_touch(symbol, st, config.ENTRY_TIMING)
     crossed_above = st.crossed_above or tick_bullish
     crossed_below = st.crossed_below or tick_bearish
     if config.ENTRY_STRATEGY_VERSION in ("v2", "v3", "v4"):
@@ -491,13 +492,31 @@ async def _evaluate_exit_signal(symbol: str, position: Position) -> Optional[str
     st = await signals.get_supertrend_state(symbol)
     if st is None or st.candle_start is None:
         return None
-    if position.supertrend_entry_candle_start and st.candle_start <= position.supertrend_entry_candle_start:
-        return None  # still reading the entry candle itself - not a real reversal yet
-    reversed_against_long = position.instrument_side == "LONG" and st.crossed_below
-    reversed_against_short = position.instrument_side == "SHORT" and st.crossed_above
-    if reversed_against_long or reversed_against_short:
+    # Which way the position makes money. A bought PE is instrument_side
+    # "LONG" but BEARISH exposure - reading instrument_side alone (the
+    # original FUTURES-era logic) made every OPTIONS PE exit on a bearish
+    # crossover (a confirmation) and ignore the bullish one (the real
+    # reversal). Fixed 28 Sep 2026.
+    bullish_exposure = position.instrument_side == "LONG" and position.resolved_option_type != "PE"
+    past_entry_candle = not (position.supertrend_entry_candle_start
+                             and st.candle_start <= position.supertrend_entry_candle_start)
+    if past_entry_candle and (st.crossed_below if bullish_exposure else st.crossed_above):
         return "SUPERTREND_REVERSAL"
+    # Tick-based exit (config.EXIT_TIMING): the live price crossing the last
+    # closed candle's line against the position - only once the forming
+    # candle is a later one than the candle the position was opened in.
+    if config.EXIT_TIMING == "tick" and st.candle_start >= _candle_start_of(position.opened_at):
+        tick_bullish, tick_bearish = _tick_supertrend_touch(symbol, st, config.EXIT_TIMING)
+        if tick_bearish if bullish_exposure else tick_bullish:
+            return "SUPERTREND_REVERSAL_TICK"
     return None
+
+
+def _candle_start_of(ts: datetime) -> datetime:
+    """Start of the Supertrend-interval candle containing `ts` (IST grid)."""
+    ts = ts.astimezone(IST)
+    minute = ts.minute - ts.minute % config.SUPERTREND_INTERVAL_MINUTES
+    return ts.replace(minute=minute, second=0, microsecond=0)
 
 
 def current_target_pct(symbol: str) -> float:
@@ -1049,16 +1068,34 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             return
 
     tag = _gen_tag("Ext", symbol)
-    place_fn = _market_order_placer(position.exchange_segment)
-    try:
-        order_resp = await loop.run_in_executor(
-            None, place_fn, position.trading_symbol, position.quantity, exit_side, tag, position.product_type,
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("%s exit order failed for %s (%s) - backing off before retrying",
-                          exit_side, symbol, position.trading_symbol)
-        await position_store.record_exit_failure(symbol)
-        return
+    order_resp = None
+    if _use_pp_limit_exit(symbol, position, reason):
+        try:
+            order_resp = await loop.run_in_executor(
+                None, dhan_wrapper.place_mcx_limit_order, position.trading_symbol, position.quantity,
+                exit_side, exit_price, tag, position.product_type,
+            )
+            _pp_limit_exits[symbol] = (
+                order_resp["order_id"], _now_ist() + timedelta(seconds=config.MCX_PP_LIMIT_EXIT_WAIT_SECONDS))
+            logger.info("%s: PROFIT_PROTECTION_HIT - resting SELL LIMIT %s at %.2f for %s (market fallback "
+                        "after %.0fs or on a hard-stop/max-loss breach)", symbol, order_resp["order_id"],
+                        order_resp["limit_price"], position.trading_symbol, config.MCX_PP_LIMIT_EXIT_WAIT_SECONDS)
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not place the PROFIT_PROTECTION LIMIT exit for %s - exiting at market "
+                             "instead", symbol, position.trading_symbol)
+            order_resp = None
+    _pp_limit_force_market.discard(symbol)
+    if order_resp is None:
+        place_fn = _market_order_placer(position.exchange_segment)
+        try:
+            order_resp = await loop.run_in_executor(
+                None, place_fn, position.trading_symbol, position.quantity, exit_side, tag, position.product_type,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("%s exit order failed for %s (%s) - backing off before retrying",
+                              exit_side, symbol, position.trading_symbol)
+            await position_store.record_exit_failure(symbol)
+            return
 
     try:
         order_id, is_amo = order_resp["order_id"], order_resp["is_amo"]
@@ -1087,6 +1124,8 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
         if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
             logger.warning("%s exit order %s for %s rejected: status=%s remark=%s - backing off before retrying",
                             exit_side, order_id, symbol, result.status, result.remark)
+            if _pp_limit_exits.pop(symbol, None):
+                _pp_limit_force_market.add(symbol)  # the retry goes out at market, not as another limit
             await position_store.set_pending_exit_order(symbol, None)
             await position_store.record_exit_failure(symbol)
             return
@@ -1110,6 +1149,10 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             # pending-order recheck this package already runs every
             # monitor tick, rather than assuming a non-terminal status
             # means filled.
+            if symbol in _pp_limit_exits:
+                logger.info("%s: PROFIT_PROTECTION LIMIT exit %s still %s - resting; _escalate_pp_limit_exits "
+                            "takes it to market if it doesn't fill in time.", symbol, order_id, result.status)
+                return
             logger.warning("%s exit order %s for %s still %s after the poll budget - deferring "
                             "to background sync instead of assuming it filled.",
                             exit_side, order_id, symbol, result.status)
@@ -1131,6 +1174,78 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
 
 def _exit_on_cooldown(position: Position) -> bool:
     return bool(position.next_exit_retry_at and _now_ist() < position.next_exit_retry_at)
+
+
+# MCX PROFIT_PROTECTION limit exits (config.MCX_PP_LIMIT_EXIT_ENABLED):
+# symbol -> (resting limit order_id, deadline to fall back to market), and
+# the symbols whose next exit attempt must go out at market.
+_pp_limit_exits: dict[str, tuple[str, datetime]] = {}
+_pp_limit_force_market: set[str] = set()
+
+
+def _use_pp_limit_exit(symbol: str, position: Position, reason: str) -> bool:
+    return (config.MCX_PP_LIMIT_EXIT_ENABLED and reason == "PROFIT_PROTECTION_HIT"
+            and position.exchange_segment == "MCX_COMM" and position.basket_type == "OPTIONS"
+            and position.instrument_side == "LONG" and symbol not in _pp_limit_force_market)
+
+
+async def _escalate_pp_limit_exits() -> None:
+    """Every monitor tick: a resting PROFIT_PROTECTION limit exit that hasn't
+    filled by its deadline - or whose option has since fallen to the
+    position's hard stop / max-loss level (the broker SL-L was cancelled when
+    the limit went in) - is cancelled and the position exited at market.
+    A limit that fills is closed by _sync_pending_exit_orders as usual."""
+    loop = asyncio.get_running_loop()
+    for symbol, (order_id, deadline) in list(_pp_limit_exits.items()):
+        position = position_store.live_positions.get(symbol)
+        if position is not None and position.pending_exit_order_id == EXIT_CLAIMED:
+            continue  # _exit_position is still recording this very order - look again next tick
+        if position is None or position.pending_exit_order_id != order_id:
+            _pp_limit_exits.pop(symbol, None)
+            _pp_limit_force_market.discard(symbol)
+            continue
+        try:
+            ltp = await _get_ltp(position)
+        except Exception:  # noqa: BLE001
+            ltp = None
+        breached = ltp is not None and (
+            price_past_hard_stop(position.instrument_side, ltp, position.hard_stop_loss)
+            or -unrealized_pnl_rs(position.instrument_side, position.entry_price, ltp, position.pnl_multiplier)
+            >= config.MAX_LOSS_PROTECTION_RS
+        )
+        if _now_ist() < deadline and not breached:
+            continue
+        reason = position.pending_exit_reason or "PROFIT_PROTECTION_HIT"
+        logger.warning("%s: PROFIT_PROTECTION LIMIT exit %s %s - cancelling and exiting at market (ltp=%s)",
+                       symbol, order_id, "hit the hard stop/max-loss" if breached else "not filled in time", ltp)
+        try:
+            await asyncio.wait_for(loop.run_in_executor(None, dhan_wrapper.cancel_order, order_id),
+                                   timeout=_ORDER_STATUS_TIMEOUT_SECONDS)
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, dhan_wrapper.refresh_order_status, order_id),
+                timeout=_ORDER_STATUS_TIMEOUT_SECONDS)
+            broker_qty = await loop.run_in_executor(
+                None, dhan_wrapper.get_broker_net_quantity, position.trading_symbol, position.exchange_segment)
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not cancel/confirm LIMIT exit %s - retrying next tick (no market order "
+                             "placed, to avoid selling twice)", symbol, order_id)
+            continue
+        await position_store.update_order_status(order_id, result.status, result.remark)
+        if result.status == OrderStatus.TRADED or broker_qty == 0:
+            await position_store.close_position(symbol, result.fill_price or ltp or position.best_price, reason)
+            _pp_limit_exits.pop(symbol, None)
+            await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
+            continue
+        if result.status not in OrderStatus.TERMINAL_STATUSES:
+            continue  # cancel not reflected yet - check again next tick
+        if 0 < broker_qty < position.quantity:
+            position.pnl_multiplier = round(position.pnl_multiplier * broker_qty / position.quantity)
+            position.quantity = broker_qty
+        _pp_limit_exits.pop(symbol, None)
+        _pp_limit_force_market.add(symbol)
+        await position_store.set_pending_exit_order(symbol, None)
+        if await position_store.try_start_exit(symbol):
+            await _exit_position(symbol, position, ltp or position.best_price, reason)
 
 
 # Bounds _get_ltp's worst-case wait - see that function's own docstring
@@ -1566,6 +1681,7 @@ async def monitor_loop() -> None:
                 # entry_backlog.py's own module docstring).
                 await _entry_backlog.clear()
             await _sync_pending_exit_orders()
+            await _escalate_pp_limit_exits()
             await _monitor_tick()
         except Exception:  # noqa: BLE001
             logger.exception("Error in Swing v2 monitor loop tick")

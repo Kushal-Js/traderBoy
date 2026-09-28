@@ -495,6 +495,53 @@ WS_STALE_AFTER_SECONDS = float(os.getenv("SWING_WS_STALE_AFTER_SECONDS", "90"))
 # ---------------------------------------------------------------------------
 ENTRY_TIMING = os.getenv("SWING_ENTRY_TIMING", "tick").strip().lower()
 
+# ---------------------------------------------------------------------------
+# Exit timing for the Supertrend-reversal exit (28 Sep 2026, user request:
+# tick-based entry AND exit).
+#
+#   "bar_close" (default, today's behaviour) - exit only when a closed 5-min
+#       candle crosses the Supertrend line against the position.
+#   "tick" - ALSO exit the moment the live price crosses the last closed
+#       candle's line against the position (the mirror of ENTRY_TIMING=tick),
+#       never inside the 5-min candle the position was opened in. The
+#       candle-close crossover still fires as a fallback. Same stale-feed
+#       rule as the entry: no fresh WS tick feed -> no tick exit.
+#
+# Backtest (28 Sep 2026, 188 Supertrend-crossover trades on the 17 NSE
+# watchlist symbols over 20 days, real Sep-29 option 1-min prints, live
+# exit ladder): tick +Rs 21,207 vs bar_close (53 exits better, 15 worse;
+# still +Rs 14,595 when every tick exit is filled at the WORST option
+# price of that minute). The same timing on Options/Luxury's Supertrend/
+# EMA-cross exits LOST money (-Rs 5,684 over 217 real trades), so it is
+# deliberately NOT ported there. COPPER's structure-break exit has no
+# price level and stays close-based. Applies to real-money NATURALGAS and
+# NIFTY/BANKNIFTY when turned on.
+# ---------------------------------------------------------------------------
+EXIT_TIMING = os.getenv("SWING_EXIT_TIMING", "bar_close").strip().lower()
+
+# ---------------------------------------------------------------------------
+# MCX options: exit PROFIT_PROTECTION_HIT with a LIMIT order instead of a
+# market order (28 Sep 2026, after the COPPER 23 OCT 1400 PUT exit: the
+# rule fired at LTP ~23.3 but the market sell filled at 22.95 in a book
+# that trades a few lots a minute).
+#
+# When on, a PROFIT_PROTECTION_HIT exit for an MCX OPTIONS position places
+# a SELL LIMIT at the LTP that triggered it. If it hasn't filled within
+# MCX_PP_LIMIT_EXIT_WAIT_SECONDS, or the LTP falls to the position's hard
+# stop / max-loss level while it waits, the limit is cancelled and the
+# position is exited at market as before. Every other exit reason (and
+# every NSE position) keeps using a market order.
+#
+# Backtest (real Oct-contract 1-min prints, an ATM CE+PE opened every 15
+# min when the strike had traded, live ladder, 3-min wait): COPPER +Rs
+# 77,250 over 507 entries (+Rs 690 per PP exit, +Rs 43,500 on the 240
+# front-month entries); NATURALGAS +Rs 6,375 over 1,397. Changing the PP
+# rule itself (confirmed arming, wider giveback, keep-50%-of-peak, higher
+# threshold, PP off) was WORSE for COPPER in the same test.
+# ---------------------------------------------------------------------------
+MCX_PP_LIMIT_EXIT_ENABLED = os.getenv("SWING_MCX_PP_LIMIT_EXIT_ENABLED", "false").lower() == "true"
+MCX_PP_LIMIT_EXIT_WAIT_SECONDS = float(os.getenv("SWING_MCX_PP_LIMIT_EXIT_WAIT_SECONDS", "180"))
+
 # Entry-signal strategy version (user request 14 Sep 2026: "mark current
 # deployed EMA-regime strategy with a version and then add another
 # version to this Combined (15min ST OR EMA) strategy"). Two entry

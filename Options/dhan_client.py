@@ -3563,6 +3563,48 @@ class DhanWrapper:
             )
         return {"order_id": str(order_id), "is_amo": is_amo}
 
+    def place_mcx_limit_order(
+        self, trading_symbol: str, quantity: int, transaction_type: str, limit_price: float,
+        tag: Optional[str] = None, product_type: str = "MARGIN",
+    ) -> dict:
+        """Plain MCX LIMIT order (28 Sep 2026) - used by Swing's
+        MCX_PP_LIMIT_EXIT_ENABLED to exit a PROFIT_PROTECTION_HIT at the
+        triggering price instead of selling at market into a thin MCX option
+        book. Same exchange/quantity conventions as place_mcx_market_order
+        (quantity = number of lots) and the same real-tick rounding as
+        place_mcx_stop_loss_limit_order. Only meant for an open session -
+        raises instead of queueing an AMO, so the caller can fall back to its
+        market order."""
+        if not self.is_market_open(exchange_segment="MCX_COMM"):
+            raise RuntimeError(f"MCX session closed - not placing a LIMIT {transaction_type} for {trading_symbol}")
+        try:
+            tick_size = self._instrument_meta(trading_symbol, expected_exchange="MCX").get("tick_size")
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not look up the real tick size for the MCX LIMIT order - "
+                             "falling back to plain 2-decimal rounding", trading_symbol)
+            tick_size = None
+        limit_price = _round_to_tick(limit_price, tick_size)
+        logger.info("Placing MCX LIMIT order: %s %s x%s limit=%.2f (product=%s)",
+                    transaction_type, trading_symbol, quantity, limit_price, product_type)
+        order_id = self.client.order_placement(
+            tradingsymbol=trading_symbol,
+            exchange="MCX",
+            quantity=quantity,
+            price=limit_price,
+            trigger_price=0,
+            order_type="LIMIT",
+            transaction_type=transaction_type,
+            trade_type=product_type,
+            after_market_order=False,
+            tag=tag,
+        )
+        if not order_id:
+            raise RuntimeError(
+                f"order_placement returned no order id for MCX LIMIT {transaction_type} {trading_symbol} "
+                "- check Tradehull's console/log output for the underlying error."
+            )
+        return {"order_id": str(order_id), "is_amo": False, "limit_price": limit_price}
+
     def place_mcx_stop_loss_limit_order(
         self, trading_symbol: str, quantity: int, transaction_type: str,
         trigger_price: float, limit_price: float,
