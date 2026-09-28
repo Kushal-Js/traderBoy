@@ -147,7 +147,8 @@ class PaperBook:
         now = datetime.now(IST)
         record = {
             "underlying_symbol": symbol, "trading_symbol": pos.trading_symbol, "option_type": pos.resolved_option_type,
-            "entry_mode": config.ENTRY_MODE, "opened_at": pos.opened_at.isoformat(), "closed_at": now.isoformat(),
+            "entry_mode": config.ENTRY_MODE, "sides": config.SIDES, "exit_mode": config.EXIT_MODE,
+            "opened_at": pos.opened_at.isoformat(), "closed_at": now.isoformat(),
             "hold_minutes": round((now - pos.opened_at).total_seconds() / 60, 1),
             "entry_price": pos.entry_price, "exit_price": exit_price, "best_price": pos.best_price,
             "exit_reason": reason, "stop_pct": pos.stop_pct, "trailing_armed": pos.trailing_armed,

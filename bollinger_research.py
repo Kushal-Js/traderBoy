@@ -60,6 +60,7 @@ class Variant:
     trail_frac: float = bcfg.TRAILING_STOP_FRACTION
     step_frac: float = bcfg.TRAILING_STEP_FRACTION
     entry_slippage: bool = False
+    sides: str = "both"  # "both" | "long" (BULLISH/CE entries only)
 
 
 class Series:
@@ -276,6 +277,8 @@ def simulate(ctx: dict, v: Variant, tier: str, day_from: date, day_to: date, sta
             continue
         used.add(key)
         if pos is not None or datetime.fromtimestamp(cand["bar_start"], tz=IST).date() != d:
+            continue
+        if v.sides == "long" and cand["side"] != "BULLISH":
             continue
         if dt.time() >= wf.FRIDAY_SQUARE_OFF_TIME or t == last_of_day[d]:
             continue

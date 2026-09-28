@@ -115,6 +115,17 @@ def _is_index_square_off_time() -> bool:
     return now.weekday() < 5 and now >= _parse_hhmm_today(config.INDEX_DAILY_SQUARE_OFF_TIME)
 
 
+def _is_daily_square_off_time() -> bool:
+    """hold_to_close mode only (28 Sep 2026): True from config.DAILY_SQUARE_OFF_
+    TIME onward on a weekday - every non-MCX position is closed and no new
+    non-MCX entry is taken. Always False in "trailing" mode (positions there
+    carry overnight until the Friday square-off, as before)."""
+    if config.EXIT_MODE != "hold_to_close":
+        return False
+    now = _now_ist()
+    return now.weekday() < 5 and now >= _parse_hhmm_today(config.DAILY_SQUARE_OFF_TIME)
+
+
 def _gen_tag(prefix: str, symbol: str) -> str:
     safe_symbol = re.sub(r"[^A-Za-z0-9]", "", symbol)
     suffix = "".join(random.choices(string.digits, k=6))
@@ -162,10 +173,18 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[tuple[str, float, floa
         if hit is None or _resting_consumed.get(symbol) == state.candle_start:
             return None
         _resting_consumed[symbol] = state.candle_start
-        return hit
+        return _direction_allowed(hit)
     if state.fired is None:
         return None
-    return state.fired, state.fired_trigger_price, state.fired_stop_price, state.last_close
+    return _direction_allowed((state.fired, state.fired_trigger_price, state.fired_stop_price, state.last_close))
+
+
+def _direction_allowed(entry: tuple[str, float, float, float]) -> Optional[tuple[str, float, float, float]]:
+    """config.SIDES == "long" drops BEARISH (buy-PE) entries - see config.SIDES
+    for the research behind it."""
+    if config.SIDES == "long" and entry[0] != "BULLISH":
+        return None
+    return entry
 
 
 def _stop_params(fill_price: float, trigger_price: float, stop_price: float,
@@ -187,6 +206,17 @@ def _stop_params(fill_price: float, trigger_price: float, stop_price: float,
     trailing_stop_dist = fill_price * stop_pct * config.TRAILING_STOP_FRACTION
     return (stop_pct, hard_stop_for("LONG", fill_price, stop_pct),
             trailing_stop_dist, trailing_stop_dist * config.TRAILING_STEP_FRACTION)
+
+
+def _broker_stop_pct(stop_pct: float) -> float:
+    """Percentage used for the resting broker-side SL-L order. In "trailing"
+    mode it's the trade's own stop_pct (unchanged). In "hold_to_close" mode
+    the strategy deliberately has no percentage stop, so the broker order is
+    only a disaster backstop: 95% of the premium, i.e. the MAX_LOSS rupee cap
+    normally decides the trigger, and the 95% floor just guarantees a valid
+    positive price (the 25 Sep negative-trigger fix in broker_stop_trigger_
+    and_limit takes the tighter of the two)."""
+    return 0.95 if config.EXIT_MODE == "hold_to_close" else stop_pct
 
 
 def premium_too_low(premium: Optional[float], is_mcx: bool) -> bool:
@@ -283,6 +313,10 @@ def _exit_reason_for(position: Position, ltp: float) -> Optional[str]:
     loss_rs = -unrealized_pnl_rs("LONG", position.entry_price, ltp, position.pnl_multiplier)
     if loss_rs >= config.MAX_LOSS_PROTECTION_RS:
         return "MAX_LOSS_HIT"
+    if config.EXIT_MODE == "hold_to_close":
+        # No percentage or trailing stop in this mode - the position is held
+        # until the daily square-off; MAX_LOSS above is the only early exit.
+        return None
     active_stop = position.trailing_stop_price if position.trailing_armed else position.hard_stop_loss
     if ltp <= active_stop:
         return "TRAILING_STOP_HIT" if position.trailing_armed else "STOP_LOSS_HIT"
@@ -394,7 +428,7 @@ async def enter_position_for_stock(symbol: str, entry_signal: str, trigger_price
         if config.BROKER_STOP_LOSS_ENABLED:
             trigger, limit = broker_stop_trigger_and_limit(
                 "LONG", fill_price, pnl_multiplier, config.MAX_LOSS_PROTECTION_RS,
-                config.BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE, hard_stop_pct=stop_pct,
+                config.BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE, hard_stop_pct=_broker_stop_pct(stop_pct),
             )
             try:
                 stop_tag = _gen_tag("SL", symbol)
@@ -888,6 +922,16 @@ async def _monitor_tick() -> None:
         await _square_off_all("INDEX_DAILY_SQUARE_OFF", symbols=config.INDEX_SYMBOLS)
         await _check_paper_positions(set(config.INDEX_SYMBOLS), "INDEX_DAILY_SQUARE_OFF")
 
+    daily_square_off_now = _is_daily_square_off_time()
+    if daily_square_off_now:
+        # hold_to_close mode: close every non-MCX position (real and paper) at
+        # DAILY_SQUARE_OFF_TIME. Doesn't return early - MCX positions still get
+        # their normal checks below.
+        await _square_off_all("DAILY_SQUARE_OFF", symbols={
+            s for s, p in position_store.live_positions.items() if p.exchange_segment != "MCX_COMM"})
+        await _check_paper_positions(
+            {s for s, p in paper_book.positions.items() if p.exchange_segment != "MCX_COMM"}, "DAILY_SQUARE_OFF")
+
     # Exits first - more urgent than looking for new entries. Concurrent
     # (asyncio.gather), same rationale as Swing's own (PERFORMANCE_AUDIT_
     # 2026-09-25.md finding).
@@ -921,6 +965,8 @@ async def _monitor_tick() -> None:
             continue
         if await position_store.is_in_entry_cooldown(symbol):
             continue
+        if daily_square_off_now and not dhan_wrapper.is_mcx_commodity(symbol):
+            continue  # hold_to_close: nothing new after the daily square-off
         if index_square_off_now and symbol in config.INDEX_SYMBOLS:
             # No fresh same-day NIFTY/BANKNIFTY entry once today's index
             # square-off has fired - would defeat the entire "never carry

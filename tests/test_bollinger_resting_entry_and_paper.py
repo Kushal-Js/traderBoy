@@ -222,6 +222,89 @@ def test_9_enter_paper_end_to_end():
     print("9. paper entry: skips cheap options, fills at live price, exits on the shared stop, never orders: PASSED")
 
 
+def test_10_sides_long_drops_bearish_entries():
+    trading_engine._resting_consumed.clear()
+
+    async def bear_state(symbol):
+        return _state("BEARISH", trigger=100.0, stop=102.0)
+
+    async def bull_state(symbol):
+        return _state("BULLISH")
+
+    common = dict(is_fresh=True)
+    for sides, state_fn, forming, expected in (
+        ("long", bear_state, _forming(101.0, 99.9), None),
+        ("both", bear_state, _forming(101.0, 99.9), ("BEARISH", 100.0, 102.0, 100.0)),
+        ("long", bull_state, _forming(100.5, 99.0), ("BULLISH", 100.0, 98.0, 100.0)),
+    ):
+        trading_engine._resting_consumed.clear()
+        with mock.patch.object(config, "ENTRY_MODE", "resting"), mock.patch.object(config, "SIDES", sides), \
+             mock.patch.object(trading_engine.signals, "get_signal_state", side_effect=state_fn), \
+             mock.patch.object(trading_engine.candle_feed, "is_fresh", return_value=common["is_fresh"]), \
+             mock.patch.object(trading_engine.candle_feed, "forming_bar", return_value=forming), \
+             mock.patch.object(trading_engine, "_now_ist", return_value=BAR_START + BAR + timedelta(minutes=1)):
+            got = asyncio.run(trading_engine._evaluate_entry_signal("TEST"))
+        assert got == expected, (sides, got)
+    print("10. SIDES=long drops BEARISH (buy-PE) entries, keeps BULLISH; SIDES=both keeps both: PASSED")
+
+
+def test_11_hold_to_close_exits_only_on_max_loss():
+    pos = _position(entry=20.0, stop_pct=0.05, qty=100)
+    apply_price_to_trailing(pos, 21.0)  # trailing armed
+    with mock.patch.object(config, "EXIT_MODE", "trailing"):
+        assert trading_engine._exit_reason_for(pos, 18.5) == "TRAILING_STOP_HIT"
+    with mock.patch.object(config, "EXIT_MODE", "hold_to_close"):
+        assert trading_engine._exit_reason_for(pos, 18.5) is None, "no %/trailing stop in hold_to_close"
+        assert trading_engine._exit_reason_for(pos, 10.0) is None, "Rs 1,000 loss < MAX_LOSS"
+        big = _position(entry=20.0, qty=1000)
+        assert trading_engine._exit_reason_for(big, 15.0) == "MAX_LOSS_HIT", "Rs 5,000 loss >= MAX_LOSS"
+        assert trading_engine._broker_stop_pct(0.05) == 0.95, "broker SL is only a disaster backstop"
+    with mock.patch.object(config, "EXIT_MODE", "trailing"):
+        assert trading_engine._broker_stop_pct(0.05) == 0.05
+    print("11. hold_to_close: no % or trailing stop, MAX_LOSS still exits, broker SL = 95% backstop: PASSED")
+
+
+def test_12_daily_square_off_predicate():
+    tue_1514 = datetime(2026, 9, 29, 15, 14, tzinfo=IST)
+    tue_1515 = datetime(2026, 9, 29, 15, 15, tzinfo=IST)
+    sat_1600 = datetime(2026, 10, 3, 16, 0, tzinfo=IST)
+    with mock.patch.object(config, "EXIT_MODE", "hold_to_close"):
+        with mock.patch.object(trading_engine, "_now_ist", return_value=tue_1514):
+            assert trading_engine._is_daily_square_off_time() is False
+        with mock.patch.object(trading_engine, "_now_ist", return_value=tue_1515):
+            assert trading_engine._is_daily_square_off_time() is True
+        with mock.patch.object(trading_engine, "_now_ist", return_value=sat_1600):
+            assert trading_engine._is_daily_square_off_time() is False
+    with mock.patch.object(config, "EXIT_MODE", "trailing"), \
+         mock.patch.object(trading_engine, "_now_ist", return_value=tue_1515):
+        assert trading_engine._is_daily_square_off_time() is False, "trailing mode never squares off daily"
+    print("12. daily square-off fires from 15:15 on weekdays, only in hold_to_close mode: PASSED")
+
+
+def test_13_paper_daily_square_off_closes_at_market_price():
+    records = []
+    with tempfile.TemporaryDirectory() as tmp:
+        book = paper_book_mod.PaperBook(str(Path(tmp) / "paper.json"))
+        asyncio.run(book.open(_position(entry=20.0, qty=100)))
+
+        async def fake_ltp(position):
+            return 22.0
+
+        async def fake_event(event, symbol, detail):
+            records.append((event, detail))
+
+        with mock.patch.object(trading_engine, "paper_book", book), \
+             mock.patch.object(paper_book_mod, "append_jsonl"), \
+             mock.patch.object(trading_engine, "_get_ltp", side_effect=fake_ltp), \
+             mock.patch.object(trading_engine, "_record_bollinger_event", side_effect=fake_event), \
+             mock.patch.object(trading_engine.dhan_wrapper, "unsubscribe_option_price"):
+            asyncio.run(trading_engine._check_paper_positions({"TEST"}, "DAILY_SQUARE_OFF"))
+        assert "TEST" not in book.positions
+    closed = [d for e, d in records if e == "PAPER_POSITION_CLOSED"][0]
+    assert closed["exit_reason"] == "DAILY_SQUARE_OFF" and closed["pnl_raw"] == 200.0
+    print("13. paper positions are squared off at the live price with reason DAILY_SQUARE_OFF: PASSED")
+
+
 if __name__ == "__main__":
     test_1_resting_trigger_hit_bullish_and_bearish()
     test_2_resting_trigger_guards()
@@ -232,4 +315,8 @@ if __name__ == "__main__":
     test_7_trailing_ratchet_unchanged()
     test_8_paper_book_open_update_close_persist()
     test_9_enter_paper_end_to_end()
+    test_10_sides_long_drops_bearish_entries()
+    test_11_hold_to_close_exits_only_on_max_loss()
+    test_12_daily_square_off_predicate()
+    test_13_paper_daily_square_off_closes_at_market_price()
     print("\nAll tests passed.")

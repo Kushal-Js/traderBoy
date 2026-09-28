@@ -79,10 +79,11 @@ async def lifespan(app: FastAPI):
         "Bollinger strategy startup complete: monitor loop running (reusing Options' Dhan connection and "
         "Swing's WS candle feed). strategy_enabled=%s paper_mode_enabled=%s broker_stop_loss_enabled=%s "
         "max_concurrent_trades=%s fund_bucket=%s entry_mode=%s min_stop_pct=%s min_atm_premium_rs=%s "
-        "open_paper_positions=%d",
+        "sides=%s exit_mode=%s daily_square_off_time=%s open_paper_positions=%d",
         config.STRATEGY_ENABLED, config.PAPER_MODE_ENABLED, config.BROKER_STOP_LOSS_ENABLED,
         config.MAX_CONCURRENT_TRADES, config.FUND_BUCKET, config.ENTRY_MODE, config.MIN_STOP_PCT,
-        config.MIN_ATM_PREMIUM_RS, len(paper_book.positions),
+        config.MIN_ATM_PREMIUM_RS, config.SIDES, config.EXIT_MODE, config.DAILY_SQUARE_OFF_TIME,
+        len(paper_book.positions),
     )
     if not config.PAPER_MODE_ENABLED:
         logger.warning(

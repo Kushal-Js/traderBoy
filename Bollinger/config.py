@@ -229,3 +229,46 @@ MIN_ATM_PREMIUM_RS = float(os.getenv("BOLLINGER_MIN_ATM_PREMIUM_RS", "5"))
 # to history/<date>_bollinger_paper_trades.log.
 # ---------------------------------------------------------------------------
 PAPER_POSITIONS_FILE = os.getenv("BOLLINGER_PAPER_POSITIONS_FILE", "data/bollinger_paper_positions.json")
+
+# ---------------------------------------------------------------------------
+# Trade direction and exit style (28 Sep 2026). Defaults keep the behaviour
+# deployed earlier the same day; the research-backed combination is
+# BOLLINGER_SIDES=long + BOLLINGER_EXIT_MODE=hold_to_close ("variant B" in
+# trading-skills learnings/bollinger-backtest-lookahead-bias-entry-timing.md).
+#
+# SIDES
+#   "both" - take BULLISH entries (buy CE) and BEARISH entries (buy PE).
+#   "long" - take BULLISH entries only. WHY: measured on the underlying,
+#            after a resting-order BULLISH entry the stock moved on average
+#            +0.18% to +0.23% by the day's close (3-4x what buying the same
+#            stocks at a random minute gave), consistently in both test
+#            periods. BEARISH entries showed no edge (about 0% or negative).
+#
+# EXIT_MODE
+#   "trailing"      - hard stop at stop_pct of the premium plus the
+#                     1/3-trailing stop (see MIN_STOP_PCT). Exits within
+#                     minutes.
+#   "hold_to_close" - no percentage stop and no trailing stop: the position
+#                     is held until DAILY_SQUARE_OFF_TIME and closed then.
+#                     The ONLY early exit is MAX_LOSS_PROTECTION_RS (the
+#                     rupee circuit-breaker). WHY: the edge above builds up
+#                     over hours; tight stops were closing trades in minutes,
+#                     before it showed up. An option also needs a bigger move
+#                     than the stock to beat time decay + spread, and holding
+#                     gives the move time to happen.
+#   Research result for long + hold_to_close, 15-stock watchlist, entry+exit
+#   slippage, replayed with the 5-position cap: +Rs 43,234 over 20 days on
+#   real option prices (about +Rs 2,160/day), worst drawdown -Rs 26,774,
+#   daily results ranged -Rs 18k to +Rs 39k. Positive in every period and
+#   price model tested, but only ~1 month of real option data - confirm in
+#   paper trading before real money.
+#
+# DAILY_SQUARE_OFF_TIME - used only in hold_to_close mode: every non-MCX
+# position (real and paper) is closed at this time each trading day, and no
+# new non-MCX entries are taken after it. 15:15 matches the research (Dhan's
+# 1-min NSE data, which the research replayed, ends at 15:14). MCX keeps its
+# existing Friday-only rule - MCX wasn't part of this research.
+# ---------------------------------------------------------------------------
+SIDES = os.getenv("BOLLINGER_SIDES", "both").strip().lower()
+EXIT_MODE = os.getenv("BOLLINGER_EXIT_MODE", "trailing").strip().lower()
+DAILY_SQUARE_OFF_TIME = os.getenv("BOLLINGER_DAILY_SQUARE_OFF_TIME", "15:15")
