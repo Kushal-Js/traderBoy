@@ -64,14 +64,13 @@ from Options import config as options_config
 from Luxury import luxury_main
 from Luxury import config as luxury_config
 from Swing import swing_main
-# DISABLED 26 Sep 2026 (user request) - Swing's own paper-mode kill
-# switch task. Safe right now: SWING_INDEX_PAPER_MODE_ENABLED=false in
-# .env, so nothing is currently routed to Swing paper entries - but if
-# that flag is ever flipped back to true WITHOUT re-enabling this import
-# too, a paper position would be entered and then never monitored for
-# exit. Swing/swing_paper_engine.py itself is untouched, just not
-# imported/scheduled here.
-# from Swing import swing_paper_engine
+# RE-ENABLED 28 Sep 2026. It was switched off on 26 Sep ("safe right now:
+# nothing is routed to Swing paper entries"), but Swing's global paper mode
+# was turned on 27 Sep - after which every Swing NSE entry was OPENED as a
+# paper position and never exit-checked or logged (5 found stuck on the
+# morning of 28 Sep). Its monitor loop is started in lifespan() below, and
+# its open positions are now persisted across restarts.
+from Swing import swing_paper_engine
 from Bollinger import bollinger_main
 import universe_bucket
 import breakout_signal
@@ -198,12 +197,26 @@ async def lifespan(app: FastAPI):
                     # have included it. Flagged to the user in the same
                     # response that made this change.
                     paper_engine_task = asyncio.create_task(breakout_paper_engine.paper_engine_monitor_loop())
+                    # Swing's own paper engine - exit-checks Swing paper
+                    # positions (see the import comment at the top of this
+                    # file for why this must run whenever Swing paper mode
+                    # can route entries). Restore persisted open positions
+                    # first and re-subscribe their option prices.
+                    for pos in swing_paper_engine.load_positions():
+                        if pos.exchange_segment in ("NSE_FNO", "MCX_COMM"):
+                            try:
+                                dhan_wrapper.subscribe_option_price(pos.trading_symbol)
+                            except Exception:  # noqa: BLE001
+                                logger.exception("Could not re-subscribe %s for a restored Swing paper position",
+                                                 pos.trading_symbol)
+                    swing_paper_task = asyncio.create_task(swing_paper_engine.paper_engine_monitor_loop())
                     try:
                         yield
                     finally:
                         if dispatcher_task:
                             dispatcher_task.cancel()
                         paper_engine_task.cancel()
+                        swing_paper_task.cancel()
 
 
 app = FastAPI(title="Chartink -> Dhan Algo Bot", lifespan=lifespan)

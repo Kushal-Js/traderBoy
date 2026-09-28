@@ -224,6 +224,34 @@ async def get_positions():
     return await position_store.snapshot()
 
 
+@router.get("/swing/paper-trades")
+async def get_paper_trades(day: Optional[str] = None):
+    """Swing's paper book (added 28 Sep 2026): open paper positions plus the
+    closed paper trades logged on `day` (YYYY-MM-DD, default today) from
+    history/<date>_swing_paper_trades.log, with running totals. Real Swing
+    trades (e.g. MCX, which stays real regardless of paper mode) are NOT
+    here - see /swing/positions."""
+    import json
+    from datetime import date
+
+    from trade_history import dated_path
+    from . import swing_paper_engine  # local import - swing_paper_engine imports Swing.trading_engine
+
+    d = date.fromisoformat(day) if day else date.today()
+    path = dated_path(swing_paper_engine.PAPER_TRADES_LOG_NAME, d)
+    closed = [json.loads(line) for line in path.read_text().splitlines() if line.strip()] if path.exists() else []
+    pnls = [t["pnl"] for t in closed if t.get("pnl") is not None]
+    return {
+        "strategy": "Swing", "mode": "paper",
+        "open_positions": await swing_paper_engine.snapshot(),
+        "day": d.isoformat(),
+        "closed_trades": closed,
+        "closed_count": len(closed),
+        "wins": sum(1 for x in pnls if x > 0),
+        "total_pnl": round(sum(pnls), 2),
+    }
+
+
 @router.get("/swing/entry-backlog")
 async def get_entry_backlog():
     """Signals that fired but couldn't be placed yet because capacity was

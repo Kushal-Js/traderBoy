@@ -69,8 +69,12 @@ engine.py already established for Options/Futures/Luxury.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+from dataclasses import asdict, fields
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from Options.dhan_client import dhan_wrapper
@@ -93,11 +97,63 @@ PAPER_TRADES_LOG_NAME = "swing_paper_trades"
 
 # --------------------------------------------------------------------- #
 # Paper-only state - never touches the real Swing PositionStore or
-# trade_history log. In-memory only, same "a restart just starts today's
-# paper simulation fresh" precedent as breakout_paper_engine.py.
+# trade_history log.
+#
+# PERSISTED since 28 Sep 2026 (was in-memory only). WHY: Swing positions
+# carry overnight by design, and the bot restarts every morning at 08:00
+# (plus on every deploy) - an in-memory-only book silently erased every
+# open paper position, UNLOGGED (a trade is only logged when it closes), so
+# overnight Swing paper trades could never produce a result. Open positions
+# are now written to PAPER_POSITIONS_FILE after every change and reloaded
+# at startup (load_positions), same design as Bollinger/paper_book.py.
 # --------------------------------------------------------------------- #
-_positions: dict[str, Position] = {}   # underlying_symbol -> Position
+PAPER_POSITIONS_FILE = Path(os.getenv("SWING_PAPER_POSITIONS_FILE", "data/swing_paper_positions.json"))
+_positions: dict[str, Position] = {}   # underlying_symbol -> Position (None = entry in progress, never persisted)
 _lock = asyncio.Lock()
+_POSITION_FIELDS = {f.name for f in fields(Position)}
+
+
+def _to_json(pos: Position) -> dict:
+    return {k: ({"__datetime__": v.isoformat()} if isinstance(v, datetime) else v) for k, v in asdict(pos).items()}
+
+
+def _from_json(d: dict) -> Position:
+    clean = {}
+    for k, v in d.items():
+        if k not in _POSITION_FIELDS:
+            continue
+        clean[k] = datetime.fromisoformat(v["__datetime__"]) if isinstance(v, dict) and "__datetime__" in v else v
+    return Position(**clean)
+
+
+def _save_locked() -> None:
+    """Caller holds _lock. Never raises - persistence failing must never break
+    the paper engine itself (it just means a restart would lose state)."""
+    try:
+        PAPER_POSITIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = PAPER_POSITIONS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps([_to_json(p) for p in _positions.values() if p is not None], indent=2))
+        os.replace(tmp, PAPER_POSITIONS_FILE)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not persist Swing paper positions to %s", PAPER_POSITIONS_FILE)
+
+
+def load_positions() -> list[Position]:
+    """Called once at startup (main.py lifespan). Returns the restored
+    positions so the caller can re-subscribe their option prices. A corrupt
+    file is logged and ignored - paper state must never block startup."""
+    if not PAPER_POSITIONS_FILE.exists():
+        return []
+    try:
+        restored = [_from_json(d) for d in json.loads(PAPER_POSITIONS_FILE.read_text())]
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not load Swing paper positions from %s - starting with none", PAPER_POSITIONS_FILE)
+        return []
+    _positions.clear()
+    _positions.update({p.underlying_symbol: p for p in restored})
+    if restored:
+        logger.info("Restored %d open Swing PAPER position(s): %s", len(restored), sorted(_positions))
+    return restored
 
 
 def _now_ist():
@@ -256,6 +312,7 @@ async def process_paper_entry(symbol: str, regime: str) -> dict:
         )
         async with _lock:
             _positions[symbol] = position
+            _save_locked()
 
         logger.warning(
             "%s: SWING PAPER entry - %s entry=%.2f qty=%d side=%s", symbol, trading_symbol, fill_price, quantity, side,
@@ -299,15 +356,20 @@ async def _log_paper_trade(position: Position) -> None:
 
 
 async def _exit_one(symbol: str, position: Position, exit_price: float, reason: str) -> None:
-    loop = asyncio.get_running_loop()
-    if position.exchange_segment in ("NSE_FNO", "MCX_COMM"):
-        await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
+    # Claim the close first: if a concurrent check already closed this
+    # position, do nothing (no double unsubscribe, never logged twice).
+    async with _lock:
+        if _positions.get(symbol) is not position:
+            return
+        _positions.pop(symbol, None)
+        _save_locked()
     position.exit_price = exit_price
     position.exit_reason = reason
     position.closed_at = swing_te._now_ist()
     position.status = "CLOSED"
-    async with _lock:
-        _positions.pop(symbol, None)
+    if position.exchange_segment in ("NSE_FNO", "MCX_COMM"):
+        await asyncio.get_running_loop().run_in_executor(
+            None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
     pnl = swing_te.unrealized_pnl_rs(position.instrument_side, position.entry_price, exit_price, position.pnl_multiplier)
     logger.warning("%s: SWING PAPER exit - %s exit=%.2f reason=%s pnl=%+.2f",
                     symbol, position.trading_symbol, exit_price, reason, pnl)
@@ -322,7 +384,25 @@ async def _check_one(symbol: str, position: Position) -> None:
         return
     if ltp is None:
         return
-    position.best_price = ltp if swing_te.is_more_favorable(position.instrument_side, ltp, position.best_price) else position.best_price
+    if swing_te.is_more_favorable(position.instrument_side, ltp, position.best_price):
+        position.best_price = ltp
+        async with _lock:
+            _save_locked()
+
+    # Friday square-off (added 28 Sep 2026) - real Swing positions are
+    # force-closed every Friday (non-MCX at FRIDAY_SQUARE_OFF_TIME, MCX at
+    # MCX_FRIDAY_SQUARE_OFF_TIME - weekend-gap protection, see Swing/
+    # trading_engine.py's _monitor_tick), but this paper check never did, so
+    # a paper position would have carried over the weekend when the real
+    # one couldn't. Same predicates as the real side.
+    if config.FRIDAY_SQUARE_OFF_ENABLED:
+        is_mcx_position = position.exchange_segment == "MCX_COMM"
+        if not is_mcx_position and swing_te._is_friday_square_off_time():
+            await _exit_one(symbol, position, ltp, "FRIDAY_SQUARE_OFF")
+            return
+        if is_mcx_position and swing_te._is_mcx_friday_square_off_time():
+            await _exit_one(symbol, position, ltp, "MCX_FRIDAY_SQUARE_OFF")
+            return
 
     # Daily index square-off (added 24 Sep 2026) - a paper NIFTY/BANKNIFTY
     # position must behave identically to a real one, including never
@@ -347,6 +427,12 @@ async def paper_engine_monitor_loop() -> None:
     """Started once from main.py's own lifespan, alongside breakout_paper_
     engine's own task - cheap no-op when config.PAPER_MODE_ENABLED is off
     (nothing in _positions to check).
+
+    RE-ENABLED 28 Sep 2026: main.py had stopped starting this loop on 26
+    Sep (safe then - nothing routed to Swing paper), but Swing's global paper
+    mode was switched on 27 Sep, so paper positions were being OPENED and
+    never exit-checked (5 found stuck on 28 Sep morning). main.py starts it
+    again.
 
     Market-hours gated since 27 Sep 2026 - found via a proactive sweep
     (this module isn't currently imported/scheduled by main.py at all, so
