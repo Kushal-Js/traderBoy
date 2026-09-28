@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -919,6 +919,10 @@ async def get_day_range_state(symbol: str) -> Optional[DayRangeState]:
 class StructureBreakSignal:
     combined: int   # +1 = all 3 timeframes agree bullish, -1 = agree bearish, 0 = no agreement
     computed_at: datetime
+    # Each timeframe's own regime ("5m"/"15m"/"1h" -> +1/-1/0) - read by the
+    # HTF exit (config.COPPER_HTF_EXIT_ENABLED) to tell a 5m-only flip from a
+    # higher-timeframe break.
+    regimes: dict = field(default_factory=dict)
 
 
 _structure_break_cache: dict[str, tuple[datetime, Optional[StructureBreakSignal]]] = {}
@@ -1178,7 +1182,7 @@ async def refresh_structure_break_signal(symbol: str) -> None:
         agree_bull = all(v == 1 for v in regimes.values())
         agree_bear = all(v == -1 for v in regimes.values())
         combined = 1 if agree_bull else -1 if agree_bear else 0
-        state = StructureBreakSignal(combined=combined, computed_at=_now_ist())
+        state = StructureBreakSignal(combined=combined, computed_at=_now_ist(), regimes=dict(regimes))
         _structure_break_fail_streak[symbol] = 0
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not refresh structure-break signal - keeping last cached value", symbol)
@@ -1211,3 +1215,43 @@ async def structure_break_refresh_loop(symbols: list) -> None:
                 except Exception:  # noqa: BLE001
                     logger.exception("%s: structure-break refresh loop iteration failed", symbol)
         await asyncio.sleep(5)
+
+
+# --------------------------------------------------------------------------- #
+# COPPER re-entry break rule (config.COPPER_REENTRY_BREAK_ENABLED, 28 Sep 2026)
+# --------------------------------------------------------------------------- #
+def _underlying_5m_bars(symbol: str) -> dict:
+    """Blocking. The symbol's 5-min underlying series (REST base + newer WS
+    bars, same series every other Swing signal reads)."""
+    security_id, exchange_segment, instrument_type = _underlying_reference(symbol)
+    return _get_intraday_series(symbol, security_id, exchange_segment, instrument_type, 5, min_bars=1)
+
+
+def underlying_extreme(symbol: str, start: datetime, end: datetime, side: int) -> Optional[float]:
+    """Blocking. The best underlying price a position on `side` reached
+    between `start` and `end`: the highest high for a CALL (+1), the lowest
+    low for a PUT (-1), over every 5-min bar overlapping that span. None if
+    no bars cover it."""
+    data = _underlying_5m_bars(symbol)
+    lo_t, hi_t = start.timestamp() - 300, end.timestamp()
+    picks = [(h, l) for t, h, l in zip(data.get("timestamp") or [], data.get("high") or [], data.get("low") or [])
+             if lo_t < t <= hi_t]
+    if not picks:
+        return None
+    return max(h for h, _ in picks) if side == 1 else min(l for _, l in picks)
+
+
+def traded_through(symbol: str, level: float, side: int, since: datetime) -> bool:
+    """Blocking. Has the underlying traded beyond `level` in `side`'s
+    direction (above for +1, below for -1) at any point after `since`?
+    Checks every closed 5-min bar after `since` plus the still-forming bar
+    (whose high/low cover every tick so far)."""
+    data = _underlying_5m_bars(symbol)
+    bars = [(h, l) for t, h, l in zip(data.get("timestamp") or [], data.get("high") or [], data.get("low") or [])
+            if t + 300 > since.timestamp()]
+    forming = candle_feed.forming_bar(symbol) if candle_feed.is_fresh(symbol, config.WS_STALE_AFTER_SECONDS) else None
+    if forming:
+        bars.append((forming["high"], forming["low"]))
+    if side == 1:
+        return any(h is not None and h > level for h, _ in bars)
+    return any(l is not None and l < level for _, l in bars)

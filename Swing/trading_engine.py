@@ -31,17 +31,19 @@ scattered branches in this file.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import re
 import string
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import entry_backlog
 import broker_flat_check
 import fund_allocation
 import paper_mode_control
+import trade_history
 from trade_history import append_jsonl, attribute_open_broker_position
 
 from . import candle_feed, config, signals
@@ -267,6 +269,77 @@ def _tick_supertrend_touch(symbol: str, st, timing: str) -> tuple[bool, bool]:
         st, candle_feed.forming_bar(symbol), config.SUPERTREND_INTERVAL_MINUTES, _now_ist().date())
 
 
+def _parse_logged_ts(value: str) -> datetime:
+    """trade_history timestamps: timezone-aware ISO, or naive UTC (the bot's
+    older convention)."""
+    ts = datetime.fromisoformat(value)
+    return (ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts).astimezone(IST)
+
+
+def _last_closed_trade(symbol: str) -> Optional[tuple[datetime, datetime, int]]:
+    """Blocking. (opened_at, closed_at, side +1 CE / -1 PE) of the most recent
+    closed Swing trade in `symbol` - this process's own closed list, plus
+    today's and yesterday's persisted real_trades log so a restart doesn't
+    forget it."""
+    found: list[tuple[datetime, datetime, int]] = []
+    for p in position_store.closed_positions_today:
+        if p.underlying_symbol == symbol and p.closed_at and p.resolved_option_type in ("CE", "PE"):
+            found.append((_as_ist(p.opened_at), _as_ist(p.closed_at), 1 if p.resolved_option_type == "CE" else -1))
+    today = datetime.now().date()
+    for d in (today, today - timedelta(days=1)):
+        path = trade_history.dated_path(trade_history.REAL_TRADES_NAME, d)
+        if not path.exists():
+            continue
+        with open(path) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                    if (r.get("strategy") == "Swing" and r.get("underlying_symbol") == symbol
+                            and r.get("option_type") in ("CE", "PE") and r.get("closed_at")):
+                        found.append((_parse_logged_ts(r["opened_at"]), _parse_logged_ts(r["closed_at"]),
+                                      1 if r["option_type"] == "CE" else -1))
+                except (ValueError, KeyError, TypeError):
+                    continue
+    return max(found, key=lambda x: x[1]) if found else None
+
+
+_reentry_levels: dict[tuple, float] = {}
+_reentry_block_logged: set[tuple] = set()
+
+
+async def _copper_reentry_allowed(symbol: str, side: int) -> bool:
+    """config.COPPER_REENTRY_BREAK_ENABLED: a same-side re-entry within
+    COPPER_REENTRY_BREAK_WINDOW_HOURS of the previous exit needs the futures
+    to have traded THROUGH that trade's best price since it closed (below its
+    lowest low for a PUT, above its highest high for a CALL). Fails open
+    (allows the entry, i.e. today's behaviour) when there's no previous trade
+    or no price data to measure it."""
+    loop = asyncio.get_running_loop()
+    last = await loop.run_in_executor(None, _last_closed_trade, symbol)
+    if last is None:
+        return True
+    opened, closed, last_side = last
+    if last_side != side or _now_ist() - closed > timedelta(hours=config.COPPER_REENTRY_BREAK_WINDOW_HOURS):
+        return True
+    key = (symbol, closed.isoformat())
+    level = _reentry_levels.get(key)
+    if level is None:
+        level = await loop.run_in_executor(None, signals.underlying_extreme, symbol, opened, closed, side)
+        if level is None:
+            return True
+        _reentry_levels[key] = level
+    if await loop.run_in_executor(None, signals.traded_through, symbol, level, side, closed):
+        return True
+    if key not in _reentry_block_logged:
+        _reentry_block_logged.add(key)
+        logger.info("%s: %s re-entry held - the futures must trade %s %.2f (the previous trade's best price, "
+                    "closed %s) first", symbol, "CALL" if side == 1 else "PUT",
+                    "above" if side == 1 else "below", level, closed.strftime("%H:%M"))
+        await _record_swing_event("ENTRY_HELD_REENTRY_BREAK", symbol, {"level": level, "side": side,
+                                                                        "previous_close": closed.isoformat()})
+    return False
+
+
 async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
     """None unless every signal this version needs has real data. Uses
     the 5-min Supertrend's crossover EDGE (crossed_above/crossed_below -
@@ -399,6 +472,8 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
             st = await signals.get_supertrend_state(symbol)
             if st is None or st.is_above != (combined == 1):
                 return None
+        if config.COPPER_REENTRY_BREAK_ENABLED and not await _copper_reentry_allowed(symbol, combined):
+            return None
         return "BULLISH" if combined == 1 else "BEARISH"
     regime = await signals.get_regime_state(symbol)
     if regime is None:
@@ -496,7 +571,12 @@ async def _evaluate_exit_signal(symbol: str, position: Position) -> Optional[str
         current_side = 1 if position.resolved_option_type == "CE" else -1
         if sig.combined == current_side:
             return None
-        return "STRUCTURE_BREAK_REVERSAL" if sig.combined == -current_side else "STRUCTURE_BREAK_SQUARE_OFF"
+        if sig.combined == -current_side:
+            return "STRUCTURE_BREAK_REVERSAL"
+        if (config.COPPER_HTF_EXIT_ENABLED and sig.regimes
+                and sig.regimes.get("15m") == current_side and sig.regimes.get("1h") == current_side):
+            return None  # only the 5m flipped - hold (config.COPPER_HTF_EXIT_ENABLED)
+        return "STRUCTURE_BREAK_SQUARE_OFF"
     if not config.ENABLE_SUPERTREND_EXIT:
         return None
     st = await signals.get_supertrend_state(symbol)

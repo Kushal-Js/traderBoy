@@ -443,6 +443,24 @@ COPPER_STRUCTURE_BREAK_ENABLED = os.getenv("SWING_COPPER_STRUCTURE_BREAK_ENABLED
 # MCX days, +Rs 6,375 over 22, +Rs 2,625 over 30 vs structure-break alone;
 # +Rs 4,575 on the 7 trades replayable on real Oct option prints.
 COPPER_SUPERTREND_FILTER_ENABLED = os.getenv("SWING_COPPER_SUPERTREND_FILTER_ENABLED", "false").lower() == "true"
+# COPPER "HTF+BREAK" (user request 28 Sep 2026, after a 5m-only flip exited
+# a PUT at 19:30 and it re-entered at a worse price at 19:55):
+#   HTF exit - when the 5m/15m/1h agreement lapses to 0 because ONLY the 5m
+#     flipped (15m and 1h still agree with the position), hold instead of
+#     squaring off. A 15m or 1h break, or a full reversal, still exits; the
+#     price exits (max-loss / target / profit-protection / stop) are unchanged.
+#   Re-entry break - a same-side re-entry within COPPER_REENTRY_BREAK_WINDOW_
+#     HOURS of the previous COPPER exit needs the futures to trade THROUGH that
+#     trade's best price first (below its lowest low for a PUT, above its
+#     highest high for a CALL). Opposite-side entries are unaffected.
+# Backtest (real COPPER futures, live entry rules incl. the Supertrend filter,
+# Rs 1,500 round-trip cost), vs live: 30 MCX days 68 -> 25 trades, same-side
+# re-entries within 60 min 14 -> 0, win rate 32% -> 56%, net +Rs 83k -> +Rs
+# 294k, worst drawdown -Rs 89k -> -Rs 28k (22 days +Rs 151k, 12 days +Rs 28k).
+# Only 4 of its trades were replayable on real Oct option prices (+Rs 3,275).
+COPPER_HTF_EXIT_ENABLED = os.getenv("SWING_COPPER_HTF_EXIT_ENABLED", "false").lower() == "true"
+COPPER_REENTRY_BREAK_ENABLED = os.getenv("SWING_COPPER_REENTRY_BREAK_ENABLED", "false").lower() == "true"
+COPPER_REENTRY_BREAK_WINDOW_HOURS = float(os.getenv("SWING_COPPER_REENTRY_BREAK_WINDOW_HOURS", "6"))
 STRUCTURE_BREAK_REFRESH_SECONDS = int(os.getenv("SWING_STRUCTURE_BREAK_REFRESH_SECONDS", "60"))
 
 # WS-based local candle reconstruction for the regime/Supertrend signals
