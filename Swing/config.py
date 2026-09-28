@@ -116,6 +116,23 @@ INDEX_PAPER_MODE_ENABLED = os.getenv("SWING_INDEX_PAPER_MODE_ENABLED", "false").
 # flag's effect, not added into it).
 MCX_PAPER_MODE_ENABLED = os.getenv("SWING_MCX_PAPER_MODE_ENABLED", "false").lower() == "true"
 
+# INDEX-only real-trading CARVE-OUT (added 28 Sep 2026, user request:
+# "enable real trading for NIFTY/BANKNIFTY under SWING now") - mirrors
+# MCX_PAPER_MODE_ENABLED's carve-out mechanism directly above, applied to
+# INDEX_SYMBOLS instead of MCX commodities. Structurally distinct from
+# INDEX_PAPER_MODE_ENABLED above (which only ADDS paper mode for an index
+# candidate on top of the global flag, ORed in): this flag, when true,
+# EXEMPTS index symbols from the global paper_mode_control.
+# is_paper_mode_enabled("Swing") check entirely - an index candidate's
+# real-vs-paper state is then decided SOLELY by INDEX_PAPER_MODE_ENABLED
+# (which defaults false, i.e. real), the same way MCX_PAPER_MODE_ENABLED
+# alone decides MCX's, independent of whatever the global flag says for
+# the rest of the watchlist. Defaults FALSE so the pre-existing ADD-on-
+# only behavior of INDEX_PAPER_MODE_ENABLED is completely unchanged unless
+# this is explicitly turned on. See Swing/trading_engine.py's
+# _should_paper_trade for where this is checked.
+INDEX_REAL_CARVEOUT_ENABLED = os.getenv("SWING_INDEX_REAL_CARVEOUT_ENABLED", "false").lower() == "true"
+
 # ---------------------------------------------------------------------------
 # Basket-type - the ONE configurable instrument choice for every watchlist
 # stock (user request: "This basket can contain either that stock Future

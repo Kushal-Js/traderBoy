@@ -201,11 +201,19 @@ def _should_paper_trade(symbol: str) -> bool:
     real-vs-paper state, and vice versa. See config.py's own
     MCX_PAPER_MODE_ENABLED docstring for the full reasoning.
 
-    Every other symbol (plain NSE equity, or INDEX_SYMBOLS) keeps the
-    original, unchanged logic: paper if EITHER the global flag OR (for an
-    index symbol specifically) config.INDEX_PAPER_MODE_ENABLED is true."""
+    INDEX_SYMBOLS (NIFTY/BANKNIFTY) has its own second, separate carve-out
+    (config.INDEX_REAL_CARVEOUT_ENABLED, added 28 Sep 2026) mirroring the
+    MCX one above: when true, an index candidate is EXEMPTED from the
+    global flag entirely and decided SOLELY by INDEX_PAPER_MODE_ENABLED -
+    same relationship MCX has, just for a different symbol set. Defaults
+    false, so unless explicitly turned on, index symbols keep the
+    original, unchanged logic below: paper if EITHER the global flag OR
+    (for an index symbol specifically) config.INDEX_PAPER_MODE_ENABLED is
+    true."""
     if dhan_wrapper.is_mcx_commodity(symbol):
         return config.MCX_PAPER_MODE_ENABLED
+    if symbol in config.INDEX_SYMBOLS and config.INDEX_REAL_CARVEOUT_ENABLED:
+        return config.INDEX_PAPER_MODE_ENABLED
     index_paper_only = symbol in config.INDEX_SYMBOLS and config.INDEX_PAPER_MODE_ENABLED
     return paper_mode_control.is_paper_mode_enabled("Swing") or index_paper_only
 
