@@ -212,6 +212,7 @@ async def get_signals():
                 "fired": state.fired, "fired_trigger_price": state.fired_trigger_price,
                 "fired_stop_price": state.fired_stop_price, "last_close": state.last_close,
                 "candle_start": state.candle_start.isoformat() if state.candle_start else None,
+                "volume_ratio": round(state.volume_ratio, 3) if state.volume_ratio is not None else None,
             },
         })
     return {"signals": out}

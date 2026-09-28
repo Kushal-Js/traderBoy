@@ -186,6 +186,33 @@ async def _record_bollinger_event(event: str, symbol: str, detail: dict, log_nam
 # --------------------------------------------------------------------------- #
 # Signal evaluation
 # --------------------------------------------------------------------------- #
+async def _volume_floor_passes(symbol: str, side: str) -> bool:
+    """Volume-floor entry gate for the MAIN strategy (paper and real alike) -
+    see config.NSE_VOLUME_FLOOR_GATE_ENABLED's docstring. Uses the volume
+    ratio already computed with the signal that produced this entry (last
+    closed 5-min candle), so no extra fetch. Checked before dispatch, so a
+    blocked entry never reserves a capacity slot; the pending order is
+    already marked consumed, so it isn't retried this candle."""
+    if dhan_wrapper.is_mcx_commodity(symbol):
+        enabled, ratio_min, label = config.MCX_VOLUME_FLOOR_GATE_ENABLED, config.MCX_VOLUME_FLOOR_RATIO_MIN, "MCX"
+    elif symbol in config.INDEX_SYMBOLS:
+        enabled, ratio_min, label = config.INDEX_VOLUME_FLOOR_GATE_ENABLED, config.INDEX_VOLUME_FLOOR_RATIO_MIN, "INDEX"
+    else:
+        enabled, ratio_min, label = config.NSE_VOLUME_FLOOR_GATE_ENABLED, config.NSE_VOLUME_FLOOR_RATIO_MIN, "NSE"
+    if not enabled:
+        return True
+    state = signals.peek_signal_state(symbol)
+    vol_ratio = state.volume_ratio if state else None
+    if vol_ratio is None or vol_ratio >= ratio_min:
+        return True
+    logger.info("%s: %s entry skipped - %s volume floor gate (last closed candle %.2fx its 20-bar avg, below %.2fx)",
+                symbol, side, label, vol_ratio, ratio_min)
+    await _record_bollinger_event(f"ENTRY_SKIPPED_{label}_VOLUME_FLOOR", symbol, {
+        "entry_signal": side, "vol_ratio": round(vol_ratio, 3), "ratio_min": ratio_min,
+        "candle_start": state.candle_start.isoformat() if state.candle_start else None})
+    return False
+
+
 async def _evaluate_entry_signal(symbol: str, profile: Profile = None) -> Optional[tuple[str, float, float, float]]:
     """Returns (side, trigger_price, stop_price, stop_reference_price) when
     `profile` (default: the deployed MAIN strategy) should enter `symbol`
@@ -1125,7 +1152,7 @@ async def _monitor_tick() -> None:
         try:
             if main_wants:
                 result = await _evaluate_entry_signal(symbol, MAIN)
-                if result:
+                if result and await _volume_floor_passes(symbol, result[0]):
                     candidates.append((symbol, result))
             if hold_wants:
                 result = await _evaluate_entry_signal(symbol, HOLD_LONG)
