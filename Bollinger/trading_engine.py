@@ -34,7 +34,7 @@ import logging
 import random
 import re
 import string
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import entry_backlog
@@ -52,7 +52,8 @@ from Swing.position_store import (
 )
 from Swing.mcx_registry import mcx_registry
 from Swing import candle_feed
-from Options.dhan_client import IST, OrderResult, OrderStatus, dhan_wrapper
+from Options import config as dhan_config
+from Options.dhan_client import AtmOption, IST, OrderResult, OrderStatus, _retry, dhan_wrapper
 
 logger = logging.getLogger("bollinger_trading_engine")
 
@@ -234,6 +235,49 @@ class _SkipEntry(Exception):
         self.result = result
 
 
+def trading_days_to_expiry(expiry: date, today: date) -> int:
+    """Weekdays after `today` up to and including `expiry` (holidays not
+    known here, so they're counted as trading days). Mon -> Tue = 1,
+    Fri -> Tue = 2, Thu -> Tue = 3."""
+    days, d = 0, today
+    while d < expiry:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            days += 1
+    return days
+
+
+def _needs_expiry_roll(expiry: Optional[date], today: date) -> bool:
+    """See config.ROLL_EXPIRY_WITHIN_TRADING_DAYS."""
+    if expiry is None or config.ROLL_EXPIRY_WITHIN_TRADING_DAYS <= 0:
+        return False
+    return trading_days_to_expiry(expiry, today) <= config.ROLL_EXPIRY_WITHIN_TRADING_DAYS
+
+
+def _next_expiry_liquid_option(symbol: str, option_type: str, near: "AtmOption") -> Optional["AtmOption"]:
+    """Blocking (run in an executor). The next listed expiry's ATM option for
+    `symbol`, put through the SAME two liquidity checks the shared picker
+    (dhan_wrapper.get_liquid_atm_option) applies to the near contract,
+    walking out to nearby strikes of that same expiry if the ATM one fails.
+    None if there is no later expiry or nothing liquid is found."""
+    try:
+        rolled = _retry(dhan_wrapper._get_atm_option_once, symbol, option_type, 1)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not resolve the next-expiry %s ATM option", symbol, option_type)
+        return None
+    if rolled.expiry_date is None or near.expiry_date is None or rolled.expiry_date <= near.expiry_date:
+        return None
+    if not dhan_config.LIQUID_CONTRACT_GATE_ENABLED:
+        return rolled  # same bypass as the shared picker when the liquidity gate is switched off
+    is_index = dhan_wrapper._is_index_underlying(symbol)
+    candidates = dhan_wrapper._nearby_option_candidates(
+        symbol, option_type, rolled, dhan_config.LIQUID_CONTRACT_MAX_STRIKE_SEARCH, False)
+    for candidate in candidates:
+        if candidate.trading_symbol and dhan_wrapper._is_contract_liquid_and_active(candidate, False, is_index):
+            return candidate
+    return None
+
+
 async def _resolve_option_leg(symbol: str, entry_signal: str) -> dict:
     """Picks the ATM option to buy and its sizing - shared by real and paper
     entries so both always trade the same contract. Raises _SkipEntry with
@@ -258,6 +302,17 @@ async def _resolve_option_leg(symbol: str, entry_signal: str) -> dict:
     if atm.expiry_date == _now_ist().date():
         logger.info("%s: skipped - %s expires today and no later expiry is available yet", symbol, atm.trading_symbol)
         raise _SkipEntry({"symbol": symbol, "status": "skipped_expiry_day", "option_trading_symbol": atm.trading_symbol})
+    if not is_mcx and _needs_expiry_roll(atm.expiry_date, _now_ist().date()):
+        near_symbol = atm.trading_symbol
+        atm = await loop.run_in_executor(None, _next_expiry_liquid_option, symbol, option_type, atm)
+        if atm is None:
+            logger.info("%s: skipped - %s is within %d trading day(s) of expiry and no liquid next-expiry "
+                        "contract was found", symbol, near_symbol, config.ROLL_EXPIRY_WITHIN_TRADING_DAYS)
+            await _record_bollinger_event("ENTRY_SKIPPED_ROLL_FAILED", symbol, {"near_contract": near_symbol})
+            raise _SkipEntry({"symbol": symbol, "status": "skipped", "reason": "expiry_roll_no_liquid_contract",
+                              "near_contract": near_symbol})
+        logger.info("%s: rolled %s -> %s (near expiry within %d trading day(s))", symbol, near_symbol,
+                    atm.trading_symbol, config.ROLL_EXPIRY_WITHIN_TRADING_DAYS)
     quantity = atm.lot_size * config.QUANTITY_LOTS
     if is_mcx:
         # NOT quantity - see Swing/position_store.py's own Position.

@@ -305,6 +305,65 @@ def test_13_paper_daily_square_off_closes_at_market_price():
     print("13. paper positions are squared off at the live price with reason DAILY_SQUARE_OFF: PASSED")
 
 
+def test_14_trading_days_to_expiry_and_roll_decision():
+    tue = date(2026, 9, 29)
+    assert trading_engine.trading_days_to_expiry(tue, date(2026, 9, 28)) == 1   # Mon -> Tue
+    assert trading_engine.trading_days_to_expiry(tue, date(2026, 9, 25)) == 2   # Fri -> Tue (weekend skipped)
+    assert trading_engine.trading_days_to_expiry(tue, date(2026, 9, 24)) == 3   # Thu -> Tue
+    with mock.patch.object(config, "ROLL_EXPIRY_WITHIN_TRADING_DAYS", 2):
+        assert trading_engine._needs_expiry_roll(tue, date(2026, 9, 28))
+        assert trading_engine._needs_expiry_roll(tue, date(2026, 9, 25))
+        assert not trading_engine._needs_expiry_roll(tue, date(2026, 9, 24))
+        assert not trading_engine._needs_expiry_roll(None, date(2026, 9, 28))
+    with mock.patch.object(config, "ROLL_EXPIRY_WITHIN_TRADING_DAYS", 0):
+        assert not trading_engine._needs_expiry_roll(tue, date(2026, 9, 28)), "0 disables the rule"
+    print("14. trading-days-to-expiry counts weekdays; roll within 2 trading days, 0 disables: PASSED")
+
+
+def test_15_resolve_leg_rolls_to_next_expiry_or_skips():
+    near = SimpleNamespace(trading_symbol="TEST 29 SEP 100 CALL", security_id="1", lot_size=100,
+                           expiry_date=date(2026, 9, 29), strike=100.0)
+    nxt = SimpleNamespace(trading_symbol="TEST 27 OCT 100 CALL", security_id="2", lot_size=100,
+                          expiry_date=date(2026, 10, 27), strike=100.0)
+    mon = datetime(2026, 9, 28, 10, 0, tzinfo=IST)
+    events = []
+
+    async def fake_event(event, symbol, detail):
+        events.append(event)
+
+    def run(liquid, is_mcx=False, now=mon):
+        with mock.patch.object(config, "ROLL_EXPIRY_WITHIN_TRADING_DAYS", 2), \
+             mock.patch.object(trading_engine.dhan_config, "LIQUID_CONTRACT_GATE_ENABLED", True), \
+             mock.patch.object(trading_engine, "_now_ist", return_value=now), \
+             mock.patch.object(trading_engine, "_record_bollinger_event", side_effect=fake_event), \
+             mock.patch.object(trading_engine.dhan_wrapper, "is_mcx_commodity", return_value=is_mcx), \
+             mock.patch.object(trading_engine.dhan_wrapper, "get_liquid_atm_option", return_value=near), \
+             mock.patch.object(trading_engine.dhan_wrapper, "_get_atm_option_once", return_value=nxt), \
+             mock.patch.object(trading_engine.dhan_wrapper, "_is_index_underlying", return_value=False), \
+             mock.patch.object(trading_engine.dhan_wrapper, "_nearby_option_candidates", return_value=[nxt]), \
+             mock.patch.object(trading_engine.dhan_wrapper, "_is_contract_liquid_and_active", return_value=liquid), \
+             mock.patch.object(trading_engine.mcx_registry, "pnl_multiplier", side_effect=_fake_multiplier):
+            return asyncio.run(trading_engine._resolve_option_leg("TEST", "BULLISH"))
+
+    leg = run(liquid=True)
+    assert leg["trading_symbol"] == "TEST 27 OCT 100 CALL", "1 trading day to expiry -> next month"
+    try:
+        run(liquid=False)
+        raise AssertionError("expected a skip when no liquid next-expiry contract exists")
+    except trading_engine._SkipEntry as skip:
+        assert skip.result["reason"] == "expiry_roll_no_liquid_contract"
+    assert "ENTRY_SKIPPED_ROLL_FAILED" in events
+    leg = run(liquid=True, is_mcx=True)
+    assert leg["trading_symbol"] == "TEST 29 SEP 100 CALL", "MCX is exempt from the roll"
+    far = datetime(2026, 9, 21, 10, 0, tzinfo=IST)  # 6 trading days to expiry
+    assert run(liquid=True, now=far)["trading_symbol"] == "TEST 29 SEP 100 CALL", "no roll when far from expiry"
+    print("15. near-expiry entries roll to a liquid next-month contract, else skip; MCX/far-dated unchanged: PASSED")
+
+
+async def _fake_multiplier(symbol):
+    return 2500
+
+
 if __name__ == "__main__":
     test_1_resting_trigger_hit_bullish_and_bearish()
     test_2_resting_trigger_guards()
@@ -319,4 +378,6 @@ if __name__ == "__main__":
     test_11_hold_to_close_exits_only_on_max_loss()
     test_12_daily_square_off_predicate()
     test_13_paper_daily_square_off_closes_at_market_price()
+    test_14_trading_days_to_expiry_and_roll_decision()
+    test_15_resolve_leg_rolls_to_next_expiry_or_skips()
     print("\nAll tests passed.")

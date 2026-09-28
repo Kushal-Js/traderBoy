@@ -272,3 +272,28 @@ PAPER_POSITIONS_FILE = os.getenv("BOLLINGER_PAPER_POSITIONS_FILE", "data/bolling
 SIDES = os.getenv("BOLLINGER_SIDES", "both").strip().lower()
 EXIT_MODE = os.getenv("BOLLINGER_EXIT_MODE", "trailing").strip().lower()
 DAILY_SQUARE_OFF_TIME = os.getenv("BOLLINGER_DAILY_SQUARE_OFF_TIME", "15:15")
+
+# ---------------------------------------------------------------------------
+# Expiry roll (28 Sep 2026). If the nearest-expiry ATM option has this many
+# TRADING days or fewer left (counting weekdays after today up to and
+# including the expiry day; exchange holidays are ignored), buy the NEXT
+# expiry's ATM option instead. 0 disables the rule (the shared contract
+# picker still rolls on expiry day itself, as before).
+#
+# WHY: with hold_to_close, a trade is held for hours. An option with 1-2
+# days left loses value to time decay very fast and swings wildly with
+# small price moves, so the same correct stock move can still lose money.
+# Next month's option decays much more slowly. Example: on Mon 28 Sep with
+# stock options expiring Tue 29 Sep (1 trading day left), entries use the
+# October contract.
+#
+# If next month's contract can't be found, or it and its nearby strikes all
+# fail the usual liquidity checks, the entry is SKIPPED - we never fall back
+# to the near-expiry contract, so the rule's effect can be measured cleanly.
+# NSE only; MCX is exempt (different expiry cycle, not studied).
+#
+# NOT BACKTESTED: next-month option prices weren't in the research data, so
+# this rule's first test is the paper book itself (the trade log shows which
+# contract each trade used).
+# ---------------------------------------------------------------------------
+ROLL_EXPIRY_WITHIN_TRADING_DAYS = int(os.getenv("BOLLINGER_ROLL_EXPIRY_WITHIN_TRADING_DAYS", "2"))
