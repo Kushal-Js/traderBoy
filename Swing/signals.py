@@ -196,22 +196,72 @@ def _get_intraday_series(
     same failure immediately rather than making its own doomed call -
     each caller's own existing fail-streak/backoff logic is unaffected,
     since it reads this function's return value exactly as before."""
+    # Fixed 28 Sep 2026 (real trade: NATURALGAS 300 CALL, 16:55 IST): this
+    # used to return the WS series ON ITS OWN once it had min_bars. The WS
+    # feed only holds bars since it was first subscribed, with gaps at every
+    # restart/feed drop, so the regime's 5-min EMA200 was computed on ~487
+    # gappy WS bars (305.41) while the 15-min EMA200 still came from 45 days
+    # of REST (305.12) - a false BULLISH regime that let a CALL through. The
+    # full-history 5-min EMA200 was 304.68 (BEARISH). Same bug Bollinger
+    # fixed in e32c91d. Now: the REST series (lookback_days_override) is
+    # ALWAYS the base, and WS only appends bars newer than it.
+    # require_prior_day/min_bars no longer gate anything here - the REST
+    # base always spans prior days; callers still check bar counts.
+    cache_key = (security_id, exchange_segment, instrument_type, interval_minutes, lookback_days_override)
+    base = _rest_base(cache_key, interval_minutes)
+    if not base.get("close"):
+        return base
+    data = {key: list(base.get(key) or []) for key in _SERIES_KEYS}
     if config.USE_WS_CANDLES and candle_feed.is_fresh(symbol, config.WS_STALE_AFTER_SECONDS):
         ws_data = candle_feed.get_candles_dict(symbol, interval_minutes)
-        ws_timestamps = ws_data.get("timestamp") or []
-        if len(ws_data.get("close") or []) >= min_bars:
-            if not require_prior_day or _spans_prior_day(ws_timestamps):
-                return ws_data
-    cache_key = (security_id, exchange_segment, instrument_type, interval_minutes, lookback_days_override)
+        last_ts = data["timestamp"][-1] if data["timestamp"] else None
+        for i, ts in enumerate(ws_data.get("timestamp") or []):
+            if last_ts is None or ts > last_ts:
+                for key in _SERIES_KEYS:
+                    data[key].append(ws_data[key][i])
+    return data
+
+
+_SERIES_KEYS = ("timestamp", "open", "high", "low", "close", "volume")
+# A REST base that's only behind by bars WS can supply is refetched at most
+# this often, so the always-REST base can't add DH-904 pressure.
+REST_BASE_MIN_REFETCH_SECONDS = 60
+
+
+def _rest_base(cache_key: tuple, interval_minutes: int) -> dict:
+    """The full-history REST series for `cache_key`, forming trailing bar
+    trimmed (a partial bar cached here would otherwise sit mid-series once
+    newer WS bars are appended after it). Reused until a newer closed bar
+    should exist, then refetched at most every REST_BASE_MIN_REFETCH_
+    SECONDS; a failed refetch keeps the last good base (WS extends it)."""
+    now = _now_ist()
     cached = _raw_series_cache.get(cache_key)
-    if cached and (_now_ist() - cached[0]).total_seconds() < RAW_SERIES_DEDUP_SECONDS:
-        return cached[1]
+    if cached and cached[1].get("timestamp"):
+        fetched_at, base = cached
+        bar_start = now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % interval_minutes)
+        newest_closed_start = bar_start - timedelta(minutes=interval_minutes)
+        up_to_date = datetime.fromtimestamp(base["timestamp"][-1], tz=IST) >= newest_closed_start
+        age = (now - fetched_at).total_seconds()
+        if up_to_date or age < REST_BASE_MIN_REFETCH_SECONDS:
+            return base
+    elif cached and (now - cached[0]).total_seconds() < RAW_SERIES_DEDUP_SECONDS:
+        return cached[1]   # a recent failure - don't hammer the API
+    security_id, exchange_segment, instrument_type, _, lookback_days_override = cache_key
     data = dhan_wrapper.fetch_continuous_intraday(
         security_id, exchange_segment, instrument_type, interval_minutes,
         lookback_days_override=lookback_days_override,
-    )
-    _raw_series_cache[cache_key] = (_now_ist(), data)
-    return data
+    ) or {}
+    ts = data.get("timestamp") or []
+    if ts and now < datetime.fromtimestamp(ts[-1], tz=IST) + timedelta(minutes=interval_minutes):
+        data = {key: (data.get(key) or [])[:-1] for key in _SERIES_KEYS}
+    if data.get("close"):
+        _raw_series_cache[cache_key] = (now, data)
+        return data
+    if cached and cached[1].get("close"):
+        _raw_series_cache[cache_key] = (now, cached[1])   # keep the last good base
+        return cached[1]
+    _raw_series_cache[cache_key] = (now, {})
+    return {}
 
 
 def is_symbol_ws_fresh(symbol: str) -> bool:
