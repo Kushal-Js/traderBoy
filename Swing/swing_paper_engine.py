@@ -331,17 +331,50 @@ async def process_paper_entry(symbol: str, regime: str) -> dict:
 # _get_ltp/_evaluate_exit_signal/_exit_reason_for directly (see module
 # docstring - Swing has only one strategy, no hooks table needed).
 # --------------------------------------------------------------------- #
+def modeled_slippage_pct(price: float) -> float:
+    """Same inverse-to-premium slippage model as Bollinger's paper book and
+    every Bollinger backtest: a ~2-tick spread (Rs 0.10) as a % of the price,
+    floored at 0.5% and capped at 10% (~10% at Rs 1, 2% at Rs 5, 0.5% at Rs 20+)."""
+    if price <= 0:
+        return 0.10
+    return min(0.10, max(0.005, 0.10 / price))
+
+
+def modeled_pnl(side: str, entry: float, exit_: float, multiplier: float, basket_type: str) -> float:
+    """P&L with slippage charged on BOTH entry and exit (added 28 Sep 2026,
+    user request), so Swing paper results are comparable with Bollinger's
+    pnl_modeled. Every fill is moved against the trade: a LONG buys higher
+    and sells lower, a SHORT the mirror image. Applied to OPTIONS only - the
+    model is built around option ticks/premiums; for FUTURES/EQUITY (much
+    higher prices, tighter % spreads) its 0.5% floor would overstate costs,
+    so those keep their raw P&L here."""
+    if basket_type != "OPTIONS":
+        return swing_te.unrealized_pnl_rs(side, entry, exit_, multiplier)
+    if side == "LONG":
+        entry_fill = entry * (1 + modeled_slippage_pct(entry))
+        exit_fill = exit_ * (1 - modeled_slippage_pct(exit_))
+    else:
+        entry_fill = entry * (1 - modeled_slippage_pct(entry))
+        exit_fill = exit_ * (1 + modeled_slippage_pct(exit_))
+    return swing_te.unrealized_pnl_rs(side, entry_fill, exit_fill, multiplier)
+
+
 async def _log_paper_trade(position: Position) -> None:
     pnl = None
     if position.exit_price is not None and position.entry_price is not None:
         pnl = swing_te.unrealized_pnl_rs(position.instrument_side, position.entry_price, position.exit_price, position.pnl_multiplier)
+    pnl_modeled = None
+    if pnl is not None:
+        pnl_modeled = round(modeled_pnl(position.instrument_side, position.entry_price, position.exit_price,
+                                        position.pnl_multiplier, position.basket_type), 2)
     record = {
         "strategy": "Swing", "underlying_symbol": position.underlying_symbol,
         "option_trading_symbol": position.option_trading_symbol, "option_type": position.option_type,
         "basket_type": position.basket_type, "instrument_side": position.instrument_side,
-        "quantity": position.quantity, "product_type": position.product_type,
+        "quantity": position.quantity, "pnl_multiplier": position.pnl_multiplier,
+        "product_type": position.product_type,
         "entry_price": position.entry_price, "exit_price": position.exit_price,
-        "exit_reason": position.exit_reason, "pnl": pnl,
+        "exit_reason": position.exit_reason, "pnl": pnl, "pnl_modeled": pnl_modeled,
         "opened_at": position.opened_at.isoformat() if position.opened_at else None,
         "closed_at": position.closed_at.isoformat() if position.closed_at else None,
         "order_id": "", "mode": "paper", "signal_source": "swing_v2",
@@ -371,8 +404,10 @@ async def _exit_one(symbol: str, position: Position, exit_price: float, reason: 
         await asyncio.get_running_loop().run_in_executor(
             None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
     pnl = swing_te.unrealized_pnl_rs(position.instrument_side, position.entry_price, exit_price, position.pnl_multiplier)
-    logger.warning("%s: SWING PAPER exit - %s exit=%.2f reason=%s pnl=%+.2f",
-                    symbol, position.trading_symbol, exit_price, reason, pnl)
+    pnl_mod = modeled_pnl(position.instrument_side, position.entry_price, exit_price, position.pnl_multiplier,
+                          position.basket_type)
+    logger.warning("%s: SWING PAPER exit - %s exit=%.2f reason=%s pnl=%+.2f pnl_modeled=%+.2f",
+                    symbol, position.trading_symbol, exit_price, reason, pnl, pnl_mod)
     await _log_paper_trade(position)
 
 

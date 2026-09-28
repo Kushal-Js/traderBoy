@@ -230,7 +230,10 @@ async def get_paper_trades(day: Optional[str] = None):
     closed paper trades logged on `day` (YYYY-MM-DD, default today) from
     history/<date>_swing_paper_trades.log, with running totals. Real Swing
     trades (e.g. MCX, which stays real regardless of paper mode) are NOT
-    here - see /swing/positions."""
+    here - see /swing/positions. pnl = at live quotes; pnl_modeled = with
+    slippage charged on entry AND exit (options only, see swing_paper_engine.
+    modeled_pnl) - the like-for-like number vs Bollinger's paper books.
+    "wins" counts pnl > 0, "wins_modeled" counts pnl_modeled > 0."""
     import json
     from datetime import date
 
@@ -240,7 +243,18 @@ async def get_paper_trades(day: Optional[str] = None):
     d = date.fromisoformat(day) if day else date.today()
     path = dated_path(swing_paper_engine.PAPER_TRADES_LOG_NAME, d)
     closed = [json.loads(line) for line in path.read_text().splitlines() if line.strip()] if path.exists() else []
+    for t in closed:
+        # Trades logged before slippage modelling existed (28 Sep morning):
+        # compute pnl_modeled from their own entry/exit prices, same formula.
+        if (t.get("pnl_modeled") is None and t.get("pnl") is not None
+                and t.get("entry_price") is not None and t.get("exit_price") is not None):
+            move = t["exit_price"] - t["entry_price"]
+            mult = t.get("pnl_multiplier") or (abs(t["pnl"] / move) if move else t["quantity"])
+            t["pnl_modeled"] = round(swing_paper_engine.modeled_pnl(
+                t.get("instrument_side", "LONG"), t["entry_price"], t["exit_price"], mult,
+                t.get("basket_type", "OPTIONS")), 2)
     pnls = [t["pnl"] for t in closed if t.get("pnl") is not None]
+    modeled = [t["pnl_modeled"] for t in closed if t.get("pnl_modeled") is not None]
     return {
         "strategy": "Swing", "mode": "paper",
         "open_positions": await swing_paper_engine.snapshot(),
@@ -248,7 +262,9 @@ async def get_paper_trades(day: Optional[str] = None):
         "closed_trades": closed,
         "closed_count": len(closed),
         "wins": sum(1 for x in pnls if x > 0),
+        "wins_modeled": sum(1 for x in modeled if x > 0),
         "total_pnl": round(sum(pnls), 2),
+        "total_pnl_modeled": round(sum(modeled), 2),
     }
 
 
