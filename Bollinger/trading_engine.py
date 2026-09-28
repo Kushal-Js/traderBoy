@@ -39,6 +39,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 import entry_backlog
+import broker_flat_check
 import fund_allocation
 import paper_mode_control
 from trade_history import append_jsonl, attribute_open_broker_position
@@ -704,7 +705,26 @@ async def _check_broker_stop_already_filled(symbol: str, position: Position) -> 
     logger.warning("%s: broker-side stop-loss order %s ended as %s without firing - this position now relies "
                     "solely on the regular poll/tick-driven check", symbol, position.stop_loss_order_id, result.status)
     await position_store.clear_stop_loss_order_id(symbol)
+    # A cancelled SL-L is how a manual exit in the Dhan app starts - see
+    # broker_flat_check's docstring (NATURALGAS, 28 Sep 2026).
+    if await broker_flat_check.confirmed_flat(lambda: dhan_wrapper.get_broker_net_quantity(position.trading_symbol, position.exchange_segment)):
+        await _close_as_manual_exit(symbol, position)
+        return True
     return False
+
+
+async def _close_as_manual_exit(symbol: str, position: Position) -> None:
+    """The broker holds none of this contract any more - it was closed
+    outside the bot. Record it as closed WITHOUT sending an order (a SELL
+    here would open a naked short). The real fill price isn't known here,
+    so it's marked at the last live price."""
+    loop = asyncio.get_running_loop()
+    mark = await broker_flat_check.last_price(position.trading_symbol, position.entry_price)
+    logger.warning("%s: broker shows NO position in %s - it was closed outside the bot (manual exit?). "
+                   "Recording it as closed at the last price %.2f; no order sent.",
+                   symbol, position.trading_symbol, mark)
+    await position_store.close_position(symbol, mark, "MANUAL_EXIT_DETECTED")
+    await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
 
 
 async def _exit_position(symbol: str, position: Position, exit_price: float, reason: str) -> None:
@@ -770,6 +790,12 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
                             symbol, broker_qty, position.quantity, stale_order_id, broker_qty)
             position.pnl_multiplier = round(position.pnl_multiplier * broker_qty / position.quantity)
             position.quantity = broker_qty
+
+    # Before the first exit order: is the contract still held at all? See
+    # broker_flat_check (a manual exit with no broker SL-L to notice).
+    if position.exit_failure_count == 0 and await broker_flat_check.confirmed_flat(lambda: dhan_wrapper.get_broker_net_quantity(position.trading_symbol, position.exchange_segment)):
+        await _close_as_manual_exit(symbol, position)
+        return
 
     if position.exit_failure_count >= 1:
         try:
