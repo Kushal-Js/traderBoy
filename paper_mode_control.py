@@ -30,10 +30,13 @@ still decides what "paper mode" actually means for it:
     instead of that package's own trading_engine._process_one_entry.
   - Swing/trading_engine.py (_monitor_tick): reroutes to
     swing_paper_engine.process_paper_entry instead of
-    enter_position_for_stock - ORed with Swing's own separate, narrower
-    INDEX_SYMBOLS-only INDEX_PAPER_MODE_ENABLED flag, which this module
-    does NOT touch (out of scope - a different, more targeted switch,
-    not "real trading on/off for the whole strategy").
+    enter_position_for_stock. NIFTY/BANKNIFTY specifically read the
+    "SwingIndex" pseudo-strategy below instead of "Swing" - fully
+    independent of the rest of the watchlist's paper/real state (added
+    28 Sep 2026 - previously a separate, narrower, restart-only
+    INDEX_PAPER_MODE_ENABLED flag ORed with the global one; folded into
+    this module so it gets the same runtime-toggle + .env-sync guarantee
+    every other strategy here already has).
 
 Same "replaces real trading, doesn't add a shadow copy" semantic in
 every case, and never touches an already-open position - flipping a
@@ -75,7 +78,7 @@ from pathlib import Path
 
 logger = logging.getLogger("paper_mode_control")
 
-STRATEGIES = ("Options", "Luxury", "Swing", "Bollinger")
+STRATEGIES = ("Options", "Luxury", "Swing", "Bollinger", "SwingIndex")
 
 OVERRIDE_FILE = Path("data/paper_mode_overrides.json")
 ENV_FILE = Path(".env")
@@ -85,6 +88,19 @@ _ENV_VAR_NAMES = {
     "Luxury": "LUXURY_BREAKOUT_PAPER_MODE_ENABLED",
     "Swing": "SWING_PAPER_MODE_ENABLED",
     "Bollinger": "BOLLINGER_PAPER_MODE_ENABLED",
+    # "SwingIndex" (added 28 Sep 2026, user request: "Make this Index
+    # trading paper mode toggle also the one which won't require any
+    # restart in future") - a SEPARATE pseudo-strategy scoped to just
+    # NIFTY/BANKNIFTY within Swing, independent of the "Swing" entry
+    # above (which governs the other 18 watchlist symbols). Reuses the
+    # pre-existing SWING_INDEX_PAPER_MODE_ENABLED env var name rather
+    # than introducing a new one - that flag already meant exactly "is
+    # NIFTY/BANKNIFTY paper", just previously only as an ADD-on OR'd with
+    # the global Swing flag and only readable via a restart. Folding it
+    # into this module gives it the same runtime-toggle + .env-sync
+    # guarantees every other strategy here already has - see Swing/
+    # trading_engine.py's _should_paper_trade for where this is checked.
+    "SwingIndex": "SWING_INDEX_PAPER_MODE_ENABLED",
 }
 
 _overrides: dict[str, bool] = {}
@@ -112,6 +128,9 @@ def _env_default(strategy: str) -> bool:
     if strategy == "Bollinger":
         from Bollinger import config as cfg
         return bool(cfg.PAPER_MODE_ENABLED)
+    if strategy == "SwingIndex":
+        from Swing import config as cfg
+        return bool(cfg.INDEX_PAPER_MODE_ENABLED)
     raise ValueError(f"unknown strategy {strategy!r} - must be one of {STRATEGIES}")
 
 

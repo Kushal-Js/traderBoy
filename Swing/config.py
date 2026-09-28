@@ -82,16 +82,26 @@ PAPER_MODE_ENABLED = os.getenv("SWING_PAPER_MODE_ENABLED", "false").lower() == "
 # request - "add a flag to turn off real trading and start paper trading"
 # specifically for the newly-added NIFTY/BANKNIFTY v3 Day Range logic +
 # its brand-new WS index feed, both deployed the same day with no live
-# track record yet). Independent of PAPER_MODE_ENABLED above (that one
-# still replaces ALL of Swing when true) - this one ONLY reroutes NIFTY/
-# BANKNIFTY candidates to swing_paper_engine.process_paper_entry;
-# ASHOKLEY/COALINDIA/COPPER/NATURALGAS keep trading real, unaffected, the
-# same instant this is flipped. See Swing/trading_engine.py's
-# _monitor_tick for where this is checked (ORed with PAPER_MODE_ENABLED,
-# so either flag alone is enough to paper-trade an index candidate).
-# Turning this OFF later does not retroactively affect any already-open
-# paper position - swing_paper_engine.py's own paper_engine_monitor_loop
-# keeps managing it through to its own exit regardless.
+# track record yet). Independent of PAPER_MODE_ENABLED above - NIFTY/
+# BANKNIFTY's real-vs-paper state is entirely its own, never affected by
+# flipping the global flag; ASHOKLEY/COALINDIA/COPPER/NATURALGAS are
+# likewise never affected by flipping this one.
+#
+# REWORKED 28 Sep 2026 (user request: "Make this Index trading paper mode
+# toggle also the one which won't require any restart in future") - this
+# .env value is now ONLY the STARTUP DEFAULT for paper_mode_control's
+# "SwingIndex" pseudo-strategy (see that module's own _env_default), not
+# read directly by Swing/trading_engine.py's _should_paper_trade anymore.
+# The actual real-vs-paper decision for NIFTY/BANKNIFTY at runtime goes
+# through paper_mode_control.is_paper_mode_enabled("SwingIndex") instead,
+# which can be flipped instantly via POST /paper-mode {"strategy":
+# "SwingIndex", "enabled": ...} - no redeploy/restart needed going
+# forward, same as Options/Luxury/Swing/Bollinger already work. This line
+# only matters for a cold start with no runtime override file present
+# yet (or after one is deliberately cleared). Turning paper mode off/on
+# later does not retroactively affect any already-open position -
+# swing_paper_engine.py's own paper_engine_monitor_loop keeps managing an
+# open paper position through to its own exit regardless.
 INDEX_PAPER_MODE_ENABLED = os.getenv("SWING_INDEX_PAPER_MODE_ENABLED", "false").lower() == "true"
 
 # MCX-only real-trading CARVE-OUT (added 26 Sep 2026, user request:
@@ -115,23 +125,6 @@ INDEX_PAPER_MODE_ENABLED = os.getenv("SWING_INDEX_PAPER_MODE_ENABLED", "false").
 # separate branch, since MCX is deliberately carved OUT of the global
 # flag's effect, not added into it).
 MCX_PAPER_MODE_ENABLED = os.getenv("SWING_MCX_PAPER_MODE_ENABLED", "false").lower() == "true"
-
-# INDEX-only real-trading CARVE-OUT (added 28 Sep 2026, user request:
-# "enable real trading for NIFTY/BANKNIFTY under SWING now") - mirrors
-# MCX_PAPER_MODE_ENABLED's carve-out mechanism directly above, applied to
-# INDEX_SYMBOLS instead of MCX commodities. Structurally distinct from
-# INDEX_PAPER_MODE_ENABLED above (which only ADDS paper mode for an index
-# candidate on top of the global flag, ORed in): this flag, when true,
-# EXEMPTS index symbols from the global paper_mode_control.
-# is_paper_mode_enabled("Swing") check entirely - an index candidate's
-# real-vs-paper state is then decided SOLELY by INDEX_PAPER_MODE_ENABLED
-# (which defaults false, i.e. real), the same way MCX_PAPER_MODE_ENABLED
-# alone decides MCX's, independent of whatever the global flag says for
-# the rest of the watchlist. Defaults FALSE so the pre-existing ADD-on-
-# only behavior of INDEX_PAPER_MODE_ENABLED is completely unchanged unless
-# this is explicitly turned on. See Swing/trading_engine.py's
-# _should_paper_trade for where this is checked.
-INDEX_REAL_CARVEOUT_ENABLED = os.getenv("SWING_INDEX_REAL_CARVEOUT_ENABLED", "false").lower() == "true"
 
 # ---------------------------------------------------------------------------
 # Basket-type - the ONE configurable instrument choice for every watchlist

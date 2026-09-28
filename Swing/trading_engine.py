@@ -192,30 +192,34 @@ def _should_paper_trade(symbol: str) -> bool:
     MCX (dhan_wrapper.is_mcx_commodity, config-free live check - same
     everywhere else in this codebase) is a CARVE-OUT: it checks ONLY
     config.MCX_PAPER_MODE_ENABLED, never the global
-    paper_mode_control.is_paper_mode_enabled("Swing") flag or config.
-    INDEX_PAPER_MODE_ENABLED. This is the opposite relationship to the
-    index flag below (which ADDS paper mode on top of the global one,
-    ORed in) - MCX is deliberately EXEMPTED from the global flag's effect
-    in either direction, so flipping Swing's global paper mode on/off for
-    the NSE-equity book never silently changes COPPER/NATURALGAS's own
+    paper_mode_control.is_paper_mode_enabled("Swing") flag. MCX is
+    deliberately EXEMPTED from the global flag's effect in either
+    direction, so flipping Swing's global paper mode on/off for the
+    NSE-equity book never silently changes COPPER/NATURALGAS's own
     real-vs-paper state, and vice versa. See config.py's own
     MCX_PAPER_MODE_ENABLED docstring for the full reasoning.
 
-    INDEX_SYMBOLS (NIFTY/BANKNIFTY) has its own second, separate carve-out
-    (config.INDEX_REAL_CARVEOUT_ENABLED, added 28 Sep 2026) mirroring the
-    MCX one above: when true, an index candidate is EXEMPTED from the
-    global flag entirely and decided SOLELY by INDEX_PAPER_MODE_ENABLED -
-    same relationship MCX has, just for a different symbol set. Defaults
-    false, so unless explicitly turned on, index symbols keep the
-    original, unchanged logic below: paper if EITHER the global flag OR
-    (for an index symbol specifically) config.INDEX_PAPER_MODE_ENABLED is
-    true."""
+    INDEX_SYMBOLS (NIFTY/BANKNIFTY) gets the SAME independence, via a
+    different mechanism: rather than a second static/restart-only config
+    flag (the 24-26 Sep design this superseded), it reads its OWN
+    runtime-togglable pseudo-strategy in paper_mode_control - "SwingIndex"
+    - completely separate from "Swing" above. Changed 28 Sep 2026, user
+    request: "Make this Index trading paper mode toggle also the one
+    which won't require any restart in future" - the old design (an
+    INDEX_PAPER_MODE_ENABLED flag ORed with the global one, then briefly
+    an INDEX_REAL_CARVEOUT_ENABLED exemption flag on top) needed a
+    redeploy+restart to flip; POST /paper-mode {"strategy": "SwingIndex",
+    ...} now flips it instantly, same guarantee (in-memory override +
+    .env sync + survives a restart) every other strategy in
+    paper_mode_control already has. An index candidate never even
+    consults the global "Swing" flag - its real-vs-paper state is
+    entirely its own, same relationship MCX has to the rest of the
+    watchlist."""
     if dhan_wrapper.is_mcx_commodity(symbol):
         return config.MCX_PAPER_MODE_ENABLED
-    if symbol in config.INDEX_SYMBOLS and config.INDEX_REAL_CARVEOUT_ENABLED:
-        return config.INDEX_PAPER_MODE_ENABLED
-    index_paper_only = symbol in config.INDEX_SYMBOLS and config.INDEX_PAPER_MODE_ENABLED
-    return paper_mode_control.is_paper_mode_enabled("Swing") or index_paper_only
+    if symbol in config.INDEX_SYMBOLS:
+        return paper_mode_control.is_paper_mode_enabled("SwingIndex")
+    return paper_mode_control.is_paper_mode_enabled("Swing")
 
 
 def _gen_tag(prefix: str, symbol: str) -> str:

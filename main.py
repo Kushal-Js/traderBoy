@@ -196,6 +196,18 @@ async def lifespan(app: FastAPI):
                     # though "the paper engines" as literally requested would
                     # have included it. Flagged to the user in the same
                     # response that made this change.
+                    # Restore persisted open Options/Luxury paper positions
+                    # first and re-subscribe their option prices - same
+                    # restart-recovery convention as Swing's own paper engine
+                    # just below (see breakout_paper_engine.py's own
+                    # PAPER_POSITIONS_FILE comment for why this matters).
+                    for pos in breakout_paper_engine.load_positions():
+                        try:
+                            dhan_wrapper.subscribe_option_price(pos.option_trading_symbol)
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "Could not re-subscribe %s for a restored breakout-scanner paper position",
+                                pos.option_trading_symbol)
                     paper_engine_task = asyncio.create_task(breakout_paper_engine.paper_engine_monitor_loop())
                     # Swing's own paper engine - exit-checks Swing paper
                     # positions (see the import comment at the top of this
@@ -394,7 +406,7 @@ async def funds_buckets():
     return await loop.run_in_executor(None, fund_allocation.snapshot)
 
 
-PAPER_MODE_STRATEGIES = paper_mode_control.STRATEGIES  # ("Options", "Futures", "Luxury", "Swing", "Bollinger")
+PAPER_MODE_STRATEGIES = paper_mode_control.STRATEGIES  # ("Options", "Luxury", "Swing", "Bollinger", "SwingIndex")
 
 
 class PaperModeRequest(BaseModel):
@@ -421,18 +433,21 @@ def _paper_mode_snapshot() -> dict:
 
 @app.get("/paper-mode")
 async def get_paper_mode():
-    """Current paper-mode state for Options/Luxury/Swing/Bollinger -
-    "source" is "runtime_override" for any strategy a POST /paper-mode
-    call has ever touched (which now also keeps `.env`'s own default in
-    sync on every such call - see paper_mode_control._sync_env_file's
-    own docstring, added 27 Sep 2026 after a real incident where an
-    undated override silently disagreed with .env for days), else
-    "env_default" (that strategy's own untouched .env default -
-    BREAKOUT_PAPER_MODE_ENABLED for Options/Luxury, PAPER_MODE_ENABLED
-    for Swing/Bollinger). Swing's separate, narrower INDEX_PAPER_MODE_
-    ENABLED (NIFTY/BANKNIFTY-only) is NOT part of this - see POST
-    /paper-mode's own docstring for why. See POST /paper-mode's own
-    docstring for the full design."""
+    """Current paper-mode state for Options/Luxury/Swing/Bollinger/
+    SwingIndex - "source" is "runtime_override" for any strategy a POST
+    /paper-mode call has ever touched (which now also keeps `.env`'s own
+    default in sync on every such call - see paper_mode_control.
+    _sync_env_file's own docstring, added 27 Sep 2026 after a real
+    incident where an undated override silently disagreed with .env for
+    days), else "env_default" (that strategy's own untouched .env
+    default - BREAKOUT_PAPER_MODE_ENABLED for Options/Luxury,
+    PAPER_MODE_ENABLED for Swing/Bollinger, SWING_INDEX_PAPER_MODE_
+    ENABLED for SwingIndex). "SwingIndex" is Swing's separate, narrower
+    NIFTY/BANKNIFTY-only paper mode - independent of "Swing" above, which
+    covers the rest of the watchlist - folded into this same runtime-
+    toggle system 28 Sep 2026 (previously restart-only, see POST
+    /paper-mode's own docstring for the full history). See POST
+    /paper-mode's own docstring for the full design."""
     return _paper_mode_snapshot()
 
 
@@ -459,12 +474,17 @@ async def set_paper_mode(payload: PaperModeRequest):
     (including why it lives in its own small shared module rather than
     inside breakout_paper_engine.py or swing_paper_engine.py).
 
-    Swing-specific scope note: this controls ONLY Swing's global
-    PAPER_MODE_ENABLED equivalent (real trading on/off for every Swing
-    symbol). Swing's separate INDEX_PAPER_MODE_ENABLED flag (NIFTY/
-    BANKNIFTY-only paper mode, independent of and narrower than this) is
-    NOT exposed here - it's a different, more targeted switch than "real
-    trading on/off for the whole strategy" and stays .env-only.
+    Swing-specific scope note: {"strategy": "Swing", ...} controls ONLY
+    Swing's global PAPER_MODE_ENABLED equivalent (real trading on/off for
+    every Swing symbol EXCEPT NIFTY/BANKNIFTY and MCX, which are both
+    independently carved out - see Swing/trading_engine.py's
+    _should_paper_trade). NIFTY/BANKNIFTY's own paper mode is a SEPARATE
+    pseudo-strategy, {"strategy": "SwingIndex", ...} - added 28 Sep 2026
+    (previously a narrower, restart-only INDEX_PAPER_MODE_ENABLED .env
+    flag; folded in here so it gets the same instant runtime-toggle every
+    other strategy already has). MCX (COPPER/NATURALGAS) has no runtime
+    toggle at all yet - it still reads MCX_PAPER_MODE_ENABLED directly
+    from .env, restart-only, unchanged by this endpoint either way.
 
     Same "replaces real trading for that strategy, doesn't add a shadow
     copy" semantic as each original flag, and does NOT touch any already-

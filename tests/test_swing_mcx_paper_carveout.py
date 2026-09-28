@@ -27,15 +27,14 @@ from Swing import config  # noqa: E402
 
 
 def _flags(**overrides):
-    """Patches the two config flags `_should_paper_trade` reads directly
-    (INDEX_PAPER_MODE_ENABLED, MCX_PAPER_MODE_ENABLED), defaulting both to
-    off. The GLOBAL flag (config.PAPER_MODE_ENABLED) is deliberately NOT
-    patched here - `_should_paper_trade` never reads it directly, only via
-    `paper_mode_control.is_paper_mode_enabled("Swing")`, which each test
-    mocks explicitly instead (that function's own .env-fallback vs
-    runtime-override logic is out of scope for these tests)."""
+    """Patches the one config flag `_should_paper_trade` reads directly
+    (MCX_PAPER_MODE_ENABLED), defaulting to off. The GLOBAL flag (config.
+    PAPER_MODE_ENABLED) and the index-only flag are deliberately NOT
+    patched here - `_should_paper_trade` never reads either directly, only
+    via `paper_mode_control.is_paper_mode_enabled("Swing"/"SwingIndex")`,
+    which each test mocks explicitly instead (that function's own .env-
+    fallback vs runtime-override logic is out of scope for these tests)."""
     defaults = {
-        "INDEX_PAPER_MODE_ENABLED": False,
         "MCX_PAPER_MODE_ENABLED": False,
     }
     defaults.update(overrides)
@@ -116,23 +115,27 @@ def test_4_everything_real_when_all_flags_off():
     print("4. Every symbol type trades REAL when all paper-mode flags are off: PASSED")
 
 
-def test_5_index_flag_unaffected_by_mcx_carveout():
-    """Regression guard: the pre-existing INDEX_PAPER_MODE_ENABLED
-    behavior (ORed with the global flag, index-only) must be completely
-    unchanged by this MCX carve-out - an index symbol never even reaches
-    the MCX branch."""
-    patchers = _apply(_flags(INDEX_PAPER_MODE_ENABLED=True, MCX_PAPER_MODE_ENABLED=False))
+def test_5_index_symbol_routes_to_its_own_swingindex_strategy_not_swing():
+    """Regression guard (updated 28 Sep 2026 - see test_swing_index_
+    runtime_paper_mode.py for the full "SwingIndex" pseudo-strategy
+    coverage): an index symbol must consult paper_mode_control.
+    is_paper_mode_enabled("SwingIndex"), completely independent of
+    whatever "Swing" (the global flag) says - and never even reach the
+    MCX branch."""
+    patchers = _apply(_flags(MCX_PAPER_MODE_ENABLED=False))
     try:
-        with mock.patch.object(trading_engine.paper_mode_control, "is_paper_mode_enabled", return_value=False), \
+        def _by_strategy(strategy):
+            return {"Swing": False, "SwingIndex": True}[strategy]
+        with mock.patch.object(trading_engine.paper_mode_control, "is_paper_mode_enabled", side_effect=_by_strategy), \
              mock.patch.object(trading_engine.dhan_wrapper, "is_mcx_commodity", return_value=False) as is_mcx:
             assert trading_engine._should_paper_trade("NIFTY") is True, \
-                "INDEX_PAPER_MODE_ENABLED alone must still paper-trade NIFTY, unchanged by this session's MCX change"
+                "NIFTY must go to paper when SwingIndex's own flag says so, regardless of the global Swing flag"
             assert trading_engine._should_paper_trade("ASHOKLEY") is False, \
-                "a non-index equity must be unaffected by INDEX_PAPER_MODE_ENABLED"
+                "a non-index equity must read the Swing flag, not SwingIndex, and be unaffected by it"
         assert is_mcx.call_count == 2, "both symbols must still be checked against is_mcx_commodity first"
     finally:
         _stop(patchers)
-    print("5. INDEX_PAPER_MODE_ENABLED behavior is unchanged by the MCX carve-out: PASSED")
+    print("5. Index symbol routes to its own SwingIndex strategy, independent of Swing/MCX: PASSED")
 
 
 if __name__ == "__main__":
@@ -140,5 +143,5 @@ if __name__ == "__main__":
     test_2_equity_goes_to_paper_when_global_flag_is_on()
     test_3_mcx_goes_to_paper_only_when_its_own_flag_is_explicitly_on()
     test_4_everything_real_when_all_flags_off()
-    test_5_index_flag_unaffected_by_mcx_carveout()
+    test_5_index_symbol_routes_to_its_own_swingindex_strategy_not_swing()
     print("\nAll tests passed.")

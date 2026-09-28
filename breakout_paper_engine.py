@@ -110,8 +110,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, asdict, fields
 from datetime import datetime, time as dtime
+from pathlib import Path
 from typing import Callable, Optional
 
 from Options.dhan_client import dhan_wrapper
@@ -185,16 +187,83 @@ def _hooks(strategy: str) -> _StrategyHooks:
 # directly - see that module's own docstring for the full design.
 # --------------------------------------------------------------------- #
 # Paper-only state - never touches any real package's own PositionStore
-# or trade_history log. In-memory only (paper positions don't need to
-# survive a restart the way real ones do - a restart just starts today's
-# paper simulation fresh, same as Paper01's own precedent).
+# or trade_history log.
+#
+# PERSISTED since 28 Sep 2026 (was in-memory only, same real gap Swing's
+# own paper engine had before its 28 Sep fix - see swing_paper_engine.py's
+# own PAPER_POSITIONS_FILE comment). WHY: an in-memory-only book silently
+# erases every open Options/Luxury paper position on any restart -
+# UNLOGGED (a trade is only logged to PAPER_TRADES_LOG_NAME when it
+# closes), so a paper position open at restart time (deploy, or the daily
+# 08:00 IST morning-refresh) would just vanish with no result ever
+# recorded. Open positions are now written to PAPER_POSITIONS_FILE after
+# every change and reloaded at startup (load_positions), same design as
+# Bollinger/paper_book.py and Swing/swing_paper_engine.py.
 # --------------------------------------------------------------------- #
+PAPER_POSITIONS_FILE = Path(os.getenv("BREAKOUT_PAPER_POSITIONS_FILE", "data/breakout_paper_positions.json"))
 _positions: dict[tuple[str, str], object] = {}  # (strategy, symbol) -> Position
 _lock = asyncio.Lock()
 _today_key: Optional[str] = None
 _entries_today: dict[tuple, int] = {}
 _max_loss_hits_today: dict[tuple, int] = {}
 _loss_count_today: dict[tuple, int] = {}
+
+
+def _to_json(strategy: str, pos) -> dict:
+    d = {"strategy": strategy}
+    d.update({k: ({"__datetime__": v.isoformat()} if isinstance(v, datetime) else v)
+              for k, v in asdict(pos).items()})
+    return d
+
+
+def _from_json(d: dict) -> tuple[str, object]:
+    strategy = d["strategy"]
+    position_cls = _hooks(strategy).position_cls
+    position_field_names = {f.name for f in fields(position_cls)}
+    clean = {}
+    for k, v in d.items():
+        if k == "strategy" or k not in position_field_names:
+            continue
+        clean[k] = datetime.fromisoformat(v["__datetime__"]) if isinstance(v, dict) and "__datetime__" in v else v
+    return strategy, position_cls(**clean)
+
+
+def _save_locked() -> None:
+    """Caller holds _lock. Never raises - persistence failing must never break
+    the paper engine itself (it just means a restart would lose state)."""
+    try:
+        PAPER_POSITIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = PAPER_POSITIONS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(
+            [_to_json(strategy, pos) for (strategy, _symbol), pos in _positions.items() if pos is not None],
+            indent=2,
+        ))
+        os.replace(tmp, PAPER_POSITIONS_FILE)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not persist breakout-scanner paper positions to %s", PAPER_POSITIONS_FILE)
+
+
+def load_positions() -> list:
+    """Called once at startup (main.py lifespan), same convention as
+    Swing/swing_paper_engine.py's own load_positions - restores open
+    Options/Luxury paper positions from PAPER_POSITIONS_FILE. Returns the
+    restored Position objects so the caller can re-subscribe their option
+    prices. A corrupt file is logged and ignored - paper state must never
+    block startup."""
+    if not PAPER_POSITIONS_FILE.exists():
+        return []
+    try:
+        restored = [_from_json(d) for d in json.loads(PAPER_POSITIONS_FILE.read_text())]
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not load breakout-scanner paper positions from %s - starting with none",
+                          PAPER_POSITIONS_FILE)
+        return []
+    _positions.clear()
+    _positions.update({(strategy, pos.underlying_symbol): pos for strategy, pos in restored})
+    if restored:
+        logger.info("Restored %d open breakout-scanner PAPER position(s): %s",
+                     len(restored), sorted(f"{s}:{p.underlying_symbol}" for s, p in restored))
+    return [pos for _strategy, pos in restored]
 
 
 def _reset_daily_counters_if_new_day() -> None:
@@ -363,6 +432,7 @@ async def process_paper_entry(strategy: str, symbol: str, option_type: str) -> d
         async with _lock:
             _positions[key] = position
             _entries_today[key] = entries_today + 1
+            _save_locked()
 
         logger.warning(
             "%s %s: PAPER entry (breakout scanner signal) - %s entry=%.2f qty=%d",
@@ -417,6 +487,7 @@ async def _exit_one(strategy: str, symbol: str, position, exit_price: float, rea
     key = (strategy, symbol)
     async with _lock:
         _positions.pop(key, None)
+        _save_locked()
         pnl = (exit_price - position.entry_price) * position.quantity
         if pnl < 0:
             _loss_count_today[key] = _loss_count_today.get(key, 0) + 1
@@ -442,7 +513,12 @@ async def _check_one(strategy: str, symbol: str, position) -> None:
     if ltp is None:
         return
 
-    position.highest_price = max(position.highest_price, ltp)
+    if ltp > position.highest_price:
+        position.highest_price = ltp
+        key = (strategy, symbol)
+        async with _lock:
+            if _positions.get(key) is position:
+                _save_locked()
 
     supertrend_against_position = False
     if getattr(cfg, "ENABLE_SUPERTREND_EXIT", False):
