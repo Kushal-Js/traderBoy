@@ -15,9 +15,14 @@ from typing import Optional
 from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel
 
+import json
+from datetime import date
+
+from trade_history import dated_path
 from Options.dhan_client import dhan_wrapper
 
 from . import config, signals
+from .paper_book import PAPER_TRADES_LOG_NAME, paper_book
 from .position_store import position_store
 from .trading_engine import _entry_backlog, monitor_loop, on_price_tick, reconcile_broker_positions
 from .watchlist import watchlist_store
@@ -53,6 +58,14 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         logger.exception("Could not reconcile broker positions at startup - continuing without them.")
 
+    # Open PAPER positions survive restarts (Bollinger/paper_book.py) - reload
+    # them and re-subscribe their option prices so exits keep working.
+    for pos in paper_book.load():
+        try:
+            dhan_wrapper.subscribe_option_price(pos.trading_symbol)
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not re-subscribe %s for a restored paper position", pos.trading_symbol)
+
     loop = asyncio.get_running_loop()
 
     def _on_price_tick(trading_symbol: str, ltp: float) -> None:
@@ -65,9 +78,11 @@ async def lifespan(app: FastAPI):
     logger.info(
         "Bollinger strategy startup complete: monitor loop running (reusing Options' Dhan connection and "
         "Swing's WS candle feed). strategy_enabled=%s paper_mode_enabled=%s broker_stop_loss_enabled=%s "
-        "max_concurrent_trades=%s fund_bucket=%s",
+        "max_concurrent_trades=%s fund_bucket=%s entry_mode=%s min_stop_pct=%s min_atm_premium_rs=%s "
+        "open_paper_positions=%d",
         config.STRATEGY_ENABLED, config.PAPER_MODE_ENABLED, config.BROKER_STOP_LOSS_ENABLED,
-        config.MAX_CONCURRENT_TRADES, config.FUND_BUCKET,
+        config.MAX_CONCURRENT_TRADES, config.FUND_BUCKET, config.ENTRY_MODE, config.MIN_STOP_PCT,
+        config.MIN_ATM_PREMIUM_RS, len(paper_book.positions),
     )
     if not config.PAPER_MODE_ENABLED:
         logger.warning(
@@ -127,6 +142,27 @@ async def get_watchlist():
 @router.get("/bollinger/positions")
 async def get_positions():
     return await position_store.snapshot()
+
+
+@router.get("/bollinger/paper-trades")
+async def get_paper_trades(day: Optional[str] = None):
+    """Paper book (28 Sep 2026): open paper positions plus the closed paper
+    trades logged on `day` (YYYY-MM-DD, default today) with running totals.
+    pnl_raw = at live quotes; pnl_modeled = with the backtests' slippage
+    model charged on entry and exit (the like-for-like number to compare
+    against bollinger_research.py)."""
+    d = date.fromisoformat(day) if day else date.today()
+    path = dated_path(PAPER_TRADES_LOG_NAME, d)
+    closed = [json.loads(line) for line in path.read_text().splitlines() if line.strip()] if path.exists() else []
+    return {
+        **paper_book.snapshot(),
+        "day": d.isoformat(),
+        "closed_trades": closed,
+        "closed_count": len(closed),
+        "wins": sum(1 for t in closed if t["pnl_modeled"] > 0),
+        "total_pnl_raw": round(sum(t["pnl_raw"] for t in closed), 2),
+        "total_pnl_modeled": round(sum(t["pnl_modeled"] for t in closed), 2),
+    }
 
 
 @router.get("/bollinger/entry-backlog")

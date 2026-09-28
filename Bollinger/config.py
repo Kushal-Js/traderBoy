@@ -141,7 +141,19 @@ BB_DEVIATIONS = (0.1, 0.2, 0.3, 0.4, 0.5)  # video's stated 5 bands, widest = 0.
 VORTEX_PERIOD = int(os.getenv("BOLLINGER_VORTEX_PERIOD", "14"))  # not stated in the video - standard default
 SWING_FRACTAL_LOOKBACK = int(os.getenv("BOLLINGER_SWING_FRACTAL_LOOKBACK", "2"))
 MIN_PULLBACK_CANDLES = int(os.getenv("BOLLINGER_MIN_PULLBACK_CANDLES", "2"))
-MIN_STOP_PCT = float(os.getenv("BOLLINGER_MIN_STOP_PCT", "0.01"))
+# MIN_STOP_PCT raised 0.01 -> 0.05 on 28 Sep 2026. WHY: the per-trade stop
+# is computed from the underlying's swing distance but then applied to the
+# OPTION PREMIUM (hard_stop = entry_premium * (1 - stop_pct)). At the old 1%
+# floor that was ~7 option ticks on a ~Rs 38 premium, and the trailing stop
+# armed after only ~2-3 ticks of profit - inside normal bid-ask noise, so
+# the median trade lasted 2-3 minutes and most exits were noise. 5% gives the
+# trade room to work (trailing arms at +1.67%, trails 1.67% behind the best
+# price). Chosen from bollinger_research.py's pre-registered variants:
+# resting entry + 5% premium stop was the best on real option prices for
+# 28 Aug-25 Sep (+Rs 11,229 on the 15-stock watchlist, entry AND exit
+# slippage included) - roughly breakeven, NOT a proven edge. See
+# trading-skills learnings/bollinger-backtest-lookahead-bias-entry-timing.md.
+MIN_STOP_PCT = float(os.getenv("BOLLINGER_MIN_STOP_PCT", "0.05"))
 TRAILING_STOP_FRACTION = 1.0 / 3.0   # video's stated ratio
 TRAILING_STEP_FRACTION = 1.0 / 5.0   # video's stated ratio (of the trailing-stop distance)
 
@@ -167,3 +179,53 @@ SIGNAL_REFRESH_SECONDS = float(os.getenv("BOLLINGER_SIGNAL_REFRESH_SECONDS", "15
 # (candle_feed.py keeps up to DISK_RESTORE_LOOKBACK_DAYS=55 days/
 # MAX_BARS_KEPT=2600 bars), avoiding the two paths silently disagreeing.
 REST_LOOKBACK_DAYS = int(os.getenv("BOLLINGER_REST_LOOKBACK_DAYS", "60"))
+
+# ---------------------------------------------------------------------------
+# Entry mode (28 Sep 2026) - HOW a pending order becomes a trade.
+#
+#   "resting"   (default) - behaves like a real resting stop order. When a
+#               5-min bar CLOSES, the pending order's trigger price is known
+#               (e.g. "buy if price goes above 1864.70"). During the NEXT
+#               bar, the moment the live underlying price touches that
+#               trigger, we enter - we don't wait for that bar to close.
+#               This is the source video's actual design ("place a pending
+#               stop order at the swing point") and only uses information
+#               that already exists when the order is armed.
+#   "bar_close" - the original live behaviour: wait for the 5-min bar that
+#               crossed the trigger to CLOSE, then enter. By then the
+#               breakout has usually already run, so the entry is late.
+#
+# WHY this changed: every earlier Bollinger backtest entered DURING the bar
+# that crossed the trigger while already using that bar's full high/low -
+# i.e. it knew the breakout would happen before it did (lookahead). That is
+# where the reported +Rs 155,652 came from. With honest timing the old
+# bar_close logic lost -Rs 1,25,156 over 28 Aug-25 Sep on real option prices
+# (entry+exit slippage); resting entry improved results in every period and
+# price model tested. Needs Swing's WS candle feed to see the forming bar -
+# if the feed is stale for a symbol, that symbol simply isn't entered.
+# ---------------------------------------------------------------------------
+ENTRY_MODE = os.getenv("BOLLINGER_ENTRY_MODE", "resting").strip().lower()
+
+# ---------------------------------------------------------------------------
+# Minimum ATM option premium (28 Sep 2026). An entry is skipped if the
+# chosen ATM option's live price is below this. WHY: NSE option prices move
+# in Rs 0.05 ticks, so on a cheap option the bid-ask spread is a big % of
+# the price - on a ~Rs 1 option, entering and exiting costs ~8-10% each way
+# before the trade does anything. SUZLON (Rs ~1 premiums) lost on all 23
+# backtested trades; MOTHERSON (low premium) was the worst symbol in every
+# honest variant. Checked on the REAL price at the moment of entry, so it
+# adapts automatically (e.g. premiums shrink near expiry). NSE options only
+# - MCX has different tick sizes/lot economics that weren't studied, so MCX
+# is exempt.
+# ---------------------------------------------------------------------------
+MIN_ATM_PREMIUM_RS = float(os.getenv("BOLLINGER_MIN_ATM_PREMIUM_RS", "5"))
+
+# ---------------------------------------------------------------------------
+# Paper book (28 Sep 2026). Before this, paper mode only LOGGED that an
+# entry was skipped - no trade was simulated, so paper mode produced no
+# evidence at all. Now paper mode runs the full entry and exit logic on live
+# option prices without placing orders (see Bollinger/paper_book.py).
+# Open paper positions persist here across restarts; closed paper trades go
+# to history/<date>_bollinger_paper_trades.log.
+# ---------------------------------------------------------------------------
+PAPER_POSITIONS_FILE = os.getenv("BOLLINGER_PAPER_POSITIONS_FILE", "data/bollinger_paper_positions.json")

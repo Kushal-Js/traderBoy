@@ -43,6 +43,7 @@ import paper_mode_control
 from trade_history import append_jsonl, attribute_open_broker_position
 
 from . import config, signals
+from .paper_book import paper_book
 from .position_store import (
     EXIT_CLAIMED, OrderRecord, Position, position_store,
 )
@@ -50,6 +51,7 @@ from Swing.position_store import (
     broker_stop_trigger_and_limit, hard_stop_for, unrealized_pnl_rs,
 )
 from Swing.mcx_registry import mcx_registry
+from Swing import candle_feed
 from Options.dhan_client import IST, OrderResult, OrderStatus, dhan_wrapper
 
 logger = logging.getLogger("bollinger_trading_engine")
@@ -67,6 +69,14 @@ _watchlist_scan_turn: dict[str, int] = {"i": 0}
 # own instance, entirely separate from Swing's - cleared at Bollinger's
 # own day-boundary reset, see monitor_loop below.
 _entry_backlog = entry_backlog.EntryBacklog()
+
+# Resting-order entry bookkeeping (28 Sep 2026): symbol -> candle_start of
+# the closed bar whose pending order we already acted on. A pending order is
+# acted on at most ONCE - if the resulting trade stops out a minute later,
+# the same (still-displayed) pending order must not open a second trade.
+# In-memory only: after a restart the newest pending order is a new one or
+# its bar has moved on, so nothing needs persisting.
+_resting_consumed: dict[str, datetime] = {}
 
 _LTP_FETCH_TIMEOUT_SECONDS = 10.0
 _ORDER_STATUS_TIMEOUT_SECONDS = 10.0
@@ -129,14 +139,139 @@ async def _record_bollinger_event(event: str, symbol: str, detail: dict) -> None
 # Signal evaluation
 # --------------------------------------------------------------------------- #
 async def _evaluate_entry_signal(symbol: str) -> Optional[tuple[str, float, float, float]]:
-    """None unless the pending-order state machine actually FIRED on the
-    newest confirmed bar this cycle - see Bollinger/signals.py's own
-    module docstring for why a stale historical fire is never actionable.
-    Returns (side, trigger_price, stop_price, last_close) on a real fire."""
+    """Returns (side, trigger_price, stop_price, stop_reference_price) when
+    this symbol should be entered right now, else None.
+
+    config.ENTRY_MODE == "resting" (default since 28 Sep 2026): enter the
+    moment the live price touches the trigger of the pending order that was
+    armed when the previous 5-min bar closed - see signals.
+    resting_trigger_hit's docstring for the step-by-step logic. Needs the WS
+    tick feed for this symbol to be fresh; if it isn't, no entry (we can't
+    see the forming bar, and guessing from a stale price could enter on a
+    trigger touch that never happened).
+
+    config.ENTRY_MODE == "bar_close" (original behaviour): enter only after
+    the bar that crossed the trigger has closed (`state.fired`)."""
     state = await signals.get_signal_state(symbol)
-    if state is None or state.fired is None:
+    if state is None:
+        return None
+    if config.ENTRY_MODE == "resting":
+        forming = (candle_feed.forming_bar(symbol)
+                   if candle_feed.is_fresh(symbol, config.WS_STALE_AFTER_SECONDS) else None)
+        hit = signals.resting_trigger_hit(state, forming, config.SIGNAL_INTERVAL_MINUTES, _now_ist().date())
+        if hit is None or _resting_consumed.get(symbol) == state.candle_start:
+            return None
+        _resting_consumed[symbol] = state.candle_start
+        return hit
+    if state.fired is None:
         return None
     return state.fired, state.fired_trigger_price, state.fired_stop_price, state.last_close
+
+
+def _stop_params(fill_price: float, trigger_price: float, stop_price: float,
+                 stop_reference_price: float) -> tuple[float, float, float, float]:
+    """Per-trade stop sizing, shared by real and paper entries. Returns
+    (stop_pct, hard_stop_loss, trailing_stop_dist, trailing_step), all on
+    the OPTION PREMIUM:
+      stop_pct  = the underlying's swing distance (trigger -> pullback
+                  extreme) as a % of the reference price, floored at
+                  config.MIN_STOP_PCT (5% since 28 Sep 2026 - nearly every
+                  trade hits the floor, so in practice this IS the stop);
+      hard stop = entry premium * (1 - stop_pct);
+      trailing  = arms after the premium gains stop_pct/3, then trails that
+                  far behind the best premium, moving up in steps of 1/5 of
+                  the trailing distance (the video's stated ratios)."""
+    distance = abs(trigger_price - stop_price) if stop_price is not None else 0.0
+    stop_pct = distance / stop_reference_price if stop_reference_price else config.MIN_STOP_PCT
+    stop_pct = max(stop_pct, config.MIN_STOP_PCT)
+    trailing_stop_dist = fill_price * stop_pct * config.TRAILING_STOP_FRACTION
+    return (stop_pct, hard_stop_for("LONG", fill_price, stop_pct),
+            trailing_stop_dist, trailing_stop_dist * config.TRAILING_STEP_FRACTION)
+
+
+def premium_too_low(premium: Optional[float], is_mcx: bool) -> bool:
+    """The minimum-premium gate (28 Sep 2026, see config.MIN_ATM_PREMIUM_RS
+    for why). NSE options only; MCX is exempt. An unknown premium (None)
+    also blocks - we never enter without a price."""
+    if is_mcx:
+        return False
+    return premium is None or premium < config.MIN_ATM_PREMIUM_RS
+
+
+class _SkipEntry(Exception):
+    def __init__(self, result: dict):
+        super().__init__(result.get("reason") or result.get("status"))
+        self.result = result
+
+
+async def _resolve_option_leg(symbol: str, entry_signal: str) -> dict:
+    """Picks the ATM option to buy and its sizing - shared by real and paper
+    entries so both always trade the same contract. Raises _SkipEntry with
+    the caller's return value when the entry should not happen."""
+    loop = asyncio.get_running_loop()
+    is_mcx = dhan_wrapper.is_mcx_commodity(symbol)
+    option_type = "CE" if entry_signal == "BULLISH" else "PE"
+    try:
+        # get_liquid_atm_option is already MCX-capable (same call Swing
+        # uses for COPPER - see Swing/trading_engine.py's own comment on
+        # this) and index-capable (Tradehull's own ATM_Strike_Selection
+        # resolves NIFTY/BANKNIFTY natively, same as any NSE underlying -
+        # confirmed via Swing's own identical, unbranched call for
+        # INDEX_SYMBOLS) - one call for all three underlying types.
+        atm = await loop.run_in_executor(None, dhan_wrapper.get_liquid_atm_option, symbol, option_type)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not resolve the OPTIONS instrument for entry", symbol)
+        raise _SkipEntry({"symbol": symbol, "status": "error", "reason": "instrument_resolution_failed"})
+    if atm is None:
+        logger.info("%s: skipped - no liquid, actively-traded %s contract found nearby", symbol, option_type)
+        raise _SkipEntry({"symbol": symbol, "status": "skipped", "reason": "no_liquid_contract_available"})
+    if atm.expiry_date == _now_ist().date():
+        logger.info("%s: skipped - %s expires today and no later expiry is available yet", symbol, atm.trading_symbol)
+        raise _SkipEntry({"symbol": symbol, "status": "skipped_expiry_day", "option_trading_symbol": atm.trading_symbol})
+    quantity = atm.lot_size * config.QUANTITY_LOTS
+    if is_mcx:
+        # NOT quantity - see Swing/position_store.py's own Position.
+        # pnl_multiplier docstring (reused here verbatim) for why MCX needs a
+        # real, separately-configured rupee-per-point multiplier instead of
+        # the tiny lot-count `quantity`. Looked up from the SAME shared
+        # Swing.mcx_registry Swing itself uses. A symbol with NO configured
+        # multiplier SKIPS rather than guessing.
+        raw_multiplier = await mcx_registry.pnl_multiplier(symbol)
+        if raw_multiplier is None:
+            logger.error(
+                "%s: no pnl_multiplier configured in data/mcx_config for this MCX symbol - "
+                "skipping entry rather than guessing (would misprice every rupee-threshold "
+                "check). Add a line to data/mcx_config, e.g. \"%s,false,<real_per_lot_qty>\".",
+                symbol, symbol,
+            )
+            raise _SkipEntry({"symbol": symbol, "status": "skipped", "reason": "mcx_pnl_multiplier_not_configured"})
+        exchange_segment, product_type = "MCX_COMM", config.MCX_PRODUCT
+        pnl_multiplier = raw_multiplier * config.QUANTITY_LOTS
+    else:
+        exchange_segment, product_type = "NSE_FNO", config.OPTIONS_PRODUCT
+        pnl_multiplier = quantity
+    return {"atm": atm, "is_mcx": is_mcx, "option_type": option_type, "trading_symbol": atm.trading_symbol,
+            "security_id": atm.security_id, "lot_size": atm.lot_size, "quantity": quantity,
+            "exchange_segment": exchange_segment, "product_type": product_type, "pnl_multiplier": pnl_multiplier}
+
+
+async def _premium_gate(symbol: str, leg: dict) -> Optional[float]:
+    """Fetches the ATM option's live price and applies the minimum-premium
+    gate. Returns the price (reused as the funds-check price / paper fill),
+    or raises _SkipEntry if the option is too cheap to trade."""
+    try:
+        price = await dhan_wrapper.get_option_ltp_async(leg["trading_symbol"])
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not price %s for the premium gate", symbol, leg["trading_symbol"])
+        price = None
+    if premium_too_low(price, leg["is_mcx"]):
+        logger.info("%s: skipped - %s premium %s is below the Rs %.2f minimum (too cheap: spread/slippage "
+                    "would dominate)", symbol, leg["trading_symbol"], price, config.MIN_ATM_PREMIUM_RS)
+        await _record_bollinger_event("ENTRY_SKIPPED_LOW_PREMIUM", symbol, {
+            "trading_symbol": leg["trading_symbol"], "premium": price, "minimum": config.MIN_ATM_PREMIUM_RS})
+        raise _SkipEntry({"symbol": symbol, "status": "skipped", "reason": "premium_below_minimum",
+                          "trading_symbol": leg["trading_symbol"], "premium": price})
+    return price
 
 
 def _exit_reason_for(position: Position, ltp: float) -> Optional[str]:
@@ -158,7 +293,10 @@ def _exit_reason_for(position: Position, ltp: float) -> Optional[str]:
 # Entry
 # --------------------------------------------------------------------------- #
 async def enter_position_for_stock(symbol: str, entry_signal: str, trigger_price: float,
-                                    stop_price: float, last_close: float) -> dict:
+                                    stop_price: float, stop_reference_price: float) -> dict:
+    """REAL-money entry. stop_reference_price is the underlying price the
+    stop % is measured against: the trigger in "resting" mode, the fire
+    bar's close in "bar_close" mode (see _evaluate_entry_signal)."""
     if not config.STRATEGY_ENABLED:
         return {"symbol": symbol, "status": "ignored", "reason": "strategy_disabled"}
 
@@ -166,61 +304,21 @@ async def enter_position_for_stock(symbol: str, entry_signal: str, trigger_price
         return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
 
     loop = asyncio.get_running_loop()
-    is_mcx = dhan_wrapper.is_mcx_commodity(symbol)
     try:
-        option_type = "CE" if entry_signal == "BULLISH" else "PE"
         try:
-            # get_liquid_atm_option is already MCX-capable (same call Swing
-            # uses for COPPER - see Swing/trading_engine.py's own comment on
-            # this) and index-capable (Tradehull's own ATM_Strike_Selection
-            # resolves NIFTY/BANKNIFTY natively, same as any NSE underlying -
-            # confirmed via Swing's own identical, unbranched call for
-            # INDEX_SYMBOLS) - one call for all three underlying types.
-            atm = await loop.run_in_executor(None, dhan_wrapper.get_liquid_atm_option, symbol, option_type)
-            if atm is None:
-                logger.info("%s: skipped - no liquid, actively-traded %s contract found nearby", symbol, option_type)
-                return {"symbol": symbol, "status": "skipped", "reason": "no_liquid_contract_available"}
-            if atm.expiry_date == _now_ist().date():
-                logger.info("%s: skipped - %s expires today and no later expiry is available yet",
-                            symbol, atm.trading_symbol)
-                return {"symbol": symbol, "status": "skipped_expiry_day", "option_trading_symbol": atm.trading_symbol}
-            trading_symbol, security_id, lot_size = atm.trading_symbol, atm.security_id, atm.lot_size
-            quantity = lot_size * config.QUANTITY_LOTS
-            if is_mcx:
-                exchange_segment, product_type = "MCX_COMM", config.MCX_PRODUCT
-                # NOT quantity - see Swing/position_store.py's own Position.
-                # pnl_multiplier docstring (reused here verbatim) for why
-                # MCX needs a real, separately-configured rupee-per-point
-                # multiplier instead of the tiny lot-count `quantity`.
-                # Looked up from the SAME shared Swing.mcx_registry Swing
-                # itself uses (live-reloadable, kept fresh by Swing's own
-                # monitor tick) rather than a duplicate Bollinger-local
-                # copy - it's a physical-instrument fact, not a strategy
-                # parameter. A symbol with NO configured multiplier SKIPS
-                # the real order rather than guessing (same discipline as
-                # Swing's own identical check).
-                raw_multiplier = await mcx_registry.pnl_multiplier(symbol)
-                if raw_multiplier is None:
-                    logger.error(
-                        "%s: no pnl_multiplier configured in data/mcx_config for this MCX symbol - "
-                        "skipping entry rather than guessing (would misprice every rupee-threshold "
-                        "check). Add a line to data/mcx_config, e.g. \"%s,false,<real_per_lot_qty>\".",
-                        symbol, symbol,
-                    )
-                    return {"symbol": symbol, "status": "skipped", "reason": "mcx_pnl_multiplier_not_configured"}
-                pnl_multiplier = raw_multiplier * config.QUANTITY_LOTS
-            else:
-                exchange_segment, product_type = "NSE_FNO", config.OPTIONS_PRODUCT
-                pnl_multiplier = quantity
-        except Exception:  # noqa: BLE001
-            logger.exception("%s: could not resolve the OPTIONS instrument for entry", symbol)
-            return {"symbol": symbol, "status": "error", "reason": "instrument_resolution_failed"}
+            leg = await _resolve_option_leg(symbol, entry_signal)
+            gate_price = await _premium_gate(symbol, leg)
+        except _SkipEntry as skip:
+            return skip.result
+        option_type, trading_symbol, security_id = leg["option_type"], leg["trading_symbol"], leg["security_id"]
+        lot_size, quantity, pnl_multiplier = leg["lot_size"], leg["quantity"], leg["pnl_multiplier"]
+        exchange_segment, product_type = leg["exchange_segment"], leg["product_type"]
 
         tag = _gen_tag(config.ORDER_TAG_PREFIX, symbol)
 
         if config.FUNDS_CHECK_ENABLED:
             try:
-                price = await dhan_wrapper.get_option_ltp_async(trading_symbol)
+                price = gate_price if gate_price is not None else await dhan_wrapper.get_option_ltp_async(trading_symbol)
                 sufficient = await fund_allocation.has_sufficient_bucket_funds(
                     config.FUND_BUCKET, symbol,
                     [(security_id, product_type, quantity, price, exchange_segment)],
@@ -289,18 +387,8 @@ async def enter_position_for_stock(symbol: str, entry_signal: str, trigger_price
 
         fill_price = result.fill_price or await dhan_wrapper.get_option_ltp_async(trading_symbol)
 
-        # Dynamic, per-trade stop percentage from the actual swing distance
-        # this entry fired against - see Bollinger/config.py's own module
-        # docstring and backtest_bollinger_vortex_9symbols_30day.py's
-        # INTERPRETATION #5. Floored at config.MIN_STOP_PCT (the backtest's
-        # own floor - a genuine, already-disclosed characteristic of this
-        # exact parameter set, not a bug to work around here).
-        stop_distance_underlying = abs(trigger_price - stop_price)
-        stop_pct = stop_distance_underlying / last_close if last_close else config.MIN_STOP_PCT
-        stop_pct = max(stop_pct, config.MIN_STOP_PCT)
-        hard_stop_loss = hard_stop_for("LONG", fill_price, stop_pct)
-        trailing_stop_dist = fill_price * stop_pct * config.TRAILING_STOP_FRACTION
-        trailing_step = trailing_stop_dist * config.TRAILING_STEP_FRACTION
+        stop_pct, hard_stop_loss, trailing_stop_dist, trailing_step = _stop_params(
+            fill_price, trigger_price, stop_price, stop_reference_price)
 
         stop_loss_order_id = None
         if config.BROKER_STOP_LOSS_ENABLED:
@@ -350,6 +438,93 @@ async def enter_position_for_stock(symbol: str, entry_signal: str, trigger_price
         if symbol not in position_store.live_positions:
             await position_store.record_failed_entry(symbol)
             await position_store.release_symbol(symbol)
+
+
+# --------------------------------------------------------------------------- #
+# Paper trading (28 Sep 2026) - see Bollinger/paper_book.py's docstring.
+# Same contract choice, same premium gate, same stop sizing and the same exit
+# rule as real mode; the only difference is that no order is ever placed.
+# --------------------------------------------------------------------------- #
+async def _enter_paper(symbol: str, entry_signal: str, trigger_price: float,
+                       stop_price: float, stop_reference_price: float) -> dict:
+    if symbol in paper_book.positions:
+        return {"symbol": symbol, "status": "skipped", "reason": "paper_position_already_open"}
+    try:
+        leg = await _resolve_option_leg(symbol, entry_signal)
+        fill_price = await _premium_gate(symbol, leg)
+    except _SkipEntry as skip:
+        return skip.result
+    if not fill_price:
+        return {"symbol": symbol, "status": "skipped", "reason": "no_option_price"}
+    stop_pct, hard_stop_loss, trailing_stop_dist, trailing_step = _stop_params(
+        fill_price, trigger_price, stop_price, stop_reference_price)
+    position = Position(
+        underlying_symbol=symbol, trading_symbol=leg["trading_symbol"], resolved_option_type=leg["option_type"],
+        instrument_side="LONG", exchange_segment=leg["exchange_segment"], product_type=leg["product_type"],
+        quantity=leg["quantity"], lot_size=leg["lot_size"], entry_price=fill_price, best_price=fill_price,
+        stop_pct=stop_pct, hard_stop_loss=hard_stop_loss,
+        trailing_stop_dist=trailing_stop_dist, trailing_step=trailing_step,
+        pnl_multiplier=leg["pnl_multiplier"], order_id="PAPER",
+    )
+    if not await paper_book.open(position):
+        return {"symbol": symbol, "status": "skipped", "reason": "paper_position_already_open"}
+    loop = asyncio.get_running_loop()
+    try:
+        # WS subscription so exits read the cached tick price instead of a
+        # REST call every 5 seconds (same as a real position).
+        await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, leg["trading_symbol"])
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not WS-subscribe %s for paper exits - REST fallback will be used",
+                         symbol, leg["trading_symbol"])
+    await _record_bollinger_event("PAPER_POSITION_OPENED", symbol, {
+        "entry_signal": entry_signal, "entry_mode": config.ENTRY_MODE, "trading_symbol": leg["trading_symbol"],
+        "entry_price": fill_price, "quantity": leg["quantity"], "stop_pct": stop_pct,
+        "trigger_price": trigger_price, "stop_price": stop_price})
+    return {"symbol": symbol, "status": "paper_entered", "trading_symbol": leg["trading_symbol"],
+            "entry_price": fill_price}
+
+
+async def _close_paper(symbol: str, exit_price: float, reason: str) -> None:
+    pos = paper_book.positions.get(symbol)
+    record = await paper_book.close(symbol, exit_price, reason)
+    if record is None:
+        return
+    await _record_bollinger_event("PAPER_POSITION_CLOSED", symbol, record)
+    if pos is not None:
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, dhan_wrapper.unsubscribe_option_price, pos.trading_symbol)
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not unsubscribe %s after paper exit", symbol, pos.trading_symbol)
+
+
+async def _check_paper_position(symbol: str, ltp: float) -> None:
+    """Apply one price to one paper position: ratchet the trailing stop, then
+    exit if the shared exit rule says so."""
+    pos = await paper_book.update(symbol, ltp)
+    if pos is None:
+        return
+    reason = _exit_reason_for(pos, ltp)
+    if reason:
+        await _close_paper(symbol, ltp, reason)
+
+
+async def _check_paper_positions(square_off_symbols: Optional[set[str]] = None,
+                                 square_off_reason: str = "") -> None:
+    """Poll path for every open paper position (the tick path is in
+    on_price_tick). Symbols in square_off_symbols are closed outright at the
+    current price - Friday / MCX-Friday / index-daily square-off, same
+    schedule as real positions."""
+    for symbol, pos in list(paper_book.positions.items()):
+        try:
+            ltp = await _get_ltp(pos)
+        except Exception:  # noqa: BLE001
+            logger.warning("%s: no price for PAPER position %s this tick - will retry", symbol, pos.trading_symbol)
+            continue
+        if square_off_symbols is not None and symbol in square_off_symbols:
+            await _close_paper(symbol, ltp, square_off_reason)
+        else:
+            await _check_paper_position(symbol, ltp)
 
 
 # --------------------------------------------------------------------------- #
@@ -603,6 +778,10 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
             None,
         )
         if not match:
+            paper_symbol = next((sym for sym, pos in paper_book.positions.items()
+                                 if pos.trading_symbol == trading_symbol), None)
+            if paper_symbol:
+                await _check_paper_position(paper_symbol, ltp)
             return
         symbol, position = match
         if position.pending_exit_order_id or _exit_on_cooldown(position):
@@ -681,11 +860,15 @@ async def _monitor_tick() -> None:
         # exchange_segment (ground truth), not a symbol-name list.
         non_mcx_open = {s for s, p in position_store.live_positions.items() if p.exchange_segment != "MCX_COMM"}
         await _square_off_all("FRIDAY_SQUARE_OFF", symbols=non_mcx_open)
+        await _check_paper_positions(
+            {s for s, p in paper_book.positions.items() if p.exchange_segment != "MCX_COMM"}, "FRIDAY_SQUARE_OFF")
 
     mcx_friday_square_off_now = config.FRIDAY_SQUARE_OFF_ENABLED and _is_mcx_friday_square_off_time()
     if mcx_friday_square_off_now:
         mcx_open = {s for s, p in position_store.live_positions.items() if p.exchange_segment == "MCX_COMM"}
         await _square_off_all("MCX_FRIDAY_SQUARE_OFF", symbols=mcx_open)
+        await _check_paper_positions(
+            {s for s, p in paper_book.positions.items() if p.exchange_segment == "MCX_COMM"}, "MCX_FRIDAY_SQUARE_OFF")
 
     if friday_square_off_now:
         # No point evaluating new entries for the rest of Friday. MCX
@@ -694,6 +877,7 @@ async def _monitor_tick() -> None:
         # (asyncio.gather), same as the normal path below.
         positions = list(position_store.live_positions.items())
         await asyncio.gather(*[_check_one_position(sym, pos) for sym, pos in positions])
+        await _check_paper_positions()
         return
 
     index_square_off_now = config.INDEX_DAILY_SQUARE_OFF_ENABLED and _is_index_square_off_time()
@@ -702,12 +886,14 @@ async def _monitor_tick() -> None:
         # return early: every other Bollinger symbol still gets its normal
         # exit-check/entry-scan this tick.
         await _square_off_all("INDEX_DAILY_SQUARE_OFF", symbols=config.INDEX_SYMBOLS)
+        await _check_paper_positions(set(config.INDEX_SYMBOLS), "INDEX_DAILY_SQUARE_OFF")
 
     # Exits first - more urgent than looking for new entries. Concurrent
     # (asyncio.gather), same rationale as Swing's own (PERFORMANCE_AUDIT_
     # 2026-09-25.md finding).
     positions = list(position_store.live_positions.items())
     await asyncio.gather(*[_check_one_position(sym, pos) for sym, pos in positions])
+    await _check_paper_positions()
 
     if not (config.STRATEGY_ENABLED and config.ENTRY_ENABLED):
         return
@@ -731,7 +917,7 @@ async def _monitor_tick() -> None:
 
     candidates: list[tuple[str, tuple[str, float, float, float]]] = []
     for i, symbol in enumerate(symbols):
-        if symbol in position_store.reserved_symbols:
+        if symbol in position_store.reserved_symbols or symbol in paper_book.positions:
             continue
         if await position_store.is_in_entry_cooldown(symbol):
             continue
@@ -754,24 +940,23 @@ async def _monitor_tick() -> None:
             logger.exception("%s: could not evaluate entry signal", symbol)
             continue
         if result:
-            side, trigger_price, stop_price, last_close = result
-            candidates.append((symbol, (side, trigger_price, stop_price, last_close)))
+            candidates.append((symbol, result))
 
     # Freshness-priority dispatch (26 Sep 2026, user request) - same
     # algorithm/rationale as Swing's own, see entry_backlog.py's module
     # docstring and Swing/trading_engine.py's own dispatch call site.
     async def _place_paper(symbol: str, payload: tuple[str, float, float, float]) -> None:
-        # Runtime kill-switch - see paper_mode_control.py's own docstring.
-        # No dedicated Bollinger paper engine exists (v1 scope) - flipping
-        # this on simply stops real entries; any already-open real
-        # position keeps being managed for real.
-        side, _trigger_price, _stop_price, _last_close = payload
-        logger.info("%s: paper mode is ON for Bollinger - skipping real entry (signal=%s)", symbol, side)
-        await _record_bollinger_event("ENTRY_SKIPPED_PAPER_MODE", symbol, {"entry_signal": side})
+        # Paper mode ON: run the full entry on live prices without placing an
+        # order (Bollinger/paper_book.py). Any already-open REAL position keeps
+        # being managed for real.
+        side, trigger_price, stop_price, stop_reference_price = payload
+        result = await _enter_paper(symbol, side, trigger_price, stop_price, stop_reference_price)
+        if result.get("status") != "paper_entered":
+            logger.info("%s: paper entry not taken (%s)", symbol, result.get("reason") or result.get("status"))
 
     async def _place_real(symbol: str, payload: tuple[str, float, float, float]) -> None:
-        side, trigger_price, stop_price, last_close = payload
-        await enter_position_for_stock(symbol, side, trigger_price, stop_price, last_close)
+        side, trigger_price, stop_price, stop_reference_price = payload
+        await enter_position_for_stock(symbol, side, trigger_price, stop_price, stop_reference_price)
 
     await entry_backlog.dispatch(
         _entry_backlog,

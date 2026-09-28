@@ -116,6 +116,28 @@ class Position:
         return self.resolved_option_type
 
 
+def apply_price_to_trailing(pos: Position, current_price: float) -> None:
+    """The trailing-stop ratchet, shared by real positions (update_trailing,
+    under the store's lock) and paper positions (Bollinger/paper_book.py) so
+    both always run identical exit maths. Always LONG on the option premium:
+      - best_price tracks the highest premium seen since entry;
+      - once best_price - entry_price >= trailing_stop_dist, the trailing
+        stop ARMS at best_price - trailing_stop_dist;
+      - after that it only moves UP, and only in steps of at least
+        trailing_step (so it doesn't twitch on every tick).
+    Mutates `pos` in place; the caller handles any locking."""
+    if current_price > pos.best_price:
+        pos.best_price = current_price
+    favorable_move = pos.best_price - pos.entry_price
+    if not pos.trailing_armed and favorable_move >= pos.trailing_stop_dist:
+        pos.trailing_armed = True
+        pos.trailing_stop_price = pos.best_price - pos.trailing_stop_dist
+    elif pos.trailing_armed:
+        candidate = pos.best_price - pos.trailing_stop_dist
+        if candidate - pos.trailing_stop_price >= pos.trailing_step:
+            pos.trailing_stop_price = candidate
+
+
 def _cap_reached(reserved_count: int) -> bool:
     # capacity_control.get_max_concurrent_trades checks a runtime override
     # first (set via POST /capacity/max-concurrent-trades), falling back
@@ -231,18 +253,8 @@ class BollingerPositionStore:
         backtest_bollinger_vortex_9symbols_30day.py's own per-tick block."""
         async with self._lock:
             pos = self.live_positions.get(underlying_symbol)
-            if not pos:
-                return
-            if current_price > pos.best_price:
-                pos.best_price = current_price
-            favorable_move = pos.best_price - pos.entry_price
-            if not pos.trailing_armed and favorable_move >= pos.trailing_stop_dist:
-                pos.trailing_armed = True
-                pos.trailing_stop_price = pos.best_price - pos.trailing_stop_dist
-            elif pos.trailing_armed:
-                candidate = pos.best_price - pos.trailing_stop_dist
-                if candidate - pos.trailing_stop_price >= pos.trailing_step:
-                    pos.trailing_stop_price = candidate
+            if pos:
+                apply_price_to_trailing(pos, current_price)
 
     async def clear_stop_loss_order_id(self, underlying_symbol: str) -> None:
         async with self._lock:

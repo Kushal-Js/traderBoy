@@ -378,6 +378,49 @@ _fail_streak: dict[str, int] = {}
 MAX_FETCH_BACKOFF_SECONDS = 300
 
 
+def resting_trigger_hit(state: Optional[BollingerSignalState], forming: Optional[dict],
+                        interval_minutes: int, today: date) -> Optional[tuple[str, float, float, float]]:
+    """Resting-stop-order entry check (added 28 Sep 2026 - see config.
+    ENTRY_MODE's own comment for the full why). Pure function, no I/O.
+
+    HOW IT WORKS, step by step:
+      1. `state` is the replay as of the newest CLOSED 5-min bar. If it
+         shows an armed pending order (e.g. BULLISH, trigger 1864.70), that
+         is our resting buy-stop for the NEXT bar.
+      2. `forming` is that next bar, still in progress, from the live tick
+         feed (Swing.candle_feed.forming_bar). Its high/low cover every tick
+         so far in the bar, so a touch between our 5-second polls still
+         counts.
+      3. If the forming bar's high has reached the trigger (low, for
+         BEARISH), the resting order would have filled -> return an entry.
+
+    Guards (each returns None = "no entry this tick"):
+      - no armed pending order;
+      - the pending order is from a previous trading day (the video's
+        pending order is a same-session idea - never carried overnight);
+      - the forming bar is not EXACTLY the bar right after the pending
+        order's bar (the signal cache or the tick feed is out of step, so
+        we can't be sure which order was resting when the touch happened).
+
+    Returns (side, trigger_price, stop_price, reference_price). The trigger
+    is the reference price for sizing the stop (the order fills at the
+    trigger), matching bollinger_research.py's validated "resting" mode.
+    The caller is responsible for acting on a given pending order only
+    once - see trading_engine._resting_consumed."""
+    if state is None or state.pending_side is None or state.pending_trigger_price is None:
+        return None
+    if state.candle_start is None or state.candle_start.date() != today:
+        return None
+    if forming is None or forming.get("candle_start") != state.candle_start + timedelta(minutes=interval_minutes):
+        return None
+    trigger = state.pending_trigger_price
+    if state.pending_side == "BULLISH" and forming["high"] >= trigger:
+        return "BULLISH", trigger, state.pending_stop_price, trigger
+    if state.pending_side == "BEARISH" and forming["low"] <= trigger:
+        return "BEARISH", trigger, state.pending_stop_price, trigger
+    return None
+
+
 def _fetch_signal_state_once(symbol: str) -> Optional[BollingerSignalState]:
     """Blocking - always call via run_in_executor."""
     security_id, exchange_segment, instrument_type = _underlying_reference(symbol)

@@ -391,6 +391,22 @@ def is_fresh(symbol: str, max_age_seconds: float) -> bool:
         return age <= max_age_seconds
 
 
+def forming_bar(symbol: str) -> Optional[dict]:
+    """Read-only snapshot of the still-FORMING 5-min bar for `symbol`
+    (added 28 Sep 2026 for Bollinger's resting-order entry). Every other
+    accessor here deliberately returns completed bars only; this is the one
+    place that exposes the live bar, so a caller can ask "has price touched
+    level X at any point during the current bar" - high/low are updated on
+    every tick, so a touch between a caller's polls is still visible.
+    Returns None if the symbol isn't subscribed or hasn't ticked yet today."""
+    with _lock:
+        st = _state.get(symbol)
+        if st is None or st.current_bar_start is None or st.bar_close is None:
+            return None
+        return {"candle_start": st.current_bar_start, "high": st.bar_high, "low": st.bar_low,
+                "last": st.bar_close, "last_tick_at": st.last_tick_at}
+
+
 def _resample(bars: list[dict], interval_minutes: int) -> list[dict]:
     """Aggregates completed BASE_INTERVAL_MINUTES(5) bars into
     interval_minutes buckets (must be a positive multiple of 5). A bucket
