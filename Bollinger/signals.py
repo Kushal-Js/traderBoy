@@ -105,19 +105,15 @@ def _underlying_reference(symbol: str) -> tuple[str, str, str]:
     return security_id, exchange_segment, instrument_type
 
 
-def _get_intraday_series(symbol: str, security_id: str, exchange_segment: str, instrument_type: str) -> dict:
-    """Hybrid WS-then-REST fetch, direct port of Swing/signals.py's own
-    _get_intraday_series pattern, simplified for Bollinger's single
-    interval/single caller (no per-caller min_bars/require_prior_day
-    parameterization needed - this module has exactly one consumer of
-    this series). Trims a still-forming trailing bar from the REST path
-    the same way Swing's own Supertrend fetch does - candle_feed.py's own
-    get_candles_dict already only ever returns completed bars, so no
-    trim is needed on that path."""
-    if config.USE_WS_CANDLES and candle_feed.is_fresh(symbol, config.WS_STALE_AFTER_SECONDS):
-        ws_data = candle_feed.get_candles_dict(symbol, config.SIGNAL_INTERVAL_MINUTES)
-        if len(ws_data.get("close") or []) >= config.BB_PERIOD + 2:
-            return ws_data
+_SERIES_KEYS = ("open", "high", "low", "close", "volume", "timestamp")
+
+# Last good REST_LOOKBACK_DAYS series per symbol - reused until a newer
+# closed bar should exist, so the full-history base costs ~one REST call
+# per symbol per bar instead of one per SIGNAL_REFRESH_SECONDS.
+_rest_series_cache: dict[str, dict] = {}
+
+
+def _fetch_rest_series(security_id: str, exchange_segment: str, instrument_type: str) -> dict:
     data = dhan_wrapper.fetch_continuous_intraday(
         security_id, exchange_segment, instrument_type, config.SIGNAL_INTERVAL_MINUTES,
         lookback_days_override=config.REST_LOOKBACK_DAYS,
@@ -126,9 +122,50 @@ def _get_intraday_series(symbol: str, security_id: str, exchange_segment: str, i
     if timestamps:
         last_candle_start = datetime.fromtimestamp(timestamps[-1], tz=IST)
         if _now_ist() < last_candle_start + timedelta(minutes=config.SIGNAL_INTERVAL_MINUTES):
-            for key in ("open", "high", "low", "close", "volume", "timestamp"):
+            for key in _SERIES_KEYS:
                 if data.get(key):
                     data[key] = data[key][:-1]
+    return data
+
+
+def _get_intraday_series(symbol: str, security_id: str, exchange_segment: str, instrument_type: str) -> dict:
+    """Full-history REST series (REST_LOOKBACK_DAYS, the same continuous
+    multi-day window the backtest replays), with any NEWER completed WS
+    bars appended on top.
+
+    Fixed 28 Sep 2026 (live finding): this used to return the WS series
+    on its own once it had BB_PERIOD + 2 bars. The WS feed only holds bars
+    since the day's first subscribe, so (a) between BB_PERIOD + 2 and
+    _replay's own min_bars it silently returned None - 14 of 17 symbols
+    had no signal state at all after an 11:12 IST restart - and (b) past
+    min_bars it replayed a today-only window, which the module docstring
+    above explains diverges from the backtest with no error. WS is now
+    only ever an extension of the REST base, never a replacement; an empty
+    REST base returns {} (a fetch failure) rather than falling back to a
+    today-only WS series."""
+    interval = config.SIGNAL_INTERVAL_MINUTES
+    now = _now_ist()
+    bar_start = now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % interval)
+    newest_closed_start = bar_start - timedelta(minutes=interval)
+
+    base = _rest_series_cache.get(symbol)
+    base_ts = (base or {}).get("timestamp") or []
+    if not base_ts or datetime.fromtimestamp(base_ts[-1], tz=IST) < newest_closed_start:
+        fetched = _fetch_rest_series(security_id, exchange_segment, instrument_type)
+        if fetched.get("close"):
+            _rest_series_cache[symbol] = fetched
+            base = fetched
+    if not base or not base.get("close"):
+        return {}
+
+    data = {key: list(base.get(key) or []) for key in _SERIES_KEYS}
+    if config.USE_WS_CANDLES and candle_feed.is_fresh(symbol, config.WS_STALE_AFTER_SECONDS):
+        ws_data = candle_feed.get_candles_dict(symbol, interval)
+        last_ts = data["timestamp"][-1] if data["timestamp"] else None
+        for i, ts in enumerate(ws_data.get("timestamp") or []):
+            if last_ts is None or ts > last_ts:
+                for key in _SERIES_KEYS:
+                    data[key].append(ws_data[key][i])
     return data
 
 
