@@ -221,26 +221,6 @@ ENTRY_MODE = os.getenv("BOLLINGER_ENTRY_MODE", "resting").strip().lower()
 MIN_ATM_PREMIUM_RS = float(os.getenv("BOLLINGER_MIN_ATM_PREMIUM_RS", "5"))
 
 # ---------------------------------------------------------------------------
-# Volume-floor entry gate (28 Sep 2026, user request after Bollinger's first
-# real trade: PHOENIXLTD 29 SEP 1940 PUT, stopped out in 2 min for -Rs 367.50
-# with a shadow reversal-filter VolRatio of 0.92 - recommended_combo_blocks=
-# True, logged but not enforced). Skips a MAIN-strategy entry (paper or real)
-# when the last CLOSED 5-min candle's volume is below RATIO_MIN x its own
-# 20-bar average - same check and thresholds as Swing's three gates (see
-# Swing/config.py's MCX/NSE/INDEX_VOLUME_FLOOR_* docstrings for the evidence
-# behind 1.2x and why the index floor is a separate 0.6x). Fails OPEN when
-# the ratio can't be computed (no volume data, <21 bars). Not applied to the
-# separate Bollinger Hold-Long paper strategy. Not backtested on Bollinger.
-# ---------------------------------------------------------------------------
-NSE_VOLUME_FLOOR_GATE_ENABLED = os.getenv("BOLLINGER_NSE_VOLUME_FLOOR_GATE_ENABLED", "true").lower() == "true"
-NSE_VOLUME_FLOOR_RATIO_MIN = float(os.getenv("BOLLINGER_NSE_VOLUME_FLOOR_RATIO_MIN", "1.2"))
-INDEX_VOLUME_FLOOR_GATE_ENABLED = os.getenv("BOLLINGER_INDEX_VOLUME_FLOOR_GATE_ENABLED", "true").lower() == "true"
-INDEX_VOLUME_FLOOR_RATIO_MIN = float(os.getenv("BOLLINGER_INDEX_VOLUME_FLOOR_RATIO_MIN", "0.6"))
-MCX_VOLUME_FLOOR_GATE_ENABLED = os.getenv("BOLLINGER_MCX_VOLUME_FLOOR_GATE_ENABLED", "true").lower() == "true"
-MCX_VOLUME_FLOOR_RATIO_MIN = float(os.getenv("BOLLINGER_MCX_VOLUME_FLOOR_RATIO_MIN", "1.2"))
-VOLUME_FLOOR_LOOKBACK_BARS = 20
-
-# ---------------------------------------------------------------------------
 # Paper book (28 Sep 2026). Before this, paper mode only LOGGED that an
 # entry was skipped - no trade was simulated, so paper mode produced no
 # evidence at all. Now paper mode runs the full entry and exit logic on live

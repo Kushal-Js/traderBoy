@@ -34,7 +34,6 @@ not-enough-data condition returns None and callers must treat that as
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -263,9 +262,6 @@ class BollingerSignalState:
     fired_stop_price: Optional[float]
     last_close: float                   # the underlying's own most recent closed-candle price - used to normalize stop_pct at entry
     candle_start: Optional[datetime]
-    # Newest closed candle's volume / its prior VOLUME_FLOOR_LOOKBACK_BARS
-    # average, for the volume-floor entry gate. None = unknown (gate fails open).
-    volume_ratio: Optional[float] = None
 
 
 def _replay(highs: list[float], lows: list[float], closes: list[float],
@@ -473,23 +469,7 @@ def _fetch_signal_state_once(symbol: str) -> Optional[BollingerSignalState]:
             f"{config.SIGNAL_INTERVAL_MINUTES}-min Bollinger series - treating as a fetch failure, "
             f"not genuinely insufficient history"
         )
-    state = _replay(data.get("high") or [], data.get("low") or [], closes, data.get("timestamp") or [])
-    if state is None:
-        return None
-    return dataclasses.replace(state, volume_ratio=_last_volume_ratio(data.get("volume") or [], len(closes)))
-
-
-def _last_volume_ratio(volumes: list[float], n_bars: int) -> Optional[float]:
-    """Newest bar's volume vs the average of the VOLUME_FLOOR_LOOKBACK_BARS
-    before it. None when volume isn't aligned with the price series, there
-    isn't enough history, or the average is zero (e.g. no volume data)."""
-    lookback = config.VOLUME_FLOOR_LOOKBACK_BARS
-    if len(volumes) != n_bars or n_bars <= lookback:
-        return None
-    avg = sum(volumes[-lookback - 1:-1]) / lookback
-    if not avg:
-        return None
-    return volumes[-1] / avg
+    return _replay(data.get("high") or [], data.get("low") or [], closes, data.get("timestamp") or [])
 
 
 async def get_signal_state(symbol: str) -> Optional[BollingerSignalState]:
