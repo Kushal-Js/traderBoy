@@ -962,7 +962,12 @@ async def _maybe_seed_universe(strategy: str, cfg) -> None:
 # the same universe_bucket signal) that sat on top of it.
 
 DISPATCHER_STRATEGY_NAME = "UniverseDispatcher"  # reuses _watchlist()'s existing per-strategy persistence/day-rollover machinery, unmodified, keyed under this synthetic "strategy" name
-_TERMINAL_SUCCESS_STATUSES = ("entered", "amo_placed", "pending_confirmation")  # mirrors alert_bucket.ENTERED_STATUSES - kept local so the two modules stay independent, per this codebase's own "deliberately separate" convention
+# "paper_entered" added 28 Sep 2026: a PAPER entry by the first target used to
+# count as a decline, so the same signal was offered on and paper-entered
+# again by the next target (MAZDOCK PE: Options @10.30 then Luxury @9.40;
+# VOLTAS/OBEROIRLTY/MCX/TRENT pairs on 24-25 Sep) - double-counting paper
+# P&L and feeding Luxury's book signals Options had already taken.
+_TERMINAL_SUCCESS_STATUSES = ("entered", "amo_placed", "pending_confirmation", "paper_entered")  # mirrors alert_bucket.ENTERED_STATUSES (plus paper) - kept local so the two modules stay independent, per this codebase's own "deliberately separate" convention
 _CAPACITY_REJECTION_REASON = "duplicate_or_capacity_full"  # the exact reason string all 3 packages' own _process_one_entry use - see reserve_symbol's own call site in each trading_engine.py
 _dispatcher_owned_strategies: set[str] = set()
 _dispatch_turn: dict[str, int] = {"CE": 0, "PE": 0}
