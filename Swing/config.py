@@ -451,6 +451,40 @@ STRUCTURE_BREAK_REFRESH_SECONDS = int(os.getenv("SWING_STRUCTURE_BREAK_REFRESH_S
 USE_WS_CANDLES = os.getenv("SWING_USE_WS_CANDLES", "false").lower() == "true"
 WS_STALE_AFTER_SECONDS = float(os.getenv("SWING_WS_STALE_AFTER_SECONDS", "90"))
 
+# ---------------------------------------------------------------------------
+# Entry timing (28 Sep 2026, user request: "Update entry timing for SWING to
+# Tick-based also, enter the moment the price touches the trigger").
+#
+#   "tick" (default) - the Supertrend-crossover entry (v1 trigger, and v2/v3/
+#       v4 "branch A") fires the moment the LIVE price crosses the Supertrend
+#       line of the last CLOSED 5-min candle, instead of waiting for a candle
+#       to close across it. Example: last closed candle at 812.0 with the
+#       Supertrend line above it at 815.5 (downtrend) -> a tick at 815.6
+#       triggers the BULLISH entry immediately. The trend filters around it
+#       (15-min Supertrend, EMA200 regime, trend-aware leg) are still read
+#       from closed candles, exactly as before. The candle-close crossover
+#       still fires too, as a fallback when the touch wasn't seen live (e.g.
+#       the tick feed was stale).
+#   "bar_close" - the original behaviour: only a candle CLOSING across the
+#       line triggers the entry.
+#
+# WHAT STAYS CLOSE-BASED, and why: only a signal with a price LEVEL can be
+# "touched". The Day Range branch (RSI(14) crossing 60/40) and COPPER's
+# structure-break agreement have no single price level, so they still
+# evaluate on closed candles. Exits (Supertrend reversal) are unchanged.
+#
+# KNOWN TRADE-OFF (flagged to the user before deploying): a close-based
+# crossover filters out intrabar breakouts that fall back before the candle
+# closes; a tick entry takes them. Such a false breakout is NOT then treated
+# as a reversal (the closed candle never crossed back), so the position is
+# held until its stop/target/profit-protection or a later real reversal.
+# Applies to every Swing symbol that uses the Supertrend trigger, INCLUDING
+# real-money MCX (NATURALGAS) - explicit user choice. Not backtested. Needs
+# the WS tick feed (USE_WS_CANDLES) to see the forming candle; without it,
+# only the candle-close crossover can fire.
+# ---------------------------------------------------------------------------
+ENTRY_TIMING = os.getenv("SWING_ENTRY_TIMING", "tick").strip().lower()
+
 # Entry-signal strategy version (user request 14 Sep 2026: "mark current
 # deployed EMA-regime strategy with a version and then add another
 # version to this Combined (15min ST OR EMA) strategy"). Two entry

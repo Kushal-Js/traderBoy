@@ -43,7 +43,7 @@ import fund_allocation
 import paper_mode_control
 from trade_history import append_jsonl, attribute_open_broker_position
 
-from . import config, signals
+from . import candle_feed, config, signals
 from .mcx_registry import mcx_registry
 from .position_store import (
     EXIT_CLAIMED, OrderRecord, Position, position_store,
@@ -240,6 +240,19 @@ async def _record_swing_event(event: str, symbol: str, detail: dict) -> None:
 # --------------------------------------------------------------------------- #
 # Signal evaluation
 # --------------------------------------------------------------------------- #
+def _tick_supertrend_touch(symbol: str, st) -> tuple[bool, bool]:
+    """(bullish_touch, bearish_touch) for config.ENTRY_TIMING == "tick" - see
+    that setting and signals.tick_supertrend_cross. Always (False, False) in
+    "bar_close" mode, or when this symbol's live tick feed is stale (we can't
+    see the forming candle, so we don't guess)."""
+    if config.ENTRY_TIMING != "tick":
+        return False, False
+    if not candle_feed.is_fresh(symbol, config.WS_STALE_AFTER_SECONDS):
+        return False, False
+    return signals.tick_supertrend_cross(
+        st, candle_feed.forming_bar(symbol), config.SUPERTREND_INTERVAL_MINUTES, _now_ist().date())
+
+
 async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
     """None unless every signal this version needs has real data. Uses
     the 5-min Supertrend's crossover EDGE (crossed_above/crossed_below -
@@ -379,6 +392,12 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
     st = await signals.get_supertrend_state(symbol)
     if st is None:
         return None
+    # Tick-based trigger (config.ENTRY_TIMING, 28 Sep 2026): the live price
+    # crossing the last closed candle's Supertrend line counts as the
+    # crossover, in addition to (not instead of) a candle closing across it.
+    tick_bullish, tick_bearish = _tick_supertrend_touch(symbol, st)
+    crossed_above = st.crossed_above or tick_bullish
+    crossed_below = st.crossed_below or tick_bearish
     if config.ENTRY_STRATEGY_VERSION in ("v2", "v3", "v4"):
         st15 = await signals.get_supertrend_state(symbol, config.REGIME_SLOW_INTERVAL_MINUTES)
         if st15 is None:
@@ -389,8 +408,8 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
         regime_bearish_leg = not regime.is_bullish
         filter_bullish = st15.is_above or trend_aware_bullish or regime_bullish_leg
         filter_bearish = (not st15.is_above) or trend_aware_bearish or regime_bearish_leg
-        branch_a_bullish = filter_bullish and st.crossed_above
-        branch_a_bearish = filter_bearish and st.crossed_below
+        branch_a_bullish = filter_bullish and crossed_above
+        branch_a_bearish = filter_bearish and crossed_below
         branch_b_bullish = branch_b_bearish = False
         day_range = await signals.get_day_range_state(symbol)
         if day_range is not None:
@@ -401,9 +420,9 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
         if branch_a_bearish or branch_b_bearish:
             return "BEARISH"
         return None
-    if regime.is_bullish and st.crossed_above:
+    if regime.is_bullish and crossed_above:
         return "BULLISH"
-    if not regime.is_bullish and st.crossed_below:
+    if not regime.is_bullish and crossed_below:
         return "BEARISH"
     return None
 

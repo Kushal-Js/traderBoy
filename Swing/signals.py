@@ -536,6 +536,34 @@ class SupertrendState:
 _supertrend_cache: dict[tuple[str, int], tuple[datetime, Optional[SupertrendState]]] = {}
 
 
+def tick_supertrend_cross(st: Optional[SupertrendState], forming: Optional[dict],
+                          interval_minutes: int, today) -> tuple[bool, bool]:
+    """Tick-based Supertrend trigger (28 Sep 2026, see config.ENTRY_TIMING).
+    Pure function. Returns (bullish_touch, bearish_touch).
+
+    `st` describes the last CLOSED candle: its close and its Supertrend line
+    value. `forming` is the candle now in progress (Swing.candle_feed.
+    forming_bar), whose high/low cover every tick so far.
+      - bullish_touch: the last closed candle was AT/BELOW the line (not
+        is_above) and the forming candle's high has gone ABOVE that line.
+      - bearish_touch: the last closed candle was ABOVE the line and the
+        forming candle's low has come down TO/BELOW it.
+    Mirrors SupertrendState.is_above's own "close > line" definition.
+
+    Both False when: no state or no forming candle; the state is from an
+    earlier day; or the forming candle isn't exactly the one right after
+    `st`'s candle (cache and tick feed out of step - we can't be sure which
+    line applied when the touch happened)."""
+    if st is None or st.candle_start is None or st.candle_start.date() != today:
+        return False, False
+    if forming is None or forming.get("candle_start") != st.candle_start + timedelta(minutes=interval_minutes):
+        return False, False
+    bullish = (not st.is_above) and forming["high"] > st.supertrend
+    bearish = st.is_above and forming["low"] <= st.supertrend
+    return bullish, bearish
+
+
+
 def _fetch_supertrend_state_once(symbol: str, interval_minutes: int) -> Optional[SupertrendState]:
     """Blocking - always call via run_in_executor. Returns None only if
     the fetch genuinely came back with too little data - callers treat
