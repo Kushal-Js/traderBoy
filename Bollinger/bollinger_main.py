@@ -18,6 +18,7 @@ from pydantic import BaseModel
 import json
 from datetime import date
 
+import paper_mode_control
 from trade_history import dated_path
 from Options.dhan_client import dhan_wrapper
 
@@ -90,11 +91,14 @@ async def lifespan(app: FastAPI):
         config.HOLD_LONG_ENABLED, config.HOLD_LONG_DAILY_SQUARE_OFF_TIME,
         config.HOLD_LONG_ROLL_EXPIRY_WITHIN_TRADING_DAYS, len(hold_long_paper_book.positions),
     )
-    if not config.PAPER_MODE_ENABLED:
+    stocks_real = not paper_mode_control.is_paper_mode_enabled("Bollinger")
+    index_real = not paper_mode_control.is_paper_mode_enabled("BollingerIndex")
+    logger.info("Bollinger paper/real (runtime): index symbols %s -> %s, all other symbols -> %s",
+                sorted(config.INDEX_SYMBOLS), "REAL" if index_real else "PAPER", "REAL" if stocks_real else "PAPER")
+    if stocks_real or index_real:
         logger.warning(
-            "Bollinger PAPER_MODE_ENABLED=False - REAL ORDERS will be placed for any symbol added to "
-            "data/bollinger_watchlist. This strategy has no prior live/paper track record beyond its own "
-            "30-day backtest - see trading-skills' learnings/bollinger-vortex-strategy-30day-backtest.md.",
+            "Bollinger REAL ORDERS will be placed for %s on data/bollinger_watchlist.",
+            "every symbol" if stocks_real and index_real else ("index symbols" if index_real else "non-index symbols"),
         )
     yield
     if _monitor_task:

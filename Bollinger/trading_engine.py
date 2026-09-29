@@ -264,6 +264,16 @@ def _broker_stop_pct(stop_pct: float) -> float:
     return 0.95 if MAIN.exit_mode == "hold_to_close" else stop_pct
 
 
+def should_paper_trade(symbol: str) -> bool:
+    """Paper or real for a NEW entry in `symbol` (30 Sep 2026): index symbols
+    (config.INDEX_SYMBOLS) follow the runtime "BollingerIndex" toggle, every
+    other symbol the "Bollinger" one - same split as Swing's
+    _should_paper_trade. Never affects an already-open position."""
+    if symbol in config.INDEX_SYMBOLS:
+        return paper_mode_control.is_paper_mode_enabled("BollingerIndex")
+    return paper_mode_control.is_paper_mode_enabled("Bollinger")
+
+
 def premium_too_low(premium: Optional[float], is_mcx: bool) -> bool:
     """The minimum-premium gate (28 Sep 2026, see config.MIN_ATM_PREMIUM_RS
     for why). NSE options only; MCX is exempt. An unknown premium (None)
@@ -1238,7 +1248,7 @@ async def _monitor_tick() -> None:
     await entry_backlog.dispatch(
         _entry_backlog,
         candidates,
-        is_paper_trade=lambda _symbol: paper_mode_control.is_paper_mode_enabled("Bollinger"),
+        is_paper_trade=should_paper_trade,
         remaining_capacity=position_store.remaining_capacity,
         place_paper=_place_paper,
         place_real=_place_real,

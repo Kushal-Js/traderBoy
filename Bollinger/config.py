@@ -59,6 +59,15 @@ ENTRY_ENABLED = os.getenv("BOLLINGER_ENTRY_ENABLED", "true").lower() == "true"
 # See module docstring - deliberately FALSE by default, unlike every other
 # strategy's own launch history in this repo.
 PAPER_MODE_ENABLED = os.getenv("BOLLINGER_PAPER_MODE_ENABLED", "false").lower() == "true"
+# Index symbols (INDEX_SYMBOLS, NIFTY/BANKNIFTY) have their OWN paper/real
+# switch since 30 Sep 2026 (user request: "only allow Nifty/Bank Nifty ...
+# using Bollinger", stocks trade real via Super Bollinger instead) - the
+# runtime "BollingerIndex" toggle in paper_mode_control, same pattern as
+# Swing's "SwingIndex". PAPER_MODE_ENABLED above now covers every NON-index
+# symbol. Unset -> follows PAPER_MODE_ENABLED, i.e. the behaviour before the
+# split.
+INDEX_PAPER_MODE_ENABLED = os.getenv("BOLLINGER_INDEX_PAPER_MODE_ENABLED",
+                                     os.getenv("BOLLINGER_PAPER_MODE_ENABLED", "false")).lower() == "true"
 
 # ---------------------------------------------------------------------------
 # Capacity - independent of Swing's own MAX_CONCURRENT_TRADES
