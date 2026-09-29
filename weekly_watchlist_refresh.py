@@ -48,6 +48,13 @@ What it does, in order:
   6. Backs up both watchlist files (.bak.<timestamp>, same convention
      used for every manual edit this session) before overwriting.
   7. Writes the new watchlist files.
+  7b. (added 30 Sep 2026, user request) Super Bollinger's OWN list,
+     data/super_bollinger_watchlist, from the HYBRID selection
+     (stock_selection.run_live - ATH top 40 among liquid stocks, ranked by
+     how the Super Bollinger rules have done on each over the last 20
+     sessions). Swing/Bollinger above keep plain ATH. Best-effort: a
+     failure or fewer than 10 picks leaves last week's Super Bollinger list
+     in place and never blocks the ATH update or the restart.
   8. Restarts dhanboy.service - UNCONDITIONALLY, per explicit user
      instruction. The bot's own broker-reconciliation-on-restart logic
      (verified live 17 Sep 2026, see TRADING_JOURNAL.md) recovers any
@@ -88,6 +95,7 @@ import requests
 from Options.dhan_client import dhan_wrapper
 from Swing import config as swing_config
 from fno_ath_screener import get_top_n_candidates, explain, DEFAULT_TOP_N
+import stock_selection
 
 IST = ZoneInfo("Asia/Kolkata")
 HISTORY_DIR = REPO_ROOT / "history"
@@ -202,6 +210,22 @@ def main() -> None:
         write_watchlist_file(path, protected, new_equity_symbols)
         log(f"{label} watchlist file updated ({len(protected)} protected + {len(new_equity_symbols)} equity "
             f"= {len(protected) + len(new_equity_symbols)} total).")
+
+    log("\nSuper Bollinger watchlist - HYBRID selection (ATH top 40 -> strategy fit, stock_selection.py)...")
+    try:
+        old_super = read_watchlist_file(stock_selection.SUPER_BOLLINGER_WATCHLIST_FILE)
+        picks = stock_selection.run_live(log)
+        new_super = [p_["symbol"] for p_ in picks]
+        if len(new_super) < 10:
+            log(f"Super Bollinger: only {len(new_super)} picks - keeping last week's list {old_super}")
+        else:
+            log(f"Super Bollinger ADDED: {sorted(set(new_super) - set(old_super))}")
+            log(f"Super Bollinger REMOVED: {sorted(set(old_super) - set(new_super))}")
+            stock_selection.write_watchlist(new_super)
+            log(f"Super Bollinger watchlist file updated ({len(new_super)} stocks).")
+    except Exception as exc:  # noqa: BLE001
+        log(f"Super Bollinger HYBRID selection FAILED ({exc!r}) - keeping last week's list; the ATH "
+            f"watchlists above were already updated normally.")
 
     log("\nRestarting dhanboy.service (unconditional, per explicit user instruction - broker "
         "reconciliation on restart recovers any position still open; its trailing-stop memory "

@@ -12,7 +12,9 @@ Endpoints:
                                           "entry_cutoff_time": "13:30", "max_concurrent_trades": 4}
   GET  /super-bollinger/positions         open real + paper positions, today's orders
   GET  /super-bollinger/trades?day=       closed real + paper trades for a day, with PnL totals
-  GET  /super-bollinger/symbols           which watchlist symbols it trades (stocks only)
+  GET  /super-bollinger/symbols           which symbols it trades now, and from which list
+  GET  /super-bollinger/watchlist         its own HYBRID-picked watchlist (data/super_bollinger_watchlist)
+  POST /super-bollinger/watchlist/replace replace it by hand, e.g. {"symbols": ["LAURUSLABS", "ZYDUSLIFE"]}
   POST /super-bollinger/square-off-now    manual kill switch - exits every open real position
 """
 from __future__ import annotations
@@ -32,6 +34,7 @@ from trade_history import REAL_TRADES_NAME, dated_path
 from Options.dhan_client import dhan_wrapper
 
 from . import settings
+from . import watchlist as super_watchlist
 from .state import STRATEGY, paper_book, position_store
 from .trading_engine import (eligible_symbols, install_tick_entries, monitor_loop, on_price_tick, open_count,
                              reconcile_broker_positions, square_off_all)
@@ -163,8 +166,24 @@ async def get_trades(day: Optional[str] = None):
 
 @router.get("/super-bollinger/symbols")
 async def get_symbols():
+    _all, source = await super_watchlist.symbols()
     symbols = await eligible_symbols()
-    return {"count": len(symbols), "symbols": symbols}
+    return {"count": len(symbols), "source": source, "symbols": symbols}
+
+
+@router.get("/super-bollinger/watchlist")
+async def get_watchlist():
+    symbols, source = await super_watchlist.symbols()
+    return {"file": str(super_watchlist.WATCHLIST_FILE), "source": source, "count": len(symbols), "symbols": symbols}
+
+
+@router.post("/super-bollinger/watchlist/replace")
+async def replace_watchlist(payload: dict[str, Any]):
+    symbols = payload.get("symbols")
+    if not isinstance(symbols, list) or not all(isinstance(s, str) for s in symbols) or not symbols:
+        raise HTTPException(status_code=422, detail="body must be {\"symbols\": [\"SYM1\", ...]} (non-empty)")
+    new = await asyncio.get_running_loop().run_in_executor(None, super_watchlist.replace, symbols)
+    return {"count": len(new), "symbols": new}
 
 
 @router.post("/super-bollinger/square-off-now")

@@ -6,7 +6,10 @@ policy "G'" - +Rs 1.02 lakh over 31 Aug-29 Sep with 5 concurrent trades,
 NSE stocks only; see trading-skills learnings/bollinger-hold-long-30day-
 backtest-and-data-gotchas.md):
 
-  Universe  data/bollinger_watchlist (shared with Bollinger), NSE STOCKS
+  Universe  data/super_bollinger_watchlist - its OWN list, picked by the
+            HYBRID selection (stock_selection.py) and refreshed every Friday
+            (SuperBollinger/watchlist.py; falls back to data/bollinger_watchlist
+            if missing). NSE STOCKS
             ONLY - index symbols (Bollinger config.INDEX_SYMBOLS) and MCX
             commodities are always skipped, plus settings.excluded_symbols.
   Entry     BULLISH resting trigger only (the deployed Bollinger/Vortex
@@ -49,7 +52,7 @@ from trade_history import attribute_open_broker_position
 from Bollinger import config as bcfg, signals
 from Bollinger import trading_engine as engine
 from Bollinger.position_store import OrderRecord, Position, position_store as bollinger_store
-from Bollinger.watchlist import watchlist_store
+from . import watchlist as super_watchlist
 from Options.dhan_client import OrderResult, OrderStatus, dhan_wrapper
 from Swing import candle_feed
 from Swing.position_store import broker_stop_trigger_and_limit
@@ -112,7 +115,8 @@ def is_eligible_symbol(symbol: str) -> bool:
 
 
 async def eligible_symbols() -> list[str]:
-    return [s for s in await watchlist_store.symbols() if is_eligible_symbol(s)]
+    syms, _source = await super_watchlist.symbols()
+    return [s for s in syms if is_eligible_symbol(s)]
 
 
 def _square_off_now() -> bool:
@@ -512,7 +516,6 @@ async def _tick_entry(symbol: str) -> None:
 # --------------------------------------------------------------------------- #
 async def _refresh_gate() -> None:
     global _eligible
-    await watchlist_store.sync_from_file()
     _eligible = set(await eligible_symbols())  # swapped whole - the WS thread reads it
     _gate["open"] = (settings.get("strategy_enabled") and _entries_open_now() and not _square_off_now()
                      and open_count() < capacity_control.get_max_concurrent_trades(STRATEGY))
