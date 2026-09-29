@@ -33,7 +33,7 @@ from Options.dhan_client import dhan_wrapper
 
 from . import settings
 from .state import STRATEGY, paper_book, position_store
-from .trading_engine import (eligible_symbols, monitor_loop, on_price_tick, open_count,
+from .trading_engine import (eligible_symbols, install_tick_entries, monitor_loop, on_price_tick, open_count,
                              reconcile_broker_positions, square_off_all)
 
 logger = logging.getLogger("super_bollinger_main")
@@ -69,6 +69,7 @@ async def lifespan(app: FastAPI):
         asyncio.run_coroutine_threadsafe(on_price_tick(trading_symbol, ltp), loop)
 
     dhan_wrapper.add_price_tick_subscriber(_on_tick)
+    install_tick_entries(loop)  # tick-driven entries off the underlying WS feed
     _monitor_task = asyncio.create_task(monitor_loop())
 
     real = not paper_mode_control.is_paper_mode_enabled(STRATEGY)

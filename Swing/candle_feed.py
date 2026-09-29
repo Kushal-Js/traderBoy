@@ -149,6 +149,17 @@ _state: dict[str, _SymbolState] = {}
 # contract roll (security_id changed under the same symbol) idempotently.
 _subscribed_ref: dict[str, tuple[str, str]] = {}
 _tick_subscriber_registered = False
+# Callbacks run after every tick has updated its symbol's bar - added 30 Sep
+# 2026 for Super Bollinger's tick-driven entries. Called from the WS feed's
+# own thread, outside _lock, as fn(symbol, ltp, tick_time): a listener must
+# be fast and non-blocking (hand real work to the event loop) and may call
+# the read-only accessors here (forming_bar, is_fresh).
+_tick_listeners: list = []
+
+
+def add_tick_listener(fn) -> None:
+    if fn not in _tick_listeners:
+        _tick_listeners.append(fn)
 
 
 # --------------------------------------------------------------------------- #
@@ -298,6 +309,12 @@ def _on_tick(underlying_symbol: str, ltp: float, cum_volume: float, t: datetime)
                 st.last_persisted_candle_start = completed["candle_start"]
         st.last_tick_at = t
         security_id = st.security_id
+    if ltp > 0:
+        for listener in list(_tick_listeners):
+            try:
+                listener(underlying_symbol, ltp, t)
+            except Exception:  # noqa: BLE001
+                logger.exception("swing_candle_feed: tick listener failed for %s", underlying_symbol)
     if completed is not None:
         _persist_bar(underlying_symbol, security_id, today, completed)
 

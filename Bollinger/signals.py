@@ -472,8 +472,14 @@ def _fetch_signal_state_once(symbol: str) -> Optional[BollingerSignalState]:
     return _replay(data.get("high") or [], data.get("low") or [], closes, data.get("timestamp") or [])
 
 
-async def get_signal_state(symbol: str) -> Optional[BollingerSignalState]:
-    """Cached, throttled (config.SIGNAL_REFRESH_SECONDS, doubling on each
+async def get_signal_state(symbol: str, force: bool = False) -> Optional[BollingerSignalState]:
+    """`force=True` (added 30 Sep 2026, Super Bollinger's tick-driven entries)
+    skips the normal refresh interval - used once per symbol right after a
+    new 5-min bar starts, so the new bar's pending order is known within a
+    second instead of up to SIGNAL_REFRESH_SECONDS later. Never forces
+    through a failure backoff.
+
+    Cached, throttled (config.SIGNAL_REFRESH_SECONDS, doubling on each
     consecutive failure up to MAX_FETCH_BACKOFF_SECONDS), fail-open - a
     fetch failure or insufficient-history condition keeps the LAST good
     cached state rather than returning a fresh, possibly-wrong None that
@@ -484,7 +490,7 @@ async def get_signal_state(symbol: str) -> Optional[BollingerSignalState]:
     cached = _signal_cache.get(cache_key)
     streak = _fail_streak.get(cache_key, 0)
     effective_refresh = min(config.SIGNAL_REFRESH_SECONDS * (2 ** streak), MAX_FETCH_BACKOFF_SECONDS)
-    if cached and (_now_ist() - cached[0]).total_seconds() < effective_refresh:
+    if cached and (_now_ist() - cached[0]).total_seconds() < effective_refresh and not (force and streak == 0):
         return cached[1]
     loop = asyncio.get_running_loop()
     try:

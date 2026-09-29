@@ -15,6 +15,9 @@ backtest-and-data-gotchas.md):
             within N trading days), min premium Rs 5, no new entries from
             the entry cutoff (14:00), max N open trades (capacity_control
             "SuperBollinger", default 5), signals seen while full are skipped.
+            TICK-DRIVEN (30 Sep 2026): every tick of a watchlist stock checks
+            its pending trigger and a touch goes straight to the order (see
+            "Tick-driven entries" below); the 5s scan remains as a backup.
   Exit      MAX_LOSS_HIT at the rupee cap (4500); BREAKEVEN_STOP_HIT - once
             the trade has been >= Rs 1500 in profit, exit if the premium
             falls back to the entry price; otherwise DAILY_SQUARE_OFF at
@@ -34,7 +37,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from typing import Optional
 
 import capacity_control
@@ -47,6 +51,7 @@ from Bollinger import trading_engine as engine
 from Bollinger.position_store import OrderRecord, Position, position_store as bollinger_store
 from Bollinger.watchlist import watchlist_store
 from Options.dhan_client import OrderResult, OrderStatus, dhan_wrapper
+from Swing import candle_feed
 from Swing.position_store import broker_stop_trigger_and_limit
 
 from . import settings
@@ -161,7 +166,7 @@ def _new_position(symbol: str, leg: dict, entry_price: float, order_id: str,
     )
 
 
-async def enter_paper(symbol: str, trigger_price: float, stop_price: float) -> dict:
+async def enter_paper(symbol: str, trigger_price: float, stop_price: float, source: str = "scan") -> dict:
     if symbol in paper_book.positions:
         return {"symbol": symbol, "status": "skipped", "reason": "paper_position_already_open"}
     try:
@@ -178,11 +183,11 @@ async def enter_paper(symbol: str, trigger_price: float, stop_price: float) -> d
                          leg["trading_symbol"])
     await _event("PAPER_POSITION_OPENED", symbol, {"trading_symbol": leg["trading_symbol"], "entry_price": price,
                                                    "quantity": leg["quantity"], "trigger_price": trigger_price,
-                                                   "stop_price": stop_price})
+                                                   "stop_price": stop_price, "entry_source": source})
     return {"symbol": symbol, "status": "paper_entered", "trading_symbol": leg["trading_symbol"], "entry_price": price}
 
 
-async def enter_real(symbol: str, trigger_price: float, stop_price: float) -> dict:
+async def enter_real(symbol: str, trigger_price: float, stop_price: float, source: str = "scan") -> dict:
     """REAL-money entry. Claims the stock in the shared cross-strategy
     registry for the whole attempt, then refuses it if the deployed
     Bollinger strategy holds (or is entering) a real position in it."""
@@ -196,7 +201,7 @@ async def enter_real(symbol: str, trigger_price: float, stop_price: float) -> di
         if not await position_store.reserve_symbol(symbol):
             return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
         try:
-            return await _enter_real_reserved(symbol, trigger_price, stop_price)
+            return await _enter_real_reserved(symbol, trigger_price, stop_price, source)
         finally:
             if symbol not in position_store.live_positions:
                 await position_store.record_failed_entry(symbol)
@@ -205,7 +210,7 @@ async def enter_real(symbol: str, trigger_price: float, stop_price: float) -> di
         await cross_strategy_registry.release_claim(symbol, STRATEGY)
 
 
-async def _enter_real_reserved(symbol: str, trigger_price: float, stop_price: float) -> dict:
+async def _enter_real_reserved(symbol: str, trigger_price: float, stop_price: float, source: str) -> dict:
     loop = asyncio.get_running_loop()
     try:
         try:
@@ -286,7 +291,8 @@ async def _enter_real_reserved(symbol: str, trigger_price: float, stop_price: fl
         await position_store.add_position(_new_position(symbol, leg, fill_price, order_id, stop_loss_order_id))
         await _event("POSITION_OPENED", symbol, {"trading_symbol": trading_symbol, "entry_price": fill_price,
                                                  "quantity": quantity, "trigger_price": trigger_price,
-                                                 "stop_price": stop_price, "order_id": order_id})
+                                                 "stop_price": stop_price, "order_id": order_id,
+                                                 "entry_source": source})
         return {"symbol": symbol, "status": "entered", "trading_symbol": trading_symbol, "entry_price": fill_price}
     except Exception:  # noqa: BLE001
         logger.exception("[%s] %s: unexpected error entering position", STRATEGY, symbol)
@@ -388,41 +394,154 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Monitor loop
+# Entry gate - shared by the tick path and the 5s scan
 # --------------------------------------------------------------------------- #
-async def _scan_for_entries() -> None:
-    cap = capacity_control.get_max_concurrent_trades(STRATEGY)
-    if open_count() >= cap:
+# Refreshed every monitor tick; read (never written) by the WS-thread tick
+# listener as a cheap pre-filter. Every real decision is re-checked on the
+# event loop in _can_enter_symbol.
+_eligible: set[str] = set()
+_gate = {"open": False}
+_entry_inflight: set[str] = set()   # symbols with an entry attempt already on its way
+_refresh_asked: dict[str, tuple] = {}  # symbol -> (bar start, monotonic time) of the last forced signal refresh
+REFRESH_RETRY_SECONDS = 3.0
+_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+async def _can_enter_symbol(symbol: str) -> bool:
+    return (settings.get("strategy_enabled") and _entries_open_now() and not _square_off_now()
+            and symbol in _eligible
+            and open_count() < capacity_control.get_max_concurrent_trades(STRATEGY)
+            and symbol not in position_store.live_positions and symbol not in position_store.reserved_symbols
+            and symbol not in paper_book.positions
+            and not await position_store.is_in_entry_cooldown(symbol)
+            and signals._symbol_market_open(symbol))
+
+
+async def _enter(symbol: str, trigger_price: float, stop_price: float, source: str) -> None:
+    if paper_mode_control.is_paper_mode_enabled(STRATEGY):
+        result = await enter_paper(symbol, trigger_price, stop_price, source)
+    else:
+        result = await enter_real(symbol, trigger_price, stop_price, source)
+    logger.info("[%s] %s: BULLISH trigger %.2f (%s) -> %s", STRATEGY, symbol, trigger_price, source, result)
+
+
+# --------------------------------------------------------------------------- #
+# Tick-driven entries (30 Sep 2026, user request: "make entries tick based")
+#
+# Swing.candle_feed calls _on_underlying_tick from the WS feed thread after
+# every tick of a subscribed underlying has updated its forming 5-min bar.
+# It only reads in-memory state (no I/O) and hands work to the event loop:
+#   - first tick of a new bar: the just-closed bar now exists, so force one
+#     refresh of that symbol's Bollinger signal (the new bar's pending
+#     order) instead of waiting up to SIGNAL_REFRESH_SECONDS (retried after
+#     REFRESH_RETRY_SECONDS if it still hasn't caught up);
+#   - a tick whose bar high has reached the pending BULLISH trigger: start
+#     the entry immediately (same guards, same order path as the scan).
+# The pending order is consumed once (PROFILE.consumed) whichever path gets
+# there first, so the scan and the tick path can never both enter.
+# --------------------------------------------------------------------------- #
+def install_tick_entries(loop: asyncio.AbstractEventLoop) -> None:
+    global _loop
+    _loop = loop
+    candle_feed.add_tick_listener(_on_underlying_tick)
+
+
+def _on_underlying_tick(symbol: str, ltp: float, tick_time: datetime) -> None:
+    """WS feed thread. Must stay cheap and non-blocking."""
+    if _loop is None or not _gate["open"] or symbol not in _eligible or symbol in _entry_inflight:
         return
+    if (symbol in position_store.live_positions or symbol in position_store.reserved_symbols
+            or symbol in paper_book.positions):
+        return
+    forming = candle_feed.forming_bar(symbol)
+    if forming is None:
+        return
+    state = signals.peek_signal_state(symbol)
+    expected = forming["candle_start"] - timedelta(minutes=bcfg.SIGNAL_INTERVAL_MINUTES)
+    if state is None or state.candle_start != expected:
+        asked = _refresh_asked.get(symbol)
+        now = time.monotonic()
+        if asked is None or asked[0] != forming["candle_start"] or now - asked[1] >= REFRESH_RETRY_SECONDS:
+            _refresh_asked[symbol] = (forming["candle_start"], now)
+            asyncio.run_coroutine_threadsafe(_refresh_signal(symbol), _loop)
+        return
+    if (state.pending_side != "BULLISH" or state.pending_trigger_price is None
+            or forming["high"] < state.pending_trigger_price or PROFILE.consumed.get(symbol) == state.candle_start):
+        return
+    _entry_inflight.add(symbol)
+    asyncio.run_coroutine_threadsafe(_tick_entry(symbol), _loop)
+
+
+async def _refresh_signal(symbol: str) -> None:
+    try:
+        await signals.get_signal_state(symbol, force=True)
+    except Exception:  # noqa: BLE001
+        logger.exception("[%s] %s: forced signal refresh failed", STRATEGY, symbol)
+
+
+def _peek_entry_signal(symbol: str) -> Optional[tuple]:
+    """engine._evaluate_entry_signal without the fetch: cached signal state +
+    the live forming bar. Consumes the pending order like the scan does."""
+    state = signals.peek_signal_state(symbol)
+    if state is None:
+        return None
+    forming = (candle_feed.forming_bar(symbol)
+               if candle_feed.is_fresh(symbol, bcfg.WS_STALE_AFTER_SECONDS) else None)
+    entry = signals.resting_trigger_hit(state, forming, bcfg.SIGNAL_INTERVAL_MINUTES, _now().date())
+    if entry is None or PROFILE.consumed.get(symbol) == state.candle_start:
+        return None
+    PROFILE.consumed[symbol] = state.candle_start
+    return engine._direction_allowed(entry, PROFILE)
+
+
+async def _tick_entry(symbol: str) -> None:
+    try:
+        if not await _can_enter_symbol(symbol):
+            return
+        entry = _peek_entry_signal(symbol)
+        if entry:
+            await _enter(symbol, entry[1], entry[2], "tick")
+    except Exception:  # noqa: BLE001
+        logger.exception("[%s] %s: tick-driven entry failed", STRATEGY, symbol)
+    finally:
+        _entry_inflight.discard(symbol)
+
+
+# --------------------------------------------------------------------------- #
+# Monitor loop (exits' poll path, square-off, gate refresh, backup entry scan)
+# --------------------------------------------------------------------------- #
+async def _refresh_gate() -> None:
+    global _eligible
     await watchlist_store.sync_from_file()
-    symbols = await eligible_symbols()
+    _eligible = set(await eligible_symbols())  # swapped whole - the WS thread reads it
+    _gate["open"] = (settings.get("strategy_enabled") and _entries_open_now() and not _square_off_now()
+                     and open_count() < capacity_control.get_max_concurrent_trades(STRATEGY))
+
+
+async def _scan_for_entries() -> None:
+    """Backup to the tick path (e.g. a trigger touched while the signal was
+    still refreshing) - also keeps every symbol's signal cache warm."""
+    symbols = sorted(_eligible)
     if symbols:
         start = _scan_turn["i"] % len(symbols)
         symbols = symbols[start:] + symbols[:start]
         _scan_turn["i"] = (_scan_turn["i"] + 1) % len(symbols)
     for i, symbol in enumerate(symbols):
-        if open_count() >= cap or not _entries_open_now() or not settings.get("strategy_enabled"):
-            return
-        if (symbol in position_store.live_positions or symbol in position_store.reserved_symbols
-                or symbol in paper_book.positions or await position_store.is_in_entry_cooldown(symbol)):
-            continue
-        if not signals._symbol_market_open(symbol):
+        if symbol in _entry_inflight or not await _can_enter_symbol(symbol):
             continue
         if i and not signals.is_symbol_ws_fresh(symbol):
             await asyncio.sleep(bcfg.SYMBOL_PACING_SECONDS)
+        if symbol in _entry_inflight:
+            continue
+        _entry_inflight.add(symbol)
         try:
             entry = await engine._evaluate_entry_signal(symbol, PROFILE)
+            if entry and await _can_enter_symbol(symbol):
+                await _enter(symbol, entry[1], entry[2], "scan")
         except Exception:  # noqa: BLE001
             logger.exception("[%s] %s: could not evaluate entry signal", STRATEGY, symbol)
-            continue
-        if not entry:
-            continue
-        _side, trigger_price, stop_price, _ref = entry
-        if paper_mode_control.is_paper_mode_enabled(STRATEGY):
-            result = await enter_paper(symbol, trigger_price, stop_price)
-        else:
-            result = await enter_real(symbol, trigger_price, stop_price)
-        logger.info("[%s] %s: BULLISH trigger %.2f -> %s", STRATEGY, symbol, trigger_price, result)
+        finally:
+            _entry_inflight.discard(symbol)
 
 
 async def _monitor_tick() -> None:
@@ -431,9 +550,9 @@ async def _monitor_tick() -> None:
         await square_off_all("DAILY_SQUARE_OFF")
     await asyncio.gather(*[_check_real(s, p) for s, p in list(position_store.live_positions.items())])
     await _check_paper(square_off)
-    if square_off or not settings.get("strategy_enabled") or not _entries_open_now():
-        return
-    await _scan_for_entries()
+    await _refresh_gate()
+    if _gate["open"]:
+        await _scan_for_entries()
 
 
 async def monitor_loop() -> None:
