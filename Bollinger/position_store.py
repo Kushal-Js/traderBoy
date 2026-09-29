@@ -138,16 +138,24 @@ def apply_price_to_trailing(pos: Position, current_price: float) -> None:
             pos.trailing_stop_price = candidate
 
 
-def _cap_reached(reserved_count: int) -> bool:
+def _cap_reached(reserved_count: int, strategy: str = "Bollinger") -> bool:
     # capacity_control.get_max_concurrent_trades checks a runtime override
     # first (set via POST /capacity/max-concurrent-trades), falling back
     # to config.MAX_CONCURRENT_TRADES only if none was ever set - added 26
     # Sep 2026, see capacity_control.py's own module docstring.
-    return reserved_count >= capacity_control.get_max_concurrent_trades("Bollinger")
+    return reserved_count >= capacity_control.get_max_concurrent_trades(strategy)
 
 
 class BollingerPositionStore:
-    def __init__(self) -> None:
+    """`strategy` (added 30 Sep 2026 for Super Bollinger, which keeps its OWN
+    instance of this store) is the name used for its capacity cap, its
+    trade-history records and its entry cooldown - "Bollinger" for the
+    deployed strategy's own module-level instance below, unchanged."""
+    def __init__(self, strategy: str = "Bollinger", entry_retry_cooldown_seconds: Optional[float] = None) -> None:
+        self.strategy = strategy
+        self._entry_retry_cooldown_seconds = (config.ENTRY_RETRY_COOLDOWN_SECONDS
+                                              if entry_retry_cooldown_seconds is None
+                                              else entry_retry_cooldown_seconds)
         self._lock = asyncio.Lock()
         self.live_positions: Dict[str, Position] = {}   # keyed by underlying_symbol
         self.reserved_symbols: set[str] = set()
@@ -182,7 +190,7 @@ class BollingerPositionStore:
         async with self._lock:
             if underlying_symbol in self.reserved_symbols or underlying_symbol in self.live_positions:
                 return False
-            if _cap_reached(len(self.reserved_symbols)):
+            if _cap_reached(len(self.reserved_symbols), self.strategy):
                 return False
             self.reserved_symbols.add(underlying_symbol)
             return True
@@ -199,23 +207,23 @@ class BollingerPositionStore:
     async def is_in_entry_cooldown(self, underlying_symbol: str) -> bool:
         async with self._lock:
             last = self._last_failed_entry_at.get(underlying_symbol)
-            return last is not None and (time.monotonic() - last) < config.ENTRY_RETRY_COOLDOWN_SECONDS
+            return last is not None and (time.monotonic() - last) < self._entry_retry_cooldown_seconds
 
     async def remaining_capacity(self) -> int:
         async with self._lock:
-            return max(0, capacity_control.get_max_concurrent_trades("Bollinger") - len(self.reserved_symbols))
+            return max(0, capacity_control.get_max_concurrent_trades(self.strategy) - len(self.reserved_symbols))
 
     async def add_position(self, pos: Position) -> None:
         async with self._lock:
             self.live_positions[pos.underlying_symbol] = pos
             self.reserved_symbols.add(pos.underlying_symbol)
-            fire_and_forget(record_opened_position("Bollinger", pos))
+            fire_and_forget(record_opened_position(self.strategy, pos))
             fire_and_forget(reversal_filters.evaluate_and_log(
-                "Bollinger", pos.underlying_symbol, pos.resolved_option_type, pos.entry_price, pos.order_id,
+                self.strategy, pos.underlying_symbol, pos.resolved_option_type, pos.entry_price, pos.order_id,
             ))
             logger.info(
-                "Position OPENED: %s (%s, LONG %s) entry=%.2f stop=%.2f stop_pct=%.3f%% qty=%s",
-                pos.underlying_symbol, pos.trading_symbol, pos.resolved_option_type,
+                "[%s] Position OPENED: %s (%s, LONG %s) entry=%.2f stop=%.2f stop_pct=%.3f%% qty=%s",
+                self.strategy, pos.underlying_symbol, pos.trading_symbol, pos.resolved_option_type,
                 pos.entry_price, pos.hard_stop_loss, pos.stop_pct * 100, pos.quantity,
             )
 
@@ -332,12 +340,12 @@ class BollingerPositionStore:
             pos.exit_price = exit_price
             pos.closed_at = _now_ist()
             self.closed_positions_today.append(pos)
-            fire_and_forget(record_closed_trade("Bollinger", pos))
+            fire_and_forget(record_closed_trade(self.strategy, pos))
             self.reserved_symbols.discard(underlying_symbol)
             pnl = (exit_price - pos.entry_price) * pos.pnl_multiplier  # always LONG - see Position.instrument_side
             logger.info(
-                "Position CLOSED: %s (%s, LONG %s) reason=%s exit=%.2f pnl=%.2f",
-                pos.underlying_symbol, pos.trading_symbol, pos.resolved_option_type,
+                "[%s] Position CLOSED: %s (%s, LONG %s) reason=%s exit=%.2f pnl=%.2f",
+                self.strategy, pos.underlying_symbol, pos.trading_symbol, pos.resolved_option_type,
                 reason, exit_price, pnl,
             )
             return pos

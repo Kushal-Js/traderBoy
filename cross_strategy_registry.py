@@ -53,6 +53,13 @@ the SAME underlying stock at the same instant - accepted, not a bug,
 since Swing trades a different instrument combination (futures + PE
 hedge) with its own capital pool.
 
+Bollinger and SuperBollinger joined on 30 Sep 2026, for REAL entries only:
+they read the same signal and buy the same ATM CE, and one strategy's exit
+would close the other's netted broker position - so each claims the stock
+here for its whole entry attempt and then refuses it if the other already
+holds it for real (Bollinger/trading_engine.py super_bollinger_real_holds,
+SuperBollinger/trading_engine.py enter_real).
+
 Pure in-memory, same tradeoff as every PositionStore in this codebase -
 resets on restart. That's fine here: this only ever needs to protect a
 single in-flight entry attempt (seconds), not persistent state. It does

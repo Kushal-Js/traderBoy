@@ -40,6 +40,7 @@ from typing import Optional
 
 import entry_backlog
 import broker_flat_check
+import cross_strategy_registry
 import fund_allocation
 import paper_mode_control
 from trade_history import append_jsonl, attribute_open_broker_position
@@ -427,7 +428,41 @@ def _exit_reason_for(position: Position, ltp: float, exit_mode: Optional[str] = 
 # --------------------------------------------------------------------------- #
 # Entry
 # --------------------------------------------------------------------------- #
+def super_bollinger_real_holds(symbol: str) -> bool:
+    """True if Super Bollinger (SuperBollinger/, 30 Sep 2026) holds - or is
+    mid-entry on - a REAL position in `symbol`. The two strategies read the
+    SAME signal and would buy the SAME ATM CE; Dhan nets one contract into
+    one position, and _exit_position cancels any outstanding SELL order for
+    the contract and reconciles to the broker's whole quantity - so one
+    strategy's exit would also close (and strip the stop-loss of) the
+    other's. Rule: one REAL Bollinger-family position per stock at a time,
+    first come first served (see also cross_strategy_registry below).
+    Imported lazily: SuperBollinger itself imports this module."""
+    try:
+        from SuperBollinger.state import position_store as super_store
+    except Exception:  # noqa: BLE001
+        return False
+    return symbol in super_store.live_positions or symbol in super_store.reserved_symbols
+
+
 async def enter_position_for_stock(symbol: str, entry_signal: str, trigger_price: float,
+                                    stop_price: float, stop_reference_price: float) -> dict:
+    """REAL-money entry, guarded against Super Bollinger holding the same
+    stock for real (see super_bollinger_real_holds). The claim is held for
+    the whole entry attempt so the two strategies can never race each other
+    into the same contract."""
+    if not await cross_strategy_registry.try_claim(symbol, "Bollinger"):
+        return {"symbol": symbol, "status": "skipped", "reason": "entry_in_progress_by_other_strategy"}
+    try:
+        if super_bollinger_real_holds(symbol):
+            logger.info("%s: skipped - Super Bollinger already holds a real position in this stock", symbol)
+            return {"symbol": symbol, "status": "skipped", "reason": "held_by_super_bollinger"}
+        return await _enter_position_for_stock(symbol, entry_signal, trigger_price, stop_price, stop_reference_price)
+    finally:
+        await cross_strategy_registry.release_claim(symbol, "Bollinger")
+
+
+async def _enter_position_for_stock(symbol: str, entry_signal: str, trigger_price: float,
                                     stop_price: float, stop_reference_price: float) -> dict:
     """REAL-money entry. stop_reference_price is the underlying price the
     stop % is measured against: the trigger in "resting" mode, the fire
@@ -625,7 +660,14 @@ def _option_still_needed(trading_symbol: str) -> bool:
     this option's price - don't unsubscribe it from under them."""
     if any(p.trading_symbol == trading_symbol for p in position_store.live_positions.values()):
         return True
-    return any(p.trading_symbol == trading_symbol for pr in _paper_profiles() for p in pr.paper_book.positions.values())
+    if any(p.trading_symbol == trading_symbol for pr in _paper_profiles() for p in pr.paper_book.positions.values()):
+        return True
+    try:  # Super Bollinger's own positions (real or paper) - lazy, see super_bollinger_real_holds
+        from SuperBollinger.state import paper_book as super_paper, position_store as super_store
+    except Exception:  # noqa: BLE001
+        return False
+    return any(p.trading_symbol == trading_symbol
+               for p in list(super_store.live_positions.values()) + list(super_paper.positions.values()))
 
 
 async def _close_paper(profile: Profile, symbol: str, exit_price: float, reason: str) -> None:
@@ -680,7 +722,8 @@ def _mcx(book: PaperBook) -> set[str]:
     return {s for s, p in book.positions.items() if p.exchange_segment == "MCX_COMM"}
 
 
-async def _check_broker_stop_already_filled(symbol: str, position: Position) -> bool:
+async def _check_broker_stop_already_filled(symbol: str, position: Position, store=None) -> bool:
+    store = store or position_store
     if not config.BROKER_STOP_LOSS_ENABLED or not position.stop_loss_order_id:
         return False
     loop = asyncio.get_running_loop()
@@ -699,41 +742,43 @@ async def _check_broker_stop_already_filled(symbol: str, position: Position) -> 
         final_exit_price = result.fill_price or position.hard_stop_loss
         logger.info("%s: broker-side stop-loss order %s ALREADY FILLED - closing at the real fill price %.2f",
                     symbol, position.stop_loss_order_id, final_exit_price)
-        await position_store.close_position(symbol, final_exit_price, "STOP_LOSS_HIT")
+        await store.close_position(symbol, final_exit_price, "STOP_LOSS_HIT")
         await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
         return True
     logger.warning("%s: broker-side stop-loss order %s ended as %s without firing - this position now relies "
                     "solely on the regular poll/tick-driven check", symbol, position.stop_loss_order_id, result.status)
-    await position_store.clear_stop_loss_order_id(symbol)
+    await store.clear_stop_loss_order_id(symbol)
     # A cancelled SL-L is how a manual exit in the Dhan app starts - see
     # broker_flat_check's docstring (NATURALGAS, 28 Sep 2026).
     if await broker_flat_check.confirmed_flat(lambda: dhan_wrapper.get_broker_net_quantity(position.trading_symbol, position.exchange_segment)):
-        await _close_as_manual_exit(symbol, position)
+        await _close_as_manual_exit(symbol, position, store)
         return True
     return False
 
 
-async def _close_as_manual_exit(symbol: str, position: Position) -> None:
+async def _close_as_manual_exit(symbol: str, position: Position, store=None) -> None:
     """The broker holds none of this contract any more - it was closed
     outside the bot. Record it as closed WITHOUT sending an order (a SELL
     here would open a naked short). The real fill price isn't known here,
     so it's marked at the last live price."""
+    store = store or position_store
     loop = asyncio.get_running_loop()
     mark = await broker_flat_check.last_price(position.trading_symbol, position.entry_price)
     logger.warning("%s: broker shows NO position in %s - it was closed outside the bot (manual exit?). "
                    "Recording it as closed at the last price %.2f; no order sent.",
                    symbol, position.trading_symbol, mark)
-    await position_store.close_position(symbol, mark, "MANUAL_EXIT_DETECTED")
+    await store.close_position(symbol, mark, "MANUAL_EXIT_DETECTED")
     await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
 
 
-async def _exit_position(symbol: str, position: Position, exit_price: float, reason: str) -> None:
+async def _exit_position(symbol: str, position: Position, exit_price: float, reason: str, store=None) -> None:
     """Caller MUST have already claimed via position_store.try_start_exit.
     Direct, deliberately unmodified port of Swing/trading_engine.py's own
     _exit_position, simplified: always a SELL (every position here is
     LONG). exchange_segment is NSE_FNO or MCX_COMM depending on the
     underlying (26 Sep 2026, MCX support) - read off the position itself,
     set at entry/reconciliation."""
+    store = store or position_store
     loop = asyncio.get_running_loop()
     net_qty_fn = dhan_wrapper.get_broker_net_quantity
     order_exchange = "MCX" if position.exchange_segment == "MCX_COMM" else "NSE"
@@ -782,7 +827,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
                     logger.exception("%s: could not fetch stale order %s's own fill price - using %.2f instead",
                                       symbol, stale_order_id, exit_price)
                     final_exit_price = exit_price
-                await position_store.close_position(symbol, final_exit_price, reason)
+                await store.close_position(symbol, final_exit_price, reason)
                 await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
                 return
             logger.warning("%s: broker shows only %d qty left (stored position says %d) after cancelling stale "
@@ -794,7 +839,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
     # Before the first exit order: is the contract still held at all? See
     # broker_flat_check (a manual exit with no broker SL-L to notice).
     if position.exit_failure_count == 0 and await broker_flat_check.confirmed_flat(lambda: dhan_wrapper.get_broker_net_quantity(position.trading_symbol, position.exchange_segment)):
-        await _close_as_manual_exit(symbol, position)
+        await _close_as_manual_exit(symbol, position, store)
         return
 
     if position.exit_failure_count >= 1:
@@ -807,7 +852,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
         if broker_qty == 0:
             logger.warning("%s: broker shows this position already flat after %d exit failure(s) - reconciling "
                             "locally as closed instead of retrying.", symbol, position.exit_failure_count)
-            await position_store.close_position(symbol, exit_price or position.best_price, "RECONCILED_ALREADY_FLAT")
+            await store.close_position(symbol, exit_price or position.best_price, "RECONCILED_ALREADY_FLAT")
             await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
             return
 
@@ -819,16 +864,16 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
         )
     except Exception:  # noqa: BLE001
         logger.exception("SELL exit order failed for %s (%s) - backing off before retrying", symbol, position.trading_symbol)
-        await position_store.record_exit_failure(symbol)
+        await store.record_exit_failure(symbol)
         return
 
     try:
         order_id, is_amo = order_resp["order_id"], order_resp["is_amo"]
-        await position_store.record_order(OrderRecord(
+        await store.record_order(OrderRecord(
             order_id=order_id, underlying_symbol=symbol, trading_symbol=position.trading_symbol,
             transaction_type="SELL", quantity=position.quantity, status=OrderStatus.TRANSIT, is_amo=is_amo,
         ))
-        await position_store.set_pending_exit_order(symbol, order_id, reason)
+        await store.set_pending_exit_order(symbol, order_id, reason)
 
         try:
             result = await asyncio.wait_for(
@@ -842,16 +887,16 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             )
             result = OrderResult(order_id=order_id, status=OrderStatus.TRANSIT, remark="order_confirmation_timeout",
                                   fill_price=0.0, filled_quantity=0, is_amo=is_amo)
-        await position_store.update_order_status(order_id, result.status, result.remark)
+        await store.update_order_status(order_id, result.status, result.remark)
 
         if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
             logger.warning("SELL exit order %s for %s rejected: status=%s remark=%s - backing off before retrying",
                             order_id, symbol, result.status, result.remark)
-            await position_store.set_pending_exit_order(symbol, None)
-            await position_store.record_exit_failure(symbol)
+            await store.set_pending_exit_order(symbol, None)
+            await store.record_exit_failure(symbol)
             return
 
-        await position_store.clear_exit_failure(symbol)
+        await store.clear_exit_failure(symbol)
 
         if result.is_queued_amo:
             logger.info("SELL exit order %s for %s queued as AMO - will confirm fill next session.", order_id, symbol)
@@ -863,7 +908,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             return
 
         final_exit_price = result.fill_price or exit_price
-        await position_store.close_position(symbol, final_exit_price, reason)
+        await store.close_position(symbol, final_exit_price, reason)
         await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
         pnl = unrealized_pnl_rs("LONG", position.entry_price, final_exit_price, position.pnl_multiplier)
         logger.info("SELL exit order %s FILLED for %s (%s): reason=%s entry=%s exit=%s qty=%s pnl=%.2f",
@@ -872,7 +917,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
     except Exception:  # noqa: BLE001
         logger.exception("Unexpected error resolving SELL exit order for %s (%s) - backing off before retrying",
                           symbol, position.trading_symbol)
-        await position_store.record_exit_failure(symbol)
+        await store.record_exit_failure(symbol)
 
 
 def _exit_on_cooldown(position: Position) -> bool:
@@ -897,10 +942,11 @@ async def _get_ltp(position: Position) -> float:
         return ltp
 
 
-async def _handle_ltp_staleness(symbol: str, position: Position) -> None:
+async def _handle_ltp_staleness(symbol: str, position: Position, store=None) -> None:
     """Forces a market exit once the failure has been CONTINUOUS for
     config.LTP_STALE_FORCE_EXIT_MINUTES - same real-incident-driven design
     as Swing's own (ANGELONE, 17 Sep 2026)."""
+    store = store or position_store
     key = (symbol, position.opened_at)
     if _now_ist() < _parse_hhmm_today(config.MARKET_OPEN_TIME):
         _ltp_failure_since.pop(key, None)
@@ -919,8 +965,8 @@ async def _handle_ltp_staleness(symbol: str, position: Position) -> None:
     fallback_price = await loop.run_in_executor(None, dhan_wrapper.get_last_historical_close, position.trading_symbol)
     if fallback_price is None:
         fallback_price = position.entry_price
-    if await position_store.try_start_exit(symbol):
-        await _exit_position(symbol, position, fallback_price, "LTP_STALE_FORCED_EXIT")
+    if await store.try_start_exit(symbol):
+        await _exit_position(symbol, position, fallback_price, "LTP_STALE_FORCED_EXIT", store)
     _ltp_failure_since.pop(key, None)
 
 
@@ -994,9 +1040,10 @@ async def _square_off_all(reason: str, symbols: Optional[set[str]] = None) -> No
         await _exit_position(symbol, position, ltp, reason)
 
 
-async def _sync_pending_exit_orders() -> None:
+async def _sync_pending_exit_orders(store=None) -> None:
+    store = store or position_store
     loop = asyncio.get_running_loop()
-    for symbol, position in dict(position_store.live_positions).items():
+    for symbol, position in dict(store.live_positions).items():
         if not position.pending_exit_order_id or position.pending_exit_order_id == EXIT_CLAIMED:
             continue
         try:
@@ -1007,15 +1054,15 @@ async def _sync_pending_exit_orders() -> None:
         except Exception:  # noqa: BLE001
             logger.exception("Could not refresh AMO exit order %s", position.pending_exit_order_id)
             continue
-        await position_store.update_order_status(position.pending_exit_order_id, result.status, result.remark)
+        await store.update_order_status(position.pending_exit_order_id, result.status, result.remark)
         if result.status in OrderStatus.REJECTED_STATUSES or result.status == OrderStatus.CANCELLED:
             logger.warning("AMO exit order %s for %s ended as %s - clearing so the next tick retries the exit.",
                             position.pending_exit_order_id, symbol, result.status)
-            await position_store.set_pending_exit_order(symbol, None)
+            await store.set_pending_exit_order(symbol, None)
             continue
         if result.status in OrderStatus.TERMINAL_STATUSES:
             final_exit_price = result.fill_price or position.best_price
-            await position_store.close_position(symbol, final_exit_price, position.pending_exit_reason or "AMO_EXIT_FILLED")
+            await store.close_position(symbol, final_exit_price, position.pending_exit_reason or "AMO_EXIT_FILLED")
             await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
 
 

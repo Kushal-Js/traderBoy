@@ -26,6 +26,10 @@ in the same process. Mounted today:
   - Bollinger/bollinger_main.py - live BB-ribbon + Vortex breakout
     strategy, real trades from day one - see Bollinger/trading_engine.py's
     module docstring.
+  - SuperBollinger/super_bollinger_main.py - added 30 Sep 2026: the
+    Bollinger Hold-Long rules promoted to their own strategy (NSE stocks,
+    long CE only, breakeven stop, 14:00 entry cutoff, 15:15 square-off),
+    reusing Bollinger's signal - see SuperBollinger/trading_engine.py.
 
 Futures/, K01/, IndexScalping/, and Paper01/ (a placeholder CE-buying
 strategy, a paper-only daily F&O screener, a paper-only NIFTY/BankNifty
@@ -72,6 +76,7 @@ from Swing import swing_main
 # its open positions are now persisted across restarts.
 from Swing import swing_paper_engine
 from Bollinger import bollinger_main
+from SuperBollinger import super_bollinger_main
 import universe_bucket
 import breakout_signal
 import breakout_paper_engine
@@ -160,7 +165,10 @@ async def lifespan(app: FastAPI):
                 # Bollinger has no breakout/CE-PE dispatch relationship
                 # with Options/Luxury, so it doesn't sit alongside the
                 # dispatcher-task block below.
-                async with bollinger_main.lifespan(app):
+                async with bollinger_main.lifespan(app), super_bollinger_main.lifespan(app):
+                    # Super Bollinger (30 Sep 2026) nests right after
+                    # Bollinger - it reads Bollinger's own signal cache and
+                    # watchlist, already loaded by the lifespan above.
                     dispatcher_task = None
                     if options_config.UNIVERSE_DISPATCHER_ENABLED:
                         # Started here, not inside any one package's own
@@ -236,6 +244,7 @@ app.include_router(option_main.router)
 app.include_router(luxury_main.router)
 app.include_router(swing_main.router)
 app.include_router(bollinger_main.router)
+app.include_router(super_bollinger_main.router)
 app.include_router(universe_bucket.router)
 
 
@@ -406,7 +415,7 @@ async def funds_buckets():
     return await loop.run_in_executor(None, fund_allocation.snapshot)
 
 
-PAPER_MODE_STRATEGIES = paper_mode_control.STRATEGIES  # ("Options", "Luxury", "Swing", "Bollinger", "SwingIndex", "SwingMCX")
+PAPER_MODE_STRATEGIES = paper_mode_control.STRATEGIES  # ("Options", "Luxury", "Swing", "Bollinger", "SwingIndex", "SwingMCX", "SuperBollinger")
 
 
 class PaperModeRequest(BaseModel):
@@ -500,7 +509,7 @@ async def set_paper_mode(payload: PaperModeRequest):
     return {"strategy": payload.strategy, **_paper_mode_snapshot()[payload.strategy]}
 
 
-CAPACITY_STRATEGIES = capacity_control.STRATEGIES  # ("Swing", "Bollinger")
+CAPACITY_STRATEGIES = capacity_control.STRATEGIES  # ("Swing", "Bollinger", "SuperBollinger")
 
 
 class CapacityRequest(BaseModel):

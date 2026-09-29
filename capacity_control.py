@@ -49,7 +49,7 @@ from pathlib import Path
 
 logger = logging.getLogger("capacity_control")
 
-STRATEGIES = ("Swing", "Bollinger")
+STRATEGIES = ("Swing", "Bollinger", "SuperBollinger")
 
 OVERRIDE_FILE = Path("data/capacity_overrides.json")
 ENV_FILE = Path(".env")
@@ -57,6 +57,7 @@ ENV_FILE = Path(".env")
 _ENV_VAR_NAMES = {
     "Swing": "SWING_MAX_CONCURRENT_TRADES",
     "Bollinger": "BOLLINGER_MAX_CONCURRENT_TRADES",
+    "SuperBollinger": "SUPER_BOLLINGER_MAX_CONCURRENT_TRADES",  # added 30 Sep 2026
 }
 
 _overrides: dict[str, int] = {}
@@ -77,6 +78,9 @@ def _env_default(strategy: str) -> int:
     if strategy == "Bollinger":
         from Bollinger import config as cfg
         return int(cfg.MAX_CONCURRENT_TRADES)
+    if strategy == "SuperBollinger":
+        from SuperBollinger import settings as cfg
+        return int(cfg.MAX_CONCURRENT_TRADES_DEFAULT)
     raise ValueError(f"unknown strategy {strategy!r} - must be one of {STRATEGIES}")
 
 

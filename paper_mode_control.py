@@ -81,7 +81,7 @@ from pathlib import Path
 
 logger = logging.getLogger("paper_mode_control")
 
-STRATEGIES = ("Options", "Luxury", "Swing", "Bollinger", "SwingIndex", "SwingMCX")
+STRATEGIES = ("Options", "Luxury", "Swing", "Bollinger", "SwingIndex", "SwingMCX", "SuperBollinger")
 
 OVERRIDE_FILE = Path("data/paper_mode_overrides.json")
 ENV_FILE = Path(".env")
@@ -110,6 +110,9 @@ _ENV_VAR_NAMES = {
     # the pre-existing SWING_MCX_PAPER_MODE_ENABLED env var, previously
     # restart-only, now the startup default for this runtime toggle.
     "SwingMCX": "SWING_MCX_PAPER_MODE_ENABLED",
+    # "SuperBollinger" (added 30 Sep 2026) - SuperBollinger/, its own
+    # strategy with its own paper/real switch.
+    "SuperBollinger": "SUPER_BOLLINGER_PAPER_MODE_ENABLED",
 }
 
 _overrides: dict[str, bool] = {}
@@ -143,6 +146,9 @@ def _env_default(strategy: str) -> bool:
     if strategy == "SwingMCX":
         from Swing import config as cfg
         return bool(cfg.MCX_PAPER_MODE_ENABLED)
+    if strategy == "SuperBollinger":
+        from SuperBollinger import settings as cfg
+        return bool(cfg.PAPER_MODE_ENABLED_DEFAULT)
     raise ValueError(f"unknown strategy {strategy!r} - must be one of {STRATEGIES}")
 
 
