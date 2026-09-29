@@ -124,6 +124,12 @@ INDEX_PAPER_MODE_ENABLED = os.getenv("SWING_INDEX_PAPER_MODE_ENABLED", "false").
 # ORed with PAPER_MODE_ENABLED or INDEX_PAPER_MODE_ENABLED - a genuinely
 # separate branch, since MCX is deliberately carved OUT of the global
 # flag's effect, not added into it).
+#
+# REWORKED 29 Sep 2026 (user request: "add the MCX runtime toggle also and
+# keep it on paper only for MCX") - like INDEX_PAPER_MODE_ENABLED above, this
+# is now ONLY the startup default for paper_mode_control's "SwingMCX"
+# pseudo-strategy; flip it at runtime via POST /paper-mode {"strategy":
+# "SwingMCX", "enabled": ...} (no restart), which also rewrites this .env line.
 MCX_PAPER_MODE_ENABLED = os.getenv("SWING_MCX_PAPER_MODE_ENABLED", "false").lower() == "true"
 
 # ---------------------------------------------------------------------------

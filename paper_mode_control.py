@@ -36,7 +36,10 @@ still decides what "paper mode" actually means for it:
     28 Sep 2026 - previously a separate, narrower, restart-only
     INDEX_PAPER_MODE_ENABLED flag ORed with the global one; folded into
     this module so it gets the same runtime-toggle + .env-sync guarantee
-    every other strategy here already has).
+    every other strategy here already has). MCX symbols (COPPER/
+    NATURALGAS) likewise read their own "SwingMCX" pseudo-strategy
+    (added 29 Sep 2026, same reasoning - previously the restart-only
+    MCX_PAPER_MODE_ENABLED flag).
 
 Same "replaces real trading, doesn't add a shadow copy" semantic in
 every case, and never touches an already-open position - flipping a
@@ -78,7 +81,7 @@ from pathlib import Path
 
 logger = logging.getLogger("paper_mode_control")
 
-STRATEGIES = ("Options", "Luxury", "Swing", "Bollinger", "SwingIndex")
+STRATEGIES = ("Options", "Luxury", "Swing", "Bollinger", "SwingIndex", "SwingMCX")
 
 OVERRIDE_FILE = Path("data/paper_mode_overrides.json")
 ENV_FILE = Path(".env")
@@ -101,6 +104,12 @@ _ENV_VAR_NAMES = {
     # guarantees every other strategy here already has - see Swing/
     # trading_engine.py's _should_paper_trade for where this is checked.
     "SwingIndex": "SWING_INDEX_PAPER_MODE_ENABLED",
+    # "SwingMCX" (added 29 Sep 2026, user request: "add the MCX runtime
+    # toggle also and keep it on paper only for MCX") - Swing's MCX
+    # commodities (COPPER/NATURALGAS), same pattern as SwingIndex: reuses
+    # the pre-existing SWING_MCX_PAPER_MODE_ENABLED env var, previously
+    # restart-only, now the startup default for this runtime toggle.
+    "SwingMCX": "SWING_MCX_PAPER_MODE_ENABLED",
 }
 
 _overrides: dict[str, bool] = {}
@@ -131,6 +140,9 @@ def _env_default(strategy: str) -> bool:
     if strategy == "SwingIndex":
         from Swing import config as cfg
         return bool(cfg.INDEX_PAPER_MODE_ENABLED)
+    if strategy == "SwingMCX":
+        from Swing import config as cfg
+        return bool(cfg.MCX_PAPER_MODE_ENABLED)
     raise ValueError(f"unknown strategy {strategy!r} - must be one of {STRATEGIES}")
 
 

@@ -406,7 +406,7 @@ async def funds_buckets():
     return await loop.run_in_executor(None, fund_allocation.snapshot)
 
 
-PAPER_MODE_STRATEGIES = paper_mode_control.STRATEGIES  # ("Options", "Luxury", "Swing", "Bollinger", "SwingIndex")
+PAPER_MODE_STRATEGIES = paper_mode_control.STRATEGIES  # ("Options", "Luxury", "Swing", "Bollinger", "SwingIndex", "SwingMCX")
 
 
 class PaperModeRequest(BaseModel):
@@ -483,8 +483,9 @@ async def set_paper_mode(payload: PaperModeRequest):
     (previously a narrower, restart-only INDEX_PAPER_MODE_ENABLED .env
     flag; folded in here so it gets the same instant runtime-toggle every
     other strategy already has). MCX (COPPER/NATURALGAS) has no runtime
-    toggle at all yet - it still reads MCX_PAPER_MODE_ENABLED directly
-    from .env, restart-only, unchanged by this endpoint either way.
+    toggle until 29 Sep 2026 - now its own pseudo-strategy too,
+    {"strategy": "SwingMCX", ...}, with SWING_MCX_PAPER_MODE_ENABLED as
+    its .env startup default (same pattern as SwingIndex).
 
     Same "replaces real trading for that strategy, doesn't add a shadow
     copy" semantic as each original flag, and does NOT touch any already-

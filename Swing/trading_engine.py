@@ -219,7 +219,9 @@ def _should_paper_trade(symbol: str) -> bool:
     entirely its own, same relationship MCX has to the rest of the
     watchlist."""
     if dhan_wrapper.is_mcx_commodity(symbol):
-        return config.MCX_PAPER_MODE_ENABLED
+        # Runtime-togglable since 29 Sep 2026 ("SwingMCX", POST /paper-mode) -
+        # config.MCX_PAPER_MODE_ENABLED is now only its startup default.
+        return paper_mode_control.is_paper_mode_enabled("SwingMCX")
     if symbol in config.INDEX_SYMBOLS:
         return paper_mode_control.is_paper_mode_enabled("SwingIndex")
     return paper_mode_control.is_paper_mode_enabled("Swing")
