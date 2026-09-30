@@ -83,6 +83,13 @@ def _parse_scale_mode(v) -> str:
     return v
 
 
+def _parse_shadow_list_mode(v) -> str:
+    v = str(v).strip().lower()
+    if v not in ("off", "paper"):
+        raise ValueError("must be off or paper (the shadow list is never traded for real)")
+    return v
+
+
 def _check_index_symbols(v) -> str | None:
     from Bollinger import config as bcfg  # function-local: no import cycle at module load
     bad = [x for x in v if x not in bcfg.INDEX_SYMBOLS]
@@ -205,6 +212,10 @@ _FIELDS = {
     # lots' combined profit reaches scale_pe_target_rs one is sold and the
     # other rides the hedge trail with a floor at its purchase price.
     "scale_mode": (_parse_scale_mode, "SUPER_BOLLINGER_SCALE_MODE", "off", None),
+    # ---- Shadow watchlist on PAPER (SuperBollinger/shadow_list.py, 1 Oct 2026) ----
+    # off | paper: trade the Friday shadow list (stock_selection.run_shadow) on
+    # paper with the same entry/exit rules and slot limit, own book and logs.
+    "shadow_list_mode": (_parse_shadow_list_mode, "SUPER_BOLLINGER_SHADOW_LIST_MODE", "paper", None),
     "scale_ce_readd_confirm": (_parse_bool, "SUPER_BOLLINGER_SCALE_CE_READD_CONFIRM", "true", None),
     "scale_pe_target_rs": (float, "SUPER_BOLLINGER_SCALE_PE_TARGET_RS", "4000",
                            lambda v: None if v > 0 else "must be > 0"),

@@ -368,12 +368,12 @@ async def on_hedge_price(symbol: str, hedge: Position, ltp: float, hedge_is_real
     await _log("SCALE_PE_ADDED", symbol, add_entry=ltp, add_qty=qty, **detail)
 
 
-async def _close_pe(symbol: str, which: str, ltp: float, reason: str) -> None:
+async def _close_pe(symbol: str, which: str, ltp: float, reason: str, **extra) -> None:
     books = (pe_add_book,) if which == "B" else (pe_copy_book, pe_add_book)
     for book in books:
         record = await book.close(symbol, ltp, reason)
         if record:
-            await _log("SCALE_PE_CLOSED", symbol, **record)
+            await _log("SCALE_PE_CLOSED", symbol, **record, **extra)
     if reason == "TARGET_BOOKED":
         _st()["pairs"].setdefault(symbol, {})["booked"] = True
         _save()
@@ -399,7 +399,13 @@ async def _manage_pe(symbol: str, ltp: float) -> None:
         settings.get("scale_pe_add_stop_rs"), settings.get("scale_pe_target_rs"),
         settings.get("hedge_trail_arm_rs"), settings.get("hedge_trail_giveback"))
     if which:
-        await _close_pe(symbol, which, ltp, reason)
+        extra = {}
+        if reason == "TARGET_BOOKED" and b is not None:
+            # Fill realism (1 Oct 2026): the backtest sells lot B with a resting limit AT the combined-target level;
+            # here it is sold at the tick that crossed it. Log both so the paper-vs-backtest fill gap can be measured.
+            level = (settings.get("scale_pe_target_rs") / b.pnl_multiplier + a.entry_price + b.entry_price) / 2
+            extra = {"rule_level": round(level, 2), "fill_minus_level": round(ltp - level, 2)}
+        await _close_pe(symbol, which, ltp, reason, **extra)
 
 
 # --------------------------------------------------------------------------- #

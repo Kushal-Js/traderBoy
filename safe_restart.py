@@ -12,10 +12,10 @@ at 11:35 IST a failed seed script was, and a hedge lost its profit trail).
 Steps: 1) snapshot every strategy's positions + Super Bollinger's live state
 to history/restart_snapshots/<time>_*.json; 2) checks - no order in flight, no
 exit in flight, every real Super Bollinger position has its broker stop order
-and is in the state file on disk (fresh), every real Swing/Bollinger position
-is in its position-memory file; 3) systemctl restart; 4) wait for /health;
+and is in the state file on disk (fresh), every real Swing/Bollinger/Options/
+Luxury position is in its position-memory file; 3) systemctl restart; 4) wait for /health;
 5) print GET /super-bollinger/restart-report plus what Swing and Bollinger
-restored, and exit 1 if anything needs review. Standard library only.
+restored (and Options/Luxury), and exit 1 if anything needs review. Standard library only.
 """
 import json
 import subprocess
@@ -34,7 +34,11 @@ ENDPOINTS = ["super-bollinger/positions", "super-bollinger/supervisor", "super-b
              "paper-mode"]
 # Swing and Bollinger remember their real positions' trailing state themselves (position_memory.py)
 MEMORY_FILES = {"swing/positions": Path("data/swing_position_memory.json"),
-                "bollinger/positions": Path("data/bollinger_position_memory.json")}
+                "bollinger/positions": Path("data/bollinger_position_memory.json"),
+                "positions": Path("data/options_position_memory.json"),          # Options (1 Oct 2026)
+                "luxury/positions": Path("data/luxury_position_memory.json")}
+REPORTS = {"swing": "swing/restart-report", "bollinger": "bollinger/restart-report",
+           "options": "options/restart-report", "luxury": "luxury/restart-report"}
 
 
 def get(path: str, timeout: float = 10):
@@ -99,24 +103,23 @@ def main() -> int:
         rows = (snap.get(ep) or {}).get("live_positions", [])
         if not rows:
             continue
-        if ep not in MEMORY_FILES:
-            notes.append(f"/{ep}: {len(rows)} real position(s) - rebuilt from the broker only (best price / trailing memory resets)")
-            continue
         try:
             mem = json.loads(MEMORY_FILES[ep].read_text())
         except Exception as exc:  # noqa: BLE001
             mem = {}
             notes.append(f"/{ep}: memory file unreadable ({exc!r})")
+        name = ep.split("/")[0] if "/" in ep else "options"
         for p in rows:
-            row = mem.get(p.get("trading_symbol"))
+            sym = p.get("trading_symbol") or p.get("option_trading_symbol")
+            row = mem.get(sym)
+            best = p.get("best_price", p.get("highest_price"))
             if p.get("pending_exit_order_id"):
-                problems.append(f"{p.get('trading_symbol')}: an exit order is in flight")
+                problems.append(f"{sym}: an exit order is in flight")
             if row is None:
-                problems.append(f"{p.get('trading_symbol')} ({ep.split('/')[0]}): not in {MEMORY_FILES[ep]} - its trailing "
-                                f"state would be lost")
+                problems.append(f"{sym} ({name}): not in {MEMORY_FILES[ep]} - its trailing state would be lost")
             else:
-                print(f"  real {ep.split('/')[0]}: {p.get('trading_symbol')} x{p.get('quantity')} entry {p.get('entry_price')} "
-                      f"best {p.get('best_price')} (remembered best {row.get('best_price')})")
+                print(f"  real {name}: {sym} x{p.get('quantity')} entry {p.get('entry_price')} best {best} "
+                      f"(remembered best {row.get('best_price', row.get('highest_price'))})")
 
     for n in notes:
         print("  note:", n)
@@ -154,9 +157,9 @@ def main() -> int:
     print(f"  day_state: {report.get('day_state')}  broker_reachable: {report.get('broker_reachable')}  "
           f"needs_review: {report.get('needs_review')}")
     review = bool(report.get("needs_review"))
-    for name in ("swing", "bollinger"):
+    for name, path in REPORTS.items():
         try:
-            last = (get(f"{name}/restart-report") or {}).get("last_restore") or {}
+            last = (get(path) or {}).get("last_restore") or {}
         except Exception:  # noqa: BLE001
             continue
         for row in last.get("restored", []):

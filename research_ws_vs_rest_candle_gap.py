@@ -11,6 +11,15 @@ Inputs: the bot's own candle logs (history/<date>_swing_candles_<SYM>_<id>.log,
 copied from the droplet to the folder given as argv[1]) and the cached REST
 5-minute bars (history/bt_walkforward_long/underlying). No Dhan calls.
 
+Second part (1 Oct 2026, "same-bar arm + fire" check): the live bot replays
+the Bollinger/Vortex state machine on bars whose most recent part comes from
+the websocket, the backtests on REST bars only. A pending order armed on a
+bar whose own high already crossed the trigger counts as fired inside that
+bar (never a resting-order entry) - so a spike that REST sees and the live
+bar misses can leave the live order armed for the next bar (a live-only
+entry), and the reverse. Replays both series and compares the entries they
+produce (resting BULLISH trigger touched before 14:00).
+
 Run: uv run python research_ws_vs_rest_candle_gap.py <folder with the candle logs>
 """
 from __future__ import annotations
@@ -114,3 +123,52 @@ for k in ("seen_same_bar", "seen_1_to_3_bars_later", "not_seen_within_15_min", "
 print(f"  total touches {n}")
 for e in examples:
     print("   e.g.", e)
+
+
+# ---------------------------------------------------------------------------
+# Part 2: entries from REST-only bars (backtest) vs live-like bars
+# ---------------------------------------------------------------------------
+def entries(fast: dict, days: set) -> dict:
+    """{(day, bar start): trigger} of resting BULLISH entries, as the live/backtest resting mode takes them."""
+    snap = S.pending_snapshots(fast)
+    ts, H = fast["timestamps"], fast["highs"]
+    out = {}
+    for i in range(1, len(ts)):
+        dt = datetime.fromtimestamp(ts[i], IST)
+        if dt.date() not in days or dt.time() >= dtime(14, 0):
+            continue
+        p = snap[i - 1]
+        if p and p[0] == "BULLISH" and datetime.fromtimestamp(ts[i - 1], IST).date() == dt.date() and H[i] >= p[1]:
+            out[(dt.date(), ts[i])] = round(p[1], 2)
+    return out
+
+
+only_rest, only_live, both, same_bar_differs = [], [], 0, 0
+for sym in sorted(ws):
+    p = REST / f"{sym}_5min.json"
+    if not p.exists():
+        continue
+    rest = json.loads(p.read_text())
+    days = {datetime.fromtimestamp(t, IST).date() for t in ws[sym]}
+    live = {k: list(v) for k, v in rest.items() if isinstance(v, list)}
+    for i, t in enumerate(live["timestamps"]):
+        w = ws[sym].get(t)
+        if w is not None and datetime.fromtimestamp(t, IST).date() in days:      # live bar where the bot built one
+            live["opens"][i], live["highs"][i], live["lows"][i], live["closes"][i] = w
+    e_rest, e_live = entries(rest, days), entries(live, days)
+    both += len(set(e_rest) & set(e_live))
+    only_rest += [(sym, k, v) for k, v in e_rest.items() if k not in e_live]
+    only_live += [(sym, k, v) for k, v in e_live.items() if k not in e_rest]
+    rs, ls = S.pending_snapshots(rest), S.pending_snapshots(live)
+    for i, t in enumerate(rest["timestamps"]):
+        if datetime.fromtimestamp(t, IST).date() in days and (rs[i] is None) != (ls[i] is None):
+            same_bar_differs += 1
+
+print("\n== ENTRIES: backtest (REST bars) vs live-like (the bot's own bars where it had them) ==")
+print(f"  both                     {both}")
+print(f"  backtest only            {len(only_rest)}   (REST saw the touch / kept the order armed, the live bars did not)")
+print(f"  live only                {len(only_live)}   (the live bars kept an order armed that REST had already fired or dropped)")
+print(f"  bars where the armed/not-armed state differs between the two replays: {same_bar_differs}")
+for tag, rows in (("backtest only", only_rest), ("live only", only_live)):
+    for sym, (d, t), trig in rows[:8]:
+        print(f"   {tag:14s} {sym:12s} {datetime.fromtimestamp(t, IST):%d %b %H:%M} trigger {trig}")

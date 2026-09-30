@@ -116,8 +116,9 @@ from datetime import datetime, time as dtime
 from pathlib import Path
 from typing import Callable, Optional
 
-from Options.dhan_client import dhan_wrapper
+from Options.dhan_client import IST, dhan_wrapper
 import cross_strategy_registry
+import expiry_square_off
 import fund_allocation
 import reversal_filters
 import trade_history
@@ -539,6 +540,16 @@ async def _check_one(strategy: str, symbol: str, position) -> None:
     if getattr(cfg, "LIQUIDITY_GUARD_ENABLED", False):
         await loop.run_in_executor(None, dhan_wrapper.refresh_liquidity_signal, position.option_trading_symbol)
         liquidity_guard_triggered = bool(dhan_wrapper.get_cached_illiquid(position.option_trading_symbol))
+
+    # Expiry-day square-off (1 Oct 2026, user: "expiry square-off for the Options/Luxury paper books") - the
+    # same rule as their real positions (expiry_square_off.py): a contract that expires today is closed from
+    # the package's EXPIRY_DAY_SQUARE_OFF_TIME. Checked before the ordinary exit ladder so the logged reason is
+    # the genuine one.
+    if getattr(cfg, "ENABLE_EXPIRY_DAY_SQUARE_OFF", False) and await expiry_square_off.due_today(
+            position.option_trading_symbol, False, datetime.now(IST), cfg.EXPIRY_DAY_SQUARE_OFF_TIME,
+            cfg.EXPIRY_DAY_SQUARE_OFF_TIME):
+        await _exit_one(strategy, symbol, position, ltp, "EXPIRY_DAY_SQUARE_OFF")
+        return
 
     reason = h.exit_reason_for(position, ltp, supertrend_against_position, liquidity_guard_triggered, ema_cross_against_position)
     if reason:

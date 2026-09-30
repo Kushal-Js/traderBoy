@@ -53,6 +53,7 @@ from trade_history import fire_and_forget, record_webhook_alert
 import breakout_signal
 import breakout_paper_engine
 import paper_mode_control
+import position_memory
 import climactic_entry_guard
 import reversal_filters
 
@@ -101,6 +102,13 @@ async def lifespan(app: FastAPI):
 
     try:
         reconciled = await reconcile_broker_positions()
+        # What the broker cannot know (highest price for the trailing/dynamic
+        # stop, opened_at, the Supertrend entry candle, the target/stop set at
+        # entry) comes back from position_memory - same contract/quantity/entry only.
+        try:
+            position_memory.restore("Luxury", reconciled, position_memory.OPTIONS_FIELDS)
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not restore Luxury position memory - positions stay as the broker reconciliation built them.")
         if reconciled:
             await position_store.reconcile_from_broker(reconciled)
             logger.info(
@@ -382,6 +390,13 @@ async def chartink_webhook_luxury_sell(payload: ChartinkWebhookPayload):
 @router.get("/luxury/positions")
 async def get_positions():
     return await position_store.snapshot()
+
+
+@router.get("/luxury/restart-report")
+async def get_restart_report():
+    """What the last startup put back on the real positions from position_memory
+    (highest price, opened_at, Supertrend entry candle, target/stop) and what it is remembering now."""
+    return {"last_restore": position_memory.last_report("Luxury"), "remembered": position_memory.remembered("Luxury")}
 
 
 @router.get("/luxury/orders")

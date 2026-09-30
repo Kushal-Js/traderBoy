@@ -156,7 +156,20 @@ def _entries_open_now() -> bool:
 
 
 def open_count() -> int:
-    return len(position_store.reserved_symbols | set(position_store.live_positions)) + len(paper_book.positions)
+    """REAL slots in use (real positions + real entries in flight). Paper
+    positions no longer take real slots (1 Oct 2026): with the index on paper
+    and the limit at 2 (capital), one paper NIFTY/BANKNIFTY position used to
+    block half of the real stock trades. Paper has its own, equal limit."""
+    return len(position_store.reserved_symbols | set(position_store.live_positions))
+
+
+def paper_open_count() -> int:
+    return len(paper_book.positions)
+
+
+def _slot_free_for(symbol: str) -> bool:
+    cap = capacity_control.get_max_concurrent_trades(STRATEGY)
+    return (paper_open_count() if is_paper_symbol(symbol) else open_count()) < cap
 
 
 # --------------------------------------------------------------------------- #
@@ -583,7 +596,7 @@ def _halted_today() -> bool:
 async def _can_enter_symbol(symbol: str) -> bool:
     return (settings.get("strategy_enabled") and not _halted_today() and _entries_open_now() and not _square_off_now()
             and symbol in _eligible
-            and open_count() < capacity_control.get_max_concurrent_trades(STRATEGY)
+            and _slot_free_for(symbol)
             and symbol not in position_store.live_positions and symbol not in position_store.reserved_symbols
             and symbol not in paper_book.positions
             and not await position_store.is_in_entry_cooldown(symbol)
@@ -726,8 +739,9 @@ async def _tick_entry(symbol: str) -> None:
 async def _refresh_gate() -> None:
     global _eligible
     _eligible = set(await eligible_symbols())  # swapped whole - the WS thread reads it
+    cap = capacity_control.get_max_concurrent_trades(STRATEGY)
     _gate["open"] = (settings.get("strategy_enabled") and not _halted_today() and _entries_open_now() and not _square_off_now()
-                     and open_count() < capacity_control.get_max_concurrent_trades(STRATEGY))
+                     and (open_count() < cap or paper_open_count() < cap))
 
 
 async def _scan_for_entries() -> None:
@@ -763,6 +777,11 @@ async def _monitor_tick() -> None:
     await asyncio.gather(*[_check_real(s, p) for s, p in list(position_store.live_positions.items())])
     await _check_paper(square_off)
     await _refresh_gate()
+    try:
+        from . import shadow_list   # paper-only shadow watchlist, background task (never delays this tick)
+        shadow_list.kick(square_off, bool(settings.get("strategy_enabled") and not _halted_today() and _entries_open_now()))
+    except Exception:  # noqa: BLE001
+        logger.exception("[%s] could not start the shadow-list pass", STRATEGY)
     if _gate["open"]:
         await _scan_for_entries()
 

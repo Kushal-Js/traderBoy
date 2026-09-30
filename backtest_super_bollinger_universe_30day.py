@@ -59,6 +59,12 @@ WATCHLIST = ["ZYDUSLIFE", "SONACOMS", "DIVISLAB", "AUROPHARMA", "MOTHERSON", "AP
 HALF_SPLIT = "2026-09-15"
 
 
+# Realism switch (1 Oct 2026): the live bot builds its bars from websocket ticks, which miss some spikes that
+# REST bars show (research_ws_vs_rest_candle_gap.py: ~1 in 5 REST-bar entries differ). TOUCH_MARGIN_PCT > 0
+# requires the 1-min high to exceed the trigger by that much before an entry counts (0 = original behaviour).
+TOUCH_MARGIN_PCT = 0.0
+
+
 def candidates_for(sym: str, sides: str) -> list[tuple]:
     fast = json.loads((ROOT / "underlying" / f"{sym}_5min.json").read_text())
     p1 = ROOT / "underlying_1m" / f"{sym}_1min.json"
@@ -79,9 +85,9 @@ def candidates_for(sym: str, sides: str) -> list[tuple]:
         p = snap[bi - 1]
         if p is None:
             continue
-        if sides != "short" and p[0] == "BULLISH" and m["highs"][k] >= p[1]:
+        if sides != "short" and p[0] == "BULLISH" and m["highs"][k] >= p[1] * (1 + TOUCH_MARGIN_PCT / 100):
             out.append((int(t), sym, "LONG", max(p[1], m["opens"][k]), m["closes"][k], fts[bi - 1]))
-        elif sides in ("both", "short") and p[0] == "BEARISH" and m["lows"][k] <= p[1]:
+        elif sides in ("both", "short") and p[0] == "BEARISH" and m["lows"][k] <= p[1] * (1 - TOUCH_MARGIN_PCT / 100):
             out.append((int(t), sym, "SHORT", min(p[1], m["opens"][k]), m["closes"][k], fts[bi - 1]))
     return out
 

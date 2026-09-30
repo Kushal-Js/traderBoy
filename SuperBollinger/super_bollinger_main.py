@@ -39,7 +39,7 @@ import paper_mode_control
 from trade_history import REAL_TRADES_NAME, dated_path
 from Options.dhan_client import dhan_wrapper
 
-from . import best_price_memory, live_state, scale, settings
+from . import best_price_memory, live_state, scale, settings, shadow_list
 from . import supervisor
 from . import watchlist as super_watchlist
 from .state import (HEDGE_STRATEGY, STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store, paper_book,
@@ -102,6 +102,10 @@ async def lifespan(app: FastAPI):
         except Exception:  # noqa: BLE001
             logger.exception("[%s] could not re-subscribe %s for a restored paper position", STRATEGY,
                              pos.trading_symbol)
+    try:
+        shadow_list.load()
+    except Exception:  # noqa: BLE001
+        logger.exception("[%s] could not restore the shadow list's paper positions", STRATEGY)
 
     loop = asyncio.get_running_loop()
 
@@ -195,7 +199,26 @@ async def update_config(payload: dict[str, Any]):
 
 @router.get("/super-bollinger/positions")
 async def get_positions():
-    return {"open_count": open_count(), **await position_store.snapshot(), **paper_book.snapshot()}
+    """open_count = REAL slots in use (paper positions have their own limit since 1 Oct 2026)."""
+    return {"open_count": open_count(), "paper_open_count": len(paper_book.positions),
+            **await position_store.snapshot(), **paper_book.snapshot()}
+
+
+@router.get("/super-bollinger/shadow-trades")
+async def get_shadow_trades(day: Optional[str] = None):
+    """The shadow watchlist traded on PAPER (SuperBollinger/shadow_list.py): the list in use, open paper
+    positions and the closed ones of `day` (YYYY-MM-DD, default today), next to the real book's closed
+    trades of the same day for comparison."""
+    d = date.fromisoformat(day) if day else date.today()
+    shadow = _read_log(shadow_list.shadow_book.log_name, d)
+    real = [t for t in _read_log(REAL_TRADES_NAME, d) if t.get("strategy") == STRATEGY]
+    symbols, as_of = shadow_list.shadow_symbols()
+    return {"mode": settings.get("shadow_list_mode"), "list_as_of": as_of, "symbols": symbols, "day": d.isoformat(),
+            "shadow": {"count": len(shadow), "wins": sum(1 for t in shadow if t["pnl_modeled"] > 0),
+                       "pnl_modeled": round(sum(t["pnl_modeled"] for t in shadow), 2), "trades": shadow,
+                       **shadow_list.shadow_book.snapshot()},
+            "real_same_day": {"count": len(real), "pnl": round(sum(t.get("pnl") or 0 for t in real), 2)},
+            "note": "paper, calls only (no hedge, no scale-in legs); real list = GET /super-bollinger/trades"}
 
 
 def _read_log(name: str, d: date) -> list[dict]:

@@ -34,6 +34,7 @@ import climactic_entry_guard
 import cross_strategy_registry
 import broker_flat_check
 import expiry_square_off
+import position_memory
 import fund_allocation
 import reversal_filters
 
@@ -2016,5 +2017,10 @@ async def monitor_loop() -> None:
                 )
         except Exception:  # noqa: BLE001
             logger.exception("Error in monitor loop tick")
+        try:
+            # restart memory of every live REAL position (written only when something changed)
+            position_memory.record("Options", list(position_store.live_positions.values()), position_memory.OPTIONS_FIELDS)
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not record Options position memory")
 
         await asyncio.sleep(config.MONITOR_INTERVAL_SECONDS)

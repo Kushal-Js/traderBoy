@@ -1,0 +1,10 @@
+trigger must be exceeded by    trades no data |           calls + hedge (real today)           |            + S1 + S2 (paper today)            
+0.00%                             118       0 |   +81,462 (Aug  +15,271 Sep  +66,191) dd  -16,200 |  +124,975 (Aug  +31,391 Sep  +93,584) dd  -16,888
+0.02%                             110       0 |   +70,898 (Aug  +21,620 Sep  +49,278) dd  -15,814 |  +114,973 (Aug  +40,315 Sep  +74,657) dd  -15,667
+0.05%                             100       0 |   +68,112 (Aug  +20,454 Sep  +47,658) dd  -12,277 |  +102,110 (Aug  +37,422 Sep  +64,688) dd  -14,495
+0.10%                              80       0 |   +34,049 (Aug  +19,260 Sep  +14,789) dd  -16,479 |   +45,039 (Aug  +35,141 Sep   +9,898) dd  -17,454
+0.20%                              42       0 |   +39,561 (Aug  +23,136 Sep  +16,425) dd   -8,580 |   +34,337 (Aug  +21,832 Sep  +12,506) dd  -13,402
+
+randomly dropping 20% of the 118 trades (200 draws), calls + hedge: median +65,968, 10th pct +32,252, 90th pct +91,916 (all trades: +81,462)
+Dhan calls made: 33 (cache-only: refused lookups)
+exit 0
