@@ -89,6 +89,13 @@ def _check_index_symbols(v) -> str | None:
     return f"not an index symbol: {', '.join(bad)} (allowed: {', '.join(sorted(bcfg.INDEX_SYMBOLS))})" if bad else None
 
 
+def _parse_filter_mode(v) -> str:
+    v = str(v).strip().lower()
+    if v not in ("off", "shadow", "on"):
+        raise ValueError("must be off, shadow or on")
+    return v
+
+
 def _to_env(v) -> str:
     if isinstance(v, bool):
         return "true" if v else "false"
@@ -145,6 +152,14 @@ _FIELDS = {
     # Shadow-only candidate rules (logged, never acted on).
     "shadow_stop_reenter_rs": (float, "SUPER_BOLLINGER_SHADOW_STOP_REENTER_RS", "2000",
                                lambda v: None if v >= 0 else "must be >= 0 (0 = off)"),
+    # ---- 1-hour-green entry filter (SuperBollinger/entry_filters.py, 30 Sep 2026) ----
+    # Take an entry only if the stock's last CLOSED entry_filter_1h_minutes
+    # candle (09:15-anchored) closed above its open. off | shadow (log only:
+    # ENTRY_FILTER_1H_WOULD_SKIP) | on (ENTRY_SKIPPED_1H_RED). Applies to every
+    # Super Bollinger entry, stocks and index, real and paper.
+    "entry_filter_1h": (_parse_filter_mode, "SUPER_BOLLINGER_ENTRY_FILTER_1H", "off", None),
+    "entry_filter_1h_minutes": (int, "SUPER_BOLLINGER_ENTRY_FILTER_1H_MINUTES", "60",
+                                lambda v: None if 15 <= v <= 120 and v % 5 == 0 else "must be 15-120 in steps of 5"),
     # ---- Unfilled orders: re-price and retry (30 Sep 2026, user request) ----
     # Dhan turns an option MARKET order into a limit near the last price, so on
     # a thin contract it can sit unfilled (SONACOMS 830 CE, 30 Sep). When the
@@ -179,24 +194,20 @@ _FIELDS = {
     # index_paper_mode_enabled on POST /super-bollinger/config).
     "index_enabled": (_parse_bool, "SUPER_BOLLINGER_INDEX_ENABLED", "false", None),
     "index_symbols": (_parse_symbols, "SUPER_BOLLINGER_INDEX_SYMBOLS", "NIFTY,BANKNIFTY", _check_index_symbols),
-    # ---- Scale-in variant (SuperBollinger/scale.py, 30 Sep 2026) ----
-    # scale_mode: off | shadow (log would-add/would-exit) | paper (the added
-    # lots live in their own paper book; real trades are never touched).
-    # CE: one extra lot once the CE is scale_ce_add_at_rs in profit (before
-    # scale_ce_add_cutoff_time); the extra lot is sold on its own when
-    # Supertrend on the last closed 5-min bar turns bearish
-    # (scale_ce_add_st_exit), otherwise it exits together with the original CE.
-    # PE: once a hedge is open and Supertrend(scale_supertrend_*) on the last closed
-    # 5-min bar is bearish (before scale_pe_add_cutoff_time), one extra PE
-    # lot; both PE lots then exit as soon as CE + PE PnL >= 0 (the pair's loss
-    # is recovered), else on the hedge's own trail/stop/square-off; the added
-    # lot also has its own scale_pe_add_stop_rs stop.
+    # ---- Recovery variant, PAPER (SuperBollinger/scale.py, 30 Sep 2026) ----
+    # scale_mode: off | shadow (log would-add) | paper (the added lots live in
+    # their own paper book; real trades are never touched).
+    # S1 call re-add: after the hedge trigger fired, when the stock is back at
+    # its trigger price (before entry_cutoff_time; with Supertrend bullish if
+    # scale_ce_readd_confirm), 1 more call lot - own max_loss_rs stop, exits
+    # with the original. S2 two PUT lots: once a hedge is open and Supertrend
+    # is bearish, 1 more PUT lot (own scale_pe_add_stop_rs stop); when both
+    # lots' combined profit reaches scale_pe_target_rs one is sold and the
+    # other rides the hedge trail with a floor at its purchase price.
     "scale_mode": (_parse_scale_mode, "SUPER_BOLLINGER_SCALE_MODE", "off", None),
-    "scale_ce_add_at_rs": (float, "SUPER_BOLLINGER_SCALE_CE_ADD_AT_RS", "1500",
+    "scale_ce_readd_confirm": (_parse_bool, "SUPER_BOLLINGER_SCALE_CE_READD_CONFIRM", "true", None),
+    "scale_pe_target_rs": (float, "SUPER_BOLLINGER_SCALE_PE_TARGET_RS", "4000",
                            lambda v: None if v > 0 else "must be > 0"),
-    "scale_ce_add_cutoff_time": (_parse_hhmm, "SUPER_BOLLINGER_SCALE_CE_ADD_CUTOFF_TIME", "14:00", None),
-    "scale_ce_add_st_exit": (_parse_bool, "SUPER_BOLLINGER_SCALE_CE_ADD_ST_EXIT", "true", None),
-    "scale_pe_add_cutoff_time": (_parse_hhmm, "SUPER_BOLLINGER_SCALE_PE_ADD_CUTOFF_TIME", "14:30", None),
     "scale_pe_add_stop_rs": (float, "SUPER_BOLLINGER_SCALE_PE_ADD_STOP_RS", "750",
                              lambda v: None if v > 0 else "must be > 0"),
     "scale_supertrend_period": (int, "SUPER_BOLLINGER_SCALE_SUPERTREND_PERIOD", "10",

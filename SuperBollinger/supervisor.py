@@ -215,8 +215,8 @@ async def _scale_safe(coro) -> None:
 
 
 async def check_ce(symbol: str, pos: Position, ltp: float, ce_is_real: bool) -> None:
-    await _scale_safe(scale.on_ce_price(symbol, pos, ltp, ce_is_real))
     st = _state(symbol, pos)
+    await _scale_safe(scale.on_ce_price(symbol, pos, ltp, ce_is_real, st, _spot(symbol)))
     loss = (pos.entry_price - ltp) * pos.pnl_multiplier
     now = _now()
 

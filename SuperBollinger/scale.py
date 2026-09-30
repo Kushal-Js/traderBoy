@@ -1,40 +1,41 @@
 """
-Super Bollinger SCALE-IN variant (30 Sep 2026, user idea: "add 1 more lot
-on whichever side the trade is going ... keep the other on the rules built
-so far"). PAPER ONLY for now (settings.scale_mode: off | shadow | paper) -
-real CE trades and real hedges are never touched; the added lots live in
-their own paper books and log (history/<date>_super_bollinger_scale_paper_
-trades.log, event log super_bollinger_scale) so the variant's results are
-never mixed with the deployed strategy's.
+Super Bollinger RECOVERY variant - PAPER ONLY (settings.scale_mode: off |
+shadow | paper). Real CE trades and real hedges are never touched; the added
+lots live in their own paper books and log (history/<date>_super_bollinger_
+scale_paper_trades.log, event log super_bollinger_scale), so the variant's
+results are never mixed with the deployed strategy's.
 
-Rules = the best variants of research_super_bollinger_scale_in_out.py
-(Sep HYBRID walk-forward trades, in-sample, not yet validated on August):
-  CE ADD   once a Super Bollinger CE (real or paper) is scale_ce_add_at_rs in
-           profit, before scale_ce_add_cutoff_time: 1 more lot of the same
-           contract ("CE-P1x": +Rs 55k over 21 days vs +Rs 50k when it just
-           exits with the original, worst day -13.7k vs -15.7k). The added
-           lot is sold on its own as soon as Supertrend on the last CLOSED
-           5-min bar (closed after the add) is bearish
-           (scale_ce_add_st_exit); otherwise it exits together with the
-           original CE (at the original's exit price). A fixed rupee stop on
-           the added lot tested badly (-Rs 4.8k) and is deliberately absent.
-  PE ADD   once a supervisor hedge (real or paper) is open and Supertrend on
-           the last closed 5-min bar is bearish, before
-           scale_pe_add_cutoff_time: the variant takes over the PE side on
-           paper - a copy of the hedge lot (lot A: the hedge's own entry and
-           best price) plus 1 added lot B at the current price ("PE-ST
-           RECOVER": hedge contribution +Rs 22.7k vs +Rs 14.1k, worst day
-           -9.0k vs -11.6k, only 16 adds). Exits, checked in this order:
-             A at the hedge stop (hedge_stop_rs)          -> A and B out
-             B at its own scale_pe_add_stop_rs stop       -> B out, A goes on
-             CE + A + B PnL >= 0 (pair loss recovered)    -> A and B out
-             A's hedge trail (hedge_trail_arm_rs / giveback) -> A and B out
-             square_off_time                              -> A and B out
-           The real hedge keeps its own rules; compare the variant's A+B
-           with the real hedge's PnL to see what the rule would have changed.
-One add per CE trade and one per hedge (keyed by contract + entry price +
-day, persisted in data/super_bollinger_scale_state.json, so a restart never
-adds twice). Shadow mode only logs SCALE_WOULD_ADD_* decisions.
+Rules = the user's two scenarios as backtested on the 3 Aug - 29 Sep
+walk-forward trades (research_super_bollinger_recovery_scenarios.py, 30 Sep
+2026; small samples, chosen in-sample):
+
+  S1  CALL RE-ADD ("the stock recovers to its trigger -> one more call").
+      After the hedge trigger has fired for a CE (the dip), when the STOCK is
+      back at or above the price the entry triggered at, before the entry
+      cutoff, and Supertrend on the last closed 5-min bar is bullish
+      (scale_ce_readd_confirm): 1 more lot of the same call. It has its own
+      max_loss_rs stop and otherwise exits together with the original CE (at
+      the original's exit price). No trailing stop and no shared max loss -
+      both tested worse (-20.0k with them vs +44.9k without; 24 re-adds).
+      Nothing is re-bought once the original CE has been closed.
+
+  S2  RIDE THE FALL WITH TWO PUT LOTS. Once a supervisor hedge is open and
+      Supertrend on the last closed 5-min bar is bearish: the variant takes
+      over the PUT side on paper - a copy of the hedge lot (lot A: the hedge's
+      own entry and best price) plus 1 added lot B at the current price.
+      Exits, checked in this order:
+        A at the hedge stop (hedge_stop_rs), or - once one lot has been
+          sold - at its own purchase price                  -> A and B out
+        B at its own scale_pe_add_stop_rs stop              -> B out
+        A + B profit >= scale_pe_target_rs                  -> B sold, A rides
+        A's trail (hedge_trail_arm_rs / hedge_trail_giveback) -> A and B out
+        square_off_time                                     -> A and B out
+      (+22.0k vs +15.7k for the hedge alone over the two months, all of the
+      gain in September; 33 second lots, target reached 9 times.)
+
+One re-add per CE trade and one second PUT lot per hedge (keyed by contract +
+entry price + day, persisted in data/super_bollinger_scale_state.json, so a
+restart never adds twice). Shadow mode only logs SCALE_WOULD_ADD_* decisions.
 """
 from __future__ import annotations
 
@@ -83,29 +84,29 @@ _lock = asyncio.Lock()
 # --------------------------------------------------------------------------- #
 # Pure rules (unit-testable)
 # --------------------------------------------------------------------------- #
-def ce_add_due(entry: float, ltp: float, mult: float, add_at_rs: float) -> bool:
-    return (ltp - entry) * mult >= add_at_rs
+def ce_readd_due(hedge_trigger_seen: bool, spot: Optional[float], entry_spot: Optional[float]) -> bool:
+    """S1: the dip happened (the hedge trigger fired) and the stock is back at/above its trigger price."""
+    return bool(hedge_trigger_seen) and spot is not None and entry_spot is not None and spot >= entry_spot
 
 
-def ce_add_st_exit_due(direction: Optional[int], bar_close_epoch: Optional[float], added_at_epoch: float) -> bool:
-    """Bearish Supertrend on a 5-min bar that CLOSED after the add."""
-    return direction == -1 and bar_close_epoch is not None and bar_close_epoch > added_at_epoch
-
-
-def pe_pair_decision(ltp: float, mult: float, a_entry: float, a_best: float, b_entry: Optional[float],
-                     b_realized: float, ce_pnl: Optional[float], hedge_stop_rs: float, add_stop_rs: float,
-                     trail_arm_rs: float, trail_giveback: float) -> tuple[Optional[str], Optional[str]]:
-    """-> (what to close: "ALL" | "B" | None, reason). b_entry None = lot B
-    already closed (its realized PnL is b_realized). a_best must include ltp."""
-    a_pnl = (ltp - a_entry) * mult
+def pe_wave_decision(ltp: float, a_mult: float, a_entry: float, a_best: float, b_entry: Optional[float], b_mult: float,
+                     booked: bool, hedge_stop_rs: float, add_stop_rs: float, target_rs: float, trail_arm_rs: float,
+                     trail_giveback: float) -> tuple[Optional[str], Optional[str]]:
+    """S2 -> (what to close: "ALL" | "B" | None, reason). b_entry None = lot B
+    is already closed. booked = one lot has been sold at the target. a_best
+    must include ltp."""
+    a_pnl = (ltp - a_entry) * a_mult
+    if booked and ltp <= a_entry:
+        return "ALL", "KEPT_LOT_FLOOR"
     if a_pnl <= -hedge_stop_rs:
         return "ALL", "HEDGE_STOP"
-    if b_entry is not None and (ltp - b_entry) * mult <= -add_stop_rs:
-        return "B", "ADD_OWN_STOP"
-    b_pnl = (ltp - b_entry) * mult if b_entry is not None else b_realized
-    if ce_pnl is not None and ce_pnl + a_pnl + b_pnl >= 0:
-        return "ALL", "PAIR_RECOVERED"
-    peak = (a_best - a_entry) * mult
+    if b_entry is not None:
+        b_pnl = (ltp - b_entry) * b_mult
+        if b_pnl <= -add_stop_rs:
+            return "B", "ADD_OWN_STOP"
+        if not booked and a_pnl + b_pnl >= target_rs:
+            return "B", "TARGET_BOOKED"
+    peak = (a_best - a_entry) * a_mult
     if peak >= trail_arm_rs and a_pnl <= peak * (1 - trail_giveback):
         return "ALL", "HEDGE_TRAIL"
     return None, None
@@ -269,28 +270,31 @@ def _closed_ce(symbol: str, ts: str, entry: float) -> Optional[tuple[float, str]
     return None
 
 
-async def on_ce_price(symbol: str, pos: Position, ltp: float, ce_is_real: bool) -> None:
-    """Called by the supervisor for every open CE price (tick + 2s loop)."""
+async def on_ce_price(symbol: str, pos: Position, ltp: float, ce_is_real: bool, track: Optional[dict] = None,
+                      spot: Optional[float] = None) -> None:
+    """Called by the supervisor for every open CE price (tick + 2s loop).
+    `track` is the supervisor's per-trade memory (hedged flag, entry spot)."""
     mode = settings.get("scale_mode")
-    if mode == "off":
+    if mode == "off" or pos.pending_exit_order_id or not track:
         return
     st = _st()
-    pair = st["pairs"].get(symbol)
-    if pair and _matches(pos, pair["ce_ts"], pair["ce_entry"]):
-        pair["ce_last"] = ltp     # in memory only; the pair PnL uses it while the CE is open
     key = _key(symbol, pos)
-    if (key in st["ce_done"] or _after(settings.get("scale_ce_add_cutoff_time")) or pos.pending_exit_order_id
-            or not ce_add_due(pos.entry_price, ltp, pos.pnl_multiplier, settings.get("scale_ce_add_at_rs"))):
+    if (key in st["ce_done"] or _after(settings.get("entry_cutoff_time"))
+            or not ce_readd_due(track.get("hedged"), spot, track.get("entry_spot"))):
         return
+    if settings.get("scale_ce_readd_confirm"):
+        direction, _bar = await supertrend_now(symbol)
+        if direction != 1:
+            return
     async with _lock:
         if key in st["ce_done"]:
             return
         st["ce_done"].append(key)
         _save()
     qty = _one_lot(pos)
-    detail = {"ce": pos.trading_symbol, "ce_entry": pos.entry_price, "ce_ltp": ltp,
-              "ce_profit": round((ltp - pos.entry_price) * pos.pnl_multiplier), "add_qty": qty,
-              "real_ce": ce_is_real, "mode": mode}
+    detail = {"ce": pos.trading_symbol, "ce_entry": pos.entry_price, "ce_ltp": ltp, "spot": spot,
+              "entry_spot": track.get("entry_spot"), "ce_pnl": round((ltp - pos.entry_price) * pos.pnl_multiplier),
+              "add_qty": qty, "real_ce": ce_is_real, "mode": mode}
     if mode == "shadow":
         await _log("SCALE_WOULD_ADD_CE", symbol, **detail)
         return
@@ -313,12 +317,10 @@ async def _manage_ce_add(symbol: str, ltp: float) -> None:
         px = closed[0] if closed else ltp
     elif parent is None:
         reason = "ORIGINAL_UNKNOWN"
+    elif (ltp - pos.entry_price) * pos.pnl_multiplier <= -settings.get("max_loss_rs"):
+        reason = "ADD_MAX_LOSS"
     elif _after(settings.get("square_off_time")):
         reason = "DAILY_SQUARE_OFF"
-    elif settings.get("scale_ce_add_st_exit"):
-        direction, bar_close = await supertrend_now(symbol)
-        if ce_add_st_exit_due(direction, bar_close, pos.opened_at.timestamp()):
-            reason = "ADD_SUPERTREND_BEARISH"
     if reason:
         record = await ce_add_book.close(symbol, px, reason)
         if record:
@@ -335,7 +337,7 @@ async def on_hedge_price(symbol: str, hedge: Position, ltp: float, hedge_is_real
         return
     st = _st()
     key = _key(symbol, hedge)
-    if key in st["pe_done"] or _after(settings.get("scale_pe_add_cutoff_time")):
+    if key in st["pe_done"]:
         return
     direction, bar_close = await supertrend_now(symbol)
     if direction != -1:
@@ -345,24 +347,9 @@ async def on_hedge_price(symbol: str, hedge: Position, ltp: float, hedge_is_real
             return
         st["pe_done"].append(key)
         _save()
-    # The CE this hedge protects: still open, or (like APLAPOLLO on 30 Sep)
-    # already closed - then its realized PnL is what the pair must recover.
-    ce, ce_info = _live_ce(symbol), None
-    if ce is not None:
-        ce_info = {"ts": ce.trading_symbol, "entry": ce.entry_price, "mult": ce.pnl_multiplier, "exit": None}
-    else:
-        for p in reversed(position_store.closed_positions_today):
-            if p.underlying_symbol == symbol and p.exit_price is not None:
-                ce_info = {"ts": p.trading_symbol, "entry": p.entry_price, "mult": p.pnl_multiplier, "exit": p.exit_price}
-                break
-        else:
-            logged = _logged_closed_ces(symbol)
-            if logged:
-                ce_info = logged[-1]
     detail = {"pe": hedge.trading_symbol, "hedge_entry": hedge.entry_price, "hedge_best": hedge.best_price,
               "pe_ltp": ltp, "real_hedge": hedge_is_real, "supertrend_bar_close": bar_close, "mode": mode,
-              "ce": ce_info["ts"] if ce_info else None, "ce_entry": ce_info["entry"] if ce_info else None,
-              "ce_closed_at_price": ce_info["exit"] if ce_info else None}
+              "target_rs": settings.get("scale_pe_target_rs")}
     if mode == "shadow":
         await _log("SCALE_WOULD_ADD_PE", symbol, **detail)
         return
@@ -372,12 +359,7 @@ async def on_hedge_price(symbol: str, hedge: Position, ltp: float, hedge_is_real
     if not await pe_copy_book.open(a):
         return
     await pe_add_book.open(b)
-    st["pairs"][symbol] = {
-        "ce_ts": ce_info["ts"] if ce_info else None, "ce_entry": ce_info["entry"] if ce_info else None,
-        "ce_mult": ce_info["mult"] if ce_info else None,
-        "ce_realized": ((ce_info["exit"] - ce_info["entry"]) * ce_info["mult"]
-                        if (ce_info and ce_info["exit"] is not None) else None),
-        "b_realized": 0.0}
+    st["pairs"][symbol] = {"booked": False}
     _save()
     try:
         await asyncio.get_running_loop().run_in_executor(None, dhan_wrapper.subscribe_option_price, hedge.trading_symbol)
@@ -386,34 +368,15 @@ async def on_hedge_price(symbol: str, hedge: Position, ltp: float, hedge_is_real
     await _log("SCALE_PE_ADDED", symbol, add_entry=ltp, add_qty=qty, **detail)
 
 
-def _pair_ce_pnl(symbol: str, pair: dict) -> Optional[float]:
-    if pair.get("ce_realized") is not None:
-        return pair["ce_realized"]
-    ts, entry, mult = pair.get("ce_ts"), pair.get("ce_entry"), pair.get("ce_mult")
-    if not ts:
-        return None
-    if _matches(_live_ce(symbol), ts, entry):
-        last = pair.get("ce_last")
-        return (last - entry) * mult if last is not None else None
-    closed = _closed_ce(symbol, ts, entry)
-    if closed:
-        pair["ce_realized"] = (closed[0] - entry) * mult
-        _save()
-        return pair["ce_realized"]
-    last = pair.get("ce_last")
-    return (last - entry) * mult if last is not None else None
-
-
 async def _close_pe(symbol: str, which: str, ltp: float, reason: str) -> None:
     books = (pe_add_book,) if which == "B" else (pe_copy_book, pe_add_book)
-    pair = _st()["pairs"].get(symbol, {})
     for book in books:
         record = await book.close(symbol, ltp, reason)
         if record:
-            if book is pe_add_book:
-                pair["b_realized"] = record["pnl_raw"]
-                _save()
             await _log("SCALE_PE_CLOSED", symbol, **record)
+    if reason == "TARGET_BOOKED":
+        _st()["pairs"].setdefault(symbol, {})["booked"] = True
+        _save()
 
 
 async def _manage_pe(symbol: str, ltp: float) -> None:
@@ -430,10 +393,10 @@ async def _manage_pe(symbol: str, ltp: float) -> None:
     if b is not None:
         await pe_add_book.update(symbol, ltp)
     pair = _st()["pairs"].get(symbol, {})
-    which, reason = pe_pair_decision(
+    which, reason = pe_wave_decision(
         ltp, a.pnl_multiplier, a.entry_price, a.best_price, b.entry_price if b else None,
-        float(pair.get("b_realized") or 0.0), _pair_ce_pnl(symbol, pair) if pair else None,
-        settings.get("hedge_stop_rs"), settings.get("scale_pe_add_stop_rs"),
+        b.pnl_multiplier if b else 0, bool(pair.get("booked")), settings.get("hedge_stop_rs"),
+        settings.get("scale_pe_add_stop_rs"), settings.get("scale_pe_target_rs"),
         settings.get("hedge_trail_arm_rs"), settings.get("hedge_trail_giveback"))
     if which:
         await _close_pe(symbol, which, ltp, reason)

@@ -58,7 +58,7 @@ from Options.dhan_client import OrderResult, OrderStatus, dhan_wrapper
 from Swing import candle_feed
 from Swing.position_store import broker_stop_trigger_and_limit
 
-from . import live_state, pricing, settings
+from . import entry_filters, live_state, pricing, settings
 from .state import EVENTS_LOG, STRATEGY, halted, paper_book, position_store
 
 logger = logging.getLogger("super_bollinger_engine")
@@ -590,7 +590,31 @@ async def _can_enter_symbol(symbol: str) -> bool:
             and signals._symbol_market_open(symbol))
 
 
+async def _passes_entry_filters(symbol: str, trigger_price: float, source: str) -> bool:
+    """1-hour-green filter (entry_filters.py). The trigger that got here is
+    already used up, so a refused signal is not retried - as in the backtest."""
+    mode = settings.get("entry_filter_1h")
+    if mode == "off":
+        return True
+    green, detail = await entry_filters.last_hour_green(symbol)
+    if green is None:
+        logger.warning("[%s] %s: 1-hour filter has no data (%s) - entry allowed", STRATEGY, symbol, detail)
+        await _event("ENTRY_FILTER_1H_NO_DATA", symbol, {"trigger_price": trigger_price, **detail})
+        return True
+    if green:
+        return True
+    if mode == "shadow":
+        await _event("ENTRY_FILTER_1H_WOULD_SKIP", symbol, {"trigger_price": trigger_price, "entry_source": source, **detail})
+        return True
+    logger.info("[%s] %s: BULLISH trigger %.2f (%s) skipped - last 1-hour candle is red (%s -> %s)", STRATEGY, symbol,
+                trigger_price, source, detail.get("candle_open"), detail.get("candle_close"))
+    await _event("ENTRY_SKIPPED_1H_RED", symbol, {"trigger_price": trigger_price, "entry_source": source, **detail})
+    return False
+
+
 async def _enter(symbol: str, trigger_price: float, stop_price: float, source: str) -> None:
+    if not await _passes_entry_filters(symbol, trigger_price, source):
+        return
     if is_paper_symbol(symbol):
         result = await enter_paper(symbol, trigger_price, stop_price, source)
     else:
