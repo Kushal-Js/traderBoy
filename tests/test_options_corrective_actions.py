@@ -161,7 +161,7 @@ def install_all_dhan_mocks():
     odc.dhan_wrapper.place_stop_loss_limit_order = lambda trading_symbol, quantity, transaction_type, trigger_price, limit_price, tag=None, product_type=None: {
         "order_id": f"FAKE-SLL-{trading_symbol}-{len(placed_orders)}-{id(object())}"}
     odc.dhan_wrapper.check_if_order_filled = lambda order_id: None
-    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
+    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False, *_a, **_k: OrderResult(
         order_id=order_id, status=OrderStatus.TRADED, remark="", fill_price=50.0, filled_quantity=500, is_amo=False)
 
     def restore():
@@ -530,6 +530,10 @@ def test_9_profit_protection_giveback_buffer():
             highest_price=12.0, hard_stop_loss=1.0, order_id="X", product_type="MARGIN",
         )  # peak profit (12-10)*1000 = 2000 > the 1500 threshold -> PP armed
     real = ote.config.PROFIT_PROTECTION_GIVEBACK_PCT
+    # Clock-independence (1 Oct 2026): the threshold is 2,000 (.env) before the risk-threshold cutoff and 1,500
+    # after it, so this test (peak profit 2,000) passed in the evening and failed at night. Pinned to 1,500.
+    real_threshold = ote.current_profit_protection_threshold_rs
+    ote.current_profit_protection_threshold_rs = lambda: 1500.0
     try:
         ote.config.PROFIT_PROTECTION_GIVEBACK_PCT = 0.0
         assert ote._exit_reason_for(mk(), ltp=11.99) == "PROFIT_PROTECTION_HIT", \
@@ -544,6 +548,7 @@ def test_9_profit_protection_giveback_buffer():
               "a small wiggle and only locks in once price is >5% off the peak: PASSED")
     finally:
         ote.config.PROFIT_PROTECTION_GIVEBACK_PCT = real
+        ote.current_profit_protection_threshold_rs = real_threshold
 
 
 async def test_10_real_atherenerg_pattern_supertrend_and_ema_cross_losses_now_block():

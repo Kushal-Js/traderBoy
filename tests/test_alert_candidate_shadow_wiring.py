@@ -44,6 +44,13 @@ import Options.position_store as ops
 import Luxury.luxury_main as lm
 import Luxury.position_store as lps
 
+# Written for the DIRECT webhook entry path. Since 21 Sep 2026 the breakout scanner is the default entry path
+# (the webhook queues the alert: "queued_for_breakout_signal"); the direct path still exists behind
+# BREAKOUT_SIGNAL_ENABLED=false and is what this file tests (1 Oct 2026 - see tests/config_overrides.py).
+import config_overrides  # noqa: E402
+TEST_CONFIG_OVERRIDES = [("Options.config", "BREAKOUT_SIGNAL_ENABLED", False),
+                         ("Luxury.config", "BREAKOUT_SIGNAL_ENABLED", False)]
+
 
 def _payload_for(module, stocks):
     return module.ChartinkWebhookPayload(
@@ -144,6 +151,7 @@ async def test_6_luxury_single_stock_alert_never_calls_it():
 
 
 async def main():
+    config_overrides.apply_config_overrides(TEST_CONFIG_OVERRIDES)
     print("=== Alert-candidate shadow-logging wiring test suite ===\n")
     await test_1_options_multi_stock_alert_calls_log_alert_candidates()
     await test_2_options_single_stock_alert_never_calls_it()

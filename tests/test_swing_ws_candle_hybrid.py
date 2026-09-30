@@ -45,6 +45,11 @@ import Swing.candle_feed as cf  # noqa: E402
 import Swing.config as sc  # noqa: E402
 import Swing.signals as signals  # noqa: E402
 
+# Offline instrument master (1 Oct 2026, tests/offline_instruments.py): newer code asks it "is this an MCX
+# commodity?" / resolves equities - without it the test reached a real Dhan login and was refused.
+import offline_instruments  # noqa: E402
+OFFLINE_INSTRUMENTS = {"equities": [], "mcx": []}
+
 IST = odc.IST
 W = odc.dhan_wrapper
 
@@ -133,16 +138,25 @@ def test_1_flag_off_always_uses_rest_regardless_of_ws_state():
         W._client = saved_client
 
 
-def test_2_flag_on_fresh_and_enough_bars_uses_ws_zero_rest_calls():
+def test_2_flag_on_fresh_ws_extends_the_rest_base_never_replaces_it():
+    """REWRITTEN 1 Oct 2026 for the design since 28 Sep 2026 (Swing/signals.py _get_intraday_series,
+    NATURALGAS 300 CALL incident): the REST series is ALWAYS the base and the fresh WS feed only APPENDS bars
+    newer than the base's last bar - it no longer replaces REST ("zero REST calls"), because a WS series alone
+    starts at the first subscribe and has gaps at every restart, which gave a false EMA200 regime."""
     saved_flag = sc.USE_WS_CANDLES
     saved_client = W._client
     try:
         sc.USE_WS_CANDLES = True
-        _seed_ws_bars("SYM2", "SID2", 300)
-        W._client = _failing_rest_client()  # any REST call here is itself a test failure
+        signals._raw_series_cache.clear()
+        _seed_ws_bars("SYM2", "SID2", 300)               # 300 WS bars from 09:15; the REST base below has 250
+        client, calls = _counting_rest_client([100.0] * 250)
+        W._client = client
         data = signals._get_intraday_series("SYM2", "SID2", "NSE_EQ", "EQUITY", 5, min_bars=200)
-        assert len(data["close"]) == 300, "must return the full local WS series, not a truncated one"
-        print("2. USE_WS_CANDLES=True + fresh + enough bars: WS series used, zero REST calls: PASSED")
+        assert calls == [5], "the REST base is always fetched"
+        assert len(data["close"]) == 300, "the 50 WS bars newer than the base must be appended"
+        assert data["close"][:250] == [100.0] * 250, "the REST base itself must not be replaced by WS bars"
+        assert data["close"][250:] == [100.0 + i for i in range(250, 300)]
+        print("2. USE_WS_CANDLES=True + fresh WS: REST base kept, only newer WS bars appended: PASSED")
     finally:
         sc.USE_WS_CANDLES = saved_flag
         W._client = saved_client
@@ -184,7 +198,10 @@ def test_4_flag_on_but_stale_falls_back_to_rest():
         W._client = saved_client
 
 
-def test_5_end_to_end_regime_and_supertrend_match_rest_with_zero_rest_calls():
+def test_5_end_to_end_regime_and_supertrend_same_with_and_without_ws():
+    """UPDATED 1 Oct 2026 (REST-base design since 28 Sep 2026, see test_2): with the WS feed fully warmed on
+    the same data, the flag-on reading must equal the REST-only reading - the WS feed may only extend the
+    REST series, never change what is computed. REST is now called in both runs."""
     saved_flag = sc.USE_WS_CANDLES
     saved_client, saved_eqid = W._client, W._equity_security_id
     try:
@@ -214,7 +231,9 @@ def test_5_end_to_end_regime_and_supertrend_match_rest_with_zero_rest_calls():
             cf._state["SYM_E2E"] = st
             cf._subscribed_ref["SYM_E2E"] = ("SID_E2E", "NSE_EQ")
 
-        W._client = _failing_rest_client()
+        signals._raw_series_cache.clear()
+        client_on, calls_on = _counting_rest_client_from_base_bars(bars)
+        W._client = client_on
         ws_regime = asyncio.run(signals.get_regime_state("SYM_E2E"))
         ws_supertrend = asyncio.run(signals.get_supertrend_state("SYM_E2E"))
         assert ws_regime is not None and ws_supertrend is not None, \
@@ -226,9 +245,11 @@ def test_5_end_to_end_regime_and_supertrend_match_rest_with_zero_rest_calls():
         # requested interval (see _counting_rest_client_from_base_bars) - a flat single-series
         # stand-in would wrongly feed the SAME 5-min-spaced data to both the fast AND slow
         # request, which a real REST endpoint never would.
+        assert calls_on, "the REST base is fetched even with a warm WS feed"
         sc.USE_WS_CANDLES = False
         signals._regime_cache.clear()
         signals._supertrend_cache.clear()
+        signals._raw_series_cache.clear()
         client, _ = _counting_rest_client_from_base_bars(bars)
         W._client = client
         rest_regime = asyncio.run(signals.get_regime_state("SYM_E2E"))
@@ -237,23 +258,24 @@ def test_5_end_to_end_regime_and_supertrend_match_rest_with_zero_rest_calls():
         assert ws_regime.is_bullish == rest_regime.is_bullish
         assert abs(ws_regime.fast_ema - rest_regime.fast_ema) < 1e-6
         assert ws_supertrend.is_above == rest_supertrend.is_above
-        print("5. End-to-end regime+Supertrend via WS match the REST-computed reading exactly, zero REST calls: PASSED")
+        print("5. End-to-end regime+Supertrend with the WS feed on match the REST-only reading exactly: PASSED")
     finally:
         sc.USE_WS_CANDLES = saved_flag
         W._client, W._equity_security_id = saved_client, saved_eqid
 
 
 def main():
+    offline_instruments.install(__import__('Options.dhan_client', fromlist=['x']).dhan_wrapper, **OFFLINE_INSTRUMENTS)
     with cf._lock:
         cf._state.clear()
         cf._subscribed_ref.clear()
     try:
         print("=== Swing WS/REST hybrid fetch (_get_intraday_series) test suite ===\n")
         test_1_flag_off_always_uses_rest_regardless_of_ws_state()
-        test_2_flag_on_fresh_and_enough_bars_uses_ws_zero_rest_calls()
+        test_2_flag_on_fresh_ws_extends_the_rest_base_never_replaces_it()
         test_3_flag_on_but_not_enough_ws_bars_falls_back_to_rest()
         test_4_flag_on_but_stale_falls_back_to_rest()
-        test_5_end_to_end_regime_and_supertrend_match_rest_with_zero_rest_calls()
+        test_5_end_to_end_regime_and_supertrend_same_with_and_without_ws()
         print("\nALL SWING WS/REST HYBRID TESTS PASSED")
     finally:
         with cf._lock:

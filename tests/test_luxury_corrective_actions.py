@@ -185,7 +185,7 @@ def install_all_dhan_mocks(volumes_sequence=None):
     odc.dhan_wrapper.place_stop_loss_limit_order = lambda trading_symbol, quantity, transaction_type, trigger_price, limit_price, tag=None, product_type=None: {
         "order_id": f"FAKE-SLL-{trading_symbol}"}
     odc.dhan_wrapper.check_if_order_filled = lambda order_id: None
-    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
+    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False, *_a, **_k: OrderResult(
         order_id=order_id, status=OrderStatus.TRADED, remark="", fill_price=50.0, filled_quantity=500, is_amo=False)
 
     # For the liquidity-guard tests: mock _instrument_meta (security_id
@@ -656,6 +656,11 @@ def test_16_profit_protection_giveback_buffer():
             highest_price=12.0, hard_stop_loss=1.0, order_id="X", product_type="MARGIN",
         )  # peak profit (12-10)*1000 = 2000 > the 1500 threshold -> PP armed
     real = lte.config.PROFIT_PROTECTION_GIVEBACK_PCT
+    # The threshold comes from .env (LUXURY_PROFIT_PROTECTION_THRESHOLD_RS_* = 5000/2500 since this test was
+    # written against 1500) and switches at the risk cutoff - pinned so the test checks the give-back buffer only
+    # (1 Oct 2026).
+    real_threshold = lte.current_profit_protection_threshold_rs
+    lte.current_profit_protection_threshold_rs = lambda: 1500.0
     try:
         lte.config.PROFIT_PROTECTION_GIVEBACK_PCT = 0.0
         assert lte._exit_reason_for(mk(), ltp=11.99) == "PROFIT_PROTECTION_HIT", \
@@ -669,6 +674,7 @@ def test_16_profit_protection_giveback_buffer():
         print("16. LUXURY_PROFIT_PROTECTION_GIVEBACK_PCT: buffer=0 exits on any dip (unchanged); buffer=0.05 "
               "rides a small wiggle and only locks in once price is >5% off the peak: PASSED")
     finally:
+        lte.current_profit_protection_threshold_rs = real_threshold
         lte.config.PROFIT_PROTECTION_GIVEBACK_PCT = real
 
 

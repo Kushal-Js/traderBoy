@@ -57,6 +57,11 @@ import Swing.signals as signals
 import Swing.trading_engine as ste
 from Swing.signals import DayRangeState, RegimeState, SupertrendState
 
+# Offline instrument master (1 Oct 2026, tests/offline_instruments.py): newer code asks it "is this an MCX
+# commodity?" / resolves equities - without it the test reached a real Dhan login and was refused.
+import offline_instruments  # noqa: E402
+OFFLINE_INSTRUMENTS = {"equities": [], "mcx": []}
+
 IST = odc.IST
 W = odc.dhan_wrapper
 
@@ -338,6 +343,7 @@ def test_9_none_day_range_state_never_blocks_branch_a():
 
 
 def main():
+    offline_instruments.install(__import__('Options.dhan_client', fromlist=['x']).dhan_wrapper, **OFFLINE_INSTRUMENTS)
     print("=== Swing v3 (Day Range + LEVEL-based Regime leg, now default for every symbol) test suite ===\n")
     test_1_today_open_and_yesterday_close_from_day_boundary()
     test_2_insufficient_history_returns_none()

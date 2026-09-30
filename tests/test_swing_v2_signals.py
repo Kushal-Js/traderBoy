@@ -36,6 +36,11 @@ import Options.dhan_client as odc
 import Swing.config as sc
 import Swing.signals as signals
 
+# Offline instrument master (1 Oct 2026, tests/offline_instruments.py): newer code asks it "is this an MCX
+# commodity?" / resolves equities - without it the test reached a real Dhan login and was refused.
+import offline_instruments  # noqa: E402
+OFFLINE_INSTRUMENTS = {"equities": [], "mcx": []}
+
 IST = odc.IST
 W = odc.dhan_wrapper
 
@@ -271,6 +276,7 @@ def test_7_underlying_reference_ws_subscribes_index_symbols_too():
 
 
 def main():
+    offline_instruments.install(__import__('Options.dhan_client', fromlist=['x']).dhan_wrapper, **OFFLINE_INSTRUMENTS)
     print("=== Swing v2 signals (regime + Supertrend crossover) test suite ===\n")
     test_1_lookback_override_reaches_the_fetch_for_both_intervals()
     test_2_regime_reads_bullish_and_bearish_correctly()

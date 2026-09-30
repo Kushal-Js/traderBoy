@@ -85,6 +85,11 @@ trade_history.HISTORY_DIR = scratch_dir
 import Options.dhan_client as odc
 from Options.dhan_client import AtmOption, DhanWrapper, OrderResult, OrderStatus
 
+# Offline instrument master (1 Oct 2026, tests/offline_instruments.py): newer code asks it "is this an MCX
+# commodity?" / resolves equities - without it the test reached a real Dhan login and was refused.
+import offline_instruments  # noqa: E402
+OFFLINE_INSTRUMENTS = {"equities": [], "mcx": []}
+
 FUTURE_EXPIRY = date.today() + timedelta(days=25)
 
 
@@ -561,6 +566,7 @@ def test_16_atm_leg_missing_with_gate_disabled_still_raises():
 
 
 def main():
+    offline_instruments.install(__import__('Options.dhan_client', fromlist=['x']).dhan_wrapper, **OFFLINE_INSTRUMENTS)
     print("=== Liquid-contract-resolution gate test suite ===\n")
     test_1_get_daily_volume_sum_sums_success_and_returns_none_on_failure()
     test_2_nearby_option_candidates_filters_and_sorts_correctly()

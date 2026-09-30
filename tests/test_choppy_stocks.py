@@ -59,6 +59,20 @@ import Options.trading_engine as ote
 import Options.option_main as om
 from Options.dhan_client import AtmOption, OrderResult, OrderStatus
 
+# Written for the DIRECT webhook entry path. Since 21 Sep 2026 the breakout scanner is the default entry path
+# (the webhook queues the alert: "queued_for_breakout_signal"); the direct path still exists behind
+# BREAKOUT_SIGNAL_ENABLED=false and is what this file tests (1 Oct 2026 - see tests/config_overrides.py).
+import config_overrides  # noqa: E402
+TEST_CONFIG_OVERRIDES = [("Options.config", "BREAKOUT_SIGNAL_ENABLED", False),
+                         ("Luxury.config", "BREAKOUT_SIGNAL_ENABLED", False)]
+# Clock-independence: this file tests what happens INSIDE the trading windows (it failed when run at night).
+TEST_CONFIG_OVERRIDES += [("Options.option_main", "is_within_trading_windows", lambda now=None: True),
+                          ("Luxury.luxury_main", "is_within_trading_windows", lambda now=None: True)]
+# Ranking: these tests mock the day-change% ranking; since 18 Sep a CE alert is ranked by ribbon expansion
+# when RIBBON_RANKING_ENABLED is on (unmocked here) - same switch test_alert_candidate_shadow_wiring uses.
+TEST_CONFIG_OVERRIDES += [(m, flag, False) for m in ("Options.config", "Luxury.config")
+                          for flag in ("RIBBON_RANKING_ENABLED", "RIBBON_RANKING_PE_ENABLED")]   # PE: ribbon breakdown
+
 FUTURE_EXPIRY = date.today() + timedelta(days=25)
 
 
@@ -199,7 +213,7 @@ def install_all_dhan_mocks():
         "order_id": f"FAKE-{trading_symbol}-{transaction_type}", "is_amo": False}
     odc.dhan_wrapper.place_stop_loss_limit_order = lambda trading_symbol, quantity, transaction_type, trigger_price, limit_price, tag=None, product_type=None: {
         "order_id": f"FAKE-SLL-{trading_symbol}"}
-    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
+    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False, *_a, **_k: OrderResult(
         order_id=order_id, status=OrderStatus.TRADED, remark="", fill_price=50.0, filled_quantity=500, is_amo=False)
 
     def restore():
@@ -257,6 +271,7 @@ async def test_4_webhook_handler_no_longer_excludes_choppy_stocks():
 
 
 async def main():
+    config_overrides.apply_config_overrides(TEST_CONFIG_OVERRIDES)
     print("=== choppy_stocks.py test suite (manually-maintained list design) ===\n")
     test_1_ensure_choppy_list_exists_seeds_default_but_never_overwrites()
     test_2_write_and_read_round_trip_normalizes()

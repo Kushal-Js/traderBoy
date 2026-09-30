@@ -78,6 +78,15 @@ import Options.trading_engine as ote
 import Options.option_main as om
 from Options.dhan_client import AtmOption, OrderResult, OrderStatus
 
+# Written for the DIRECT webhook entry path. Since 21 Sep 2026 the breakout scanner is the default entry path
+# (the webhook queues the alert: "queued_for_breakout_signal"); the direct path still exists behind
+# BREAKOUT_SIGNAL_ENABLED=false and is what this file tests (1 Oct 2026 - see tests/config_overrides.py).
+import config_overrides  # noqa: E402
+TEST_CONFIG_OVERRIDES = [("Options.config", "BREAKOUT_SIGNAL_ENABLED", False),
+                         ("Luxury.config", "BREAKOUT_SIGNAL_ENABLED", False)]
+TEST_CONFIG_OVERRIDES += [(m, flag, False) for m in ("Options.config", "Luxury.config")
+                          for flag in ("RIBBON_RANKING_ENABLED", "RIBBON_RANKING_PE_ENABLED")]   # ranking is mocked
+
 IST = odc.IST
 W = odc.dhan_wrapper
 FUTURE_EXPIRY = date.today() + timedelta(days=25)
@@ -472,7 +481,7 @@ def install_all_dhan_mocks():
         "order_id": f"FAKE-{trading_symbol}-{transaction_type}", "is_amo": False}
     odc.dhan_wrapper.place_stop_loss_limit_order = lambda trading_symbol, quantity, transaction_type, trigger_price, limit_price, tag=None, product_type=None: {
         "order_id": f"FAKE-SLL-{trading_symbol}"}
-    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
+    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False, *_a, **_k: OrderResult(
         order_id=order_id, status=OrderStatus.TRADED, remark="", fill_price=50.0, filled_quantity=500, is_amo=False)
 
     def restore():
@@ -503,6 +512,12 @@ async def test_13_real_ce_alert_ignored_during_cooloff_pe_unaffected_flag_bypass
 
     real_flag = ocfg.ENABLE_GAP_DOWN_CE_DELAY
     ocfg.ENABLE_GAP_DOWN_CE_DELAY = True
+    # This test is about the CE cool-off wiring. The -120 gap below also trips the whole-day gap-down block
+    # added 24 Sep (NIFTY_GAP_BLOCK_ENABLED, checked first) - switched off here so the cool-off is what is tested.
+    real_gap_block = ocfg.NIFTY_GAP_BLOCK_ENABLED
+    ocfg.NIFTY_GAP_BLOCK_ENABLED = False
+    real_windows = om.is_within_trading_windows
+    om.is_within_trading_windows = lambda now=None: True      # clock-independence (it failed when run at night)
     real_rank = om.rank_and_pick_top_stocks
     om.rank_and_pick_top_stocks = fake_ranked
     real_should_delay = odc.dhan_wrapper.should_delay_ce_entry
@@ -513,8 +528,8 @@ async def test_13_real_ce_alert_ignored_during_cooloff_pe_unaffected_flag_bypass
         "gap_points": -120.0, "gap_down": True, "fall_pct": 0.0, "sharp_falling": False,
         "delay_ce": True, "delay_until": datetime.now(IST).replace(hour=9, minute=25, second=0, microsecond=0),
     }
-    odc.dhan_wrapper.should_delay_ce_entry = lambda: True  # cool-off active
-    odc.dhan_wrapper.evaluate_nifty_open_condition = lambda: fake_condition
+    odc.dhan_wrapper.should_delay_ce_entry = lambda now=None: True  # cool-off active
+    odc.dhan_wrapper.evaluate_nifty_open_condition = lambda now=None: fake_condition
     restore_mocks = install_all_dhan_mocks()
     order_calls = []
     real_place = odc.dhan_wrapper.place_market_order
@@ -566,6 +581,8 @@ async def test_13_real_ce_alert_ignored_during_cooloff_pe_unaffected_flag_bypass
         print("13c. ENABLE_GAP_DOWN_CE_DELAY=False cleanly bypasses the check even while the "
               "underlying condition would otherwise delay CE: PASSED")
     finally:
+        ocfg.NIFTY_GAP_BLOCK_ENABLED = real_gap_block
+        om.is_within_trading_windows = real_windows
         odc.dhan_wrapper.place_market_order = real_place
         restore_mocks()
         odc.dhan_wrapper.should_delay_ce_entry = real_should_delay
@@ -575,6 +592,7 @@ async def test_13_real_ce_alert_ignored_during_cooloff_pe_unaffected_flag_bypass
 
 
 async def main():
+    config_overrides.apply_config_overrides(TEST_CONFIG_OVERRIDES)
     print("=== Nifty50 open gap-down / sharp-fall CE cool-off test suite ===\n")
     test_1_gap_down_over_100_points_triggers_delay()
     test_2_sharp_fall_without_a_big_gap_also_triggers_delay()

@@ -142,7 +142,7 @@ def install_mocks(entry_fill_status=OrderStatus.TRADED):
 
     odc.dhan_wrapper.place_mcx_market_order = _place
     odc.dhan_wrapper.place_market_order = _place
-    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
+    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False, *_a, **_k: OrderResult(
         order_id=order_id, status=entry_fill_status, remark="", fill_price=100.0, filled_quantity=1, is_amo=False)
 
     def restore():

@@ -92,22 +92,29 @@ def test_1_lookup_functions_switch_at_the_cutoff():
     hardcoded assumption without anyone noticing until the next full
     suite run - the exact "pinned test, live constant changed" class of
     staleness this docstring already warns about for the MAX_LOSS values
-    above, just not applied to this one too at the time."""
+    above, just not applied to this one too at the time.
+
+    1 Oct 2026: the MAX_LOSS values are read off each module's config too -
+    Luxury's live values moved to 5500/3100 (CE) and 4500/2600 (PE) in .env,
+    which broke the pinned 4500/2100/3500/1600. What this test checks is the
+    before/after-cutoff SWITCH, not today's numbers."""
+    for module in (ote, lte):
+        assert module.config.MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF_CE != module.config.MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF_CE
     for label, module in (("Options", ote), ("Luxury", lte)):
         before_pp = module.config.PROFIT_PROTECTION_THRESHOLD_RS_BEFORE_CUTOFF
         after_pp = module.config.PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF
         restore = _freeze_time(module, BEFORE_CUTOFF)
         try:
-            assert module.current_max_loss_per_trade_rs("CE") == 4500, label
-            assert module.current_max_loss_per_trade_rs("PE") == 3500, label
+            assert module.current_max_loss_per_trade_rs("CE") == module.config.MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF_CE, label
+            assert module.current_max_loss_per_trade_rs("PE") == module.config.MAX_LOSS_PER_TRADE_RS_BEFORE_CUTOFF_PE, label
             assert module.current_profit_protection_threshold_rs() == before_pp, label
         finally:
             restore()
 
         restore = _freeze_time(module, AFTER_CUTOFF)
         try:
-            assert module.current_max_loss_per_trade_rs("CE") == 2100, label
-            assert module.current_max_loss_per_trade_rs("PE") == 1600, label
+            assert module.current_max_loss_per_trade_rs("CE") == module.config.MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF_CE, label
+            assert module.current_max_loss_per_trade_rs("PE") == module.config.MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF_PE, label
             assert module.current_profit_protection_threshold_rs() == after_pp, label
         finally:
             restore()
@@ -129,8 +136,8 @@ def test_2_exact_boundary_instant_counts_as_after():
         after_pp = module.config.PROFIT_PROTECTION_THRESHOLD_RS_AFTER_CUTOFF
         restore = _freeze_time(module, AT_CUTOFF)
         try:
-            assert module.current_max_loss_per_trade_rs("CE") == 2100, label
-            assert module.current_max_loss_per_trade_rs("PE") == 1600, label
+            assert module.current_max_loss_per_trade_rs("CE") == module.config.MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF_CE, label
+            assert module.current_max_loss_per_trade_rs("PE") == module.config.MAX_LOSS_PER_TRADE_RS_AFTER_CUTOFF_PE, label
             assert module.current_profit_protection_threshold_rs() == after_pp, label
         finally:
             restore()

@@ -374,7 +374,8 @@ def run_live(log: Callable[[str], None] = print, pace_seconds: float = 0.25) -> 
 # --------------------------------------------------------------------------- #
 # Shadow list - recorded and scored, never traded
 # --------------------------------------------------------------------------- #
-def load_shadow_record(path: Path = SHADOW_FILE) -> Optional[dict]:
+def load_shadow_record(path: Optional[Path] = None) -> Optional[dict]:
+    path = path or SHADOW_FILE          # resolved at call time (a test or a relocation can point it elsewhere)
     try:
         return json.loads(path.read_text())
     except (OSError, ValueError):
@@ -413,11 +414,12 @@ def score_lists(record: dict, get_fast: Callable[[str], Optional[dict]], session
 
 
 def run_shadow(log: Callable[[str], None] = print, live_symbols: Optional[list[str]] = None,
-               pace_seconds: float = 0.25, record_path: Path = SHADOW_FILE,
-               scores_path: Path = SHADOW_SCORES_FILE) -> Optional[dict]:
+               pace_seconds: float = 0.25, record_path: Optional[Path] = None,
+               scores_path: Optional[Path] = None) -> Optional[dict]:
     """1. scores the lists recorded last time on the sessions since; 2. picks
     this week's shadow list and records it next to the live list. Reads Dhan,
     writes only its own two files - the live watchlist is never touched."""
+    record_path, scores_path = record_path or SHADOW_FILE, scores_path or SHADOW_SCORES_FILE
     deadline = time.monotonic() + SHADOW_TIME_BUDGET_SECONDS
     dailies = _LAST.get("dailies") or _fetch_dailies(log, pace_seconds)
     sessions_seen: set[date] = set()

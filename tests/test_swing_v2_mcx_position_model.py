@@ -99,7 +99,7 @@ def install_mocks():
         return {"order_id": f"FAKE-MCX-{trading_symbol}-{len(placed_orders)}", "is_amo": False}
 
     odc.dhan_wrapper.place_mcx_market_order = _place_mcx
-    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
+    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False, *_a, **_k: OrderResult(
         order_id=order_id, status=OrderStatus.TRADED, remark="", fill_price=25.0, filled_quantity=1, is_amo=False)
 
     def restore():

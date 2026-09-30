@@ -42,6 +42,14 @@ def _flags(**overrides):
     return patchers
 
 
+def _modes(swing: bool, mcx: bool, index: bool = False):
+    """paper_mode_control.is_paper_mode_enabled per pseudo-strategy. Since 29 Sep 2026 the MCX branch reads
+    its own runtime toggle "SwingMCX" (config.MCX_PAPER_MODE_ENABLED is only its startup default), so the
+    old single return_value for every strategy made "global on, MCX off" impossible (1 Oct 2026)."""
+    table = {"Swing": swing, "SwingMCX": mcx, "SwingIndex": index}
+    return lambda strategy: table[strategy]
+
+
 def _apply(patchers):
     for p in patchers:
         p.start()
@@ -60,7 +68,8 @@ def test_1_mcx_stays_real_when_global_paper_mode_is_on_and_mcx_flag_is_off():
     the global flag."""
     patchers = _apply(_flags(MCX_PAPER_MODE_ENABLED=False))
     try:
-        with mock.patch.object(trading_engine.paper_mode_control, "is_paper_mode_enabled", return_value=True), \
+        with mock.patch.object(trading_engine.paper_mode_control, "is_paper_mode_enabled",
+                               side_effect=_modes(swing=True, mcx=False)), \
              mock.patch.object(trading_engine.dhan_wrapper, "is_mcx_commodity", return_value=True) as is_mcx:
             assert trading_engine._should_paper_trade("COPPER") is False, \
                 "MCX must trade REAL even while the global Swing paper-mode flag is on"
@@ -76,7 +85,8 @@ def test_2_equity_goes_to_paper_when_global_flag_is_on():
     supposed to catch it."""
     patchers = _apply(_flags(MCX_PAPER_MODE_ENABLED=False))
     try:
-        with mock.patch.object(trading_engine.paper_mode_control, "is_paper_mode_enabled", return_value=True), \
+        with mock.patch.object(trading_engine.paper_mode_control, "is_paper_mode_enabled",
+                               side_effect=_modes(swing=True, mcx=False)), \
              mock.patch.object(trading_engine.dhan_wrapper, "is_mcx_commodity", return_value=False):
             assert trading_engine._should_paper_trade("ASHOKLEY") is True, \
                 "a plain NSE-equity symbol must go to paper when the global Swing paper-mode flag is on"
@@ -91,7 +101,8 @@ def test_3_mcx_goes_to_paper_only_when_its_own_flag_is_explicitly_on():
     directions, not just one."""
     patchers = _apply(_flags(MCX_PAPER_MODE_ENABLED=True))
     try:
-        with mock.patch.object(trading_engine.paper_mode_control, "is_paper_mode_enabled", return_value=False), \
+        with mock.patch.object(trading_engine.paper_mode_control, "is_paper_mode_enabled",
+                               side_effect=_modes(swing=False, mcx=True)), \
              mock.patch.object(trading_engine.dhan_wrapper, "is_mcx_commodity", return_value=True):
             assert trading_engine._should_paper_trade("NATURALGAS") is True, \
                 "MCX_PAPER_MODE_ENABLED alone must be enough to paper-trade MCX, independent of the global flag"

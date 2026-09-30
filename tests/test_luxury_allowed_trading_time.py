@@ -58,6 +58,13 @@ import Luxury.trading_engine as lte
 import Luxury.luxury_main as lm
 from Options.dhan_client import AtmOption, OrderResult, OrderStatus
 
+# Written for the DIRECT webhook entry path. Since 21 Sep 2026 the breakout scanner is the default entry path
+# (the webhook queues the alert: "queued_for_breakout_signal"); the direct path still exists behind
+# BREAKOUT_SIGNAL_ENABLED=false and is what this file tests (1 Oct 2026 - see tests/config_overrides.py).
+import config_overrides  # noqa: E402
+TEST_CONFIG_OVERRIDES = [("Options.config", "BREAKOUT_SIGNAL_ENABLED", False),
+                         ("Luxury.config", "BREAKOUT_SIGNAL_ENABLED", False)]
+
 FUTURE_EXPIRY = date.today() + timedelta(days=25)
 IST = ZoneInfo("Asia/Kolkata")
 BEFORE_CUTOFF_INSTANT = datetime.now(IST).replace(hour=10, minute=0, second=0, microsecond=0)
@@ -127,7 +134,7 @@ def install_all_dhan_mocks():
     odc.dhan_wrapper.place_stop_loss_limit_order = lambda trading_symbol, quantity, transaction_type, trigger_price, limit_price, tag=None, product_type=None: {
         "order_id": f"FAKE-SLL-{trading_symbol}"}
     odc.dhan_wrapper.check_if_order_filled = lambda order_id: None
-    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
+    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False, *_a, **_k: OrderResult(
         order_id=order_id, status=OrderStatus.TRADED, remark="", fill_price=50.0, filled_quantity=500, is_amo=False)
 
     def restore():
@@ -281,6 +288,7 @@ async def test_3_disabled_flag_bypasses_even_past_cutoff():
 
 
 async def main():
+    config_overrides.apply_config_overrides(TEST_CONFIG_OVERRIDES)
     print("=== Luxury allowed-trading-time cutoff test suite ===\n")
     await test_1_before_cutoff_entry_proceeds_normally()
     await test_2_after_cutoff_entry_ignored_zero_orders()

@@ -84,8 +84,14 @@ async def test_1_monitor_tick_routes_only_index_candidates_to_paper_when_flag_on
         original_evaluate, original_paper_entry = ste._evaluate_entry_signal, spe.process_paper_entry
         ste._evaluate_entry_signal = _fake_evaluate
         spe.process_paper_entry = _fake_paper_entry
+        # Since 28 Sep 2026 the index route reads its own runtime toggle "SwingIndex" (paper_mode_control),
+        # not config.INDEX_PAPER_MODE_ENABLED - mocked per pseudo-strategy (1 Oct 2026).
+        modes = {"Swing": False, "SwingIndex": True, "SwingMCX": False}
         try:
-            with mock.patch("Swing.trading_engine.datetime") as fake_dt:
+            with mock.patch("Swing.trading_engine.datetime") as fake_dt, \
+                 mock.patch.object(ste.paper_mode_control, "is_paper_mode_enabled", side_effect=lambda s: modes[s]), \
+                 mock.patch.object(ste.dhan_wrapper, "is_mcx_commodity", return_value=False), \
+                 mock.patch.object(ste.signals, "_symbol_market_open", lambda symbol: True):   # moved to signals 22 Sep
                 fake_dt.now.return_value = _at(2026, 9, 21, 11, 0)  # plain Monday, well within market hours
                 await ste._monitor_tick()
             assert paper_calls == ["NIFTY"], f"expected only NIFTY routed to the paper engine, got {paper_calls}"

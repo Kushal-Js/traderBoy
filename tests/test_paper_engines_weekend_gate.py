@@ -56,7 +56,7 @@ def test_1_breakout_paper_engine_skips_check_one_when_market_closed():
          mock.patch.object(bpe, "_reset_daily_counters_if_new_day"):
         bpe._positions[("Options", "FAKESYM")] = object()  # any non-None value - _check_one is mocked out
         try:
-            asyncio.get_event_loop().run_until_complete(_run_briefly(bpe.paper_engine_monitor_loop()))
+            asyncio.run(_run_briefly(bpe.paper_engine_monitor_loop()))
         finally:
             bpe._positions.pop(("Options", "FAKESYM"), None)
         assert not fake_check_one.called, \
@@ -71,7 +71,7 @@ def test_2_breakout_paper_engine_calls_check_one_when_market_open():
          mock.patch.object(bpe, "_reset_daily_counters_if_new_day"):
         bpe._positions[("Options", "FAKESYM")] = object()
         try:
-            asyncio.get_event_loop().run_until_complete(_run_briefly(bpe.paper_engine_monitor_loop()))
+            asyncio.run(_run_briefly(bpe.paper_engine_monitor_loop()))
         finally:
             bpe._positions.pop(("Options", "FAKESYM"), None)
         assert fake_check_one.called, \
@@ -85,7 +85,7 @@ def test_3_options_paper_webhook_poll_loop_skips_everything_when_market_closed()
          mock.patch.object(pw, "_get_ltp", new=mock.AsyncMock()) as fake_get_ltp:
         pw.paper_store.open_positions["FAKESYM"] = object()  # any value - loop body under test never reaches it
         try:
-            asyncio.get_event_loop().run_until_complete(_run_briefly(pw.poll_loop()))
+            asyncio.run(_run_briefly(pw.poll_loop()))
         finally:
             pw.paper_store.open_positions.pop("FAKESYM", None)
         assert not fake_get_ltp.called, \

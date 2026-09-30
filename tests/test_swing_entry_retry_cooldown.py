@@ -135,6 +135,10 @@ async def test_5_monitor_tick_skips_a_symbol_in_cooldown():
         # happens to run at.
         original_market_open = ste.signals._symbol_market_open
         ste.signals._symbol_market_open = lambda symbol: True
+        # Real-entry path under test: Swing's paper mode (on in .env since 26 Sep) would route the entry to
+        # the paper engine instead, which has no cooldown to test (1 Oct 2026).
+        original_should_paper = ste._should_paper_trade
+        ste._should_paper_trade = lambda symbol: False
         try:
             await ste._monitor_tick()
             assert len(placed) == 1, "first tick should attempt (and fail) the entry once"
@@ -148,6 +152,7 @@ async def test_5_monitor_tick_skips_a_symbol_in_cooldown():
         finally:
             ste._evaluate_entry_signal = original_evaluate
             ste.signals._symbol_market_open = original_market_open
+            ste._should_paper_trade = original_should_paper
             watchlist_store.symbols = original_symbols
     finally:
         restore()

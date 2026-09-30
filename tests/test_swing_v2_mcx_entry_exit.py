@@ -32,7 +32,7 @@ import asyncio
 import os
 import sys
 import tempfile
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +55,11 @@ import Swing.trading_engine as ste
 from Swing.mcx_registry import mcx_registry
 from Swing.position_store import unrealized_pnl_rs
 
+# Offline instrument master (1 Oct 2026, tests/offline_instruments.py): newer code asks it "is this an MCX
+# commodity?" / resolves equities - without it the test reached a real Dhan login and was refused.
+import offline_instruments  # noqa: E402
+OFFLINE_INSTRUMENTS = {"equities": [], "mcx": ["COPPER", "NATURALGAS"], "options": [("NATURALGAS 23 SEP 280 CALL", "MCX", 1)]}
+
 COPPER_PNL_MULTIPLIER = 2500  # real 2,500kg/lot - matches data/mcx_config's real COPPER entry
 
 # Mutable set backing the is_mcx_commodity mock below - test_5 temporarily
@@ -71,6 +76,21 @@ _REAL_GET_SUPERTREND_STATE = ste.signals.get_supertrend_state
 
 FUTURE_EXPIRY = date.today() + timedelta(days=25)
 
+
+
+def _pin_in_session(module):
+    """Clock-independence (1 Oct 2026): the stale-price forced exit is deliberately
+    suppressed before 09:15 IST (see _handle_ltp_staleness), so this test failed
+    whenever the suite ran at night. Pins the module's clock to 11:00 IST on the
+    latest weekday for the duration of the test; returns the real function."""
+    from Options.dhan_client import IST as _IST
+    real = module._now_ist
+    d = datetime.now(_IST)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    fixed = d.replace(hour=11, minute=0, second=0, microsecond=0)
+    module._now_ist = lambda: fixed
+    return real
 
 def fake_copper_atm_option(symbol: str, option_type: str) -> AtmOption:
     return AtmOption(trading_symbol=f"{symbol} FAKE {option_type}", strike=1100.0, option_type=option_type,
@@ -118,7 +138,7 @@ def install_mocks():
     odc.dhan_wrapper.place_mcx_market_order = _place_mcx
     odc.dhan_wrapper.subscribe_option_price = lambda ts: ws_calls.__setitem__("subscribe", ws_calls["subscribe"] + 1)
     odc.dhan_wrapper.unsubscribe_option_price = lambda ts: ws_calls.__setitem__("unsubscribe", ws_calls["unsubscribe"] + 1)
-    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
+    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False, *_a, **_k: OrderResult(
         order_id=order_id, status=OrderStatus.TRADED, remark="", fill_price=25.0, filled_quantity=1, is_amo=False)
 
     def restore():
@@ -218,16 +238,19 @@ async def test_3_exit_ladder_uses_pnl_multiplier_not_quantity():
         restore()
 
 
-async def test_4_ws_never_subscribed_for_a_copper_position():
+async def test_4_ws_subscribed_for_a_copper_position():
+    """INVERTED 1 Oct 2026: this test used to assert an MCX position is NEVER WS-subscribed (REST poll only).
+    02998ff (23 Sep 2026, "Add MCX WS price support end-to-end for Swing") made MCX_COMM positions subscribe
+    exactly like NSE_FNO ones - after ASHOKLEY/NATURALGAS sat 30+ minutes on a frozen best price with REST
+    failing. The option contract must now be subscribed once."""
     await _set("options")
     restore, placed, ws_calls = install_mocks()
     try:
         result = await ste.enter_position_for_stock("COPPER", "BULLISH")
         assert result["status"] == "entered", result
-        assert ws_calls["subscribe"] == 0, \
-            "an MCX position must never subscribe to WS ticks (unverified segment support - REST poll only)"
-        print("4. WebSocket ticks are never subscribed for a Copper (MCX_COMM) position - "
-              "REST poll loop only, same as equity: PASSED")
+        assert ws_calls["subscribe"] == 1, \
+            f"an MCX (Copper) position must be WS-subscribed like an NSE option since 23 Sep 2026, got {ws_calls}"
+        print("4. A Copper (MCX_COMM) position is WS-subscribed for live ticks, same as an NSE option: PASSED")
     finally:
         restore()
 
@@ -365,6 +388,7 @@ async def test_8_ltp_staleness_uses_mcx_segment_codes_for_an_mcx_position():
     ste.position_store.try_start_exit = fake_try_start_exit
     ste._exit_position = fake_exit_position
     ste._ltp_failure_since.clear()
+    real_now = _pin_in_session(ste)
     try:
         pos = _mcx_position()
         key = ("NATURALGAS", pos.opened_at)
@@ -380,6 +404,7 @@ async def test_8_ltp_staleness_uses_mcx_segment_codes_for_an_mcx_position():
         print("8. _handle_ltp_staleness's own historical-close fallback uses the real MCX segment "
               "codes for an MCX position too (previously NSE-only): PASSED")
     finally:
+        ste._now_ist = real_now
         odc.dhan_wrapper.get_last_historical_close = real_historical
         ste.position_store.try_start_exit = real_try_start_exit
         ste._exit_position = real_exit_position
@@ -387,11 +412,12 @@ async def test_8_ltp_staleness_uses_mcx_segment_codes_for_an_mcx_position():
 
 
 async def main():
+    offline_instruments.install(__import__('Options.dhan_client', fromlist=['x']).dhan_wrapper, **OFFLINE_INSTRUMENTS)
     print("=== Swing v2 Copper/MCX entry-exit routing test suite ===\n")
     await test_1_copper_options_entry_uses_mcx_routing()
     await test_2_copper_always_trades_options_even_when_global_basket_type_is_futures()
     await test_3_exit_ladder_uses_pnl_multiplier_not_quantity()
-    await test_4_ws_never_subscribed_for_a_copper_position()
+    await test_4_ws_subscribed_for_a_copper_position()
     await test_5_options_only_override_is_scoped_to_copper_not_all_mcx_symbols()
     await test_6_get_ltp_falls_back_to_mcx_historical_close_when_rest_ltp_fails()
     await test_7_get_ltp_still_raises_when_both_mcx_sources_fail()

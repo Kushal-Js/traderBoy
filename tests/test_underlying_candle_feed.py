@@ -183,9 +183,13 @@ def test_7_restart_reconciliation_end_to_end():
     tick arrives, not start cold."""
     sym = "RESTARTSYM"
     today = datetime.now(IST).date()
-    ucf._on_tick(sym, ltp=500.0, cum_volume=50_000.0, t=_t(9, 15, 1))
-    ucf._on_tick(sym, ltp=500.5, cum_volume=51_000.0, t=_t(9, 19, 0))
-    ucf._on_tick(sym, ltp=501.0, cum_volume=52_000.0, t=_t(9, 20, 1))  # closes 09:15 bar, volume=1000
+    # Ticks dated TODAY (fixed 1 Oct 2026): the restore reads the last few days' files relative to today, so
+    # the module's fixed-date _t (22 Sep 2026) made this test pass only in the days right after it was written.
+    def _today_t(h, m, s=0):
+        return datetime(today.year, today.month, today.day, h, m, s, tzinfo=IST)
+    ucf._on_tick(sym, ltp=500.0, cum_volume=50_000.0, t=_today_t(9, 15, 1))
+    ucf._on_tick(sym, ltp=500.5, cum_volume=51_000.0, t=_today_t(9, 19, 0))
+    ucf._on_tick(sym, ltp=501.0, cum_volume=52_000.0, t=_today_t(9, 20, 1))  # closes 09:15 bar, volume=1000
     assert len(ucf._state[sym].bars) == 1
     pre_restart_bars = list(ucf._state[sym].bars)
 

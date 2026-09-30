@@ -65,6 +65,21 @@ _REAL_GET_SUPERTREND_STATE = ste.signals.get_supertrend_state
 FUTURE_EXPIRY = date.today() + timedelta(days=25)
 
 
+
+def _pin_in_session(module):
+    """Clock-independence (1 Oct 2026): the stale-price forced exit is deliberately
+    suppressed before 09:15 IST (see _handle_ltp_staleness), so this test failed
+    whenever the suite ran at night. Pins the module's clock to 11:00 IST on the
+    latest weekday for the duration of the test; returns the real function."""
+    from Options.dhan_client import IST as _IST
+    real = module._now_ist
+    d = datetime.now(_IST)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    fixed = d.replace(hour=11, minute=0, second=0, microsecond=0)
+    module._now_ist = lambda: fixed
+    return real
+
 async def _fake_get_supertrend_state(symbol):
     """enter_position_for_stock calls signals.get_supertrend_state to
     capture entry_candle_start - MUST be mocked in every test here, or
@@ -157,7 +172,7 @@ def install_mocks(broker_net_quantity=250, fail_stop_loss_placement=False, entry
     odc.dhan_wrapper.place_stop_loss_limit_order = _place_sl
     odc.dhan_wrapper.place_equity_stop_loss_limit_order = _place_sl
     odc.dhan_wrapper.check_if_order_filled = lambda order_id: None
-    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
+    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False, *_a, **_k: OrderResult(
         order_id=order_id, status=entry_fill_status, remark="", fill_price=50.0, filled_quantity=broker_net_quantity, is_amo=False)
     # Never touch dhan_wrapper.client (real Dhan auth) from a unit test -
     # the LTP-staleness forced-exit path calls this as its fallback price
@@ -419,7 +434,7 @@ async def test_13_still_pending_non_amo_exit_defers_instead_of_closing():
         assert result["status"] == "entered", result
         pos = ste.position_store.live_positions["RELIANCE"]
 
-        odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
+        odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False, *_a, **_k: OrderResult(
             order_id=order_id, status=OrderStatus.PENDING, remark="", fill_price=0.0,
             filled_quantity=0, is_amo=False,
         )
@@ -466,6 +481,7 @@ async def test_14_ltp_stale_for_too_long_forces_a_market_exit_and_cancels_broker
     real_cancel = odc.dhan_wrapper.cancel_order
     cancelled_order_ids = []
     ste._ltp_failure_since.clear()
+    real_now = _pin_in_session(ste)
     try:
         result = await ste.enter_position_for_stock("RELIANCE", "BEARISH")
         assert result["status"] == "entered", result
@@ -509,6 +525,7 @@ async def test_14_ltp_stale_for_too_long_forces_a_market_exit_and_cancels_broker
               "unmonitorable position indefinitely (the real ANGELONE 17 Sep 2026 incident this fix was "
               "written for): PASSED")
     finally:
+        ste._now_ist = real_now
         odc.dhan_wrapper._get_option_ltp_once = real_get_ltp
         odc.dhan_wrapper.get_pending_order_id = real_get_pending
         odc.dhan_wrapper.cancel_order = real_cancel

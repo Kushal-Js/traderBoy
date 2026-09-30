@@ -38,7 +38,39 @@ whichever OTHER file pytest happened to import last.
 This does not change how any file behaves when run standalone (that path
 never goes through pytest/conftest.py at all) - only pytest-driven runs
 gain real per-module isolation.
+
+OFFLINE INSTRUMENT MASTER (added 1 Oct 2026): a test module that defines
+OFFLINE_INSTRUMENTS = {"equities": [...], "mcx": [...]} gets
+tests/offline_instruments.install() for the duration of that module (its own
+main() does the same when run standalone) - see that helper's docstring.
+
+CANDLE FILES (added 1 Oct 2026): Swing/candle_feed.py and
+underlying_candle_feed.py persist every completed bar under their own
+HISTORY_DIR (default: the real history/ folder). The two candle-feed test
+files redirect it only in their standalone main(), so every pytest run wrote
+TESTSYM / STRESSTEST / RESTARTSYM / COPPER_OLD_CONTRACT bar files into the
+real history/ - and read the real ones back (test_5 found 756 bars instead of
+1). isolated_candle_history_dirs points both at scratch dirs per module.
+
+DHAN WRAPPER SINGLETON (added 1 Oct 2026): some files replace the module
+attribute Options.dhan_client.dhan_wrapper with a fake (e.g.
+test_swing_candle_feed's _install_fake_dhan_wrapper) and never put the real
+one back - fine as a standalone script, but under pytest every LATER file
+then patched methods onto the fake while the code under test still used the
+real singleton (~40 Swing failures, "'_FakeDhanWrapper' object has no
+attribute ..."). restore_dhan_wrapper_singleton puts the original back after
+each module.
+
+ASYNC TESTS (added 1 Oct 2026): most older files are standalone scripts whose
+`async def test_*` functions their own `main()` runs with asyncio. Under
+pytest (no pytest-asyncio installed) every one of them was reported as a
+failure - "async def functions are not natively supported" - about 176 of the
+suite's ~198 "failures", which hid the real ones. pytest_pyfunc_call below
+runs each coroutine test in its own event loop (asyncio.run), with its
+fixtures, exactly like the scripts do.
 """
+import asyncio
+import inspect
 import shutil
 import sys
 import tempfile
@@ -62,3 +94,70 @@ def isolated_trade_history_dir():
     finally:
         trade_history.HISTORY_DIR = original
         shutil.rmtree(scratch_dir, ignore_errors=True)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_pyfunc_call(pyfuncitem):
+    """Run `async def test_*` functions (see the module docstring)."""
+    if inspect.iscoroutinefunction(pyfuncitem.obj):
+        args = {name: pyfuncitem.funcargs[name] for name in pyfuncitem._fixtureinfo.argnames}
+        asyncio.run(pyfuncitem.obj(**args))
+        return True
+    return None
+
+
+@pytest.fixture(autouse=True, scope="module")
+def offline_instrument_master(request):
+    """See OFFLINE INSTRUMENT MASTER in the module docstring."""
+    spec = getattr(request.module, "OFFLINE_INSTRUMENTS", None)
+    if spec is None:
+        yield
+        return
+    import offline_instruments
+    from Options.dhan_client import dhan_wrapper
+    restore = offline_instruments.install(dhan_wrapper, **spec)
+    try:
+        yield
+    finally:
+        restore()
+
+
+@pytest.fixture(autouse=True, scope="module")
+def module_config_overrides(request):
+    """A test module's TEST_CONFIG_OVERRIDES (see tests/config_overrides.py), applied for that module only."""
+    overrides = getattr(request.module, "TEST_CONFIG_OVERRIDES", None)
+    if not overrides:
+        yield
+        return
+    import config_overrides
+    restore = config_overrides.apply_config_overrides(overrides)
+    try:
+        yield
+    finally:
+        restore()
+
+
+@pytest.fixture(autouse=True, scope="module")
+def isolated_candle_history_dirs():
+    """See CANDLE FILES in the module docstring."""
+    import underlying_candle_feed
+    from Swing import candle_feed
+    saved = (candle_feed.HISTORY_DIR, underlying_candle_feed.HISTORY_DIR)
+    scratch = Path(tempfile.mkdtemp(prefix="dhanboy_pytest_candles_"))
+    candle_feed.HISTORY_DIR, underlying_candle_feed.HISTORY_DIR = scratch / "swing", scratch / "underlying"
+    try:
+        yield
+    finally:
+        candle_feed.HISTORY_DIR, underlying_candle_feed.HISTORY_DIR = saved
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def restore_dhan_wrapper_singleton():
+    """See DHAN WRAPPER SINGLETON in the module docstring."""
+    import Options.dhan_client as dc
+    original = dc.dhan_wrapper
+    try:
+        yield
+    finally:
+        dc.dhan_wrapper = original

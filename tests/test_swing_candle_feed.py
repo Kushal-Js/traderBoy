@@ -203,7 +203,7 @@ def test_5_ensure_subscribed_mcx_roll_resets_state_and_resubscribes():
 def test_6_roll_restore_never_loads_the_retired_contracts_bars():
     fake = _install_fake_dhan_wrapper()
     _reset_module_state()
-    sym, day = "COPPER", cf.datetime.now(IST).date()
+    sym, day = "COPPER", _t(9, 15).date()     # the ticks below are dated by _t (23 Sep 2026), not today (fixed 1 Oct 2026)
 
     cf.ensure_subscribed(sym, "OLD_CONTRACT", "MCX_COMM")
     cf._on_tick(sym, ltp=700.0, cum_volume=500.0, t=_t(9, 15, 0))

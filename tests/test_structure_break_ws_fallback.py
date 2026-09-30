@@ -44,6 +44,11 @@ load_dotenv(REPO_ROOT / ".env")
 import Options.dhan_client as odc
 import structure_break as sb
 
+# Offline instrument master (1 Oct 2026, tests/offline_instruments.py): newer code asks it "is this an MCX
+# commodity?" / resolves equities - without it the test reached a real Dhan login and was refused.
+import offline_instruments  # noqa: E402
+OFFLINE_INSTRUMENTS = {"equities": [], "mcx": ["COPPER"]}
+
 IST = odc.IST
 W = odc.dhan_wrapper
 
@@ -355,6 +360,7 @@ def test_7_fetch_one_structure_break_timeframe_subscribes_ws_and_passes_the_hook
 
 
 def main():
+    offline_instruments.install(__import__('Options.dhan_client', fromlist=['x']).dhan_wrapper, **OFFLINE_INSTRUMENTS)
     print("=== structure_break.py ws_candles_fn (WS-first/REST-fallback) test suite ===\n")
     test_1_ws_candles_fn_used_directly_rest_never_called()
     test_2_ws_candles_fn_returns_none_falls_through_to_rest()

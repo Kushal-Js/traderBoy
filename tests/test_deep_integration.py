@@ -68,6 +68,20 @@ import Options.trading_engine as ote
 import Options.option_main as om
 from Options.dhan_client import AtmOption, OrderResult, OrderStatus
 
+# Written for the DIRECT webhook entry path. Since 21 Sep 2026 the breakout scanner is the default entry path
+# (the webhook queues the alert: "queued_for_breakout_signal"); the direct path still exists behind
+# BREAKOUT_SIGNAL_ENABLED=false and is what this file tests (1 Oct 2026 - see tests/config_overrides.py).
+import config_overrides  # noqa: E402
+TEST_CONFIG_OVERRIDES = [("Options.config", "BREAKOUT_SIGNAL_ENABLED", False),
+                         ("Luxury.config", "BREAKOUT_SIGNAL_ENABLED", False)]
+# Clock-independence: this file tests what happens INSIDE the trading windows (it failed when run at night).
+TEST_CONFIG_OVERRIDES += [("Options.option_main", "is_within_trading_windows", lambda now=None: True),
+                          ("Luxury.luxury_main", "is_within_trading_windows", lambda now=None: True)]
+# Ranking: these tests mock the day-change% ranking; since 18 Sep a CE alert is ranked by ribbon expansion
+# when RIBBON_RANKING_ENABLED is on (unmocked here) - same switch test_alert_candidate_shadow_wiring uses.
+TEST_CONFIG_OVERRIDES += [(m, flag, False) for m in ("Options.config", "Luxury.config")
+                          for flag in ("RIBBON_RANKING_ENABLED", "RIBBON_RANKING_PE_ENABLED")]   # PE: ribbon breakdown
+
 REAL_STOCKS = ["RELIANCE", "TCS", "SBIN", "HDFCBANK", "ICICIBANK"]
 FUTURE_EXPIRY = date.today() + timedelta(days=25)
 
@@ -419,6 +433,7 @@ async def test_6_malformed_payloads_rejected_cleanly():
 
 
 async def main():
+    config_overrides.apply_config_overrides(TEST_CONFIG_OVERRIDES)
     print("=== Deep integration test suite (real handlers/logic, all Dhan network calls mocked) ===\n")
     await test_1_real_concurrent_entry_through_real_webhook_handler()
     await test_2_duplicate_webhook_delivery_race()

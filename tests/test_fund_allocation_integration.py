@@ -86,6 +86,17 @@ import Swing.swing_main as sm
 import Swing.watchlist as swl
 from Options.dhan_client import AtmOption, FuturesContract, OrderResult, OrderStatus
 
+# Written for the DIRECT webhook entry path. Since 21 Sep 2026 the breakout scanner is the default entry path
+# (the webhook queues the alert: "queued_for_breakout_signal"); the direct path still exists behind
+# BREAKOUT_SIGNAL_ENABLED=false and is what this file tests (1 Oct 2026 - see tests/config_overrides.py).
+import config_overrides  # noqa: E402
+TEST_CONFIG_OVERRIDES = [("Options.config", "BREAKOUT_SIGNAL_ENABLED", False),
+                         ("Luxury.config", "BREAKOUT_SIGNAL_ENABLED", False)]
+TEST_CONFIG_OVERRIDES += [("Options.option_main", "is_within_trading_windows", lambda now=None: True),   # clock
+                          ("Luxury.luxury_main", "is_within_trading_windows", lambda now=None: True)]
+TEST_CONFIG_OVERRIDES += [(m, flag, False) for m in ("Options.config", "Luxury.config")
+                          for flag in ("RIBBON_RANKING_ENABLED", "RIBBON_RANKING_PE_ENABLED")]   # ranking is mocked
+
 FUTURE_EXPIRY = date.today() + timedelta(days=25)
 
 
@@ -209,7 +220,7 @@ def install_dhan_mocks(margin_per_leg=999.0, fund_limits_sequence=None, availabl
     odc.dhan_wrapper.place_stop_loss_limit_order = lambda trading_symbol, quantity, transaction_type, trigger_price, limit_price, tag=None, product_type=None: {
         "order_id": f"FAKE-SLL-{trading_symbol}"}
     odc.dhan_wrapper.check_if_order_filled = lambda order_id: None
-    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
+    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False, *_a, **_k: OrderResult(
         order_id=order_id, status=OrderStatus.TRADED, remark="", fill_price=50.0, filled_quantity=500, is_amo=False)
 
     def restore():
@@ -229,10 +240,10 @@ async def test_1_secondary_bucket_protects_primary_share_across_real_packages():
     ote.position_store = options_store
     ote.config.MAX_LIVE_POSITIONS_CE = 5
 
-    swing_store = sps.BasketHedgeStore()
-    ste.basket_hedge_store = swing_store
+    # Swing's side: the basket_hedge mode this test used to drive was removed in the Swing v2 rewrite
+    # (73bd107, 12 Sep 2026). What matters here - that Swing's PRIMARY share is untouched by an Options
+    # rejection - is checked directly on the shared funds check Swing's real entry calls (1 Oct 2026).
     real_swing_enabled = ste.config.STRATEGY_ENABLED
-    ste.config.STRATEGY_ENABLED = True
 
     # Account balance: 100,000. Secondary bucket (15%) = 15,000. Primary
     # bucket (85%) = 85,000. Options' own required margin (60,000) fits
@@ -266,10 +277,10 @@ async def test_1_secondary_bucket_protects_primary_share_across_real_packages():
         restore()
         restore, placed_orders = install_dhan_mocks(margin_per_leg=2000.0, available_balance=100000.0)
 
-        result = await ste._enter_basket_hedge_for_stock("SMALLSWINGBET")
-        assert result["status"] == "entered", \
-            f"Swing's own primary-bucket entry must succeed - the Options rejection never actually spent any money, got {result}"
-        assert "SMALLSWINGBET" in swing_store.live_positions
+        swing_ok = await fa.has_sufficient_bucket_funds(
+            ste.config.FUND_BUCKET, "SMALLSWINGBET", [("1", "MARGIN", 500, 4.0), ("2", "MARGIN", 500, 4.0)])
+        assert ste.config.FUND_BUCKET == "primary"
+        assert swing_ok, "Swing's own primary-bucket entry must be affordable - the Options rejection spent no money"
 
         print("1. The secondary bucket (15%) correctly protects the primary bucket's own 85% share - "
               "an Options entry sized to fit the WHOLE account but not its own 15% slice is rejected "
@@ -481,6 +492,7 @@ async def test_4_funds_rejected_stock_is_genuinely_retriable_on_a_later_alert():
 
 
 async def main():
+    config_overrides.apply_config_overrides(TEST_CONFIG_OVERRIDES)
     print("=== Fund allocation - deep integration test suite ===\n")
     # Pinned explicitly (not left to the ambient .env value) - tests 2
     # and 3's own numbers are hand-worked against a clean 85/15 split

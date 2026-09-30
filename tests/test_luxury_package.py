@@ -54,6 +54,20 @@ from Options.dhan_client import AtmOption, OrderResult, OrderStatus
 FUTURE_EXPIRY = date.today() + timedelta(days=25)
 
 from zoneinfo import ZoneInfo
+
+# Written for the DIRECT webhook entry path. Since 21 Sep 2026 the breakout scanner is the default entry path
+# (the webhook queues the alert: "queued_for_breakout_signal"); the direct path still exists behind
+# BREAKOUT_SIGNAL_ENABLED=false and is what this file tests (1 Oct 2026 - see tests/config_overrides.py).
+import config_overrides  # noqa: E402
+TEST_CONFIG_OVERRIDES = [("Options.config", "BREAKOUT_SIGNAL_ENABLED", False),
+                         ("Luxury.config", "BREAKOUT_SIGNAL_ENABLED", False)]
+# Clock-independence: this file tests what happens INSIDE the trading windows (it failed when run at night).
+TEST_CONFIG_OVERRIDES += [("Options.option_main", "is_within_trading_windows", lambda now=None: True),
+                          ("Luxury.luxury_main", "is_within_trading_windows", lambda now=None: True)]
+# Ranking: these tests mock the day-change% ranking; since 18 Sep a CE alert is ranked by ribbon expansion
+# when RIBBON_RANKING_ENABLED is on (unmocked here) - same switch test_alert_candidate_shadow_wiring uses.
+TEST_CONFIG_OVERRIDES += [(m, flag, False) for m in ("Options.config", "Luxury.config")
+                          for flag in ("RIBBON_RANKING_ENABLED", "RIBBON_RANKING_PE_ENABLED")]   # PE: ribbon breakdown
 MARKET_HOURS_INSTANT = datetime.now(ZoneInfo("Asia/Kolkata")).replace(hour=10, minute=0, second=0, microsecond=0)
 
 
@@ -134,7 +148,7 @@ def install_all_dhan_mocks():
     odc.dhan_wrapper.place_stop_loss_limit_order = lambda trading_symbol, quantity, transaction_type, trigger_price, limit_price, tag=None, product_type=None: {
         "order_id": f"FAKE-SLL-{trading_symbol}"}
     odc.dhan_wrapper.check_if_order_filled = lambda order_id: None
-    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False: OrderResult(
+    odc.dhan_wrapper.wait_for_order_result = lambda order_id, is_amo=False, *_a, **_k: OrderResult(
         order_id=order_id, status=OrderStatus.TRADED, remark="", fill_price=50.0, filled_quantity=500, is_amo=False)
 
     def restore():
@@ -384,6 +398,7 @@ async def test_6_malformed_payload_rejected_cleanly():
 
 
 async def main():
+    config_overrides.apply_config_overrides(TEST_CONFIG_OVERRIDES)
     print("=== Luxury package deep integration test suite ===\n")
     await test_1_real_concurrent_ce_entry_through_luxury_webhook()
     await test_2_pe_webhook_ranks_lowest_change_first()
