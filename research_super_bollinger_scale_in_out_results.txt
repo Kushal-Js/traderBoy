@@ -1,0 +1,54 @@
+HYBRID CE trades 92 (priced 91, unpriced 1); live-rule hedges 35; Dhan calls made: 0
+
+== CE side (baseline = HYBRID G', 1 lot) ==
+CE-BASE G' 1 lot (no add)                            total  +46,378 extra       +0 (0/0 won) H1  +10,654 H2  +35,724 dd  -22,530 worst -13,368 green 9/21 peakcap  135,165 days>1.2L 3
+CE-U  2 lots at entry, book 2nd at +2k               total  +30,490 extra  -15,888 (52/91 won) H1   -2,908 H2  +33,398 dd  -36,369 worst -24,227 green 10/21 peakcap  257,732 days>1.2L 14
+CE-U' 2 lots at entry, book 2nd at +1.5k             total  +23,061 extra  -23,317 (60/91 won) H1   -9,943 H2  +33,004 dd  -34,376 worst -24,631 green 9/21 peakcap  257,732 days>1.2L 14
+CE-P1 add at +1.5k, exit with original               total  +96,788 extra  +50,410 (18/48 won) H1  +37,037 H2  +59,751 dd  -30,794 worst -15,741 green 10/21 peakcap  240,682 days>1.2L 8
+CE-P1s add at +1.5k, own stop -750                   total  +44,323 extra   -2,055 (9/48 won) H1   -4,325 H2  +48,647 dd  -27,919 worst -14,752 green 10/21 peakcap  199,318 days>1.2L 7
+CE-P1st add at +1.5k & ST up, own stop -750          total  +51,334 extra   +4,956 (7/45 won) H1   +9,177 H2  +42,157 dd  -26,830 worst -13,368 green 10/21 peakcap  243,131 days>1.2L 6
+CE-P2 add at +1.5k, book add +1.5k, stop -750        total  +37,175 extra   -9,203 (20/48 won) H1   +1,835 H2  +35,340 dd  -25,549 worst -14,752 green 10/21 peakcap  175,260 days>1.2L 7
+CE-P2b add at +1.5k, book add +1k, stop -750         total  +34,875 extra  -11,502 (23/48 won) H1   +2,709 H2  +32,167 dd  -26,178 worst -14,752 green 10/21 peakcap  175,260 days>1.2L 7
+CE-P3 add at +3k, own stop -1k                       total  +69,675 extra  +23,297 (9/30 won) H1  +20,496 H2  +49,179 dd  -25,481 worst -13,368 green 11/21 peakcap  214,921 days>1.2L 8
+CE-P3b add at +3k, book add +1.5k, stop -1k          total  +62,868 extra  +16,490 (21/30 won) H1  +13,374 H2  +49,494 dd  -25,481 worst -13,368 green 10/21 peakcap  200,948 days>1.2L 8
+CE-P1x add at +1.5k, sell add on ST bearish          total +101,741 extra  +55,363 (18/48 won) H1  +38,077 H2  +63,664 dd  -30,189 worst -13,689 green 10/21 peakcap  240,682 days>1.2L 8
+CE-P1c add at +1.5k, sell add at -1k                 total  +41,621 extra   -4,757 (11/48 won) H1   -4,549 H2  +46,170 dd  -29,163 worst -14,752 green 10/21 peakcap  199,318 days>1.2L 8
+CE-P1xc add +1.5k, sell add ST bearish or -1k        total  +46,140 extra     -238 (12/48 won) H1   -2,055 H2  +48,195 dd  -29,163 worst -13,689 green 10/21 peakcap  199,318 days>1.2L 8
+CE-P3x add at +3k, sell add on ST bearish            total  +96,514 extra  +50,136 (15/30 won) H1  +35,513 H2  +61,001 dd  -28,625 worst -13,368 green 11/21 peakcap  240,252 days>1.2L 8
+
+== PE side (baseline + live hedge rule; adds use the same PE contract) ==
+PE-0  live hedge only (1 lot)                        total  +60,491 extra  +14,113 (25/35 won) H1  +18,770 H2  +41,721 dd  -20,201 worst -11,649 green 9/21 peakcap  204,092 days>1.2L 5
+PE-PX   add, book add +1k (sell 1 quick)             total  +62,197 extra  +15,819 (36/57 won) H1  +16,769 H2  +45,428 dd  -21,779 worst -10,868 green 9/21 peakcap  239,364 days>1.2L 7
+PE-PX   add, book add +1.5k                          total  +62,612 extra  +16,234 (35/57 won) H1  +17,670 H2  +44,942 dd  -22,438 worst -10,712 green 9/21 peakcap  273,619 days>1.2L 7
+PE-PX   add, both on hedge trail                     total  +57,722 extra  +11,344 (34/57 won) H1  +16,275 H2  +41,448 dd  -22,438 worst -11,493 green 11/21 peakcap  273,619 days>1.2L 7
+PE-PX   add, sell both once pair loss recovered      total  +62,347 extra  +15,969 (35/57 won) H1  +19,532 H2  +42,815 dd  -22,438 worst  -9,451 green 10/21 peakcap  239,364 days>1.2L 7
+PE-PX   add, pair profit-protection trail            total  +60,504 extra  +14,126 (35/57 won) H1  +14,052 H2  +46,452 dd  -25,187 worst -11,493 green 10/21 peakcap  273,619 days>1.2L 7
+PE-ST   add, book add +1k (sell 1 quick)             total  +66,682 extra  +20,304 (35/51 won) H1  +22,781 H2  +43,901 dd  -17,556 worst -10,712 green 9/21 peakcap  223,692 days>1.2L 6
+PE-ST   add, book add +1.5k                          total  +66,466 extra  +20,088 (34/51 won) H1  +24,724 H2  +41,741 dd  -16,940 worst -10,712 green 9/21 peakcap  237,442 days>1.2L 6
+PE-ST   add, both on hedge trail                     total  +65,269 extra  +18,891 (33/51 won) H1  +22,734 H2  +42,535 dd  -18,248 worst -12,431 green 10/21 peakcap  241,478 days>1.2L 6
+PE-ST   add, sell both once pair loss recovered      total  +69,037 extra  +22,659 (35/51 won) H1  +25,134 H2  +43,903 dd  -16,367 worst  -8,993 green 9/21 peakcap  223,692 days>1.2L 6
+PE-ST   add, pair profit-protection trail            total  +58,214 extra  +11,836 (32/51 won) H1  +16,047 H2  +42,167 dd  -18,248 worst -12,431 green 10/21 peakcap  241,478 days>1.2L 6
+PE-BOTH add, book add +1k (sell 1 quick)             total  +62,764 extra  +16,386 (32/48 won) H1  +19,689 H2  +43,075 dd  -21,318 worst -10,712 green 9/21 peakcap  239,364 days>1.2L 6
+PE-BOTH add, book add +1.5k                          total  +63,039 extra  +16,661 (31/48 won) H1  +21,441 H2  +41,598 dd  -21,318 worst -10,712 green 9/21 peakcap  239,364 days>1.2L 6
+PE-BOTH add, both on hedge trail                     total  +60,492 extra  +14,114 (30/48 won) H1  +18,101 H2  +42,391 dd  -21,318 worst -12,431 green 11/21 peakcap  239,364 days>1.2L 6
+PE-BOTH add, sell both once pair loss recovered      total  +68,307 extra  +21,929 (32/48 won) H1  +24,548 H2  +43,759 dd  -21,318 worst  -8,993 green 10/21 peakcap  239,364 days>1.2L 6
+PE-BOTH add, pair profit-protection trail            total  +53,870 extra   +7,493 (27/48 won) H1  +14,232 H2  +39,639 dd  -23,982 worst -12,431 green 10/21 peakcap  239,364 days>1.2L 6
+
+Dhan calls made: 0
+
+== CE side under a funds limit (premium outlay; entries/adds that don't fit are skipped) ==
+budget 120,000  CE-BASE G  1 lot                                     total  +40,248 dd  -22,530 worst  -13,368 skipped {'entry': 3}
+budget 120,000  CE-U  2 lots at entry, book 2nd at +2k               total  +11,775 dd  -34,523 worst  -24,227 skipped {'add': 15, 'entry': 16}
+budget 120,000  CE-P1 add at +1.5k, exit with original               total +109,862 dd  -23,945 worst  -15,741 skipped {'entry': 10, 'add': 7}
+budget 120,000  CE-P1st add at +1.5k & ST up, own stop -750          total  +59,422 dd  -26,830 worst  -13,368 skipped {'add': 10, 'entry': 3}
+budget 120,000  CE-P3 add at +3k, own stop -1k                       total  +86,594 dd  -20,262 worst  -13,368 skipped {'add': 7, 'entry': 7}
+budget 200,000  CE-BASE G  1 lot                                     total  +41,703 dd  -22,530 worst  -13,368 skipped {}
+budget 200,000  CE-U  2 lots at entry, book 2nd at +2k               total  +17,934 dd  -36,369 worst  -24,227 skipped {'add': 5, 'entry': 1}
+budget 200,000  CE-P1 add at +1.5k, exit with original               total  +89,518 dd  -30,794 worst  -15,741 skipped {'add': 3}
+budget 200,000  CE-P1st add at +1.5k & ST up, own stop -750          total  +49,267 dd  -26,830 worst  -13,368 skipped {'add': 2}
+budget 200,000  CE-P3 add at +3k, own stop -1k                       total  +69,429 dd  -25,481 worst  -13,368 skipped {'add': 3}
+budget 250,000  CE-BASE G  1 lot                                     total  +41,703 dd  -22,530 worst  -13,368 skipped {}
+budget 250,000  CE-U  2 lots at entry, book 2nd at +2k               total  +24,087 dd  -36,369 worst  -24,227 skipped {'add': 1}
+budget 250,000  CE-P1 add at +1.5k, exit with original               total  +92,113 dd  -30,794 worst  -15,741 skipped {}
+budget 250,000  CE-P1st add at +1.5k & ST up, own stop -750          total  +46,659 dd  -26,830 worst  -13,368 skipped {}
+budget 250,000  CE-P3 add at +3k, own stop -1k                       total  +65,000 dd  -25,481 worst  -13,368 skipped {}
