@@ -1,0 +1,85 @@
+universe 213, with data 210; 5-min history 2026-05-25 .. 2026-09-30
+proxies computed
+14 weekly decisions: 2026-06-29 .. 2026-09-28
+
+== RULES, scored on the FOLLOWING week (sum of % moves captured by 15 stocks, with the 1-hour filter) - 14 weeks ==
+rule                                                  total     Jul     Aug     Sep  weeks+ worst wk beats random no-filter total
+HYBRID_F lookback 40                                  +42.0   +21.7   +10.9    +9.4   11/14     -4.9         99%           +36.9
+HYBRID (live)                                         +34.2   +14.0   +11.0    +9.1   10/14     -2.8         98%           +18.4
+HYBRID_F pool 60                                      +33.5   +12.6    +8.6   +12.3   11/14     -6.6         98%           +30.5
+FIT (whole universe)                                  +33.2   +25.4   +10.0    -2.2    9/14     -3.1         98%           +36.9
+FIT_F lookback 10                                     +31.6   +18.6    +9.2    +3.7   11/14     -2.7         98%           +27.2
+HYBRID_F (fit with 1h filter)                         +26.4    +9.5    +5.6   +11.3    8/14     -3.8         95%           +13.4
+HYBRID_F lookback 10                                  +25.3    +7.8    +8.8    +8.6   10/14     -3.3         94%           +13.2
+NIFTY_SWITCH2 (10d return < 0 -> RESILIENT_FIT)       +20.6    +6.6    +9.8    +4.2    9/14     -3.8         88%           +13.1
+HYBRID_F pool 80                                      +19.8    +4.6    +7.3    +7.9    9/14     -8.3         87%           +15.3
+HYBRID_F pool 25                                      +19.6    +9.2    +7.9    +2.5    8/14     -3.5         87%           +12.0
+HITRATE (ATH 40 pool)                                 +18.9    +9.6    +4.0    +5.3    8/14     -4.7         86%            +9.8
+RESILIENT_FIT                                         +17.7    +8.4    +5.2    +4.2    9/14     -5.5         84%           +13.1
+NIFTY_SWITCH (below 20d avg -> RESILIENT_FIT)         +17.1    +6.6    +6.4    +4.2    8/14     -3.8         83%            +6.4
+FIT_F (whole universe, filter)                        +16.3    +5.7   +10.0    +0.7    8/14     -4.1         79%           +10.2
+RESILIENT (up on NIFTY down days)                     +13.5    +7.1   +11.4    -5.0    7/14     -3.9         75%            +2.1
+ATH only (old list)                                    +2.9    +2.0    +5.7    -4.8    9/14     -5.0         47%            -1.6
+LOWCHOP (daily efficiency ratio)                       -3.8    +1.7    +6.8   -12.3    6/14     -6.6         24%           -20.0
+RANDOM lists (300): median / 10th-90th pct             +3.6   range -9.2 .. +21.0
+
+== WEEK BY WEEK: HYBRID (live) vs HYBRID_F vs random median, and the market ==
+week           HYBRID  HYBRID_F  RESIL_FIT  rand med  NIFTY wk%  NIFTY<20d avg  NIFTY 10d%  fit->next-week corr
+2026-06-29       +4.8      +3.8       +7.5      +2.9      +0.91          False       +3.74                -0.21
+2026-07-06       -1.0      -1.1       -5.5      -1.8      -0.25          False       +0.38                +0.06
+2026-07-13       -2.8      -2.8       +0.3      -0.9      +0.56          False       +0.66                +0.04
+2026-07-20       +2.9      -0.7       -1.3      +2.0      -2.30          False       +0.31                -0.12
+2026-07-27      +10.1     +10.4       +7.4      +2.8      +2.44           True       -1.75                +0.22
+2026-08-03       -1.5      -3.8       -0.4      -0.1      +0.84          False       +0.08                -0.25
+2026-08-10       +2.7      +3.8       -4.2      +1.6      -0.83          False       +3.29                -0.12
+2026-08-17       +0.9      -2.6       +0.8      -0.2      -0.47          False       -0.00                -0.09
+2026-08-24       +9.0      +8.2       +9.0      +1.6      -0.31           True       -1.30                +0.23
+2026-08-31       +0.8      +0.6       +1.0      -0.9      -1.15           True       -0.78                +0.13
+2026-09-07       +5.0      +5.7       +3.3      -0.3      -2.09           True       -1.46                +0.29
+2026-09-14       +1.8      +1.6       +1.4      -0.4      -0.22           True       -3.22                +0.06
+2026-09-21       +1.8      +3.8       +0.3      -0.6      -0.88           True       -2.21                +0.08
+2026-09-28       -0.3      -0.3       -1.9      -3.5      -2.25           True       -1.44                +0.24
+average rank correlation between a stock's 20-session fit and its NEXT week: +0.040 (0 = the fit says nothing)
+
+== BY MARKET REGIME at the time of the pick: NIFTY ABOVE its 20-day average (7 weeks) vs BELOW (7 weeks) ==
+rule                                               ABOVE total beats random  BELOW total beats random
+HYBRID_F lookback 40                                     +15.0          84%        +27.0         100%
+HYBRID (live)                                             +6.0          54%        +28.2         100%
+HYBRID_F pool 60                                          +4.8          49%        +28.6         100%
+FIT (whole universe)                                      +9.3          68%        +23.9         100%
+FIT_F lookback 10                                        +12.3          75%        +19.3          99%
+HYBRID_F (fit with 1h filter)                             -3.4          18%        +29.9         100%
+HYBRID_F lookback 10                                      +6.0          54%        +19.3          99%
+NIFTY_SWITCH2 (10d return < 0 -> RESILIENT_FIT)           +0.0          29%        +20.6         100%
+HYBRID_F pool 80                                          -3.1          20%        +22.9         100%
+HYBRID_F pool 25                                          -3.1          20%        +22.7         100%
+HITRATE (ATH 40 pool)                                     +1.8          36%        +17.1          98%
+RESILIENT_FIT                                             -2.8          21%        +20.6         100%
+NIFTY_SWITCH (below 20d avg -> RESILIENT_FIT)             -3.4          18%        +20.6         100%
+FIT_F (whole universe, filter)                            +2.7          38%        +13.7          95%
+RESILIENT (up on NIFTY down days)                         +8.6          63%         +5.0          77%
+ATH only (old list)                                       -1.9          24%         +4.8          76%
+LOWCHOP (daily efficiency ratio)                          -8.6           6%         +4.8          76%
+RANDOM median                                             +5.0                      -0.8
+fit -> next-week rank correlation: NIFTY above its 20-day average -0.099  |  below +0.178
+
+== BY MONTH: where the live HYBRID list sits among 300 random lists ==
+  Jul: HYBRID +14.0  random median +6.1  -> better than 81% of random lists (5 weeks)
+  Aug: HYBRID +11.0  random median +3.8  -> better than 83% of random lists (4 weeks)
+  Sep: HYBRID +9.1  random median -5.3  -> better than 98% of random lists (5 weeks)
+
+== HOW OFTEN THE LIST CHANGES: stocks in common with the previous week's HYBRID list ==
+  2026-07-06: 7/15 kept
+  2026-07-13: 11/15 kept
+  2026-07-20: 7/15 kept
+  2026-07-27: 7/15 kept
+  2026-08-03: 11/15 kept
+  2026-08-10: 9/15 kept
+  2026-08-17: 9/15 kept
+  2026-08-24: 7/15 kept
+  2026-08-31: 9/15 kept
+  2026-09-07: 11/15 kept
+  2026-09-14: 9/15 kept
+  2026-09-21: 9/15 kept
+  2026-09-28: 9/15 kept
+exit 0
