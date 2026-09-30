@@ -934,6 +934,12 @@ def _exit_on_cooldown(position: Position) -> bool:
     return bool(position.next_exit_retry_at and _now_ist() < position.next_exit_retry_at)
 
 
+def is_paper_position(position: Position) -> bool:
+    """Bollinger/Super Bollinger paper positions carry order_id "PAPER";
+    Swing's paper engine uses product_type "PAPER"."""
+    return position.order_id == "PAPER" or position.product_type == "PAPER"
+
+
 async def _get_ltp(position: Position) -> float:
     """WS-cache-then-REST-fallback, direct port of Swing's own _get_ltp -
     trading_symbol-only, no exchange-segment branch needed here (Tradehull
@@ -943,6 +949,13 @@ async def _get_ltp(position: Position) -> float:
     ltp = await loop.run_in_executor(None, dhan_wrapper.get_cached_option_ltp, position.trading_symbol)
     if ltp is not None:
         return ltp
+    if is_paper_position(position):
+        # Paper: a slightly older WS tick beats spending the REST quote
+        # budget real positions need (dhan_config.PAPER_LTP_MAX_AGE_SECONDS).
+        ltp = await loop.run_in_executor(None, dhan_wrapper.get_recent_cached_option_ltp,
+                                         position.trading_symbol, dhan_config.PAPER_LTP_MAX_AGE_SECONDS)
+        if ltp is not None:
+            return ltp
     async with dhan_wrapper.ltp_rest_fallback_semaphore:
         ltp = await asyncio.wait_for(
             dhan_wrapper.get_option_ltp_async(position.trading_symbol),

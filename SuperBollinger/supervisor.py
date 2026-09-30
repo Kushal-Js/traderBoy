@@ -36,8 +36,10 @@ hedge_store, trade-history tag "SuperBollingerHedge").
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import cross_strategy_registry
@@ -52,7 +54,7 @@ from Swing.position_store import broker_stop_trigger_and_limit
 from SuperTrader.strategy import atr as atr_series
 
 from . import settings
-from .state import (HEDGE_STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store, paper_book,
+from .state import (EVENTS_LOG, HEDGE_STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store, paper_book,
                     position_store)
 from .trading_engine import NO_TRAILING, PROFILE, square_off_all as square_off_ce
 
@@ -89,11 +91,36 @@ def _atr(symbol: str) -> Optional[float]:
     return atr_series(base["high"], base["low"], base["close"], 14)[-1]
 
 
+def _logged_entry_spot(symbol: str) -> Optional[float]:
+    """Entry spot for a CE re-adopted after a restart (the in-memory _track
+    is gone): the trigger price of today's last POSITION_OPENED event for
+    the symbol - Super Bollinger enters when the stock touches its trigger.
+    Without this the ATR-drop check would measure from the spot at restart."""
+    path = Path("history") / f"{engine._now_ist().date().isoformat()}_{EVENTS_LOG}.log"
+    found = None
+    try:
+        with path.open() as fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if d.get("event") == "POSITION_OPENED" and d.get("underlying_symbol") == symbol:
+                    found = d.get("trigger_price")
+    except OSError:
+        return None
+    try:
+        return float(found) if found else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _state(symbol: str, pos: Position) -> dict:
     key = (symbol, pos.opened_at.isoformat())
     st = _track.get(key)
     if st is None:
-        st = {"entry_spot": _spot(symbol), "hedged": False, "waiting_logged": False,
+        entry_spot = (_logged_entry_spot(symbol) if pos.reconciled else None) or _spot(symbol)
+        st = {"entry_spot": entry_spot, "hedged": False, "waiting_logged": False,
               "shadow_stopped": False, "shadow_reentered": False}
         _track[key] = st
     elif st["entry_spot"] is None:

@@ -1005,6 +1005,17 @@ MONITOR_INTERVAL_SECONDS = int(os.getenv("MONITOR_INTERVAL_SECONDS", "2"))
 # on every single poll (rate-limit safety - NOTES.md bug #5).
 LTP_STALE_AFTER_SECONDS = float(os.getenv("LTP_STALE_AFTER_SECONDS", "5"))
 
+# PAPER positions only (30 Sep 2026, live finding): when a paper position's
+# WS tick is older than LTP_STALE_AFTER_SECONDS, first accept a WS tick up
+# to this old before falling back to REST. Thin options go quiet for >5s
+# all the time, and with ~8 paper positions each forcing a REST LTP call
+# every 5s, Dhan's ~1 req/s quote limit was saturated (~870 failed REST LTP
+# calls in 25 min on 30 Sep) - and REAL positions share that same budget:
+# Super Bollinger's real APLAPOLLO CE had whole price checks fail. Real
+# positions keep the strict 5s rule; paper exits just become a little less
+# precise on thin contracts. 0 = off (paper behaves exactly like real).
+PAPER_LTP_MAX_AGE_SECONDS = float(os.getenv("PAPER_LTP_MAX_AGE_SECONDS", "30"))
+
 # ---------------------------------------------------------------------------
 # Misc
 # ---------------------------------------------------------------------------

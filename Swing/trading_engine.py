@@ -55,6 +55,7 @@ from .position_store import (
     price_past_hard_stop, price_past_target, resolve_instrument_side,
     resolved_option_type_for, target_price_for, unrealized_pnl_rs,
 )
+from Options import config as odc_config
 from Options.dhan_client import IST, OrderResult, OrderStatus, dhan_wrapper
 
 logger = logging.getLogger("swing_trading_engine")
@@ -1442,6 +1443,14 @@ async def _get_ltp(position: Position) -> float:
     ltp = await loop.run_in_executor(None, dhan_wrapper.get_cached_option_ltp, position.trading_symbol)
     if ltp is not None:
         return ltp
+    if position.product_type == "PAPER" and odc_config.PAPER_LTP_MAX_AGE_SECONDS > 0:
+        # Swing paper engine positions (30 Sep 2026) - see
+        # Options/config.py's PAPER_LTP_MAX_AGE_SECONDS: keep the shared REST
+        # quote budget for real positions.
+        ltp = await loop.run_in_executor(None, dhan_wrapper.get_recent_cached_option_ltp,
+                                         position.trading_symbol, odc_config.PAPER_LTP_MAX_AGE_SECONDS)
+        if ltp is not None:
+            return ltp
     async with dhan_wrapper.ltp_rest_fallback_semaphore:
         try:
             ltp = await asyncio.wait_for(

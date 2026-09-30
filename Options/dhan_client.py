@@ -437,6 +437,7 @@ class DhanWrapper:
             "ltp_cache_hits": 0,
             "ltp_cache_misses": 0,
             "ltp_cache_stale": 0,
+            "paper_ltp_recent_cache_hits": 0,
             "order_status_cache_hits": 0,
             "order_status_rest_calls": 0,
             "price_ticks_received": 0,
@@ -1389,6 +1390,29 @@ class DhanWrapper:
             self.stats["ltp_cache_hits"] += 1
         else:
             self.stats["ltp_cache_misses"] += 1
+        return ltp
+
+    def get_recent_cached_option_ltp(self, trading_symbol: str, max_age_seconds: float) -> Optional[float]:
+        """PAPER positions only - see config.PAPER_LTP_MAX_AGE_SECONDS. Same
+        WS cache as get_cached_option_ltp, but accepts a tick up to
+        max_age_seconds old, so a quiet thin option held on PAPER doesn't
+        spend Dhan's shared REST quote budget (which real positions need)
+        every LTP_STALE_AFTER_SECONDS. None = no usable tick (caller falls
+        back to REST as before). Never raises."""
+        if not config.ENABLE_WS_FEED or max_age_seconds <= 0:
+            return None
+        try:
+            meta = self._instrument_meta(trading_symbol, expected_exchange=self._expected_exchange_for(trading_symbol))
+        except Exception:  # noqa: BLE001
+            return None
+        security_id = meta["security_id"]
+        ltp = self._ltp_cache.get(security_id)
+        last_update = self._ltp_cache_ts.get(security_id)
+        if ltp is None or last_update is None:
+            return None
+        if (datetime.now(IST) - last_update).total_seconds() > max_age_seconds:
+            return None
+        self.stats["paper_ltp_recent_cache_hits"] += 1
         return ltp
 
     def note_rest_ltp(self, trading_symbol: str, ltp: float) -> None:
