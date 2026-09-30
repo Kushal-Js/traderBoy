@@ -9,7 +9,7 @@ every NIFTY 50 stock included, instead of the 15-stock watchlist):
     continuous 5-min series (bollinger_research.fires_with_snapshots), BULLISH
     only; entry the minute a 1-min HIGH touches the pending trigger armed at
     the previous 5-min close (same day), fill_u = max(trigger, minute open);
-    sides="both" (user follow-up) also takes BEARISH triggers - a 1-min LOW
+    sides="both" (user follow-up) also takes BEARISH triggers ("short" = only them) - a 1-min LOW
     touching the trigger, fill_u = min(trigger, minute open), ATM PE - as a
     separately reported variant;
   - ATM CE, nearest monthly expiry rolled within 2 trading days, min premium
@@ -79,9 +79,9 @@ def candidates_for(sym: str, sides: str) -> list[tuple]:
         p = snap[bi - 1]
         if p is None:
             continue
-        if p[0] == "BULLISH" and m["highs"][k] >= p[1]:
+        if sides != "short" and p[0] == "BULLISH" and m["highs"][k] >= p[1]:
             out.append((int(t), sym, "LONG", max(p[1], m["opens"][k]), m["closes"][k], fts[bi - 1]))
-        elif sides == "both" and p[0] == "BEARISH" and m["lows"][k] <= p[1]:
+        elif sides in ("both", "short") and p[0] == "BEARISH" and m["lows"][k] <= p[1]:
             out.append((int(t), sym, "SHORT", min(p[1], m["opens"][k]), m["closes"][k], fts[bi - 1]))
     return out
 

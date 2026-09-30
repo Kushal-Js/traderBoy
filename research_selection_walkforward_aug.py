@@ -20,6 +20,7 @@ Run after 15:30 IST (shares the live bot's Dhan data budget):
 """
 from __future__ import annotations
 
+import csv
 import json
 import sys
 import time
@@ -37,7 +38,10 @@ FIVE_CHUNKS = [("2026-05-25", "2026-08-09"), ("2026-08-10", "2026-09-30")]
 ONE_MIN_FROM, ONE_MIN_TO = "2026-07-31", "2026-09-30"
 AUG_END = date(2026, 8, 31)
 # HYBRID = top 15 (live); HYBRID_TOP10 / HYBRID_TOP20 = watchlist-size check (user request 30 Sep).
-RULES = ["HYBRID", "HYBRID_TOP10", "HYBRID_TOP20", "STRATEGY_FIT", "TREND_ATH", "TREND_ATH_GATE", "MOMENTUM"] + \
+# BEAR_HYBRID (30 Sep, user idea "buy PE too") = mirrored weakest-stock list for the PE book, picked here so
+# research_super_bollinger_bearish_side.py aug uses the same walk-forward decisions (simulated long here too).
+RULES = ["HYBRID", "HYBRID_TOP10", "HYBRID_TOP20", "BEAR_HYBRID", "STRATEGY_FIT", "TREND_ATH", "TREND_ATH_GATE",
+         "MOMENTUM"] + \
     [f"RANDOM_{k}" for k in range(1, 11)]
 
 
@@ -100,7 +104,22 @@ def run() -> None:
     u.ROOT = LONG
     u.WINDOW_FROM, u.WINDOW_TO = date(2026, 8, 3), date(2026, 9, 29)
     sys.argv = [sys.argv[0]] + RULES
+    # Keep each rule's trades (30 Sep): HYBRID_trades.csv / BEAR_HYBRID_trades.csv for the follow-up runs.
+    captured, simulate = {}, u.simulate
+
+    def _capture(syms, cap, pricer, label, *a, **k):
+        tr, stats = simulate(syms, cap, pricer, label, *a, **k)
+        captured[label] = tr
+        return tr, stats
+    u.simulate = _capture
     r.main()
+    u.simulate = simulate
+    for label in ("HYBRID", "BEAR_HYBRID"):
+        if captured.get(label):
+            with open(LONG / f"{label}_trades.csv", "w", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=list(captured[label][0].keys()))
+                w.writeheader()
+                w.writerows(captured[label])
     report = json.loads((LONG / "selection_walkforward.json").read_text())
     print("\n=== August (3-28 Aug, never used to design HYBRID) vs September ===", flush=True)
     for rule, v in report.items():

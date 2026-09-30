@@ -94,8 +94,36 @@ def momentum_scores(dailies: dict, as_of: date) -> dict[str, float]:
     return out
 
 
-def fit_proxy(sym: str) -> dict[date, float]:
-    """Per-day underlying-proxy PnL (%) of the Super Bollinger rules on 5-min bars."""
+def weakness_scores(dailies: dict, as_of: date) -> dict[str, float]:
+    """Mirror of momentum_scores for the bearish side: 20-day LOSS per unit
+    of volatility (only stocks that fell)."""
+    out = {}
+    for sym, d in dailies.items():
+        sl = wf.daily_slice(d, as_of)
+        c = sl["close"]
+        if len(c) < 25:
+            continue
+        vol = wf.vol_from_closes(c)
+        ret = c[-1] / c[-21] - 1
+        if vol and ret < 0:
+            out[sym] = -ret / vol
+    return out
+
+
+_bear_fit_cache: dict = {}
+
+
+def bear_fits(syms) -> dict:
+    for s in syms:
+        if s not in _bear_fit_cache:
+            _bear_fit_cache[s] = fit_proxy(s, "BEARISH") if (FIVE / f"{s}_5min.json").exists() else {}
+    return _bear_fit_cache
+
+
+def fit_proxy(sym: str, side: str = "BULLISH") -> dict[date, float]:
+    """Per-day underlying-proxy PnL (%) of the Super Bollinger rules on 5-min bars
+    (side="BEARISH": the mirrored rules on BEARISH triggers, i.e. the PE book)."""
+    sg = 1 if side == "BULLISH" else -1
     fast = json.loads((FIVE / f"{sym}_5min.json").read_text())
     if not fast.get("closes") or len(fast["closes"]) < 300:
         return {}
@@ -108,21 +136,22 @@ def fit_proxy(sym: str) -> dict[date, float]:
     while i < len(ts):
         p = snap[i - 1]
         t_i = datetime.fromtimestamp(ts[i], IST)
-        if (p and p[0] == "BULLISH" and days[i - 1] == days[i] and t_i.time() < dtime(14, 0) and h[i] >= p[1]):
-            e = max(p[1], o[i])
+        if (p and p[0] == side and days[i - 1] == days[i] and t_i.time() < dtime(14, 0)
+                and (h[i] >= p[1] if sg == 1 else l[i] <= p[1])):
+            e = max(p[1], o[i]) if sg == 1 else min(p[1], o[i])
             peak, out, j = 0.0, None, i
             while j < len(ts) and days[j] == days[i]:
-                lo = (l[j] - e) / e * 100
+                lo = ((l[j] - e) if sg == 1 else (e - h[j])) / e * 100      # worst move against the trade
                 if lo <= -1.0:
                     out = -1.0
                     break
                 if peak >= 0.4 and lo <= 0:
                     out = 0.0
                     break
-                peak = max(peak, (h[j] - e) / e * 100)
+                peak = max(peak, ((h[j] - e) if sg == 1 else (e - l[j])) / e * 100)
                 j += 1
             if out is None:
-                out = (c[j - 1] - e) / e * 100
+                out = sg * (c[j - 1] - e) / e * 100
             res[days[i]] += out
             n[days[i]] += 1
             while j < len(ts) and days[j] == days[i] and j < i + 1:
@@ -157,6 +186,16 @@ def select(rule: str, as_of: date, dailies: dict, universe: list[str], fits: dic
         ath = wf.ath_scores({s: dailies[s] for s in gated}, as_of)
         pool = sorted(ath, key=lambda s: ath[s], reverse=True)[:40]
         fit = _fit_scores(pool, as_of, fits, days)
+        ranked = sorted(fit, key=lambda s: fit[s], reverse=True)[:top_n]
+        ranked += [s for s in pool if s not in ranked][:top_n - len(ranked)]
+        return set(ranked)
+    if rule == "BEAR_HYBRID":
+        # Mirror of HYBRID for the PE book (30 Sep 2026): the 40 weakest gated
+        # stocks (20-day loss per unit of volatility), ranked by the mirrored
+        # rules' own 20-session proxy PnL on BEARISH triggers.
+        weak = weakness_scores({s: dailies[s] for s in gated}, as_of)
+        pool = sorted(weak, key=lambda s: weak[s], reverse=True)[:40]
+        fit = _fit_scores(pool, as_of, bear_fits(pool), days)
         ranked = sorted(fit, key=lambda s: fit[s], reverse=True)[:top_n]
         ranked += [s for s in pool if s not in ranked][:top_n - len(ranked)]
         return set(ranked)
