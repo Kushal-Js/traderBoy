@@ -22,7 +22,7 @@ Defaults = the best-performing rules from the 29 Sep 2026 backtest
 (backtest_bollinger_hold_long_exit_variants.py, policy "G'"): buy the ATM CE
 on a BULLISH resting trigger, Rs 4,500 max loss, breakeven stop once the
 trade has been Rs 1,500 in profit, no new entries from 14:00, square off at
-15:15, 5 concurrent trades, NSE stocks only.
+15:15, 5 concurrent trades, NSE stocks (+ NIFTY/BANKNIFTY when index_enabled).
 """
 from __future__ import annotations
 
@@ -42,6 +42,9 @@ ENV_FILE = Path(".env")
 # Not in _FIELDS - owned by paper_mode_control / capacity_control (see docstring).
 PAPER_MODE_ENABLED_DEFAULT = os.getenv("SUPER_BOLLINGER_PAPER_MODE_ENABLED", "true").lower() == "true"
 MAX_CONCURRENT_TRADES_DEFAULT = int(os.getenv("SUPER_BOLLINGER_MAX_CONCURRENT_TRADES", "5"))
+# Paper/real for the permanent index symbols (NIFTY/BANKNIFTY) - its own runtime
+# toggle "SuperBollingerIndex" in paper_mode_control, independent of the stocks'.
+INDEX_PAPER_MODE_ENABLED_DEFAULT = os.getenv("SUPER_BOLLINGER_INDEX_PAPER_MODE_ENABLED", "true").lower() == "true"
 
 
 def _parse_bool(v) -> bool:
@@ -78,6 +81,12 @@ def _parse_scale_mode(v) -> str:
     if v not in ("off", "shadow", "paper"):
         raise ValueError("must be off, shadow or paper")
     return v
+
+
+def _check_index_symbols(v) -> str | None:
+    from Bollinger import config as bcfg  # function-local: no import cycle at module load
+    bad = [x for x in v if x not in bcfg.INDEX_SYMBOLS]
+    return f"not an index symbol: {', '.join(bad)} (allowed: {', '.join(sorted(bcfg.INDEX_SYMBOLS))})" if bad else None
 
 
 def _to_env(v) -> str:
@@ -132,6 +141,16 @@ _FIELDS = {
     # Shadow-only candidate rules (logged, never acted on).
     "shadow_stop_reenter_rs": (float, "SUPER_BOLLINGER_SHADOW_STOP_REENTER_RS", "2000",
                                lambda v: None if v >= 0 else "must be >= 0 (0 = off)"),
+    # ---- Permanent index symbols (30 Sep 2026, user request) ----
+    # NIFTY/BANKNIFTY are traded by Super Bollinger ALONGSIDE the weekly
+    # HYBRID stock watchlist and are never part of that list, so the Friday
+    # refresh cannot drop or reshuffle them. index_enabled=false removes them
+    # from trading (open positions are still managed to their exit);
+    # index_symbols is which indices. Paper/real for them is the separate
+    # runtime toggle "SuperBollingerIndex" (POST /paper-mode, or
+    # index_paper_mode_enabled on POST /super-bollinger/config).
+    "index_enabled": (_parse_bool, "SUPER_BOLLINGER_INDEX_ENABLED", "false", None),
+    "index_symbols": (_parse_symbols, "SUPER_BOLLINGER_INDEX_SYMBOLS", "NIFTY,BANKNIFTY", _check_index_symbols),
     # ---- Scale-in variant (SuperBollinger/scale.py, 30 Sep 2026) ----
     # scale_mode: off | shadow (log would-add/would-exit) | paper (the added
     # lots live in their own paper book; real trades are never touched).

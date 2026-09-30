@@ -104,10 +104,30 @@ def _position_exit_reason(pos: Position, ltp: float) -> Optional[str]:
                            settings.get("max_loss_rs"), settings.get("breakeven_after_rs"))
 
 
+INDEX_STRATEGY = "SuperBollingerIndex"   # paper_mode_control toggle for the permanent index symbols
+
+
+def index_symbols() -> list[str]:
+    """The permanent index symbols (NIFTY/BANKNIFTY) currently switched on."""
+    if not settings.get("index_enabled"):
+        return []
+    return [s for s in settings.get("index_symbols")
+            if s in bcfg.INDEX_SYMBOLS and s not in settings.get("excluded_symbols")]
+
+
+def is_paper_symbol(symbol: str) -> bool:
+    """Paper or real for a NEW entry: index symbols follow their own runtime
+    toggle, everything else the strategy's."""
+    return paper_mode_control.is_paper_mode_enabled(INDEX_STRATEGY if symbol in bcfg.INDEX_SYMBOLS else STRATEGY)
+
+
 def is_eligible_symbol(symbol: str) -> bool:
-    """NSE stocks only: never an index, never an MCX commodity."""
-    if symbol in bcfg.INDEX_SYMBOLS or symbol in settings.get("excluded_symbols"):
+    """NSE stocks, plus the permanent index symbols when index_enabled; never
+    an MCX commodity."""
+    if symbol in settings.get("excluded_symbols"):
         return False
+    if symbol in bcfg.INDEX_SYMBOLS:
+        return symbol in index_symbols()
     try:
         return not dhan_wrapper.is_mcx_commodity(symbol)
     except Exception:  # noqa: BLE001
@@ -115,8 +135,12 @@ def is_eligible_symbol(symbol: str) -> bool:
 
 
 async def eligible_symbols() -> list[str]:
+    """The weekly HYBRID stock watchlist + the permanent index symbols. The
+    indices are added here, never stored in the watchlist file, so the Friday
+    refresh cannot drop or reshuffle them."""
     syms, _source = await super_watchlist.symbols()
-    return [s for s in syms if is_eligible_symbol(s)]
+    out = [s for s in syms if s not in bcfg.INDEX_SYMBOLS and is_eligible_symbol(s)]
+    return out + [s for s in index_symbols() if s not in out]
 
 
 def _square_off_now() -> bool:
@@ -427,7 +451,7 @@ async def _can_enter_symbol(symbol: str) -> bool:
 
 
 async def _enter(symbol: str, trigger_price: float, stop_price: float, source: str) -> None:
-    if paper_mode_control.is_paper_mode_enabled(STRATEGY):
+    if is_paper_symbol(symbol):
         result = await enter_paper(symbol, trigger_price, stop_price, source)
     else:
         result = await enter_real(symbol, trigger_price, stop_price, source)

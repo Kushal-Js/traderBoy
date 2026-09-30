@@ -12,7 +12,7 @@ Endpoints:
                                           "entry_cutoff_time": "13:30", "max_concurrent_trades": 4}
   GET  /super-bollinger/positions         open real + paper positions, today's orders
   GET  /super-bollinger/trades?day=       closed real + paper trades for a day, with PnL totals
-  GET  /super-bollinger/symbols           which symbols it trades now, and from which list
+  GET  /super-bollinger/symbols           which symbols it trades now (weekly stock list + permanent index symbols)
   GET  /super-bollinger/watchlist         its own HYBRID-picked watchlist (data/super_bollinger_watchlist)
   POST /super-bollinger/watchlist/replace replace it by hand, e.g. {"symbols": ["LAURUSLABS", "ZYDUSLIFE"]}
   POST /super-bollinger/square-off-now    manual kill switch - exits every open real position
@@ -41,8 +41,8 @@ from . import supervisor
 from . import watchlist as super_watchlist
 from .state import (HEDGE_STRATEGY, STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store, paper_book,
                     position_store)
-from .trading_engine import (eligible_symbols, install_tick_entries, monitor_loop, on_price_tick, open_count,
-                             reconcile_broker_positions, square_off_all)
+from .trading_engine import (INDEX_STRATEGY, eligible_symbols, index_symbols, install_tick_entries, monitor_loop,
+                             on_price_tick, open_count, reconcile_broker_positions, square_off_all)
 
 logger = logging.getLogger("super_bollinger_main")
 router = APIRouter()
@@ -108,8 +108,12 @@ async def lifespan(app: FastAPI):
                 "REAL" if real else "PAPER", capacity_control.get_max_concurrent_trades(STRATEGY),
                 {k: v["value"] for k, v in settings.snapshot().items()})
     if real:
-        logger.warning("[%s] REAL TRADING ON - real orders will be placed for NSE stocks on data/bollinger_watchlist.",
+        logger.warning("[%s] REAL TRADING ON - real orders will be placed for the stocks on data/super_bollinger_watchlist.",
                        STRATEGY)
+    idx = index_symbols()
+    if idx:
+        logger.warning("[%s] index symbols %s are traded (permanent, outside the weekly watchlist) - mode=%s", STRATEGY,
+                       idx, "PAPER" if paper_mode_control.is_paper_mode_enabled(INDEX_STRATEGY) else "REAL")
     yield
     if _monitor_task:
         _monitor_task.cancel()
@@ -122,10 +126,13 @@ def _config_view() -> dict:
         "strategy": STRATEGY,
         "paper_mode_enabled": {"value": paper_mode_control.is_paper_mode_enabled(STRATEGY),
                                "source": paper_mode_control.paper_mode_source(STRATEGY)},
+        "index_paper_mode_enabled": {"value": paper_mode_control.is_paper_mode_enabled(INDEX_STRATEGY),
+                                     "source": paper_mode_control.paper_mode_source(INDEX_STRATEGY)},
         "max_concurrent_trades": {"value": capacity_control.get_max_concurrent_trades(STRATEGY),
                                   "source": capacity_control.capacity_source(STRATEGY)},
         **settings.snapshot(),
-        "always_excluded": "index symbols (NIFTY/BANKNIFTY) and MCX commodities",
+        "index_symbols_traded_now": index_symbols(),
+        "always_excluded": "MCX commodities (index symbols are traded only when index_enabled)",
     }
 
 
@@ -144,10 +151,13 @@ async def update_config(payload: dict[str, Any]):
     backstop order keeps the level it was placed at)."""
     changes = dict(payload)
     paper = changes.pop("paper_mode_enabled", None)
+    index_paper = changes.pop("index_paper_mode_enabled", None)
     capacity = changes.pop("max_concurrent_trades", None)
     parsed, errors = settings.validate(changes)
     if paper is not None and not isinstance(paper, bool):
         errors.append("paper_mode_enabled: must be true or false")
+    if index_paper is not None and not isinstance(index_paper, bool):
+        errors.append("index_paper_mode_enabled: must be true or false")
     if capacity is not None and (not isinstance(capacity, int) or isinstance(capacity, bool) or capacity < 0):
         errors.append("max_concurrent_trades: must be an integer >= 0")
     if errors:
@@ -159,9 +169,12 @@ async def update_config(payload: dict[str, Any]):
     env_synced = await settings.update(parsed) if parsed else True
     if paper is not None:
         await paper_mode_control.set_paper_mode(STRATEGY, paper)
+    if index_paper is not None:
+        await paper_mode_control.set_paper_mode(INDEX_STRATEGY, index_paper)
     if capacity is not None:
         await capacity_control.set_max_concurrent_trades(STRATEGY, capacity)
     return {"applied": {**parsed, **({"paper_mode_enabled": paper} if paper is not None else {}),
+                        **({"index_paper_mode_enabled": index_paper} if index_paper is not None else {}),
                         **({"max_concurrent_trades": capacity} if capacity is not None else {})},
             "env_synced": env_synced, "warnings": warnings, "config": _config_view()}
 
@@ -204,13 +217,18 @@ async def get_trades(day: Optional[str] = None):
 async def get_symbols():
     _all, source = await super_watchlist.symbols()
     symbols = await eligible_symbols()
-    return {"count": len(symbols), "source": source, "symbols": symbols}
+    idx = index_symbols()
+    return {"count": len(symbols), "source": source, "symbols": symbols,
+            "permanent_index_symbols": idx,
+            "index_mode": ("PAPER" if paper_mode_control.is_paper_mode_enabled(INDEX_STRATEGY) else "REAL") if idx else "off"}
 
 
 @router.get("/super-bollinger/watchlist")
 async def get_watchlist():
     symbols, source = await super_watchlist.symbols()
-    return {"file": str(super_watchlist.WATCHLIST_FILE), "source": source, "count": len(symbols), "symbols": symbols}
+    return {"file": str(super_watchlist.WATCHLIST_FILE), "source": source, "count": len(symbols), "symbols": symbols,
+            "permanent_index_symbols": index_symbols(),
+            "note": "index symbols are not stored in this file - the weekly refresh never touches them"}
 
 
 @router.post("/super-bollinger/watchlist/replace")

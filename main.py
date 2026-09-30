@@ -415,7 +415,7 @@ async def funds_buckets():
     return await loop.run_in_executor(None, fund_allocation.snapshot)
 
 
-PAPER_MODE_STRATEGIES = paper_mode_control.STRATEGIES  # ("Options", "Luxury", "Swing", "Bollinger", "SwingIndex", "SwingMCX", "SuperBollinger")
+PAPER_MODE_STRATEGIES = paper_mode_control.STRATEGIES  # incl. the index/MCX pseudo-strategies, see paper_mode_control
 
 
 class PaperModeRequest(BaseModel):
