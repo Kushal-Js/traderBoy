@@ -77,6 +77,18 @@ _lock = asyncio.Lock()
 _claimed: dict[str, str] = {}  # underlying_symbol -> strategy name currently entering it
 
 
+def same_contract_key(underlying_symbol: str) -> str:
+    """A SEPARATE claim key for "strategies that could end up holding the same
+    option contract of this underlying" - Swing, Bollinger and Super Bollinger
+    (30 Sep 2026). Dhan nets one contract into one position and an exit
+    reconciles to the broker's whole quantity, so two of them holding the same
+    contract would close each other's trade. Kept apart from the plain
+    underlying key above on purpose: Swing stays independent of Options/
+    Luxury (user decision 1 Sep 2026) and only becomes mutually exclusive with
+    the Bollinger family."""
+    return f"{underlying_symbol}|same-contract"
+
+
 async def try_claim(underlying_symbol: str, strategy: str) -> bool:
     """Atomically claims underlying_symbol for `strategy` if no OTHER
     strategy currently holds it. Returns True (and records the claim)

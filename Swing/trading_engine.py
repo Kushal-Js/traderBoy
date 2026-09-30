@@ -30,6 +30,7 @@ scattered branches in this file.
 """
 from __future__ import annotations
 
+import cross_strategy_registry
 import order_safety
 
 import asyncio
@@ -685,7 +686,47 @@ def _exit_reason_for(position: Position, ltp: float) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 # Entry
 # --------------------------------------------------------------------------- #
+def bollinger_family_real_holder(symbol: str) -> Optional[str]:
+    """Name of the Bollinger-family book that holds - or is entering - a REAL
+    position in `symbol`: "Bollinger", "SuperBollinger" or "SuperBollingerHedge"
+    (its supervisor's PE hedge). Imported lazily (they import Swing modules)."""
+    try:
+        from Bollinger.position_store import position_store as bollinger_store
+        from SuperBollinger.state import hedge_store, position_store as super_store
+    except Exception:  # noqa: BLE001
+        return None
+    for name, store in (("Bollinger", bollinger_store), ("SuperBollinger", super_store), ("SuperBollingerHedge", hedge_store)):
+        if symbol in store.live_positions or symbol in store.reserved_symbols:
+            return name
+    return None
+
+
 async def enter_position_for_stock(symbol: str, regime: str) -> dict:
+    """REAL-money entry, guarded (30 Sep 2026, user request "add the index
+    guard") against Bollinger / Super Bollinger holding the same underlying
+    for real: all three buy index and stock options, Dhan nets one contract
+    into one position, and an exit reconciles to the broker's whole quantity
+    and cancels the contract's resting stop order - so one strategy's exit
+    would close the other's trade. One real position per underlying across
+    Swing and the Bollinger family, first come first served; paper entries
+    never come through here. The claim is held for the whole attempt."""
+    if not (await mcx_registry.options_only(symbol) or config.BASKET_TYPE.upper() == "OPTIONS"):
+        return await _enter_position_for_stock(symbol, regime)   # futures/equity: no option contract to share
+    key = cross_strategy_registry.same_contract_key(symbol)
+    if not await cross_strategy_registry.try_claim(key, "Swing"):
+        return {"symbol": symbol, "status": "skipped", "reason": "entry_in_progress_by_other_strategy"}
+    try:
+        holder = bollinger_family_real_holder(symbol)
+        if holder:
+            logger.info("%s: skipped - %s already holds a real position in this underlying", symbol, holder)
+            await _record_swing_event("ENTRY_SKIPPED_HELD_BY_OTHER_STRATEGY", symbol, {"held_by": holder})
+            return {"symbol": symbol, "status": "skipped", "reason": f"held_by_{holder}"}
+        return await _enter_position_for_stock(symbol, regime)
+    finally:
+        await cross_strategy_registry.release_claim(key, "Swing")
+
+
+async def _enter_position_for_stock(symbol: str, regime: str) -> dict:
     """regime: "BULLISH"/"BEARISH", already confirmed by _evaluate_entry_
     signal. Reads config.BASKET_TYPE FRESH (not cached anywhere) so a
     config change takes effect on the very next entry, no restart needed."""

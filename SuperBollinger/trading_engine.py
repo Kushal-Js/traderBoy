@@ -58,7 +58,7 @@ from Options.dhan_client import OrderResult, OrderStatus, dhan_wrapper
 from Swing import candle_feed
 from Swing.position_store import broker_stop_trigger_and_limit
 
-from . import live_state, settings
+from . import live_state, pricing, settings
 from .state import EVENTS_LOG, STRATEGY, halted, paper_book, position_store
 
 logger = logging.getLogger("super_bollinger_engine")
@@ -169,15 +169,18 @@ async def _resolve_leg(symbol: str) -> tuple[dict, float]:
     leg = await engine._resolve_option_leg(symbol, "BULLISH", PROFILE)
     leg["quantity"] = leg["lot_size"] * settings.get("quantity_lots")
     leg["pnl_multiplier"] = leg["quantity"]
-    try:
-        price = await dhan_wrapper.get_option_ltp_async(leg["trading_symbol"])
-    except Exception:  # noqa: BLE001
-        logger.exception("[%s] %s: could not price %s for the premium gate", STRATEGY, symbol, leg["trading_symbol"])
-        price = None
+    # Last traded price, else the live order book (30 Sep 2026: two real entries were lost as
+    # "low premium" with premium = null when the price call returned nothing - see pricing.py).
+    price, source = await pricing.price_for_entry(leg["trading_symbol"])
     minimum = settings.get("min_premium_rs")
-    if price is None or price < minimum:
-        await _event("ENTRY_SKIPPED_LOW_PREMIUM", symbol, {"trading_symbol": leg["trading_symbol"],
-                                                           "premium": price, "minimum": minimum})
+    if price is None:
+        logger.error("[%s] %s: no price at all for %s - entry skipped", STRATEGY, symbol, leg["trading_symbol"])
+        await _event("ENTRY_SKIPPED_NO_PRICE", symbol, {"trading_symbol": leg["trading_symbol"]})
+        raise engine._SkipEntry({"symbol": symbol, "status": "skipped", "reason": "no_price",
+                                 "trading_symbol": leg["trading_symbol"], "premium": None})
+    if price < minimum:
+        await _event("ENTRY_SKIPPED_LOW_PREMIUM", symbol, {"trading_symbol": leg["trading_symbol"], "premium": price,
+                                                           "minimum": minimum, "price_source": source})
         raise engine._SkipEntry({"symbol": symbol, "status": "skipped", "reason": "premium_below_minimum",
                                  "trading_symbol": leg["trading_symbol"], "premium": price})
     return leg, price
@@ -319,11 +322,18 @@ async def enter_real(symbol: str, trigger_price: float, stop_price: float, sourc
     Bollinger strategy holds (or is entering) a real position in it."""
     if not await cross_strategy_registry.try_claim(symbol, STRATEGY):
         return {"symbol": symbol, "status": "skipped", "reason": "entry_in_progress_by_other_strategy"}
+    key = cross_strategy_registry.same_contract_key(symbol)   # also mutually exclusive with Swing (30 Sep 2026)
     try:
+        if not await cross_strategy_registry.try_claim(key, STRATEGY):
+            return {"symbol": symbol, "status": "skipped", "reason": "entry_in_progress_by_other_strategy"}
         if symbol in bollinger_store.live_positions or symbol in bollinger_store.reserved_symbols:
             logger.info("[%s] %s: skipped - Bollinger already holds a real position in this stock", STRATEGY, symbol)
             await _event("ENTRY_SKIPPED_HELD_BY_BOLLINGER", symbol, {})
             return {"symbol": symbol, "status": "skipped", "reason": "held_by_bollinger"}
+        if engine.swing_real_holds(symbol):
+            logger.info("[%s] %s: skipped - Swing already holds a real option position in this underlying", STRATEGY, symbol)
+            await _event("ENTRY_SKIPPED_HELD_BY_SWING", symbol, {})
+            return {"symbol": symbol, "status": "skipped", "reason": "held_by_swing"}
         if not await position_store.reserve_symbol(symbol):
             return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
         try:
@@ -333,6 +343,7 @@ async def enter_real(symbol: str, trigger_price: float, stop_price: float, sourc
                 await position_store.record_failed_entry(symbol)
                 await position_store.release_symbol(symbol)
     finally:
+        await cross_strategy_registry.release_claim(key, STRATEGY)
         await cross_strategy_registry.release_claim(symbol, STRATEGY)
 
 
@@ -465,7 +476,7 @@ async def _check_real(symbol: str, position: Position) -> None:
     if await engine._check_broker_stop_already_filled(symbol, position, position_store):
         return
     try:
-        ltp = await engine._get_ltp(position)
+        ltp = await pricing.live_price(position)   # price call, else the order book's mid
     except Exception:  # noqa: BLE001
         logger.exception("[%s] could not fetch LTP for %s", STRATEGY, position.trading_symbol)
         await engine._handle_ltp_staleness(symbol, position, position_store)

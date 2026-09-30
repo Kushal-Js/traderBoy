@@ -456,20 +456,43 @@ def super_bollinger_real_holds(symbol: str) -> bool:
     return symbol in super_store.live_positions or symbol in super_store.reserved_symbols
 
 
+def swing_real_holds(symbol: str) -> bool:
+    """True if Swing holds - or is entering - a REAL position in `symbol`
+    (30 Sep 2026 same-contract guard, see cross_strategy_registry.
+    same_contract_key). A Swing FUTURES/EQUITY position cannot share an
+    option contract with us and does not count. Imported lazily."""
+    try:
+        from Swing.position_store import position_store as swing_store
+    except Exception:  # noqa: BLE001
+        return False
+    pos = swing_store.live_positions.get(symbol)
+    if pos is not None:
+        return str(getattr(pos, "basket_type", "OPTIONS")).upper() == "OPTIONS"
+    return symbol in swing_store.reserved_symbols
+
+
 async def enter_position_for_stock(symbol: str, entry_signal: str, trigger_price: float,
                                     stop_price: float, stop_reference_price: float) -> dict:
-    """REAL-money entry, guarded against Super Bollinger holding the same
-    stock for real (see super_bollinger_real_holds). The claim is held for
-    the whole entry attempt so the two strategies can never race each other
-    into the same contract."""
+    """REAL-money entry, guarded against Super Bollinger (see
+    super_bollinger_real_holds) or Swing (swing_real_holds) holding the same
+    underlying for real. The claims are held for the whole entry attempt so
+    the strategies can never race each other into the same contract."""
     if not await cross_strategy_registry.try_claim(symbol, "Bollinger"):
         return {"symbol": symbol, "status": "skipped", "reason": "entry_in_progress_by_other_strategy"}
+    key = cross_strategy_registry.same_contract_key(symbol)
     try:
+        if not await cross_strategy_registry.try_claim(key, "Bollinger"):
+            return {"symbol": symbol, "status": "skipped", "reason": "entry_in_progress_by_other_strategy"}
         if super_bollinger_real_holds(symbol):
             logger.info("%s: skipped - Super Bollinger already holds a real position in this stock", symbol)
             return {"symbol": symbol, "status": "skipped", "reason": "held_by_super_bollinger"}
+        if swing_real_holds(symbol):
+            logger.info("%s: skipped - Swing already holds a real option position in this underlying", symbol)
+            await _record_bollinger_event("ENTRY_SKIPPED_HELD_BY_SWING", symbol, {})
+            return {"symbol": symbol, "status": "skipped", "reason": "held_by_swing"}
         return await _enter_position_for_stock(symbol, entry_signal, trigger_price, stop_price, stop_reference_price)
     finally:
+        await cross_strategy_registry.release_claim(key, "Bollinger")
         await cross_strategy_registry.release_claim(symbol, "Bollinger")
 
 

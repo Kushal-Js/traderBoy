@@ -54,7 +54,7 @@ from Swing import candle_feed
 from Swing.position_store import broker_stop_trigger_and_limit
 from SuperTrader.strategy import atr as atr_series
 
-from . import best_price_memory, live_state, scale, settings
+from . import best_price_memory, live_state, pricing, scale, settings
 from .state import (EVENTS_LOG, HEDGE_STRATEGY, STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store,
                     paper_book, position_store)
 from .trading_engine import (NO_TRAILING, PROFILE, retry_unfilled_buy, settle_unfilled_order,
@@ -62,6 +62,7 @@ from .trading_engine import (NO_TRAILING, PROFILE, retry_unfilled_buy, settle_un
 
 logger = logging.getLogger("super_bollinger_supervisor")
 LOOP_SECONDS = 2
+MARK_CHECK_FROM = 0.6      # from 60% of the hedge trigger on, also judge the CE's loss by the bid/ask mid
 _track: dict = {}          # (symbol, CE opened_at) -> per-CE-trade supervisor state
 _hedge_inflight: set = set()
 
@@ -230,9 +231,22 @@ async def check_ce(symbol: str, pos: Position, ltp: float, ce_is_real: bool) -> 
             await _log("SHADOW_STOP_REENTER_WOULD_REBUY", symbol, ce=pos.trading_symbol, ce_ltp=ltp, real_ce=ce_is_real)
 
     mode = settings.get("hedge_mode")
+    trigger = settings.get("hedge_trigger_rs")
     if (mode == "off" or st["hedged"] or symbol in _hedge_inflight or halted_today()
-            or loss < settings.get("hedge_trigger_rs")
             or now.strftime("%H:%M") >= settings.get("hedge_cutoff_time")):
+        return
+    if ce_is_real and trigger * MARK_CHECK_FROM <= loss < trigger:
+        # Close to the trigger on the last TRADED price: a thin option's last trade can be minutes old
+        # (APLAPOLLO 2240 CE, 30 Sep: seen at the trigger 15:03:56, the stock's low was 14:55). Judge the
+        # loss by the live bid/ask mid as well.
+        mark, source = await pricing.mark_for_loss(pos, ltp)
+        if source == "mid":
+            ltp, loss = mark, (pos.entry_price - mark) * pos.pnl_multiplier
+            if loss >= trigger and not st.get("mark_logged"):
+                st["mark_logged"] = True
+                await _log("HEDGE_TRIGGER_SEEN_ON_MID", symbol, ce=pos.trading_symbol, ce_mid=round(mark, 2),
+                           loss=round(loss))
+    if loss < trigger:
         return
     spot, atr_v, mult = _spot(symbol), _atr(symbol), settings.get("hedge_atr_mult")
     drop = (st["entry_spot"] - spot) if (spot is not None and st["entry_spot"] is not None) else None
@@ -462,7 +476,7 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
 # --------------------------------------------------------------------------- #
 async def _ltp(pos: Position) -> Optional[float]:
     try:
-        return await engine._get_ltp(pos)
+        return await pricing.live_price(pos)   # price call, else the order book's mid (real positions)
     except Exception:  # noqa: BLE001
         return None
 
