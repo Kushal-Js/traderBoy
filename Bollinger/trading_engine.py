@@ -41,6 +41,7 @@ from typing import Optional
 import entry_backlog
 import broker_flat_check
 import cross_strategy_registry
+import order_safety
 import fund_allocation
 import paper_mode_control
 from trade_history import append_jsonl, attribute_open_broker_position
@@ -559,6 +560,14 @@ async def _enter_position_for_stock(symbol: str, entry_signal: str, trigger_pric
         # Literal TRADED-only fill discipline - no AMO-promotion path for
         # entries, same rule as Swing's own (the real MAHABANK phantom-exit
         # incident this guards against).
+        if result.status in OrderStatus.OPEN_STATUSES:
+            # Never leave an unfilled entry order resting at the broker (order_safety.py, the 30 Sep 2026
+            # SONACOMS incident). A fill that raced the cancel comes back TRADED and continues below.
+            result, cancel_error = await order_safety.cancel_unfilled(order_id, result, is_amo)
+            await position_store.update_order_status(order_id, result.status, result.remark)
+            await _record_bollinger_event(order_safety.outcome_event(result), symbol, {
+                "what": "entry", "trading_symbol": trading_symbol, "order_id": order_id, "final_status": result.status,
+                "filled_quantity": result.filled_quantity, "cancel_error": cancel_error})
         if result.status != OrderStatus.TRADED:
             await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, trading_symbol)
             logger.warning("%s: entry order %s did not reach TRADED (status=%s remark=%s) - treating as a failed entry",

@@ -46,6 +46,7 @@ from typing import Optional
 
 import capacity_control
 import cross_strategy_registry
+import order_safety
 import fund_allocation
 import paper_mode_control
 from trade_history import attribute_open_broker_position
@@ -195,31 +196,8 @@ async def settle_unfilled_order(symbol: str, trading_symbol: str, order_id: str,
     ORDER_STILL_RESTING_AT_BROKER) - it needs a manual cancel."""
     if result.status not in OrderStatus.OPEN_STATUSES:
         return result
-    loop = asyncio.get_running_loop()
-    cancel_error = None
-    try:
-        await loop.run_in_executor(None, dhan_wrapper.cancel_order, order_id)
-    except Exception as exc:  # noqa: BLE001
-        cancel_error = repr(exc)
-        logger.warning("[%s] %s: cancel of unfilled %s order %s failed (%s) - re-checking its status", STRATEGY, symbol,
-                       what, order_id, cancel_error)
-    final = result
-    try:
-        final = await asyncio.wait_for(
-            loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, is_amo, 4, 1.0), timeout=20)
-    except Exception:  # noqa: BLE001
-        logger.exception("[%s] %s: could not re-check %s order %s after the cancel", STRATEGY, symbol, what, order_id)
-    if final.status == OrderStatus.TRADED:
-        event = "ORDER_FILLED_DURING_CANCEL"
-    elif final.status in OrderStatus.OPEN_STATUSES:
-        event = "ORDER_STILL_RESTING_AT_BROKER"
-        logger.error("[%s] %s: %s order %s for %s is STILL OPEN at the broker (status=%s) after a cancel attempt - "
-                     "cancel it by hand", STRATEGY, symbol, what, order_id, trading_symbol, final.status)
-    else:
-        event = "ORDER_UNFILLED_CANCELLED"
-    if final.status != OrderStatus.TRADED and final.filled_quantity:
-        logger.error("[%s] %s: %s order %s ended %s with %s qty FILLED - that quantity is NOT managed by the bot",
-                     STRATEGY, symbol, what, order_id, final.status, final.filled_quantity)
+    final, cancel_error = await order_safety.cancel_unfilled(order_id, result, is_amo)
+    event = order_safety.outcome_event(final)
     await _event(event, symbol, {"what": what, "trading_symbol": trading_symbol, "order_id": order_id,
                                  "status_at_timeout": result.status, "final_status": final.status,
                                  "filled_quantity": final.filled_quantity, "cancel_error": cancel_error})

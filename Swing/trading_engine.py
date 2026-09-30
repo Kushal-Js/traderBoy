@@ -30,6 +30,8 @@ scattered branches in this file.
 """
 from __future__ import annotations
 
+import order_safety
+
 import asyncio
 import json
 import logging
@@ -942,6 +944,14 @@ async def enter_position_for_stock(symbol: str, regime: str) -> dict:
         # incident (a non-terminal order status must never be counted as a
         # position) - anything other than TRADED here is a FAILED entry,
         # not "pending," and is released rather than left half-tracked.
+        if result.status in OrderStatus.OPEN_STATUSES:
+            # Never leave an unfilled entry order resting at the broker (order_safety.py, the 30 Sep 2026
+            # SONACOMS incident). A fill that raced the cancel comes back TRADED and continues below.
+            result, cancel_error = await order_safety.cancel_unfilled(order_id, result, is_amo)
+            await position_store.update_order_status(order_id, result.status, result.remark)
+            await _record_swing_event(order_safety.outcome_event(result), symbol, {
+                "what": "entry", "trading_symbol": trading_symbol, "order_id": order_id, "final_status": result.status,
+                "filled_quantity": result.filled_quantity, "cancel_error": cancel_error})
         if result.status != OrderStatus.TRADED:
             if exchange_segment in ("NSE_FNO", "MCX_COMM"):
                 await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, trading_symbol)
