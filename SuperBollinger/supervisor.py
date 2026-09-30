@@ -1,0 +1,418 @@
+"""
+Super Bollinger SUPERVISOR (30 Sep 2026, user request: "build this
+supervisor ... deploy ... work from today ... hedging with the rules we have
+been discussing ... log everything").
+
+Watches every open Super Bollinger CE trade and:
+  1. HEDGE (settings.hedge_mode: off | shadow | paper | real) - the best
+     rule from the 60-combination backtest grid (research_super_bollinger_
+     hedge_indicators.py, "T2000 ATR_DROP TRAIL": +Rs 10,831 on 35 hedges,
+     positive in both halves, not yet validated out-of-sample):
+       when the CE's open loss >= hedge_trigger_rs AND the stock is
+       >= hedge_atr_mult x ATR(14, 5-min, last completed bar) below the CE's
+       entry spot -> buy 1 lot of the same stock's ATM PE. The CE is left
+       untouched (its own rules still apply). Exit the PE once its profit
+       has reached hedge_trail_arm_rs and then given back
+       hedge_trail_giveback of its best profit, or at a hedge_stop_rs loss,
+       or at the square-off time. One hedge per CE trade; no new hedge from
+       hedge_cutoff_time. A PAPER CE is only ever hedged on paper.
+  2. DISASTER BRAKE - if the day's realized + open REAL PnL (CE + hedges)
+     reaches -disaster_brake_rs: no more entries or hedges today and every
+     real position is squared off. A malfunction guard, not a performance
+     rule.
+  3. SHADOW RULES - logged only, never acted on: stop-and-re-enter at
+     shadow_stop_reenter_rs (would exit the CE, would re-buy at its entry
+     price).
+  4. LOGS everything to history/<date>_super_bollinger_supervisor.log
+     (JSONL): every trigger seen, confirmation inputs (loss, ATR, stock
+     drop), hedge decisions, orders/fills and slippage vs the decision
+     price, exits and PnL, brake checks, shadow-rule events.
+
+Real hedge orders reuse the incident-hardened Bollinger order/exit machinery
+(Bollinger.trading_engine: _exit_position, broker SL check, LTP staleness,
+pending-order sync) against the hedge's OWN position store (state.
+hedge_store, trade-history tag "SuperBollingerHedge").
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import datetime
+from typing import Optional
+
+import cross_strategy_registry
+import fund_allocation
+from trade_history import attribute_open_broker_position
+from Bollinger import config as bcfg, signals
+from Bollinger import trading_engine as engine
+from Bollinger.position_store import OrderRecord, Position
+from Options.dhan_client import OrderResult, OrderStatus, dhan_wrapper
+from Swing import candle_feed
+from Swing.position_store import broker_stop_trigger_and_limit
+from SuperTrader.strategy import atr as atr_series
+
+from . import settings
+from .state import (HEDGE_STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store, paper_book,
+                    position_store)
+from .trading_engine import NO_TRAILING, PROFILE, square_off_all as square_off_ce
+
+logger = logging.getLogger("super_bollinger_supervisor")
+LOOP_SECONDS = 2
+_track: dict = {}          # (symbol, CE opened_at) -> per-CE-trade supervisor state
+_hedge_inflight: set = set()
+
+
+def _now() -> datetime:
+    return engine._now_ist()
+
+
+async def _log(event: str, symbol: str, **detail) -> None:
+    await engine._record_bollinger_event(event, symbol, {"component": "supervisor", **detail}, SUPERVISOR_LOG)
+
+
+def halted_today() -> bool:
+    return halted["day"] == _now().date()
+
+
+def _spot(symbol: str) -> Optional[float]:
+    forming = candle_feed.forming_bar(symbol) if candle_feed.is_fresh(symbol, bcfg.WS_STALE_AFTER_SECONDS) else None
+    if forming and forming.get("last"):
+        return float(forming["last"])
+    base = signals._rest_series_cache.get(symbol)
+    return float(base["close"][-1]) if base and base.get("close") else None
+
+
+def _atr(symbol: str) -> Optional[float]:
+    base = signals._rest_series_cache.get(symbol)
+    if not base or len(base.get("close") or []) < 30:
+        return None
+    return atr_series(base["high"], base["low"], base["close"], 14)[-1]
+
+
+def _state(symbol: str, pos: Position) -> dict:
+    key = (symbol, pos.opened_at.isoformat())
+    st = _track.get(key)
+    if st is None:
+        st = {"entry_spot": _spot(symbol), "hedged": False, "waiting_logged": False,
+              "shadow_stopped": False, "shadow_reentered": False}
+        _track[key] = st
+    elif st["entry_spot"] is None:
+        st["entry_spot"] = _spot(symbol)
+    return st
+
+
+# --------------------------------------------------------------------------- #
+# CE watch: shadow rules + hedge trigger
+# --------------------------------------------------------------------------- #
+async def check_ce(symbol: str, pos: Position, ltp: float, ce_is_real: bool) -> None:
+    st = _state(symbol, pos)
+    loss = (pos.entry_price - ltp) * pos.pnl_multiplier
+    now = _now()
+
+    shadow_rs = settings.get("shadow_stop_reenter_rs")
+    if shadow_rs > 0:
+        if not st["shadow_stopped"] and loss >= shadow_rs:
+            st["shadow_stopped"] = True
+            await _log("SHADOW_STOP_REENTER_WOULD_EXIT", symbol, ce=pos.trading_symbol, ce_entry=pos.entry_price,
+                       ce_ltp=ltp, loss=round(loss), real_ce=ce_is_real)
+        elif st["shadow_stopped"] and not st["shadow_reentered"] and ltp >= pos.entry_price and now.time().strftime("%H:%M") < "15:00":
+            st["shadow_reentered"] = True
+            await _log("SHADOW_STOP_REENTER_WOULD_REBUY", symbol, ce=pos.trading_symbol, ce_ltp=ltp, real_ce=ce_is_real)
+
+    mode = settings.get("hedge_mode")
+    if (mode == "off" or st["hedged"] or symbol in _hedge_inflight or halted_today()
+            or loss < settings.get("hedge_trigger_rs")
+            or now.strftime("%H:%M") >= settings.get("hedge_cutoff_time")):
+        return
+    spot, atr_v, mult = _spot(symbol), _atr(symbol), settings.get("hedge_atr_mult")
+    drop = (st["entry_spot"] - spot) if (spot is not None and st["entry_spot"] is not None) else None
+    confirmed = mult == 0 or (atr_v is not None and drop is not None and drop >= mult * atr_v)
+    if not confirmed:
+        if not st["waiting_logged"]:
+            st["waiting_logged"] = True
+            await _log("HEDGE_TRIGGER_WAITING_FOR_ATR", symbol, ce=pos.trading_symbol, loss=round(loss),
+                       entry_spot=st["entry_spot"], spot=spot, drop=drop, atr=atr_v, needed=None if atr_v is None else mult * atr_v)
+        return
+    st["hedged"] = True
+    _hedge_inflight.add(symbol)
+    try:
+        effective = "paper" if (mode == "real" and not ce_is_real) else mode
+        await _open_hedge(symbol, pos, ltp, loss, spot, atr_v, drop, effective)
+    except Exception:  # noqa: BLE001
+        logger.exception("[supervisor] %s: hedge open failed", symbol)
+        await _log("HEDGE_ERROR", symbol, stage="open")
+    finally:
+        _hedge_inflight.discard(symbol)
+
+
+async def _open_hedge(symbol, ce: Position, ce_ltp, loss, spot, atr_v, drop, mode) -> None:
+    decision = {"ce": ce.trading_symbol, "ce_entry": ce.entry_price, "ce_ltp": ce_ltp, "ce_loss": round(loss),
+                "spot": spot, "atr": atr_v, "drop": drop, "mode": mode}
+    if mode == "shadow":
+        await _log("HEDGE_DECISION_SHADOW", symbol, **decision)
+        return
+    try:
+        leg = await engine._resolve_option_leg(symbol, "BEARISH", PROFILE)
+    except engine._SkipEntry as skip:
+        await _log("HEDGE_SKIPPED", symbol, reason=skip.result.get("reason") or skip.result.get("status"), **decision)
+        return
+    qty = leg["lot_size"] * settings.get("quantity_lots")
+    try:
+        price = await dhan_wrapper.get_option_ltp_async(leg["trading_symbol"])
+    except Exception:  # noqa: BLE001
+        price = None
+    if price is None or price < settings.get("min_premium_rs"):
+        await _log("HEDGE_SKIPPED", symbol, reason="premium_below_minimum_or_unknown", pe=leg["trading_symbol"],
+                   premium=price, **decision)
+        return
+    loop = asyncio.get_running_loop()
+
+    if mode == "paper":
+        pos = _hedge_position(symbol, leg, qty, price, "PAPER")
+        if await hedge_paper_book.open(pos):
+            try:
+                await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, leg["trading_symbol"])
+            except Exception:  # noqa: BLE001
+                pass
+            await _log("HEDGE_OPENED", symbol, pe=leg["trading_symbol"], qty=qty, pe_entry=price, **decision)
+        return
+
+    # ---- real ----
+    if not await cross_strategy_registry.try_claim(symbol, HEDGE_STRATEGY):
+        await _log("HEDGE_SKIPPED", symbol, reason="entry_in_progress_by_other_strategy", **decision)
+        return
+    try:
+        if symbol in hedge_store.live_positions:
+            return
+        if settings.get("funds_check_enabled"):
+            try:
+                ok = await fund_allocation.has_sufficient_bucket_funds(
+                    bcfg.FUND_BUCKET, symbol, [(leg["security_id"], leg["product_type"], qty, price, "NSE_FNO")],
+                    buffer_rs=bcfg.FUNDS_CHECK_BUFFER_RS)
+            except Exception:  # noqa: BLE001
+                logger.exception("[supervisor] %s: funds check failed - proceeding", symbol)
+                ok = True
+            if not ok:
+                await _log("HEDGE_SKIPPED", symbol, reason="insufficient_funds", pe=leg["trading_symbol"], **decision)
+                return
+        existing = await loop.run_in_executor(None, dhan_wrapper.get_pending_order_id, leg["trading_symbol"], "BUY", "NSE")
+        if existing:
+            await _log("HEDGE_SKIPPED", symbol, reason="buy_order_already_pending", order_id=existing, **decision)
+            return
+        await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, leg["trading_symbol"])
+        resp = await loop.run_in_executor(None, dhan_wrapper.place_market_order, leg["trading_symbol"], qty, "BUY",
+                                          engine._gen_tag("SBH", symbol), leg["product_type"])
+        order_id, is_amo = resp["order_id"], resp["is_amo"]
+        await hedge_store.record_order(OrderRecord(order_id=order_id, underlying_symbol=symbol,
+                                                   trading_symbol=leg["trading_symbol"], transaction_type="BUY",
+                                                   quantity=qty, status=OrderStatus.TRANSIT, is_amo=is_amo,
+                                                   lot_size=leg["lot_size"]))
+        try:
+            result = await asyncio.wait_for(loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, is_amo),
+                                            timeout=engine._ORDER_RESULT_TIMEOUT_SECONDS)
+        except Exception:  # noqa: BLE001
+            result = OrderResult(order_id=order_id, status=OrderStatus.TRANSIT, remark="order_confirmation_timeout",
+                                 fill_price=0.0, filled_quantity=0, is_amo=is_amo)
+        await hedge_store.update_order_status(order_id, result.status, result.remark)
+        if result.status != OrderStatus.TRADED:
+            await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, leg["trading_symbol"])
+            await _log("HEDGE_ORDER_NOT_FILLED", symbol, pe=leg["trading_symbol"], order_id=order_id,
+                       status=result.status, remark=result.remark, **decision)
+            return
+        fill = result.fill_price or price
+        sl_id = None
+        if bcfg.BROKER_STOP_LOSS_ENABLED:
+            trig, limit = broker_stop_trigger_and_limit("LONG", fill, qty, settings.get("hedge_stop_rs"),
+                                                        bcfg.BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE, hard_stop_pct=0.95)
+            try:
+                sl = await loop.run_in_executor(None, dhan_wrapper.place_stop_loss_limit_order, leg["trading_symbol"],
+                                                qty, "SELL", trig, limit, engine._gen_tag("SL", symbol), leg["product_type"])
+                sl_id = sl["order_id"]
+                await hedge_store.record_order(OrderRecord(order_id=sl_id, underlying_symbol=symbol,
+                                                           trading_symbol=leg["trading_symbol"], transaction_type="SELL",
+                                                           quantity=qty, status="PENDING", is_amo=False))
+            except Exception:  # noqa: BLE001
+                logger.exception("[supervisor] %s: could not place the hedge's broker SL - bot stop still applies", symbol)
+        await hedge_store.add_position(_hedge_position(symbol, leg, qty, fill, order_id, sl_id))
+        await _log("HEDGE_OPENED", symbol, pe=leg["trading_symbol"], qty=qty, pe_entry=fill, pe_ltp_at_decision=price,
+                   slippage=round(fill - price, 2), order_id=order_id, broker_sl=sl_id, **decision)
+    finally:
+        await cross_strategy_registry.release_claim(symbol, HEDGE_STRATEGY)
+
+
+def _hedge_position(symbol, leg, qty, price, order_id, sl_id=None, reconciled=False) -> Position:
+    return Position(
+        underlying_symbol=symbol, trading_symbol=leg["trading_symbol"], resolved_option_type="PE",
+        instrument_side="LONG", exchange_segment="NSE_FNO", product_type=leg["product_type"], quantity=qty,
+        lot_size=leg.get("lot_size"), entry_price=price, best_price=price, stop_pct=0.0,
+        hard_stop_loss=max(price - settings.get("hedge_stop_rs") / qty, 0.05),
+        trailing_stop_dist=NO_TRAILING, trailing_step=NO_TRAILING, pnl_multiplier=qty,
+        order_id=order_id, reconciled=reconciled, stop_loss_order_id=sl_id)
+
+
+# --------------------------------------------------------------------------- #
+# Hedge exits
+# --------------------------------------------------------------------------- #
+def hedge_exit_reason(entry: float, best: float, ltp: float, qty: float) -> Optional[str]:
+    """Pure. best must already include ltp."""
+    profit, peak = (ltp - entry) * qty, (best - entry) * qty
+    if profit <= -settings.get("hedge_stop_rs"):
+        return "HEDGE_STOP"
+    if peak >= settings.get("hedge_trail_arm_rs") and profit <= peak * (1 - settings.get("hedge_trail_giveback")):
+        return "HEDGE_TRAIL"
+    return None
+
+
+async def _apply_hedge_price(symbol: str, ltp: float, real: bool, square_off: bool = False) -> None:
+    if real:
+        pos = hedge_store.live_positions.get(symbol)
+        if pos is None or pos.pending_exit_order_id or engine._exit_on_cooldown(pos):
+            return
+        await hedge_store.update_best_price(symbol, ltp)
+        reason = "DAILY_SQUARE_OFF" if square_off else hedge_exit_reason(pos.entry_price, pos.best_price, ltp, pos.pnl_multiplier)
+        if reason and await hedge_store.try_start_exit(symbol):
+            await _log("HEDGE_EXIT_DECIDED", symbol, pe=pos.trading_symbol, reason=reason, pe_entry=pos.entry_price,
+                       pe_ltp=ltp, pe_best=pos.best_price, est_pnl=round((ltp - pos.entry_price) * pos.pnl_multiplier), mode="real")
+            await engine._exit_position(symbol, pos, ltp, reason, hedge_store)
+    else:
+        pos = await hedge_paper_book.update(symbol, ltp)
+        if pos is None:
+            return
+        reason = "DAILY_SQUARE_OFF" if square_off else hedge_exit_reason(pos.entry_price, pos.best_price, ltp, pos.pnl_multiplier)
+        if reason:
+            record = await hedge_paper_book.close(symbol, ltp, reason)
+            if record:
+                await _log("HEDGE_CLOSED", symbol, mode="paper", **record)
+
+
+async def on_price_tick(trading_symbol: str, ltp: float) -> None:
+    """WS fast path: hedge exits and CE hedge triggers."""
+    try:
+        for sym, pos in list(hedge_store.live_positions.items()):
+            if pos.trading_symbol == trading_symbol:
+                if await engine._check_broker_stop_already_filled(sym, pos, hedge_store):
+                    return
+                await _apply_hedge_price(sym, ltp, True)
+                return
+        for sym, pos in list(hedge_paper_book.positions.items()):
+            if pos.trading_symbol == trading_symbol:
+                await _apply_hedge_price(sym, ltp, False)
+                return
+        for sym, pos in list(position_store.live_positions.items()):
+            if pos.trading_symbol == trading_symbol and not pos.pending_exit_order_id:
+                await check_ce(sym, pos, ltp, True)
+                return
+        for sym, pos in list(paper_book.positions.items()):
+            if pos.trading_symbol == trading_symbol:
+                await check_ce(sym, pos, ltp, False)
+                return
+    except Exception:  # noqa: BLE001
+        logger.exception("[supervisor] on_price_tick failed for %s", trading_symbol)
+
+
+# --------------------------------------------------------------------------- #
+# Loop
+# --------------------------------------------------------------------------- #
+async def _ltp(pos: Position) -> Optional[float]:
+    try:
+        return await engine._get_ltp(pos)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _day_real_pnl() -> float:
+    total = 0.0
+    for store in (position_store, hedge_store):
+        for p in store.closed_positions_today:
+            if p.exit_price is not None:
+                total += (p.exit_price - p.entry_price) * p.pnl_multiplier
+        for p in list(store.live_positions.values()):
+            ltp = await _ltp(p)
+            if ltp is not None:
+                total += (ltp - p.entry_price) * p.pnl_multiplier
+    return total
+
+
+async def _tick() -> None:
+    await hedge_store.maybe_reset_for_new_day()
+    await engine._sync_pending_exit_orders(hedge_store)
+    now = _now()
+    square = now.weekday() < 5 and now.strftime("%H:%M") >= settings.get("square_off_time")
+
+    for sym, pos in list(hedge_store.live_positions.items()):
+        if pos.pending_exit_order_id or engine._exit_on_cooldown(pos):
+            continue
+        if await engine._check_broker_stop_already_filled(sym, pos, hedge_store):
+            await _log("HEDGE_CLOSED_BY_BROKER_SL", sym, pe=pos.trading_symbol)
+            continue
+        try:
+            ltp = await engine._get_ltp(pos)
+        except Exception:  # noqa: BLE001
+            await engine._handle_ltp_staleness(sym, pos, hedge_store)
+            continue
+        engine._ltp_failure_since.pop((sym, pos.opened_at), None)
+        await _apply_hedge_price(sym, ltp, True, square)
+    for sym, pos in list(hedge_paper_book.positions.items()):
+        ltp = await _ltp(pos)
+        if ltp is not None:
+            await _apply_hedge_price(sym, ltp, False, square)
+
+    if not square:
+        for sym, pos in list(position_store.live_positions.items()):
+            if not pos.pending_exit_order_id:
+                ltp = await _ltp(pos)
+                if ltp is not None:
+                    await check_ce(sym, pos, ltp, True)
+        for sym, pos in list(paper_book.positions.items()):
+            ltp = await _ltp(pos)
+            if ltp is not None:
+                await check_ce(sym, pos, ltp, False)
+
+    brake = settings.get("disaster_brake_rs")
+    if brake > 0 and not halted_today() and (position_store.live_positions or hedge_store.live_positions
+                                               or position_store.closed_positions_today or hedge_store.closed_positions_today):
+        pnl = await _day_real_pnl()
+        if pnl <= -brake:
+            halted["day"], halted["reason"] = now.date(), f"day PnL {pnl:,.0f} <= -{brake:,.0f}"
+            logger.error("[supervisor] DISASTER BRAKE: %s - halting entries/hedges and squaring off", halted["reason"])
+            await _log("DISASTER_BRAKE", "*", day_pnl=round(pnl), brake=brake)
+            await square_off_ce("DISASTER_BRAKE")
+            for sym, pos in list(hedge_store.live_positions.items()):
+                ltp = await _ltp(pos) or pos.entry_price
+                if await hedge_store.try_start_exit(sym):
+                    await engine._exit_position(sym, pos, ltp, "DISASTER_BRAKE", hedge_store)
+
+    live_keys = {(s, p.opened_at.isoformat()) for s, p in list(position_store.live_positions.items()) + list(paper_book.positions.items())}
+    for key in [k for k in _track if k not in live_keys and k[1][:10] != now.date().isoformat()]:
+        _track.pop(key, None)
+
+
+async def supervisor_loop() -> None:
+    logger.info("[supervisor] loop started (hedge_mode=%s)", settings.get("hedge_mode"))
+    while True:
+        try:
+            await _tick()
+        except Exception:  # noqa: BLE001
+            logger.exception("[supervisor] tick failed")
+        await asyncio.sleep(LOOP_SECONDS)
+
+
+async def reconcile_hedges() -> list[Position]:
+    loop = asyncio.get_running_loop()
+    out = []
+    for bp in await loop.run_in_executor(None, dhan_wrapper.get_open_fno_positions):
+        if not bp.get("avg_price") or bp["quantity"] <= 0 or bp.get("option_type") != "PE":
+            continue
+        if await loop.run_in_executor(None, attribute_open_broker_position, bp["trading_symbol"]) != HEDGE_STRATEGY:
+            continue
+        leg = {"trading_symbol": bp["trading_symbol"], "product_type": bp.get("product_type") or bcfg.OPTIONS_PRODUCT,
+               "lot_size": bp.get("lot_size")}
+        sl_id = None
+        try:
+            sl_id = await loop.run_in_executor(None, dhan_wrapper.get_pending_order_id, bp["trading_symbol"], "SELL", "NSE")
+        except Exception:  # noqa: BLE001
+            pass
+        out.append(_hedge_position(bp["underlying_symbol"], leg, abs(bp["quantity"]), bp["avg_price"], "", sl_id, True))
+    for pos in out:
+        await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, pos.trading_symbol)
+    return out

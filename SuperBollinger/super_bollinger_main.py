@@ -16,6 +16,8 @@ Endpoints:
   GET  /super-bollinger/watchlist         its own HYBRID-picked watchlist (data/super_bollinger_watchlist)
   POST /super-bollinger/watchlist/replace replace it by hand, e.g. {"symbols": ["LAURUSLABS", "ZYDUSLIFE"]}
   POST /super-bollinger/square-off-now    manual kill switch - exits every open real position
+  GET  /super-bollinger/supervisor        supervisor status: hedge mode, open hedges, today's hedge trades, brake
+  POST /super-bollinger/supervisor/square-off-hedges   exits every open REAL hedge (CE trades untouched)
 """
 from __future__ import annotations
 
@@ -34,14 +36,17 @@ from trade_history import REAL_TRADES_NAME, dated_path
 from Options.dhan_client import dhan_wrapper
 
 from . import settings
+from . import supervisor
 from . import watchlist as super_watchlist
-from .state import STRATEGY, paper_book, position_store
+from .state import (HEDGE_STRATEGY, STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store, paper_book,
+                    position_store)
 from .trading_engine import (eligible_symbols, install_tick_entries, monitor_loop, on_price_tick, open_count,
                              reconcile_broker_positions, square_off_all)
 
 logger = logging.getLogger("super_bollinger_main")
 router = APIRouter()
 _monitor_task: Optional[asyncio.Task] = None
+_supervisor_task: Optional[asyncio.Task] = None
 
 
 @asynccontextmanager
@@ -49,7 +54,7 @@ async def lifespan(app: FastAPI):
     """Reconciliation and the monitor loop always start (even with
     strategy_enabled=false) so an already-open real position is always
     managed to its exit."""
-    global _monitor_task
+    global _monitor_task, _supervisor_task
     try:
         reconciled = await reconcile_broker_positions()
         if reconciled:
@@ -59,7 +64,14 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         logger.exception("[%s] could not reconcile broker positions at startup - continuing without them", STRATEGY)
 
-    for pos in paper_book.load():
+    try:
+        hedges = await supervisor.reconcile_hedges()
+        if hedges:
+            await hedge_store.reconcile_from_broker(hedges)
+            logger.info("[%s] reconciled %d open REAL hedge(s): %s", STRATEGY, len(hedges), [p.underlying_symbol for p in hedges])
+    except Exception:  # noqa: BLE001
+        logger.exception("[%s] could not reconcile hedge positions at startup", STRATEGY)
+    for pos in paper_book.load() + hedge_paper_book.load():
         try:
             dhan_wrapper.subscribe_option_price(pos.trading_symbol)
         except Exception:  # noqa: BLE001
@@ -71,7 +83,12 @@ async def lifespan(app: FastAPI):
     def _on_tick(trading_symbol: str, ltp: float) -> None:
         asyncio.run_coroutine_threadsafe(on_price_tick(trading_symbol, ltp), loop)
 
+    def _on_tick_supervisor(trading_symbol: str, ltp: float) -> None:
+        asyncio.run_coroutine_threadsafe(supervisor.on_price_tick(trading_symbol, ltp), loop)
+
     dhan_wrapper.add_price_tick_subscriber(_on_tick)
+    dhan_wrapper.add_price_tick_subscriber(_on_tick_supervisor)
+    _supervisor_task = asyncio.create_task(supervisor.supervisor_loop())
     install_tick_entries(loop)  # tick-driven entries off the underlying WS feed
     _monitor_task = asyncio.create_task(monitor_loop())
 
@@ -85,6 +102,8 @@ async def lifespan(app: FastAPI):
     yield
     if _monitor_task:
         _monitor_task.cancel()
+    if _supervisor_task:
+        _supervisor_task.cancel()
 
 
 def _config_view() -> dict:
@@ -154,7 +173,13 @@ async def get_trades(day: Optional[str] = None):
     d = date.fromisoformat(day) if day else date.today()
     real = [t for t in _read_log(REAL_TRADES_NAME, d) if t.get("strategy") == STRATEGY]
     paper = _read_log(paper_book.log_name, d)
+    hedges_real = [t for t in _read_log(REAL_TRADES_NAME, d) if t.get("strategy") == HEDGE_STRATEGY]
+    hedges_paper = _read_log(hedge_paper_book.log_name, d)
     return {
+        "hedges": {"real_count": len(hedges_real), "real_pnl": round(sum(t.get("pnl") or 0 for t in hedges_real), 2),
+                   "paper_count": len(hedges_paper),
+                   "paper_pnl_modeled": round(sum(t["pnl_modeled"] for t in hedges_paper), 2),
+                   "real": hedges_real, "paper": hedges_paper},
         "strategy": STRATEGY, "day": d.isoformat(),
         "real": {"count": len(real), "wins": sum(1 for t in real if (t.get("pnl") or 0) > 0),
                  "total_pnl": round(sum(t.get("pnl") or 0 for t in real), 2), "trades": real},
@@ -190,3 +215,42 @@ async def replace_watchlist(payload: dict[str, Any]):
 async def manual_square_off():
     await square_off_all("MANUAL_SQUARE_OFF")
     return await position_store.snapshot()
+
+
+SUPERVISOR_KEYS = ("hedge_mode", "hedge_trigger_rs", "hedge_atr_mult", "hedge_trail_arm_rs", "hedge_trail_giveback",
+                   "hedge_stop_rs", "hedge_cutoff_time", "disaster_brake_rs", "shadow_stop_reenter_rs")
+
+
+@router.get("/super-bollinger/supervisor")
+async def get_supervisor(day: Optional[str] = None):
+    """Supervisor status (change any setting via POST /super-bollinger/config)."""
+    d = date.fromisoformat(day) if day else date.today()
+    events = _read_log(SUPERVISOR_LOG, d)
+    counts: dict = {}
+    for e in events:
+        counts[e["event"]] = counts.get(e["event"], 0) + 1
+    hedges_real = [x for x in _read_log(REAL_TRADES_NAME, d) if x.get("strategy") == HEDGE_STRATEGY]
+    hedges_paper = _read_log(hedge_paper_book.log_name, d)
+    return {
+        "settings": {k: settings.get(k) for k in SUPERVISOR_KEYS},
+        "halted_today": halted["day"] == date.today(), "halt_reason": halted["reason"],
+        "open_hedges_real": (await hedge_store.snapshot())["live_positions"],
+        "open_hedges_paper": hedge_paper_book.snapshot()["open_positions"],
+        "hedges_closed_today": {"real": hedges_real, "real_pnl": round(sum(x.get("pnl") or 0 for x in hedges_real), 2),
+                                "paper": hedges_paper,
+                                "paper_pnl_modeled": round(sum(x["pnl_modeled"] for x in hedges_paper), 2)},
+        "event_counts": counts, "last_events": events[-30:],
+    }
+
+
+@router.post("/super-bollinger/supervisor/square-off-hedges")
+async def square_off_hedges():
+    from Bollinger import trading_engine as engine
+    for sym, pos in list(hedge_store.live_positions.items()):
+        try:
+            ltp = await engine._get_ltp(pos)
+        except Exception:  # noqa: BLE001
+            ltp = pos.entry_price
+        if await hedge_store.try_start_exit(sym):
+            await engine._exit_position(sym, pos, ltp, "MANUAL_SQUARE_OFF", hedge_store)
+    return await hedge_store.snapshot()

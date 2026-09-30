@@ -58,7 +58,7 @@ from Swing import candle_feed
 from Swing.position_store import broker_stop_trigger_and_limit
 
 from . import settings
-from .state import EVENTS_LOG, STRATEGY, paper_book, position_store
+from .state import EVENTS_LOG, STRATEGY, halted, paper_book, position_store
 
 logger = logging.getLogger("super_bollinger_engine")
 
@@ -411,8 +411,13 @@ REFRESH_RETRY_SECONDS = 3.0
 _loop: Optional[asyncio.AbstractEventLoop] = None
 
 
+def _halted_today() -> bool:
+    """The supervisor's disaster brake (SuperBollinger/supervisor.py)."""
+    return halted["day"] == _now().date()
+
+
 async def _can_enter_symbol(symbol: str) -> bool:
-    return (settings.get("strategy_enabled") and _entries_open_now() and not _square_off_now()
+    return (settings.get("strategy_enabled") and not _halted_today() and _entries_open_now() and not _square_off_now()
             and symbol in _eligible
             and open_count() < capacity_control.get_max_concurrent_trades(STRATEGY)
             and symbol not in position_store.live_positions and symbol not in position_store.reserved_symbols
@@ -517,7 +522,7 @@ async def _tick_entry(symbol: str) -> None:
 async def _refresh_gate() -> None:
     global _eligible
     _eligible = set(await eligible_symbols())  # swapped whole - the WS thread reads it
-    _gate["open"] = (settings.get("strategy_enabled") and _entries_open_now() and not _square_off_now()
+    _gate["open"] = (settings.get("strategy_enabled") and not _halted_today() and _entries_open_now() and not _square_off_now()
                      and open_count() < capacity_control.get_max_concurrent_trades(STRATEGY))
 
 

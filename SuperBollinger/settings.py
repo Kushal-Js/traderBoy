@@ -63,6 +63,13 @@ def _parse_symbols(v) -> list[str]:
     return sorted({str(s).strip().upper() for s in items if str(s).strip()})
 
 
+def _parse_mode(v) -> str:
+    v = str(v).strip().lower()
+    if v not in ("off", "shadow", "paper", "real"):
+        raise ValueError("must be off, shadow, paper or real")
+    return v
+
+
 def _to_env(v) -> str:
     if isinstance(v, bool):
         return "true" if v else "false"
@@ -88,6 +95,33 @@ _FIELDS = {
                       lambda v: None if 1 <= v <= 10 else "must be 1-10"),
     "funds_check_enabled": (_parse_bool, "SUPER_BOLLINGER_FUNDS_CHECK_ENABLED", "true", None),
     "excluded_symbols": (_parse_symbols, "SUPER_BOLLINGER_EXCLUDED_SYMBOLS", "", None),
+    # ---- Supervisor (SuperBollinger/supervisor.py, 30 Sep 2026) ----
+    # hedge_mode: off | shadow (decide + log only) | paper (simulated PE on live
+    # prices) | real (real PE orders). Rule = the backtest's best hedge:
+    # CE open loss >= hedge_trigger_rs AND the stock >= hedge_atr_mult x ATR(14,
+    # 5-min) below the CE's entry spot -> buy 1 lot ATM PE; exit on a
+    # hedge_trail_giveback giveback once PE profit >= hedge_trail_arm_rs, at a
+    # hedge_stop_rs PE loss, or at square_off_time. One hedge per CE trade.
+    "hedge_mode": (_parse_mode, "SUPER_BOLLINGER_HEDGE_MODE", "paper", None),
+    "hedge_trigger_rs": (float, "SUPER_BOLLINGER_HEDGE_TRIGGER_RS", "2000",
+                         lambda v: None if v > 0 else "must be > 0"),
+    "hedge_atr_mult": (float, "SUPER_BOLLINGER_HEDGE_ATR_MULT", "1.0",
+                       lambda v: None if v >= 0 else "must be >= 0 (0 = no ATR confirmation)"),
+    "hedge_trail_arm_rs": (float, "SUPER_BOLLINGER_HEDGE_TRAIL_ARM_RS", "1000",
+                           lambda v: None if v > 0 else "must be > 0"),
+    "hedge_trail_giveback": (float, "SUPER_BOLLINGER_HEDGE_TRAIL_GIVEBACK", "0.40",
+                             lambda v: None if 0 < v < 1 else "must be between 0 and 1"),
+    "hedge_stop_rs": (float, "SUPER_BOLLINGER_HEDGE_STOP_RS", "2000",
+                      lambda v: None if v > 0 else "must be > 0"),
+    "hedge_cutoff_time": (_parse_hhmm, "SUPER_BOLLINGER_HEDGE_CUTOFF_TIME", "15:00", None),
+    # Disaster brake: day's realized + open PnL (CE + hedges) at or below
+    # -disaster_brake_rs -> no new entries or hedges today, everything squared
+    # off. A malfunction guard, not a performance rule (0 = off).
+    "disaster_brake_rs": (float, "SUPER_BOLLINGER_DISASTER_BRAKE_RS", "20000",
+                          lambda v: None if v >= 0 else "must be >= 0"),
+    # Shadow-only candidate rules (logged, never acted on).
+    "shadow_stop_reenter_rs": (float, "SUPER_BOLLINGER_SHADOW_STOP_REENTER_RS", "2000",
+                               lambda v: None if v >= 0 else "must be >= 0 (0 = off)"),
 }
 FIELD_NAMES = tuple(_FIELDS)
 

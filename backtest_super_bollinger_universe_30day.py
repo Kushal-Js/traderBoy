@@ -90,9 +90,24 @@ _cand_cache: dict = {}
 
 
 def simulate(syms: list[str], cap: int, pricer: st.OptionPricer, label: str, sides: str = "long",
-             allowed: dict | None = None):
+             allowed: dict | None = None, daily_loss_limit: float | None = None,
+             entry_gate=None, cooloff_week_of: dict | None = None,
+             soft_stop_rs: float | None = None, max_reentries: int = 0, reentry_cutoff: dtime = dtime(14, 0)):
     """`allowed` (optional): {date: set of symbols} - only those symbols may
-    enter on that day (walk-forward stock selection)."""
+    enter on that day (walk-forward stock selection).
+    Loss-reduction switches (30 Sep 2026, all off by default):
+      daily_loss_limit - no new entries once the day's realized modeled PnL
+                         is at or below -daily_loss_limit;
+      entry_gate(t, side) -> bool - extra check before each new entry (e.g.
+                         a NIFTY-weakness filter);
+      cooloff_week_of  - {date: week key}; after a MAX_LOSS_HIT the stock is
+                         blocked for the rest of that week key.
+      soft_stop_rs / max_reentries / reentry_cutoff - stop-and-re-enter (user
+                         idea, 30 Sep): exit at a Rs soft_stop_rs open loss
+                         (SOFT_STOP), keep watching that option, and buy it
+                         again when it trades back up to the ORIGINAL entry
+                         price, before reentry_cutoff, at most max_reentries
+                         times per signal; re-entered legs use the same exits."""
     events = []
     for s in syms:
         if (s, sides) not in _cand_cache:
@@ -108,12 +123,20 @@ def simulate(syms: list[str], cap: int, pricer: st.OptionPricer, label: str, sid
     for d in days:  # end-of-day sentinel so every position gets squared off
         by_t.setdefault(int(datetime.combine(d, dtime(15, 16), IST).timestamp()), [])
     trades, open_pos, consumed, stats = [], {}, set(), defaultdict(int)
+    day_pnl = defaultdict(float)
+    blocked = set()  # (symbol, week key)
+    watches = {}     # symbol -> stopped-out leg waiting for the option to get back to its entry price
     peak_open, peak_capital = 0, 0.0
 
     def close(sym, t, px, reason):
         pos = open_pos.pop(sym)
         e_mod = pos["p0"] * (1 + modeled_slippage_pct(pos["p0"]))
         x_mod = px * (1 - modeled_slippage_pct(px))
+        day_pnl[pos["day"]] += (x_mod - e_mod) * pos["qty"]
+        if reason == "MAX_LOSS_HIT" and cooloff_week_of is not None:
+            blocked.add((sym, cooloff_week_of.get(pos["day"])))
+        if reason == "SOFT_STOP" and pos.get("reentries_left", 0) > 0:
+            watches[sym] = {**pos, "k": bisect.bisect_right(pos["mins"].ts, t), "trigger": pos["orig_p0"]}
         trades.append({"run": label, "symbol": sym, "side": pos["side"], "contract": pos["name"], "day": pos["day"].isoformat(),
                        "entry_time": datetime.fromtimestamp(pos["t0"], IST).strftime("%H:%M"),
                        "exit_time": datetime.fromtimestamp(t, IST).strftime("%H:%M"),
@@ -130,9 +153,9 @@ def simulate(syms: list[str], cap: int, pricer: st.OptionPricer, label: str, sid
             if datetime.fromtimestamp(t, IST).time() >= SQUARE_OFF or datetime.fromtimestamp(t, IST).date() != pos["day"]:
                 close(sym, t, mm.o[k], "DAILY_SQUARE_OFF")
                 return
-            level = pos["p0"] - MAX_LOSS / pos["qty"]
+            level = pos["p0"] - (soft_stop_rs or MAX_LOSS) / pos["qty"]
             if mm.l[k] <= level:
-                close(sym, t, min(level, mm.o[k]), "MAX_LOSS_HIT")
+                close(sym, t, min(level, mm.o[k]), "SOFT_STOP" if soft_stop_rs else "MAX_LOSS_HIT")
                 return
             if pos["peak"] >= BE_AFTER and mm.l[k] <= pos["p0"]:
                 close(sym, t, min(pos["p0"], mm.o[k]), "BREAKEVEN_STOP_HIT")
@@ -144,6 +167,31 @@ def simulate(syms: list[str], cap: int, pricer: st.OptionPricer, label: str, sid
             idx = bisect.bisect_right(mm.ts, int(datetime.combine(pos["day"], SQUARE_OFF, IST).timestamp())) - 1
             close(sym, until, mm.c[idx] if idx >= 0 else pos["p0"], "DAILY_SQUARE_OFF")
 
+    def advance_watch(sym, until):
+        w = watches[sym]
+        mm, k = w["mins"], w["k"]
+        while k < len(mm.ts) and mm.ts[k] < until:
+            tt = mm.ts[k]
+            dtt = datetime.fromtimestamp(tt, IST)
+            if dtt.date() != w["day"] or dtt.time() >= reentry_cutoff:
+                del watches[sym]
+                return
+            if mm.h[k] >= w["trigger"]:
+                if sym in open_pos or len(open_pos) >= cap:
+                    stats["reentry_skipped_full"] += 1
+                    del watches[sym]
+                    return
+                p0 = max(w["trigger"], mm.o[k])
+                open_pos[sym] = {"side": w["side"], "p0": p0, "orig_p0": w["orig_p0"], "qty": w["qty"], "t0": tt,
+                                 "day": w["day"], "mins": mm, "k": k + 1, "peak": 0.0, "name": w["name"],
+                                 "reentries_left": w["reentries_left"] - 1}
+                stats["reentered"] += 1
+                del watches[sym]
+                advance(sym, until)  # manage the re-entered leg up to `until`
+                return
+            k += 1
+        w["k"] = k
+
     last_day = None
     for t in sorted(by_t):
         d = datetime.fromtimestamp(t, IST).date()
@@ -153,11 +201,22 @@ def simulate(syms: list[str], cap: int, pricer: st.OptionPricer, label: str, sid
             last_day = d
         for sym in list(open_pos):
             advance(sym, t)
+        for sym in list(watches):
+            advance_watch(sym, t)
         for (_t, sym, side, fill_u, und_close, key) in by_t[t]:
-            if (sym, key) in consumed or sym in open_pos:
+            if (sym, key) in consumed or sym in open_pos or sym in watches:
                 continue
             if len(open_pos) >= cap:
                 stats["touch_while_full"] += 1
+                continue
+            if daily_loss_limit is not None and day_pnl[d] <= -daily_loss_limit:
+                stats["skipped_daily_loss_limit"] += 1
+                continue
+            if cooloff_week_of is not None and (sym, cooloff_week_of.get(d)) in blocked:
+                stats["skipped_cooloff"] += 1
+                continue
+            if entry_gate is not None and not entry_gate(t, side):
+                stats["skipped_entry_gate"] += 1
                 continue
             consumed.add((sym, key))
             qty = pricer.lot(sym)
@@ -178,7 +237,7 @@ def simulate(syms: list[str], cap: int, pricer: st.OptionPricer, label: str, sid
             if p0 < MIN_PREMIUM:
                 stats["skipped_premium_below_min"] += 1
                 continue
-            open_pos[sym] = {"side": side, "p0": p0, "qty": qty, "t0": t, "day": d, "mins": mm, "k": bisect.bisect_right(mm.ts, t),
+            open_pos[sym] = {"side": side, "p0": p0, "orig_p0": p0, "reentries_left": max_reentries, "qty": qty, "t0": t, "day": d, "mins": mm, "k": bisect.bisect_right(mm.ts, t),
                              "peak": 0.0, "name": f"{sym} {leg['expiry']:%d %b} {leg['strike']:g} {leg['ot']}"}
             stats["entered"] += 1
         peak_open = max(peak_open, len(open_pos))
