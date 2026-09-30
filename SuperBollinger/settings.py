@@ -121,18 +121,22 @@ _FIELDS = {
     # 5-min) below the CE's entry spot -> buy 1 lot ATM PE; exit on a
     # hedge_trail_giveback giveback once PE profit >= hedge_trail_arm_rs, at a
     # hedge_stop_rs PE loss, or at square_off_time. One hedge per CE trade.
+    # Defaults = the values live since 30 Sep 2026 (user decisions): trigger
+    # 1,800, trail giveback 30%, stop 1,500, and NO time cutoff - a position
+    # stays hedgeable until it is closed (hedge_cutoff_time = the square-off
+    # time; an earlier time brings the cutoff back).
     "hedge_mode": (_parse_mode, "SUPER_BOLLINGER_HEDGE_MODE", "paper", None),
-    "hedge_trigger_rs": (float, "SUPER_BOLLINGER_HEDGE_TRIGGER_RS", "2000",
+    "hedge_trigger_rs": (float, "SUPER_BOLLINGER_HEDGE_TRIGGER_RS", "1800",
                          lambda v: None if v > 0 else "must be > 0"),
     "hedge_atr_mult": (float, "SUPER_BOLLINGER_HEDGE_ATR_MULT", "1.0",
                        lambda v: None if v >= 0 else "must be >= 0 (0 = no ATR confirmation)"),
     "hedge_trail_arm_rs": (float, "SUPER_BOLLINGER_HEDGE_TRAIL_ARM_RS", "1000",
                            lambda v: None if v > 0 else "must be > 0"),
-    "hedge_trail_giveback": (float, "SUPER_BOLLINGER_HEDGE_TRAIL_GIVEBACK", "0.40",
+    "hedge_trail_giveback": (float, "SUPER_BOLLINGER_HEDGE_TRAIL_GIVEBACK", "0.30",
                              lambda v: None if 0 < v < 1 else "must be between 0 and 1"),
-    "hedge_stop_rs": (float, "SUPER_BOLLINGER_HEDGE_STOP_RS", "2000",
+    "hedge_stop_rs": (float, "SUPER_BOLLINGER_HEDGE_STOP_RS", "1500",
                       lambda v: None if v > 0 else "must be > 0"),
-    "hedge_cutoff_time": (_parse_hhmm, "SUPER_BOLLINGER_HEDGE_CUTOFF_TIME", "15:00", None),
+    "hedge_cutoff_time": (_parse_hhmm, "SUPER_BOLLINGER_HEDGE_CUTOFF_TIME", "15:15", None),
     # Disaster brake: day's realized + open PnL (CE + hedges) at or below
     # -disaster_brake_rs -> no new entries or hedges today, everything squared
     # off. A malfunction guard, not a performance rule (0 = off).

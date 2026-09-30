@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -53,7 +54,7 @@ from Swing import candle_feed
 from Swing.position_store import broker_stop_trigger_and_limit
 from SuperTrader.strategy import atr as atr_series
 
-from . import best_price_memory, scale, settings
+from . import best_price_memory, live_state, scale, settings
 from .state import (EVENTS_LOG, HEDGE_STRATEGY, STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store,
                     paper_book, position_store)
 from .trading_engine import NO_TRAILING, PROFILE, settle_unfilled_order, square_off_all as square_off_ce
@@ -89,6 +90,77 @@ def _atr(symbol: str) -> Optional[float]:
     if not base or len(base.get("close") or []) < 30:
         return None
     return atr_series(base["high"], base["low"], base["close"], 14)[-1]
+
+
+# --------------------------------------------------------------------------- #
+# Data for HELD symbols (30 Sep 2026 incident: GLENMARK's hedge fired 7 minutes
+# late). The entry scan is what normally subscribes a stock's candle feed and
+# loads its 5-min series - and it skips stocks that are already held (and stops
+# at the entry cutoff). After a restart a held stock that only Super Bollinger
+# trades therefore had no spot and no ATR, and the hedge waited forever. The
+# supervisor now keeps both alive itself for everything it holds.
+# --------------------------------------------------------------------------- #
+SERIES_RECHECK_SECONDS = 15
+NO_DATA_ALARM_SECONDS = 30
+_series_checked: dict[str, float] = {}
+_series_running = {"on": False}
+_no_data_since: dict[str, float] = {}
+_no_data_logged: dict[str, float] = {}
+
+
+async def ensure_series(symbol: str, force: bool = False) -> bool:
+    """Subscribe the underlying's candle feed and make sure its 5-min series
+    is loaded and current (one REST call per symbol per bar at most - the
+    signal module only fetches when a newer closed bar should exist)."""
+    now = time.monotonic()
+    if not force and now - _series_checked.get(symbol, 0.0) < SERIES_RECHECK_SECONDS:
+        return bool(signals._rest_series_cache.get(symbol))
+    _series_checked[symbol] = now
+
+    def work():
+        sid, seg, inst = signals._underlying_reference(symbol)
+        return signals._get_intraday_series(symbol, sid, seg, inst)
+
+    try:
+        data = await asyncio.get_running_loop().run_in_executor(None, work)
+        return bool(data and data.get("close"))
+    except Exception:  # noqa: BLE001
+        logger.exception("[supervisor] %s: could not load the candle series for a held position", symbol)
+        return False
+
+
+async def _ensure_series_for(symbols: list[str]) -> None:
+    try:
+        for sym in symbols:
+            await ensure_series(sym)
+    finally:
+        _series_running["on"] = False
+
+
+def _keep_held_data_fresh() -> None:
+    """Fire-and-forget (never delays the hedge/exit checks of this tick)."""
+    held = sorted(set(position_store.live_positions) | set(paper_book.positions) | set(hedge_store.live_positions)
+                  | set(hedge_paper_book.positions))
+    if held and not _series_running["on"]:
+        _series_running["on"] = True
+        asyncio.create_task(_ensure_series_for(held))
+
+
+async def _check_held_data(symbol: str, real: bool) -> None:
+    """Loud event when a held CE has had no spot or no ATR for a while - the
+    hedge cannot be evaluated without them."""
+    spot, atr_v = _spot(symbol), _atr(symbol)
+    now = time.monotonic()
+    if spot is not None and atr_v is not None:
+        _no_data_since.pop(symbol, None)
+        return
+    since = _no_data_since.setdefault(symbol, now)
+    if now - since >= NO_DATA_ALARM_SECONDS and now - _no_data_logged.get(symbol, 0.0) >= 60:
+        _no_data_logged[symbol] = now
+        logger.error("[supervisor] %s: held position has no %s for %.0fs - the hedge cannot be evaluated", symbol,
+                     "spot price" if spot is None else "ATR", now - since)
+        await _log("HELD_POSITION_NO_DATA", symbol, spot=spot, atr=atr_v, seconds=round(now - since), real_ce=real)
+        _series_checked.pop(symbol, None)     # retry the load right away
 
 
 def _logged_entry_spot(symbol: str) -> Optional[float]:
@@ -218,6 +290,7 @@ async def _open_hedge(symbol, ce: Position, ce_ltp, loss, spot, atr_v, drop, mod
     if not await cross_strategy_registry.try_claim(symbol, HEDGE_STRATEGY):
         await _log("HEDGE_SKIPPED", symbol, reason="entry_in_progress_by_other_strategy", **decision)
         return
+    intent, outcome_known = None, False
     try:
         if symbol in hedge_store.live_positions:
             return
@@ -237,9 +310,11 @@ async def _open_hedge(symbol, ce: Position, ce_ltp, loss, spot, atr_v, drop, mod
             await _log("HEDGE_SKIPPED", symbol, reason="buy_order_already_pending", order_id=existing, **decision)
             return
         await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, leg["trading_symbol"])
+        intent = live_state.intent_begin("hedge", symbol, leg, qty, ce=ce.trading_symbol)   # on file BEFORE the order
         resp = await loop.run_in_executor(None, dhan_wrapper.place_market_order, leg["trading_symbol"], qty, "BUY",
                                           engine._gen_tag("SBH", symbol), leg["product_type"])
         order_id, is_amo = resp["order_id"], resp["is_amo"]
+        live_state.intent_order(intent, order_id)
         await hedge_store.record_order(OrderRecord(order_id=order_id, underlying_symbol=symbol,
                                                    trading_symbol=leg["trading_symbol"], transaction_type="BUY",
                                                    quantity=qty, status=OrderStatus.TRANSIT, is_amo=is_amo,
@@ -255,6 +330,7 @@ async def _open_hedge(symbol, ce: Position, ce_ltp, loss, spot, atr_v, drop, mod
             result = await settle_unfilled_order(symbol, leg["trading_symbol"], order_id, result, is_amo, "hedge")
             await hedge_store.update_order_status(order_id, result.status, result.remark)
         if result.status != OrderStatus.TRADED:
+            outcome_known = result.status not in OrderStatus.OPEN_STATUSES
             await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, leg["trading_symbol"])
             await _log("HEDGE_ORDER_NOT_FILLED", symbol, pe=leg["trading_symbol"], order_id=order_id,
                        status=result.status, remark=result.remark, **decision)
@@ -274,9 +350,11 @@ async def _open_hedge(symbol, ce: Position, ce_ltp, loss, spot, atr_v, drop, mod
             except Exception:  # noqa: BLE001
                 logger.exception("[supervisor] %s: could not place the hedge's broker SL - bot stop still applies", symbol)
         await hedge_store.add_position(_hedge_position(symbol, leg, qty, fill, order_id, sl_id))
+        outcome_known = True
         await _log("HEDGE_OPENED", symbol, pe=leg["trading_symbol"], qty=qty, pe_entry=fill, pe_ltp_at_decision=price,
                    slippage=round(fill - price, 2), order_id=order_id, broker_sl=sl_id, **decision)
     finally:
+        await live_state.intent_finish(intent, outcome_known)
         await cross_strategy_registry.release_claim(symbol, HEDGE_STRATEGY)
 
 
@@ -381,6 +459,7 @@ async def _day_real_pnl() -> float:
 async def _tick() -> None:
     await hedge_store.maybe_reset_for_new_day()
     await engine._sync_pending_exit_orders(hedge_store)
+    _keep_held_data_fresh()
     now = _now()
     square = now.weekday() < 5 and now.strftime("%H:%M") >= settings.get("square_off_time")
 
@@ -404,11 +483,13 @@ async def _tick() -> None:
 
     if not square:
         for sym, pos in list(position_store.live_positions.items()):
+            await _check_held_data(sym, True)
             if not pos.pending_exit_order_id:
                 ltp = await _ltp(pos)
                 if ltp is not None:
                     await check_ce(sym, pos, ltp, True)
         for sym, pos in list(paper_book.positions.items()):
+            await _check_held_data(sym, False)
             ltp = await _ltp(pos)
             if ltp is not None:
                 await check_ce(sym, pos, ltp, False)
@@ -437,6 +518,7 @@ async def _tick() -> None:
     live_keys = {(s, p.opened_at.isoformat()) for s, p in list(position_store.live_positions.items()) + list(paper_book.positions.items())}
     for key in [k for k in _track if k not in live_keys and k[1][:10] != now.date().isoformat()]:
         _track.pop(key, None)
+    live_state.save()   # state file for restarts (only written when something changed)
 
 
 async def supervisor_loop() -> None:

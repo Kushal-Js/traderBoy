@@ -57,7 +57,7 @@ from Options.dhan_client import OrderResult, OrderStatus, dhan_wrapper
 from Swing import candle_feed
 from Swing.position_store import broker_stop_trigger_and_limit
 
-from . import settings
+from . import live_state, settings
 from .state import EVENTS_LOG, STRATEGY, halted, paper_book, position_store
 
 logger = logging.getLogger("super_bollinger_engine")
@@ -284,6 +284,7 @@ async def enter_real(symbol: str, trigger_price: float, stop_price: float, sourc
 
 async def _enter_real_reserved(symbol: str, trigger_price: float, stop_price: float, source: str) -> dict:
     loop = asyncio.get_running_loop()
+    intent, outcome_known = None, False
     try:
         try:
             leg, gate_price = await _resolve_leg(symbol)
@@ -317,9 +318,11 @@ async def _enter_real_reserved(symbol: str, trigger_price: float, stop_price: fl
 
         await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, trading_symbol)
         tag = engine._gen_tag(ORDER_TAG_PREFIX, symbol)
+        intent = live_state.intent_begin("entry", symbol, leg, quantity, trigger_price=trigger_price)  # on file BEFORE the order
         order_resp = await loop.run_in_executor(
             None, dhan_wrapper.place_market_order, trading_symbol, quantity, "BUY", tag, product_type)
         order_id, is_amo = order_resp["order_id"], order_resp["is_amo"]
+        live_state.intent_order(intent, order_id)
         await position_store.record_order(OrderRecord(
             order_id=order_id, underlying_symbol=symbol, trading_symbol=trading_symbol, transaction_type="BUY",
             quantity=quantity, status=OrderStatus.TRANSIT, is_amo=is_amo, lot_size=leg["lot_size"]))
@@ -336,6 +339,7 @@ async def _enter_real_reserved(symbol: str, trigger_price: float, stop_price: fl
             result = await settle_unfilled_order(symbol, trading_symbol, order_id, result, is_amo, "entry")
             await position_store.update_order_status(order_id, result.status, result.remark)
         if result.status != OrderStatus.TRADED:  # literal TRADED-only fill discipline
+            outcome_known = result.status not in OrderStatus.OPEN_STATUSES   # still resting -> intent_finish looks again
             await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, trading_symbol)
             logger.warning("[%s] %s: entry order %s not TRADED (status=%s remark=%s)", STRATEGY, symbol, order_id,
                            result.status, result.remark)
@@ -364,6 +368,7 @@ async def _enter_real_reserved(symbol: str, trigger_price: float, stop_price: fl
                                  "max-loss check still protects it", STRATEGY, symbol, trading_symbol)
 
         await position_store.add_position(_new_position(symbol, leg, fill_price, order_id, stop_loss_order_id))
+        outcome_known = True
         await _event("POSITION_OPENED", symbol, {"trading_symbol": trading_symbol, "entry_price": fill_price,
                                                  "quantity": quantity, "trigger_price": trigger_price,
                                                  "stop_price": stop_price, "order_id": order_id,
@@ -372,6 +377,8 @@ async def _enter_real_reserved(symbol: str, trigger_price: float, stop_price: fl
     except Exception:  # noqa: BLE001
         logger.exception("[%s] %s: unexpected error entering position", STRATEGY, symbol)
         return {"symbol": symbol, "status": "error"}
+    finally:
+        await live_state.intent_finish(intent, outcome_known)
 
 
 # --------------------------------------------------------------------------- #

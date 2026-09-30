@@ -19,6 +19,8 @@ Endpoints:
   GET  /super-bollinger/supervisor        supervisor status: hedge mode, open hedges, today's hedge trades, brake
   POST /super-bollinger/supervisor/square-off-hedges   exits every open REAL hedge (CE trades untouched)
   GET  /super-bollinger/scale?day=        scale-in PAPER variant: open added lots, closed ones, PnL vs the real hedge
+  GET  /super-bollinger/restart-report    what the last startup restored from the state file / broker, and what needs a look
+  GET  /super-bollinger/live-state        the live state that is persisted for restarts
 """
 from __future__ import annotations
 
@@ -36,7 +38,7 @@ import paper_mode_control
 from trade_history import REAL_TRADES_NAME, dated_path
 from Options.dhan_client import dhan_wrapper
 
-from . import best_price_memory, scale, settings
+from . import best_price_memory, live_state, scale, settings
 from . import supervisor
 from . import watchlist as super_watchlist
 from .state import (HEDGE_STRATEGY, STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store, paper_book,
@@ -50,6 +52,28 @@ _monitor_task: Optional[asyncio.Task] = None
 _supervisor_task: Optional[asyncio.Task] = None
 
 
+async def _legacy_reconcile() -> None:
+    """The pre-state-file startup rebuild (broker positions + best-price
+    memory) - only used if live_state.restore() itself fails."""
+    try:
+        reconciled = await reconcile_broker_positions()
+        if reconciled:
+            best_price_memory.restore(STRATEGY, reconciled)
+            await position_store.reconcile_from_broker(reconciled)
+            logger.info("[%s] reconciled %d open position(s) at startup: %s", STRATEGY, len(reconciled),
+                        [p.underlying_symbol for p in reconciled])
+    except Exception:  # noqa: BLE001
+        logger.exception("[%s] could not reconcile broker positions at startup - continuing without them", STRATEGY)
+    try:
+        hedges = await supervisor.reconcile_hedges()
+        if hedges:
+            best_price_memory.restore(HEDGE_STRATEGY, hedges)
+            await hedge_store.reconcile_from_broker(hedges)
+            logger.info("[%s] reconciled %d open REAL hedge(s): %s", STRATEGY, len(hedges), [p.underlying_symbol for p in hedges])
+    except Exception:  # noqa: BLE001
+        logger.exception("[%s] could not reconcile hedge positions at startup", STRATEGY)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Reconciliation and the monitor loop always start (even with
@@ -57,27 +81,16 @@ async def lifespan(app: FastAPI):
     managed to its exit."""
     global _monitor_task, _supervisor_task
     try:
-        reconciled = await reconcile_broker_positions()
-        if reconciled:
-            restored = best_price_memory.restore(STRATEGY, reconciled)
-            if restored:
-                logger.info("[%s] best price restored for re-adopted CE(s): %s", STRATEGY, restored)
-            await position_store.reconcile_from_broker(reconciled)
-            logger.info("[%s] reconciled %d open position(s) at startup: %s", STRATEGY, len(reconciled),
-                        [p.underlying_symbol for p in reconciled])
+        # State file + broker + open orders (SuperBollinger/live_state.py): restores every real CE and
+        # hedge with its full management state, today's closed trades, the brake, used signals and the
+        # supervisor's per-trade memory; resolves orders that were in flight; warms up the data feeds.
+        report = await live_state.restore()
+        logger.info("[%s] restart reconcile done: %d CE %s, %d hedge(s) %s", STRATEGY, len(report["positions"]),
+                    [p["trading_symbol"] for p in report["positions"]], len(report["hedges"]),
+                    [p["trading_symbol"] for p in report["hedges"]])
     except Exception:  # noqa: BLE001
-        logger.exception("[%s] could not reconcile broker positions at startup - continuing without them", STRATEGY)
-
-    try:
-        hedges = await supervisor.reconcile_hedges()
-        if hedges:
-            restored = best_price_memory.restore(HEDGE_STRATEGY, hedges)
-            if restored:
-                logger.info("[%s] best price restored for re-adopted hedge(s) (profit trail kept): %s", STRATEGY, restored)
-            await hedge_store.reconcile_from_broker(hedges)
-            logger.info("[%s] reconciled %d open REAL hedge(s): %s", STRATEGY, len(hedges), [p.underlying_symbol for p in hedges])
-    except Exception:  # noqa: BLE001
-        logger.exception("[%s] could not reconcile hedge positions at startup", STRATEGY)
+        logger.exception("[%s] state-file reconcile failed - falling back to the broker-only rebuild", STRATEGY)
+        await _legacy_reconcile()
     try:
         scale.load()
     except Exception:  # noqa: BLE001
@@ -270,6 +283,18 @@ async def get_supervisor(day: Optional[str] = None):
                                 "paper_pnl_modeled": round(sum(x["pnl_modeled"] for x in hedges_paper), 2)},
         "event_counts": counts, "last_events": events[-30:],
     }
+
+
+@router.get("/super-bollinger/restart-report")
+async def get_restart_report():
+    """What the last startup restored (SuperBollinger/live_state.py) and whether anything needs a look."""
+    return live_state.last_report() or {"note": "no restart report in this process yet"}
+
+
+@router.get("/super-bollinger/live-state")
+async def get_live_state():
+    """The state file's content as it would be written right now."""
+    return live_state.collect()
 
 
 @router.get("/super-bollinger/scale")
