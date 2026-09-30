@@ -1,0 +1,31 @@
+== HEDGE PE trail (live rule T2000+ATR, stop 1500) - 35 hedges, Sep HYBRID. 'close' = checked on 1-min closes (as the earlier research); 'touch' = resting stop at the trail level ==
+LIVE arm 1000, give back 40%                     | close: hedge  +14,113 (H1  +8,116 H2  +5,997) wins 25/35 captured   21% of peaks | touch: hedge  +14,390 (H1  +7,851 H2  +6,538) wins 24/35 captured   22% of peaks
+arm 1000, give back 20%                          | close: hedge  +17,016 (H1  +8,388 H2  +8,628) wins 25/35 captured   29% of peaks | touch: hedge  +17,869 (H1  +8,557 H2  +9,313) wins 24/35 captured   31% of peaks
+arm 1000, give back 25%                          | close: hedge  +16,401 (H1  +8,132 H2  +8,269) wins 25/35 captured   27% of peaks | touch: hedge  +16,159 (H1  +8,010 H2  +8,148) wins 24/35 captured   27% of peaks
+arm 1000, give back 30%                          | close: hedge  +16,389 (H1  +7,610 H2  +8,779) wins 25/35 captured   26% of peaks | touch: hedge  +16,981 (H1  +7,641 H2  +9,340) wins 24/35 captured   27% of peaks
+arm 1000, give back 50%                          | close: hedge  +11,221 (H1  +6,310 H2  +4,911) wins 25/35 captured   17% of peaks | touch: hedge  +11,140 (H1  +5,774 H2  +5,367) wins 24/35 captured   17% of peaks
+arm 500, give back 40%                           | close: hedge   +7,773 (H1  +1,614 H2  +6,159) wins 23/35 captured   15% of peaks | touch: hedge   +7,928 (H1  +1,827 H2  +6,101) wins 23/35 captured   15% of peaks
+arm 500, give back 30%                           | close: hedge   +8,262 (H1    +976 H2  +7,286) wins 23/35 captured   16% of peaks | touch: hedge   +9,396 (H1  +1,241 H2  +8,155) wins 23/35 captured   19% of peaks
+arm 1500, give back 30%                          | close: hedge  +13,494 (H1  +6,122 H2  +7,371) wins 22/35 captured   20% of peaks | touch: hedge  +14,575 (H1  +6,642 H2  +7,933) wins 22/35 captured   22% of peaks
+stepped: 40% from 1k, 30% from 2k, 20% from 3k   | close: hedge  +17,286 (H1  +9,336 H2  +7,950) wins 25/35 captured   26% of peaks | touch: hedge  +17,795 (H1  +9,253 H2  +8,543) wins 24/35 captured   27% of peaks
+stepped: 40% from 1k, 25% from 2k                | close: hedge  +17,902 (H1  +9,522 H2  +8,380) wins 25/35 captured   27% of peaks | touch: hedge  +17,964 (H1  +9,120 H2  +8,844) wins 24/35 captured   28% of peaks
+stepped: 30% from 1k, 20% from 2.5k              | close: hedge  +17,621 (H1  +8,842 H2  +8,779) wins 25/35 captured   28% of peaks | touch: hedge  +18,138 (H1  +8,538 H2  +9,600) wins 24/35 captured   29% of peaks
+
+== MAIN CE trade: profit trail added on top of the current rules (G') - 91 trades ==
+CURRENT rules (no trail)                         total  +46,378 H1  +10,654 H2  +35,724 dd  -22,530 worst  -13,368
+after +2k, give back 30%                         total   +1,230 H1  -19,061 H2  +20,291 dd  -28,437 worst  -12,081  (48 trades exit earlier,  -45,148 vs current)
+after +2k, give back 40%                         total   -5,123 H1  -26,375 H2  +21,252 dd  -34,725 worst  -12,081  (43 trades exit earlier,  -51,501 vs current)
+after +2k, give back 50%                         total   +4,315 H1  -30,759 H2  +35,075 dd  -36,962 worst  -12,081  (40 trades exit earlier,  -42,063 vs current)
+after +3k, give back 30%                         total  +12,758 H1   -5,572 H2  +18,330 dd  -17,187 worst  -13,402  (37 trades exit earlier,  -33,620 vs current)
+after +3k, give back 40%                         total  +12,228 H1   -6,559 H2  +18,787 dd  -17,718 worst  -13,773  (32 trades exit earlier,  -34,150 vs current)
+after +3k, give back 50%                         total  +30,715 H1   -2,148 H2  +32,863 dd  -18,802 worst  -13,368  (28 trades exit earlier,  -15,663 vs current)
+after +4k, give back 30%                         total  +11,548 H1   -8,709 H2  +20,257 dd  -18,536 worst  -13,368  (26 trades exit earlier,  -34,830 vs current)
+after +4k, give back 40%                         total  +12,967 H1   -9,039 H2  +22,006 dd  -19,253 worst  -13,368  (20 trades exit earlier,  -33,411 vs current)
+after +4k, give back 50%                         total  +24,710 H1   -4,076 H2  +28,786 dd  -19,057 worst  -13,368  (17 trades exit earlier,  -21,668 vs current)
+after +6k, give back 30%                         total  +35,793 H1   +3,047 H2  +32,746 dd  -18,536 worst  -13,368  (18 trades exit earlier,  -10,585 vs current)
+after +6k, give back 40%                         total  +38,603 H1   +2,467 H2  +36,137 dd  -18,536 worst  -13,368  (14 trades exit earlier,   -7,775 vs current)
+after +6k, give back 50%                         total  +55,664 H1  +16,880 H2  +38,784 dd  -19,057 worst  -13,368  (10 trades exit earlier,   +9,286 vs current)
+stepped: 50% from 3k, 35% from 6k, 25% from 10k  total   +8,206 H1  -18,707 H2  +26,913 dd  -23,736 worst  -13,368  (34 trades exit earlier,  -38,172 vs current)
+stepped: 50% from 4k, 30% from 8k                total  +21,193 H1  -11,059 H2  +32,252 dd  -19,057 worst  -13,368  (22 trades exit earlier,  -25,185 vs current)
+only big winners: 30% from 8k                    total  +39,659 H1   -1,988 H2  +41,646 dd  -22,530 worst  -13,368  (13 trades exit earlier,   -6,719 vs current)
+only big winners: 25% from 10k                   total  +40,300 H1   -8,718 H2  +49,018 dd  -22,530 worst  -13,368  (10 trades exit earlier,   -6,078 vs current)
