@@ -57,7 +57,8 @@ from SuperTrader.strategy import atr as atr_series
 from . import best_price_memory, live_state, scale, settings
 from .state import (EVENTS_LOG, HEDGE_STRATEGY, STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store,
                     paper_book, position_store)
-from .trading_engine import NO_TRAILING, PROFILE, settle_unfilled_order, square_off_all as square_off_ce
+from .trading_engine import (NO_TRAILING, PROFILE, retry_unfilled_buy, settle_unfilled_order,
+                             square_off_all as square_off_ce)
 
 logger = logging.getLogger("super_bollinger_supervisor")
 LOOP_SECONDS = 2
@@ -329,6 +330,29 @@ async def _open_hedge(symbol, ce: Position, ce_ltp, loss, spot, atr_v, drop, mod
         if result.status != OrderStatus.TRADED:   # never leave an unfilled hedge order resting at the broker
             result = await settle_unfilled_order(symbol, leg["trading_symbol"], order_id, result, is_amo, "hedge")
             await hedge_store.update_order_status(order_id, result.status, result.remark)
+        if result.status == OrderStatus.CANCELLED and not is_amo:
+            # Confirmed unfilled: re-price at the live ask while the CE is still open and still past the trigger.
+            await live_state.intent_finish(intent, True)
+            intent = None
+
+            async def still_valid() -> Optional[str]:
+                live_ce = position_store.live_positions.get(symbol)
+                if live_ce is None or live_ce.pending_exit_order_id:
+                    return "ce_closed"
+                if halted_today():
+                    return "halted"
+                if _now().strftime("%H:%M") >= settings.get("hedge_cutoff_time"):
+                    return "hedge_window_closed"
+                ce_now = await _ltp(live_ce)
+                if ce_now is not None and (live_ce.entry_price - ce_now) * live_ce.pnl_multiplier < settings.get("hedge_trigger_rs"):
+                    return "ce_recovered"
+                return None
+
+            leg_q = {**leg, "quantity": qty}
+            retried, retry_order_id, retry_intent, why = await retry_unfilled_buy(
+                symbol, leg_q, qty, price, still_valid, "hedge", hedge_store, "SBH")
+            if retried is not None:
+                result, order_id, intent = retried, retry_order_id, retry_intent
         if result.status != OrderStatus.TRADED:
             outcome_known = result.status not in OrderStatus.OPEN_STATUSES
             await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, leg["trading_symbol"])
@@ -460,6 +484,7 @@ async def _tick() -> None:
     await hedge_store.maybe_reset_for_new_day()
     await engine._sync_pending_exit_orders(hedge_store)
     _keep_held_data_fresh()
+    _maybe_sweep()
     now = _now()
     square = now.weekday() < 5 and now.strftime("%H:%M") >= settings.get("square_off_time")
 
@@ -519,6 +544,121 @@ async def _tick() -> None:
     for key in [k for k in _track if k not in live_keys and k[1][:10] != now.date().isoformat()]:
         _track.pop(key, None)
     live_state.save()   # state file for restarts (only written when something changed)
+
+
+# --------------------------------------------------------------------------- #
+# Orphan sweep (30 Sep 2026, user: "a mechanism to retry or close any such
+# positions going forward"). A last line of defence behind the write-ahead
+# intents: nothing of ours may sit at the broker unmanaged.
+# --------------------------------------------------------------------------- #
+ORDER_TAG_PREFIXES = ("SBol-", "SBH-")     # trading_engine.ORDER_TAG_PREFIX / the hedge tag
+ORPHAN_MIN_AGE_SECONDS = 20
+_sweep = {"last": 0.0, "running": False}
+_untracked_logged: dict[str, float] = {}
+
+
+def _order_age_seconds(created: Optional[str]) -> float:
+    try:
+        made = datetime.strptime(created, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_now().tzinfo)
+        return (_now() - made).total_seconds()
+    except (TypeError, ValueError):
+        return 1e9   # unknown age = old
+
+
+async def sweep_orphans() -> dict:
+    """Cancel open BUY orders carrying this strategy's tags that no order in
+    flight owns (adopting a fill that raced the cancel), and flag broker
+    positions in our books' contracts that nothing tracks."""
+    loop = asyncio.get_running_loop()
+    out = {"cancelled": [], "adopted": [], "untracked": []}
+    in_flight = {it.get("order_id") for it in live_state._intents.values() if it.get("order_id")}
+    try:
+        orders = await loop.run_in_executor(None, dhan_wrapper.list_open_orders, "BUY")
+    except Exception:  # noqa: BLE001
+        logger.exception("[supervisor] orphan sweep: could not read the order book")
+        return out
+    broker = None
+    for o in orders:
+        if not o["tag"].startswith(ORDER_TAG_PREFIXES) or o["order_id"] in in_flight:
+            continue
+        if live_state._intents and any(not it.get("order_id") for it in live_state._intents.values()):
+            continue   # an order is being placed right now and has no id yet - look again next sweep
+        if _order_age_seconds(o.get("created")) < ORPHAN_MIN_AGE_SECONDS:
+            continue
+        kind = "hedge" if o["tag"].startswith("SBH-") else "entry"
+        try:
+            await loop.run_in_executor(None, dhan_wrapper.cancel_order, o["order_id"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[supervisor] orphan sweep: cancel of %s failed (%r)", o["order_id"], exc)
+        try:
+            final = await loop.run_in_executor(None, dhan_wrapper.refresh_order_status, o["order_id"])
+        except Exception:  # noqa: BLE001
+            final = None
+        status = final.status if final else "UNKNOWN"
+        await _log("ORPHAN_ORDER_CANCELLED" if status == OrderStatus.CANCELLED else "ORPHAN_ORDER_FOUND", "*",
+                   order_id=o["order_id"], broker_symbol=o["trading_symbol"], tag=o["tag"], kind=kind,
+                   status_before=o["status"], status_after=status, order_type=o.get("order_type"), price=o.get("price"))
+        logger.error("[supervisor] ORPHAN %s order %s (%s, tag %s) found at the broker - now %s", kind, o["order_id"],
+                     o["trading_symbol"], o["tag"], status)
+        out["cancelled"].append(o["order_id"])
+        if final is not None and final.status == OrderStatus.TRADED:
+            # It filled before the cancel: find the broker position by security id and adopt it.
+            try:
+                broker = broker if broker is not None else await loop.run_in_executor(None, dhan_wrapper.get_open_fno_positions)
+                for bp in broker:
+                    sid = await loop.run_in_executor(
+                        None, lambda t=bp["trading_symbol"]: str(dhan_wrapper._instrument_meta(t, expected_exchange="NSE")["security_id"]))
+                    if sid == o["security_id"] and bp["quantity"] > 0:
+                        tracked = {p.trading_symbol for p in list(position_store.live_positions.values())
+                                   + list(hedge_store.live_positions.values())}
+                        it = {"kind": kind, "symbol": bp["underlying_symbol"], "trading_symbol": bp["trading_symbol"],
+                              "quantity": abs(bp["quantity"]), "lot_size": bp.get("lot_size"),
+                              "product_type": bp.get("product_type"), "order_id": o["order_id"]}
+                        res = await live_state._resolve_intent("sweep", it, tracked, None)
+                        await _log("ORPHAN_FILL_ADOPTED", bp["underlying_symbol"], **res)
+                        out["adopted"].append(res)
+                        break
+            except Exception:  # noqa: BLE001
+                logger.exception("[supervisor] orphan sweep: could not adopt the fill of order %s", o["order_id"])
+    # Broker positions that are ours by trade history (or nobody's) but that no book is managing.
+    try:
+        broker = broker if broker is not None else await loop.run_in_executor(None, dhan_wrapper.get_open_fno_positions)
+        tracked = {p.trading_symbol for p in list(position_store.live_positions.values())
+                   + list(hedge_store.live_positions.values())}
+        for bp in broker:
+            ts = bp["trading_symbol"]
+            if bp.get("quantity", 0) <= 0 or ts in tracked:
+                continue
+            owner = await loop.run_in_executor(None, attribute_open_broker_position, ts)
+            if owner not in (STRATEGY, HEDGE_STRATEGY):
+                continue   # another strategy's position, or not ours by our own records
+            now = time.monotonic()
+            if now - _untracked_logged.get(ts, 0.0) >= 300:
+                _untracked_logged[ts] = now
+                logger.error("[supervisor] UNTRACKED position at the broker: %s x%s (history says %s) - not managed by "
+                             "any book", ts, bp["quantity"], owner)
+                await _log("UNTRACKED_POSITION_AT_BROKER", bp["underlying_symbol"], trading_symbol=ts,
+                           quantity=bp["quantity"], avg_price=bp.get("avg_price"), history_owner=owner)
+            out["untracked"].append(ts)
+    except Exception:  # noqa: BLE001
+        logger.exception("[supervisor] orphan sweep: could not check broker positions")
+    return out
+
+
+async def _sweep_task() -> None:
+    try:
+        await sweep_orphans()
+    finally:
+        _sweep["running"] = False
+
+
+def _maybe_sweep() -> None:
+    every = settings.get("orphan_sweep_seconds")
+    now = time.monotonic()
+    if every <= 0 or _sweep["running"] or now - _sweep["last"] < every or not dhan_wrapper.is_market_open():
+        return
+    _sweep["last"], _sweep["running"] = now, True
+    asyncio.create_task(_sweep_task())
 
 
 async def supervisor_loop() -> None:

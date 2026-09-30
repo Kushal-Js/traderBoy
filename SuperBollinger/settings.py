@@ -145,6 +145,30 @@ _FIELDS = {
     # Shadow-only candidate rules (logged, never acted on).
     "shadow_stop_reenter_rs": (float, "SUPER_BOLLINGER_SHADOW_STOP_REENTER_RS", "2000",
                                lambda v: None if v >= 0 else "must be >= 0 (0 = off)"),
+    # ---- Unfilled orders: re-price and retry (30 Sep 2026, user request) ----
+    # Dhan turns an option MARKET order into a limit near the last price, so on
+    # a thin contract it can sit unfilled (SONACOMS 830 CE, 30 Sep). When the
+    # first order is not filled it is cancelled, and while the setup still
+    # holds (stock at/above the trigger for an entry; the CE still open and
+    # still losing for a hedge) a LIMIT order at the live best ask is sent, up
+    # to entry_retry_max times, each waited entry_retry_wait_seconds. It never
+    # pays more than entry_chase_max_pct above the price seen at the first
+    # attempt. entry_retry_limit_buffer_pct is only used when the book shows
+    # no ask (limit = last price + buffer). entry_retry_max = 0 turns retries
+    # off (an unfilled order is then just cancelled).
+    "entry_retry_max": (int, "SUPER_BOLLINGER_ENTRY_RETRY_MAX", "2",
+                        lambda v: None if 0 <= v <= 5 else "must be 0-5"),
+    "entry_retry_wait_seconds": (float, "SUPER_BOLLINGER_ENTRY_RETRY_WAIT_SECONDS", "5",
+                                 lambda v: None if 1 <= v <= 30 else "must be 1-30"),
+    "entry_chase_max_pct": (float, "SUPER_BOLLINGER_ENTRY_CHASE_MAX_PCT", "5",
+                            lambda v: None if 0 <= v <= 25 else "must be 0-25"),
+    "entry_retry_limit_buffer_pct": (float, "SUPER_BOLLINGER_ENTRY_RETRY_LIMIT_BUFFER_PCT", "1",
+                                     lambda v: None if 0 <= v <= 5 else "must be 0-5"),
+    # Safety sweep: every orphan_sweep_seconds the supervisor cancels any open
+    # BUY order at the broker that carries this strategy's tag and is not part
+    # of an order in flight, and flags a broker position nobody tracks (0 = off).
+    "orphan_sweep_seconds": (int, "SUPER_BOLLINGER_ORPHAN_SWEEP_SECONDS", "30",
+                             lambda v: None if v == 0 or 10 <= v <= 600 else "must be 0 (off) or 10-600"),
     # ---- Permanent index symbols (30 Sep 2026, user request) ----
     # NIFTY/BANKNIFTY are traded by Super Bollinger ALONGSIDE the weekly
     # HYBRID stock watchlist and are never part of that list, so the Friday

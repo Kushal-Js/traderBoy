@@ -3397,6 +3397,93 @@ class DhanWrapper:
             return order.get("orderId")
         return None
 
+    def list_open_orders(self, transaction_type: Optional[str] = None) -> list[dict]:
+        """Every order at Dhan today that is NOT in a terminal status (added
+        30 Sep 2026 for the orphan-order sweep after the SONACOMS incident: a
+        PENDING buy order the bot had given up on was left resting). Each:
+        order_id, trading_symbol (Dhan's own format), security_id, tag
+        (correlationId - the tag the order was placed with), transaction_type,
+        status, quantity, order_type, price, created (Dhan's createTime)."""
+        resp = self.client.Dhan.get_order_list()
+        if resp.get("status") != "success":
+            raise RuntimeError(f"get_order_list failed: {resp.get('remarks')}")
+        out = []
+        for o in (resp.get("data") or []):
+            if o.get("orderStatus") in OrderStatus.TERMINAL_STATUSES:
+                continue
+            if transaction_type and o.get("transactionType") != transaction_type:
+                continue
+            out.append({"order_id": str(o.get("orderId")), "trading_symbol": o.get("tradingSymbol"),
+                        "security_id": str(o.get("securityId", "")), "tag": o.get("correlationId") or "",
+                        "transaction_type": o.get("transactionType"), "status": o.get("orderStatus"),
+                        "quantity": o.get("quantity"), "order_type": o.get("orderType"), "price": o.get("price"),
+                        "created": o.get("createTime")})
+        return out
+
+    _quote_lock = threading.Lock()
+    _quote_last_call = [0.0]
+    QUOTE_MIN_GAP_SECONDS = 1.1   # Dhan's /marketfeed/quote allows ~1 request per second (a 2nd call 0s later fails)
+
+    def get_option_quote(self, trading_symbol: str, attempts: int = 3) -> dict:
+        """Live bid/ask for an NSE F&O contract from Dhan's quote API (added
+        30 Sep 2026 for the entry re-price/retry). Returns {"ltp", "bid",
+        "ask", "bid_qty", "ask_qty"}; bid/ask are None when that side of the
+        book is empty. Response shape verified live 30 Sep 2026:
+        resp["data"]["data"]["NSE_FNO"][security_id] with "last_price" and
+        "depth": {"buy": [{price, quantity, orders}, ...], "sell": [...]}.
+        Calls are spaced QUOTE_MIN_GAP_SECONDS apart process-wide."""
+        meta = self._instrument_meta(trading_symbol, expected_exchange="NSE")
+        sid = str(meta["security_id"])
+        last_error = None
+        for attempt in range(attempts):
+            with self._quote_lock:
+                wait = self.QUOTE_MIN_GAP_SECONDS - (time.monotonic() - self._quote_last_call[0])
+                if wait > 0:
+                    time.sleep(wait)
+                try:
+                    resp = self.client.Dhan.quote_data({"NSE_FNO": [int(sid)]})
+                finally:
+                    self._quote_last_call[0] = time.monotonic()
+            try:
+                row = ((resp.get("data") or {}).get("data") or {}).get("NSE_FNO", {}).get(sid) if resp.get("status") == "success" else None
+            except AttributeError:
+                row = None
+            if row:
+                buy = [d for d in (row.get("depth") or {}).get("buy") or [] if d.get("price")]
+                sell = [d for d in (row.get("depth") or {}).get("sell") or [] if d.get("price")]
+                return {"ltp": float(row.get("last_price") or 0) or None,
+                        "bid": float(buy[0]["price"]) if buy else None, "bid_qty": int(buy[0].get("quantity") or 0) if buy else 0,
+                        "ask": float(sell[0]["price"]) if sell else None, "ask_qty": int(sell[0].get("quantity") or 0) if sell else 0}
+            last_error = resp.get("remarks") if isinstance(resp, dict) else resp
+        raise ValueError(f"No quote returned for {trading_symbol} after {attempts} attempts: {last_error}")
+
+    def place_limit_order(
+        self, trading_symbol: str, quantity: int, transaction_type: str, limit_price: float,
+        tag: Optional[str] = None, product_type: Optional[str] = None,
+    ) -> dict:
+        """LIMIT order for an NSE F&O contract at `limit_price`, rounded to
+        the contract's tick size (added 30 Sep 2026: Dhan turns an option
+        MARKET order into a limit near the last price - the SONACOMS buy sat
+        PENDING at 28.05 under the ask - so a re-priced retry has to name its
+        own price). Never an AMO: only used for intraday retries."""
+        product_type = product_type or config.OPTIONS_PRODUCT
+        try:
+            tick_size = self._instrument_meta(trading_symbol, expected_exchange="NSE").get("tick_size")
+        except Exception:  # noqa: BLE001
+            tick_size = None
+        price = _round_to_tick(limit_price, tick_size)
+        logger.info("Placing LIMIT %s order: %s x%s at %.2f (product=%s)", transaction_type, trading_symbol, quantity,
+                    price, product_type)
+        order_id = self.client.order_placement(
+            tradingsymbol=trading_symbol, exchange=config.DEFAULT_EXCHANGE, quantity=quantity, price=price,
+            trigger_price=0, order_type="LIMIT", transaction_type=transaction_type, trade_type=product_type,
+            after_market_order=False, tag=tag,
+        )
+        if not order_id:
+            raise RuntimeError(f"order_placement returned no order id for LIMIT {transaction_type} {trading_symbol} "
+                               "- check Tradehull's console/log output for the underlying error.")
+        return {"order_id": str(order_id), "is_amo": False, "price": price}
+
     def cancel_order(self, order_id: str) -> None:
         """Cancels a still-outstanding broker order. Raises if the cancel
         itself fails (e.g. the order already resolved by the time this

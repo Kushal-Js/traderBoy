@@ -226,6 +226,82 @@ async def settle_unfilled_order(symbol: str, trading_symbol: str, order_id: str,
     return final
 
 
+async def retry_unfilled_buy(symbol: str, leg: dict, quantity: int, reference_price: float, still_valid, what: str,
+                             store, tag_prefix: str) -> tuple[Optional[OrderResult], Optional[str], Optional[str], str]:
+    """Re-price and retry a BUY whose first order was cancelled unfilled
+    (settings entry_retry_*). Each attempt: check the setup still holds
+    (`still_valid()` -> None, or the reason to give up), read the live book,
+    send a LIMIT at the best ask (capped at reference_price + entry_chase_
+    max_pct), wait, cancel if unfilled. Returns (result, order_id, intent_id,
+    reason): on a fill the result is TRADED and the order's write-ahead intent
+    is STILL OPEN - the caller finishes it once the position is recorded."""
+    loop = asyncio.get_running_loop()
+    ts, product = leg["trading_symbol"], leg["product_type"]
+    attempts = settings.get("entry_retry_max")
+    cap = reference_price * (1 + settings.get("entry_chase_max_pct") / 100)
+    reason = "retries_off" if attempts <= 0 else "retries_exhausted"
+    for attempt in range(1, attempts + 1):
+        why = await still_valid()
+        if why:
+            reason = why
+            break
+        try:
+            quote = await loop.run_in_executor(None, dhan_wrapper.get_option_quote, ts)
+        except Exception:  # noqa: BLE001
+            logger.exception("[%s] %s: no quote for %s - cannot re-price the %s", STRATEGY, symbol, ts, what)
+            reason = "no_quote"
+            break
+        if quote.get("ask"):
+            price = quote["ask"]
+        elif quote.get("ltp"):
+            price = quote["ltp"] * (1 + settings.get("entry_retry_limit_buffer_pct") / 100)
+        else:
+            reason = "no_quote"
+            break
+        if price > cap:
+            reason = "price_ran_away"
+            await _event("ORDER_RETRY_SKIPPED", symbol, {"what": what, "attempt": attempt, "trading_symbol": ts,
+                                                         "ask": quote.get("ask"), "limit_wanted": round(price, 2),
+                                                         "cap": round(cap, 2), "reference_price": reference_price})
+            break
+        intent = live_state.intent_begin(what, symbol, leg, quantity, retry=attempt)
+        keep_intent, outcome_known = False, False
+        try:
+            resp = await loop.run_in_executor(None, dhan_wrapper.place_limit_order, ts, quantity, "BUY", price,
+                                              engine._gen_tag(tag_prefix, symbol), product)
+            order_id = resp["order_id"]
+            live_state.intent_order(intent, order_id)
+            await store.record_order(OrderRecord(order_id=order_id, underlying_symbol=symbol, trading_symbol=ts,
+                                                 transaction_type="BUY", quantity=quantity, status=OrderStatus.TRANSIT,
+                                                 is_amo=False, lot_size=leg.get("lot_size")))
+            polls = max(1, int(round(settings.get("entry_retry_wait_seconds"))))
+            try:
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, False, polls, 1.0),
+                    timeout=polls + engine._ORDER_RESULT_TIMEOUT_SECONDS)
+            except Exception:  # noqa: BLE001
+                result = OrderResult(order_id=order_id, status=OrderStatus.TRANSIT, remark="order_confirmation_timeout",
+                                     fill_price=0.0, filled_quantity=0, is_amo=False)
+            if result.status != OrderStatus.TRADED:
+                result = await settle_unfilled_order(symbol, ts, order_id, result, False, f"{what} retry {attempt}")
+            await store.update_order_status(order_id, result.status, result.remark)
+            await _event("ORDER_RETRY", symbol, {"what": what, "attempt": attempt, "trading_symbol": ts,
+                                                 "bid": quote.get("bid"), "ask": quote.get("ask"), "ltp": quote.get("ltp"),
+                                                 "limit_price": resp.get("price"), "reference_price": reference_price,
+                                                 "order_id": order_id, "status": result.status,
+                                                 "fill_price": result.fill_price or None})
+            if result.status == OrderStatus.TRADED:
+                keep_intent = True
+                return result, order_id, intent, "filled"
+            outcome_known = result.status not in OrderStatus.OPEN_STATUSES
+        finally:
+            if not keep_intent:
+                await live_state.intent_finish(intent, outcome_known)
+    await _event("ENTRY_ABANDONED" if what == "entry" else "HEDGE_ABANDONED", symbol,
+                 {"trading_symbol": ts, "reason": reason, "reference_price": reference_price, "attempts_allowed": attempts})
+    return None, None, None, reason
+
+
 def _new_position(symbol: str, leg: dict, entry_price: float, order_id: str,
                   stop_loss_order_id: Optional[str] = None, reconciled: bool = False) -> Position:
     return Position(
@@ -338,6 +414,27 @@ async def _enter_real_reserved(symbol: str, trigger_price: float, stop_price: fl
         if result.status != OrderStatus.TRADED:
             result = await settle_unfilled_order(symbol, trading_symbol, order_id, result, is_amo, "entry")
             await position_store.update_order_status(order_id, result.status, result.remark)
+        if result.status == OrderStatus.CANCELLED and not is_amo:
+            # Confirmed unfilled and gone: re-price at the live ask while the breakout still holds.
+            await live_state.intent_finish(intent, True)
+            intent = None
+
+            async def still_valid() -> Optional[str]:
+                if not _entries_open_now() or _square_off_now():
+                    return "entry_window_closed"
+                if _halted_today():
+                    return "halted"
+                forming = (candle_feed.forming_bar(symbol)
+                           if candle_feed.is_fresh(symbol, bcfg.WS_STALE_AFTER_SECONDS) else None)
+                spot = float(forming["last"]) if forming and forming.get("last") else None
+                if spot is None:
+                    return "no_spot_price"
+                return "momentum_gone" if spot < trigger_price else None
+
+            retried, retry_order_id, retry_intent, _why = await retry_unfilled_buy(
+                symbol, leg, quantity, gate_price, still_valid, "entry", position_store, ORDER_TAG_PREFIX)
+            if retried is not None:
+                result, order_id, intent = retried, retry_order_id, retry_intent
         if result.status != OrderStatus.TRADED:  # literal TRADED-only fill discipline
             outcome_known = result.status not in OrderStatus.OPEN_STATUSES   # still resting -> intent_finish looks again
             await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, trading_symbol)
