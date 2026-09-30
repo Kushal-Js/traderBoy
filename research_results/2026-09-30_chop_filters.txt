@@ -1,0 +1,106 @@
+193 trades. A = calls + live hedge + S1(own caps, no trail); B = calls + S2(4,000) + S1. Columns: kept trades, total, Aug, Sep, max drawdown, worst day.
+
+== NO FILTER ==
+  all trades                                   n=193 | A +124,150 (Aug +42,845 Sep +81,305) dd -41,531 worst -11,649 | B +130,463 dd -46,791 | plain  +63,495 dd -45,752
+
+== 1-HOUR STRUCTURE (user's idea) ==
+  spot above open+close of last 2 x 1h candles n=163 | A +100,721 (Aug +37,412 Sep +63,309) dd -27,857 worst -10,734 | B +104,658 dd -32,152 | plain  +60,190 dd -22,499
+  spot above open+close of last 1h candle      n=186 | A +123,539 (Aug +53,876 Sep +69,664) dd -33,311 worst -11,649 | B +129,426 dd -37,606 | plain  +66,605 dd -31,188
+  last 1h close above the one before           n=162 | A +138,261 (Aug +55,936 Sep +82,325) dd -29,653 worst -11,444 | B +137,603 dd -34,913 | plain  +88,938 dd -25,627
+  1h higher high + higher low                  n= 92 | A  +33,530 (Aug  +2,323 Sep +31,207) dd -30,656 worst  -8,332 | B  +32,858 dd -33,489 | plain   -2,849 dd -31,862
+  last 1h candle green                         n=156 | A +145,243 (Aug +65,902 Sep +79,341) dd -19,472 worst -10,878 | B +147,313 dd -22,801 | plain  +94,698 dd -20,073
+  spot above 1h EMA20                          n=145 | A  +84,723 (Aug +40,791 Sep +43,933) dd -37,181 worst -11,649 | B  +89,622 dd -39,647 | plain  +32,327 dd -36,839
+  1h Supertrend up                             n=116 | A  +16,575 (Aug  +3,682 Sep +12,893) dd -45,700 worst -11,649 | B  +22,730 dd -48,166 | plain  -17,909 dd -44,292
+  spot above this hour's open                  n=187 | A +122,550 (Aug +48,612 Sep +73,938) dd -38,069 worst -11,649 | B +130,367 dd -42,365 | plain  +64,491 dd -37,577
+
+== CHOP / TREND STRENGTH ==
+  CHOP(14) 5m < 45                             n= 74 | A  +80,865 (Aug +24,652 Sep +56,213) dd -18,878 worst -13,497 | B  +82,776 dd -19,417 | plain  +40,585 dd -16,450
+  CHOP(14) 5m < 50                             n=109 | A  +91,696 (Aug +38,693 Sep +53,003) dd -29,165 worst -13,497 | B  +90,979 dd -30,788 | plain  +46,595 dd -26,859
+  CHOP(14) 5m < 55                             n=149 | A +101,497 (Aug +22,029 Sep +79,468) dd -29,444 worst -10,734 | B +104,350 dd -34,583 | plain  +44,348 dd -29,277
+  CHOP(14) 5m < 61.8                           n=177 | A  +86,172 (Aug +22,517 Sep +63,655) dd -39,510 worst -10,769 | B  +92,173 dd -44,770 | plain  +27,236 dd -43,255
+  CHOP(14) 15m < 45                            n= 77 | A  +87,670 (Aug +42,948 Sep +44,722) dd -21,773 worst -11,510 | B  +89,886 dd -22,728 | plain  +43,119 dd -16,723
+  CHOP(14) 15m < 50                            n=124 | A +116,512 (Aug +47,439 Sep +69,073) dd -28,540 worst -15,770 | B +120,439 dd -30,712 | plain  +58,935 dd -24,331
+  CHOP(14) 15m < 55                            n=161 | A +106,242 (Aug +31,340 Sep +74,902) dd -35,617 worst -11,444 | B +108,239 dd -40,021 | plain  +43,017 dd -35,979
+  CHOP(14) 15m < 61.8                          n=185 | A +130,954 (Aug +44,913 Sep +86,041) dd -39,051 worst -11,444 | B +134,715 dd -44,311 | plain  +71,852 dd -43,273
+  ADX(14) 5m >= 15                             n=178 | A  +77,201 (Aug +41,940 Sep +35,261) dd -39,725 worst -15,880 | B  +77,957 dd -44,985 | plain  +30,349 dd -46,786
+  ADX(14) 5m >= 20                             n=147 | A  +90,200 (Aug +52,993 Sep +37,207) dd -30,057 worst -15,880 | B  +92,230 dd -33,379 | plain  +41,202 dd -36,420
+  ADX(14) 5m >= 25                             n=112 | A  +91,225 (Aug +48,701 Sep +42,524) dd -39,920 worst -10,518 | B  +93,789 dd -42,278 | plain  +48,734 dd -39,847
+  ADX(14) 5m >= 30                             n= 79 | A  +89,056 (Aug +36,359 Sep +52,697) dd -37,738 worst -10,518 | B  +89,066 dd -38,716 | plain  +47,331 dd -31,743
+  ADX(14) 15m >= 15                            n=173 | A  +77,920 (Aug +19,064 Sep +58,856) dd -64,901 worst -11,210 | B  +79,308 dd -70,161 | plain  +24,100 dd -69,122
+  ADX(14) 15m >= 20                            n=146 | A  +88,449 (Aug +33,192 Sep +55,256) dd -53,157 worst -12,595 | B  +87,173 dd -59,250 | plain  +42,738 dd -52,708
+  ADX(14) 15m >= 25                            n=113 | A +124,135 (Aug +41,493 Sep +82,642) dd -48,108 worst -11,510 | B +124,935 dd -54,201 | plain  +78,429 dd -43,939
+  ADX(14) 15m >= 30                            n= 71 | A +120,601 (Aug +32,113 Sep +88,488) dd -22,060 worst -11,510 | B +121,849 dd -24,442 | plain  +68,150 dd -26,028
+  Efficiency Ratio(10) >= 0.2                  n=131 | A  +41,641 (Aug  +5,386 Sep +36,255) dd -35,177 worst -10,678 | B  +43,301 dd -30,687 | plain  -10,888 dd -51,922
+  Efficiency Ratio(10) >= 0.3                  n=102 | A  +30,589 (Aug  -4,986 Sep +35,575) dd -36,302 worst -10,678 | B  +31,779 dd -43,314 | plain  -20,602 dd -42,268
+  Efficiency Ratio(10) >= 0.4                  n= 73 | A  +63,531 (Aug +26,219 Sep +37,311) dd -16,816 worst -10,678 | B  +66,008 dd -17,983 | plain  +23,371 dd -16,316
+  Efficiency Ratio(20) >= 0.2                  n=135 | A  +94,816 (Aug +62,386 Sep +32,429) dd -45,190 worst -14,685 | B  +92,600 dd -49,593 | plain  +41,069 dd -41,225
+  Efficiency Ratio(20) >= 0.3                  n= 85 | A  +69,657 (Aug +42,736 Sep +26,921) dd -35,125 worst -14,685 | B  +68,089 dd -37,461 | plain  +18,315 dd -29,898
+  Efficiency Ratio(20) >= 0.4                  n= 49 | A  +13,688 (Aug +17,958 Sep  -4,270) dd -21,434 worst -10,292 | B  +13,056 dd -23,111 | plain  -12,184 dd -22,536
+  15m Supertrend up                            n=118 | A  +82,489 (Aug +46,333 Sep +36,156) dd -38,414 worst -10,292 | B  +79,731 dd -41,713 | plain  +49,098 dd -36,264
+
+== DAY CONTEXT ==
+  spot above the day's open                    n=146 | A  +99,310 (Aug +41,502 Sep +57,809) dd -29,161 worst -10,734 | B +103,399 dd -31,519 | plain  +59,242 dd -27,089
+  spot above yesterday's close                 n=157 | A  +84,523 (Aug +36,224 Sep +48,300) dd -40,943 worst -11,649 | B  +85,484 dd -46,203 | plain  +43,274 dd -37,940
+  spot above yesterday's high                  n= 67 | A  +26,602 (Aug  -6,529 Sep +33,131) dd -50,534 worst -10,292 | B  +21,836 dd -53,170 | plain  +26,183 dd -49,511
+  spot above the first 30-min high             n= 88 | A   -2,395 (Aug  -7,674 Sep  +5,279) dd -28,693 worst  -7,013 | B     -103 dd -28,840 | plain   -3,460 dd -24,340
+  spot above the 20-day average                n=157 | A  +31,285 (Aug +32,766 Sep  -1,481) dd -38,781 worst -11,649 | B  +34,184 dd -44,041 | plain  -11,057 dd -37,612
+  stock gapped up today                        n=113 | A  +89,669 (Aug +76,896 Sep +12,773) dd -23,317 worst -11,210 | B  +85,415 dd -22,332 | plain  +63,291 dd -23,126
+
+== MARKET (NIFTY) ==
+  NIFTY above its day open                     n= 72 | A  +62,883 (Aug +21,537 Sep +41,346) dd -17,697 worst -11,649 | B  +64,102 dd -17,235 | plain  +16,823 dd -19,745
+  NIFTY above yesterday's close                n= 72 | A  +20,874 (Aug -15,170 Sep +36,044) dd -40,158 worst -11,649 | B  +23,162 dd -38,410 | plain  -12,712 dd -43,377
+  NIFTY above open+close of last 2 x 1h candles n= 40 | A  -14,990 (Aug  -9,184 Sep  -5,806) dd -34,746 worst -12,595 | B  -15,852 dd -34,681 | plain  -25,709 dd -37,784
+  NIFTY last 1h close up                       n= 86 | A  +39,576 (Aug +23,869 Sep +15,706) dd -31,352 worst -14,127 | B  +40,801 dd -30,479 | plain  +18,670 dd -31,099
+  NIFTY 1h Supertrend up                       n= 43 | A  +10,391 (Aug  +2,015 Sep  +8,375) dd -14,115 worst -10,789 | B  +10,911 dd -14,175 | plain   -5,584 dd -13,305
+  NIFTY above 1h EMA20                         n= 72 | A  -30,113 (Aug -11,541 Sep -18,572) dd -38,152 worst -12,705 | B  -30,731 dd -38,693 | plain  -35,126 dd -40,394
+  NIFTY CHOP(14) 15m < 50                      n=120 | A  +27,801 (Aug -14,591 Sep +42,392) dd -32,261 worst -11,210 | B  +38,270 dd -27,716 | plain   -2,991 dd -40,323
+  NIFTY CHOP(14) 15m < 61.8                    n=179 | A +106,874 (Aug +46,827 Sep +60,046) dd -37,549 worst -11,649 | B +111,517 dd -42,809 | plain  +58,002 dd -40,852
+  NIFTY ADX(14) 15m >= 20                      n=153 | A +110,993 (Aug +45,469 Sep +65,524) dd -39,442 worst -11,444 | B +115,963 dd -43,846 | plain  +64,723 dd -48,253
+  NIFTY above the 20-day average               n= 55 | A  -38,523 (Aug -38,523 Sep      +0) dd -39,619 worst -11,444 | B  -43,783 dd -44,879 | plain  -36,273 dd -36,283
+
+== TIME OF ENTRY ==
+  entry before 10:00                           n= 19 | A  +51,447 (Aug +37,476 Sep +13,971) dd  -5,660 worst  -3,965 | B  +52,551 dd  -6,198 | plain  +19,966 dd -10,524
+  entry 10:00-11:30                            n= 85 | A   +4,452 (Aug -27,033 Sep +31,485) dd -47,128 worst -14,127 | B   +6,634 dd -48,643 | plain   -3,434 dd -48,693
+  entry 11:30-13:00                            n= 53 | A  +64,407 (Aug +38,380 Sep +26,028) dd -14,112 worst -10,878 | B  +67,387 dd -16,128 | plain  +46,689 dd -17,634
+  entry after 13:00                            n= 36 | A   +3,844 (Aug  -5,978 Sep  +9,822) dd -11,233 worst  -5,469 | B   +3,891 dd -11,290 | plain     +273 dd -11,729
+  NOT 11:30-13:00                              n=140 | A  +59,743 (Aug  +4,466 Sep +55,277) dd -37,472 worst -13,300 | B  +63,077 dd -39,840 | plain  +16,806 dd -38,751
+  NOT after 13:00                              n=157 | A +120,306 (Aug +48,823 Sep +71,483) dd -32,928 worst -11,649 | B +126,572 dd -38,188 | plain  +63,222 dd -34,627
+
+== SINGLE FILTERS THAT CUT THE DRAWDOWN, keep >= 85% of combo A's profit and do not hurt August (9) ==
+  last 1h candle green                         n=156  A +145,243 (Aug +65,902 Sep +79,341) dd -19,472  profit/drawdown 7.46  (no filter: 2.99)
+  last 1h close above the one before           n=162  A +138,261 (Aug +55,936 Sep +82,325) dd -29,653  profit/drawdown 4.66  (no filter: 2.99)
+  CHOP(14) 15m < 50                            n=124  A +116,512 (Aug +47,439 Sep +69,073) dd -28,540  profit/drawdown 4.08  (no filter: 2.99)
+  spot above open+close of last 1h candle      n=186  A +123,539 (Aug +53,876 Sep +69,664) dd -33,311  profit/drawdown 3.71  (no filter: 2.99)
+  NOT after 13:00                              n=157  A +120,306 (Aug +48,823 Sep +71,483) dd -32,928  profit/drawdown 3.65  (no filter: 2.99)
+  CHOP(14) 15m < 61.8                          n=185  A +130,954 (Aug +44,913 Sep +86,041) dd -39,051  profit/drawdown 3.35  (no filter: 2.99)
+  spot above this hour's open                  n=187  A +122,550 (Aug +48,612 Sep +73,938) dd -38,069  profit/drawdown 3.22  (no filter: 2.99)
+  NIFTY CHOP(14) 15m < 61.8                    n=179  A +106,874 (Aug +46,827 Sep +60,046) dd -37,549  profit/drawdown 2.85  (no filter: 2.99)
+  NIFTY ADX(14) 15m >= 20                      n=153  A +110,993 (Aug +45,469 Sep +65,524) dd -39,442  profit/drawdown 2.81  (no filter: 2.99)
+
+== PAIRS of those filters (both must pass) ==
+  last 1h candle green + CHOP(14) 15m < 61.8
+      n=152  A +146,885 (Aug +67,296 Sep +79,589) dd -19,224 worst -10,878  profit/dd 7.64 | B +148,955 dd -20,995
+  last 1h candle green + last 1h close above the one before
+      n=154  A +145,927 (Aug +66,362 Sep +79,565) dd -19,247 worst -10,878  profit/dd 7.58 | B +147,997 dd -22,801
+  CHOP(14) 15m < 50 + NIFTY ADX(14) 15m >= 20
+      n= 95  A +135,868 (Aug +62,168 Sep +73,700) dd -18,218 worst -11,111  profit/dd 7.46 | B +137,596 dd -16,650
+  last 1h candle green + NIFTY ADX(14) 15m >= 20
+      n=123  A +132,752 (Aug +67,852 Sep +64,900) dd -17,813 worst  -9,876  profit/dd 7.45 | B +134,175 dd -20,529
+  last 1h candle green + NOT after 13:00
+      n=124  A +136,136 (Aug +66,922 Sep +69,213) dd -18,551 worst -10,878  profit/dd 7.34 | B +138,158 dd -19,155
+  last 1h candle green + NIFTY CHOP(14) 15m < 61.8
+      n=145  A +129,563 (Aug +69,612 Sep +59,950) dd -18,317 worst -10,878  profit/dd 7.07 | B +131,228 dd -19,090
+  last 1h candle green + spot above open+close of last 1h candle
+      n=154  A +136,977 (Aug +65,002 Sep +71,975) dd -19,472 worst -10,878  profit/dd 7.03 | B +139,046 dd -22,801
+  last 1h candle green + spot above this hour's open
+      n=153  A +136,358 (Aug +64,383 Sep +71,975) dd -19,846 worst -10,878  profit/dd 6.87 | B +138,428 dd -23,419
+  last 1h close above the one before + spot above open+close of last 1h candle
+      n=158  A +138,216 (Aug +63,257 Sep +74,959) dd -21,433 worst -10,878  profit/dd 6.45 | B +138,522 dd -25,728
+  last 1h candle green + CHOP(14) 15m < 50
+      n=103  A +137,705 (Aug +57,318 Sep +80,387) dd -21,799 worst -12,595  profit/dd 6.32 | B +140,143 dd -23,411
+  last 1h close above the one before + CHOP(14) 15m < 50
+      n=107  A +130,025 (Aug +55,113 Sep +74,912) dd -21,799 worst -12,595  profit/dd 5.96 | B +130,699 dd -23,792
+  last 1h close above the one before + spot above this hour's open
+      n=158  A +133,278 (Aug +58,319 Sep +74,959) dd -26,370 worst -11,444  profit/dd 5.05 | B +133,584 dd -30,666
+
+Dhan calls made: 0

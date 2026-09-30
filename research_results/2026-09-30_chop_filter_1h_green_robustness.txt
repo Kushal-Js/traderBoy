@@ -1,0 +1,29 @@
+== WEEK BY WEEK (Mon date): all trades vs only 'last 1h candle green' ==
+  2026-08-03  all: n= 28 plain  -22,424 comboA  -17,991   | filtered: n= 22 plain   -9,646 comboA   -7,277   dropped trades made  -10,714
+  2026-08-10  all: n= 27 plain  -14,086 comboA  -20,768   | filtered: n= 22 plain     -450 comboA   -9,179   dropped trades made  -11,589
+  2026-08-17  all: n= 20 plain   -3,829 comboA  +12,617   | filtered: n= 16 plain   +6,760 comboA  +21,062   dropped trades made   -8,445
+  2026-08-24  all: n= 26 plain  +57,456 comboA  +68,988   | filtered: n= 23 plain  +48,638 comboA  +61,297   dropped trades made   +7,692
+  2026-08-31  all: n= 23 plain   +1,693 comboA   +3,337   | filtered: n= 18 plain   +1,394 comboA     +653   dropped trades made   +2,684
+  2026-09-07  all: n= 26 plain   +8,961 comboA  +10,290   | filtered: n= 20 plain  +21,959 comboA  +22,300   dropped trades made  -12,010
+  2026-09-14  all: n= 17 plain  +24,359 comboA  +41,550   | filtered: n= 14 plain  +17,810 comboA  +34,835   dropped trades made   +6,715
+  2026-09-21  all: n= 21 plain   +5,792 comboA  +15,167   | filtered: n= 17 plain   +7,333 comboA  +15,267   dropped trades made     -100
+  2026-09-28  all: n=  5 plain   +5,574 comboA  +10,961   | filtered: n=  4 plain     +899 comboA   +6,286   dropped trades made   +4,675
+  weeks where the filter is at least as good: 5 of 9
+
+== THE 37 DROPPED TRADES: plain -31,200  comboA -21,095; winners 7, losers 30; biggest winner +9,277, biggest loser -5,141
+   kept trades: 156, win rate 31% vs all 28%
+
+== OTHER CANDLE LENGTHS / ANCHORS: 'last CLOSED candle green' ==
+  15-min                                 n=116  A  +43,275 (Aug -25,161 Sep +68,436) dd -67,210 | plain  +30,419 dd -64,426
+  30-min                                 n=134  A  +76,696 (Aug +33,842 Sep +42,854) dd -23,009 | plain  +38,167 dd -21,887
+  45-min                                 n=157  A +117,264 (Aug +32,821 Sep +84,443) dd -25,995 | plain  +67,077 dd -22,795
+  60-min (09:15 anchor) = the filter     n=156  A +145,243 (Aug +65,902 Sep +79,341) dd -19,472 | plain  +94,698 dd -20,073
+  60-min clock hours (10:00, 11:00..)    n=153  A +102,922 (Aug +31,757 Sep +71,166) dd -41,043 | plain  +60,473 dd -37,655
+  60-min anchored 09:45                  n=155  A +145,530 (Aug +62,055 Sep +83,475) dd -30,913 | plain  +86,386 dd -25,451
+  75-min                                 n=136  A +107,244 (Aug +67,979 Sep +39,265) dd -34,942 | plain  +61,932 dd -27,967
+  90-min                                 n=115  A +128,668 (Aug +74,429 Sep +54,239) dd -13,140 | plain +106,595 dd -11,774
+  120-min                                n=103  A  +39,306 (Aug  -5,589 Sep +44,895) dd -30,532 | plain  +24,561 dd -26,209
+  (no filter)                            n=193  A +124,150 (Aug +42,845 Sep +81,305) dd -41,531 | plain  +63,495 dd -45,752
+
+== RANDOM CHECK: drop 37 random trades 2,000 times - how often does combo A reach the filter's result? ==
+  filter: total +145,243, dd -19,472.  Random drops as good on profit: 8.1%  on drawdown: 0.1%  on both: 0.00%

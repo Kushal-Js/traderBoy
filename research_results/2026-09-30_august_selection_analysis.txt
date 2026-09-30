@@ -1,0 +1,21 @@
+== WEEK BY WEEK: HYBRID vs the 10 random lists (plain calls), and the market ==
+  week of      HYBRID   random mean  randoms beaten   NIFTY week %   NIFTY avg CHOP(15m)
+  2026-08-03   -22,424      -9,738       3/10        -0.01%         46.5
+  2026-08-10   -14,086      +1,566       2/10        -0.88%         50.7
+  2026-08-17    -3,829      -4,148       4/10        -0.38%         45.9
+  2026-08-24   +57,456        -207      10/10        -0.45%         46.1
+  2026-08-31    +1,693      -3,331       7/10        -0.91%         46.2
+  2026-09-07    +8,961        -319       7/10        -2.03%         46.2
+  2026-09-14   +24,359      -3,511       9/10        -0.97%         50.0
+  2026-09-21    +5,792      -7,668       9/10        -0.81%         47.6
+  2026-09-28    +5,574      -3,810      10/10        -1.93%         45.9
+
+== LIST VARIANTS (cache-only re-simulation, 5 slots) ==
+  hybrid15      (list size 15-15) no filter trades 193 (no option data 1)  plain   +63,495 (Aug  +17,117 Sep  +46,378) dd  -45,752 worst  -13,368
+  hybrid15      (list size 15-15) 1h green  trades 163 (no option data 0)  plain   +94,945 (Aug  +41,287 Sep  +53,658) dd  -22,773 worst  -12,597
+  positive_fit  (list size 15-15) no filter trades 193 (no option data 1)  plain   +63,495 (Aug  +17,117 Sep  +46,378) dd  -45,752 worst  -13,368
+  positive_fit  (list size 15-15) 1h green  trades 163 (no option data 0)  plain   +94,945 (Aug  +41,287 Sep  +53,658) dd  -22,773 worst  -12,597
+  top8          (list size 8-8) no filter trades 114 (no option data 1)  plain   +61,679 (Aug   +3,283 Sep  +58,396) dd  -37,186 worst  -10,384
+  top8          (list size 8-8) 1h green  trades  94 (no option data 0)  plain   +74,419 (Aug  +23,974 Sep  +50,445) dd  -16,650 worst   -8,396
+  top5          (list size 5-5) no filter trades  83 (no option data 0)  plain   +19,227 (Aug  -12,801 Sep  +32,028) dd  -41,378 worst  -10,013
+  top5          (list size 5-5) 1h green  trades  68 (no option data 0)  plain   +34,674 (Aug   +5,937 Sep  +28,737) dd  -22,640 worst   -7,050

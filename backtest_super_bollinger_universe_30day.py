@@ -91,13 +91,15 @@ _cand_cache: dict = {}
 
 def simulate(syms: list[str], cap: int, pricer: st.OptionPricer, label: str, sides: str = "long",
              allowed: dict | None = None, daily_loss_limit: float | None = None,
-             entry_gate=None, cooloff_week_of: dict | None = None,
+             entry_gate=None, cooloff_week_of: dict | None = None, symbol_gate=None,
              soft_stop_rs: float | None = None, max_reentries: int = 0, reentry_cutoff: dtime = dtime(14, 0)):
     """`allowed` (optional): {date: set of symbols} - only those symbols may
     enter on that day (walk-forward stock selection).
     Loss-reduction switches (30 Sep 2026, all off by default):
       daily_loss_limit - no new entries once the day's realized modeled PnL
                          is at or below -daily_loss_limit;
+      symbol_gate(sym, t, side) -> bool - per-symbol entry filter (e.g. "the
+                         stock's last closed 1-hour candle is green");
       entry_gate(t, side) -> bool - extra check before each new entry (e.g.
                          a NIFTY-weakness filter);
       cooloff_week_of  - {date: week key}; after a MAX_LOSS_HIT the stock is
@@ -217,6 +219,12 @@ def simulate(syms: list[str], cap: int, pricer: st.OptionPricer, label: str, sid
                 continue
             if entry_gate is not None and not entry_gate(t, side):
                 stats["skipped_entry_gate"] += 1
+                continue
+            if symbol_gate is not None and not symbol_gate(sym, t, side):
+                # per-symbol entry filter (30 Sep 2026 chop-filter research); a refused signal is used up,
+                # as it would be live (one decision per trigger)
+                consumed.add((sym, key))
+                stats["skipped_symbol_gate"] += 1
                 continue
             consumed.add((sym, key))
             qty = pricer.lot(sym)

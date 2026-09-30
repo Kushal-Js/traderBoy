@@ -1,0 +1,21 @@
+filter                                  trades  skipped(filter / no option data) | plain | + hedge + S1
+no filter                                 193     0 /   1  (hedges unpriced 1)
+      plain          +63,495 (Aug  +17,117 Sep  +46,378) dd  -45,752 worst  -13,368
+      +hedge +S1    +124,150 (Aug  +42,845 Sep  +81,305) dd  -41,531 worst  -11,649
+last 60-min candle green (09:15 anchor)   163    42 /   0  (hedges unpriced 3)
+      plain          +94,945 (Aug  +41,287 Sep  +53,658) dd  -22,773 worst  -12,597
+      +hedge +S1    +145,997 (Aug  +62,393 Sep  +83,603) dd  -28,655 worst  -10,878
+last 60-min close above the one before    169    33 /   0  (hedges unpriced 3)
+      plain          +90,438 (Aug  +34,687 Sep  +55,750) dd  -30,377 worst  -12,969
+      +hedge +S1    +140,518 (Aug  +57,649 Sep  +82,868) dd  -34,404 worst  -11,444
+last 45-min candle green                  164    39 /   1  (hedges unpriced 3)
+      plain          +56,454 (Aug   +2,804 Sep  +53,650) dd  -34,675 worst  -13,368
+      +hedge +S1    +107,739 (Aug  +23,514 Sep  +84,225) dd  -33,676 worst  -12,063
+last 90-min candle green                  123    87 /   0  (hedges unpriced 2)
+      plain         +103,644 (Aug  +57,138 Sep  +46,506) dd  -13,884 worst   -8,671
+      +hedge +S1    +125,719 (Aug  +68,306 Sep  +57,414) dd  -19,808 worst   -9,334
+last 30-min candle green                  147    63 /   1  (hedges unpriced 2)
+      plain          +41,951 (Aug  +14,804 Sep  +27,148) dd  -27,359 worst  -13,411
+      +hedge +S1     +81,237 (Aug  +32,824 Sep  +48,412) dd  -26,860 worst  -12,331
+
+Dhan calls made: 8 (cache-only: these are refused lookups, not network calls)
