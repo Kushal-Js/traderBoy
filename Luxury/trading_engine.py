@@ -58,6 +58,7 @@ from trade_history import (
 import climactic_entry_guard
 import cross_strategy_registry
 import broker_flat_check
+import expiry_square_off
 import fund_allocation
 import reversal_filters
 
@@ -1371,8 +1372,9 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
         logger.exception("on_price_tick failed for %s", trading_symbol)
 
 
-async def _square_off_all(reason: str) -> None:
-    positions = dict(position_store.live_positions)
+async def _square_off_all(reason: str, symbols: Optional[set] = None) -> None:
+    """`symbols` (30 Sep 2026, expiry-day square-off): only these underlyings; None = every open position."""
+    positions = {s: p for s, p in position_store.live_positions.items() if symbols is None or s in symbols}
     if not positions:
         return
     logger.info("Square-off triggered (%s) for %d open position(s)", reason, len(positions))
@@ -1604,6 +1606,23 @@ async def _sync_pending_orders() -> None:
             await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.option_trading_symbol)
 
 
+async def _expiry_day_square_off() -> None:
+    """Expiry-day square-off (see expiry_square_off.py): a position whose
+    OWN contract expires today is closed from config.EXPIRY_DAY_SQUARE_OFF_
+    TIME on, whatever the weekday - the Friday carve-out does not cover a
+    Tuesday monthly expiry. Only those positions; retried every tick until
+    flat (an exit already in flight or on cooldown is skipped by
+    _square_off_all itself)."""
+    if not config.ENABLE_EXPIRY_DAY_SQUARE_OFF or not position_store.live_positions:
+        return
+    now = _now_ist()
+    expiring = {s for s, p in list(position_store.live_positions.items())
+                if await expiry_square_off.due_today(p.option_trading_symbol, False, now,
+                                                     config.EXPIRY_DAY_SQUARE_OFF_TIME, config.EXPIRY_DAY_SQUARE_OFF_TIME)}
+    if expiring:
+        await _square_off_all("EXPIRY_DAY_SQUARE_OFF", symbols=expiring)
+
+
 async def monitor_loop() -> None:
     """Runs forever; polls open positions and enforces exits + a square-off
     on whichever days _todays_square_off_time() says apply one - see
@@ -1618,6 +1637,8 @@ async def monitor_loop() -> None:
             await _sync_pending_orders()
             if config.CLIMACTIC_GUARD_ENABLED:
                 await climactic_entry_guard.poll_pending("Luxury")
+
+            await _expiry_day_square_off()
 
             cutoff = _todays_square_off_time()
             if cutoff is not None:

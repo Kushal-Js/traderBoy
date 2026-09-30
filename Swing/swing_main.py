@@ -21,6 +21,7 @@ from typing import Optional
 from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel
 
+import position_memory
 from Options.dhan_client import dhan_wrapper
 
 from . import candle_feed, config, signals
@@ -62,6 +63,13 @@ async def lifespan(app: FastAPI):
 
     try:
         reconciled = await reconcile_broker_positions()
+        # What the broker cannot know (best price, regime, the real opened_at,
+        # the target/stop set at entry) comes back from position_memory - only
+        # for the same contract/quantity/side/entry (see that module).
+        try:
+            position_memory.restore("Swing", reconciled, position_memory.SWING_FIELDS)
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not restore Swing position memory - positions stay as the broker reconciliation built them.")
         if reconciled:
             await position_store.reconcile_from_broker(reconciled)
             logger.info("Reconciled %d existing Swing position(s) at startup: %s",
@@ -222,6 +230,14 @@ async def get_mcx_config():
 @router.get("/swing/positions")
 async def get_positions():
     return await position_store.snapshot()
+
+
+@router.get("/swing/restart-report")
+async def get_restart_report():
+    """What the last startup put back on the real positions from
+    position_memory (best price, regime, opened_at, target/stop) and what it
+    is remembering now."""
+    return {"last_restore": position_memory.last_report("Swing"), "remembered": position_memory.remembered("Swing")}
 
 
 @router.get("/swing/paper-trades")

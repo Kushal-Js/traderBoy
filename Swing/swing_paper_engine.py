@@ -439,6 +439,12 @@ async def _check_one(symbol: str, position: Position) -> None:
             await _exit_one(symbol, position, ltp, "MCX_FRIDAY_SQUARE_OFF")
             return
 
+    # Expiry-day square-off (30 Sep 2026) - same rule as the real side: a
+    # contract that expires today is closed at EXPIRY_DAY_SQUARE_OFF_TIME.
+    if await swing_te._expires_today_and_due(position):
+        await _exit_one(symbol, position, ltp, "EXPIRY_DAY_SQUARE_OFF")
+        return
+
     # Daily index square-off (added 24 Sep 2026) - a paper NIFTY/BANKNIFTY
     # position must behave identically to a real one, including never
     # carrying overnight (see config.INDEX_DAILY_SQUARE_OFF_TIME's own

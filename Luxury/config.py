@@ -418,6 +418,14 @@ ENABLE_FRIDAY_SQUARE_OFF = os.getenv("LUXURY_ENABLE_FRIDAY_SQUARE_OFF", "true").
 # position after Friday 15:25 PM, square them off").
 FRIDAY_SQUARE_OFF_TIME = os.getenv("LUXURY_FRIDAY_SQUARE_OFF_TIME", "15:25")
 
+# Expiry-day square-off (30 Sep 2026, user: "On day of the monthly expiry of
+# Options, all open positions need to be squared off also at 15:25. No carry
+# forward after EXPIRY date.") - a position whose OWN contract expires today
+# is closed at this time whatever the weekday (the Friday rule above does not
+# cover a Tuesday monthly expiry). See expiry_square_off.py.
+ENABLE_EXPIRY_DAY_SQUARE_OFF = os.getenv("LUXURY_ENABLE_EXPIRY_DAY_SQUARE_OFF", "true").lower() == "true"
+EXPIRY_DAY_SQUARE_OFF_TIME = os.getenv("LUXURY_EXPIRY_DAY_SQUARE_OFF_TIME", "15:25")
+
 # See Options/config.py's identical flag - this package's own independently-
 # tunable cutoff for NEW entries only.
 ENABLE_TRADING_TIME_LIMIT = os.getenv("LUXURY_ENABLE_TRADING_TIME_LIMIT", "false").lower() == "true"

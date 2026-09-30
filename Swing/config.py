@@ -921,6 +921,15 @@ FRIDAY_SQUARE_OFF_TIME = os.getenv("SWING_FRIDAY_SQUARE_OFF_TIME", "15:25")
 # _monitor_tick for where this is checked and enforced.
 MCX_FRIDAY_SQUARE_OFF_TIME = os.getenv("SWING_MCX_FRIDAY_SQUARE_OFF_TIME", "23:25")
 
+# Expiry-day square-off (30 Sep 2026, user: "On day of the monthly expiry of
+# Options, all open positions need to be squared off also at 15:25. No carry
+# forward after EXPIRY date.") - a position whose OWN contract expires today
+# is closed at this time whatever the weekday (the Friday rule above does not
+# cover a Tuesday monthly expiry). See expiry_square_off.py.
+EXPIRY_DAY_SQUARE_OFF_ENABLED = os.getenv("SWING_EXPIRY_DAY_SQUARE_OFF_ENABLED", "true").lower() == "true"
+EXPIRY_DAY_SQUARE_OFF_TIME = os.getenv("SWING_EXPIRY_DAY_SQUARE_OFF_TIME", "15:25")
+MCX_EXPIRY_DAY_SQUARE_OFF_TIME = os.getenv("SWING_MCX_EXPIRY_DAY_SQUARE_OFF_TIME", "23:25")
+
 # Daily (not just weekly) square-off, INDEX_SYMBOLS (NIFTY/BANKNIFTY) ONLY -
 # user request 24 Sep 2026 ("all open positions for NIFTY and BANKNIFTY to
 # be strictly squared off at 3:25 daily with no carry forward over the

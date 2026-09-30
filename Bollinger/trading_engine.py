@@ -41,9 +41,11 @@ from typing import Optional
 import entry_backlog
 import broker_flat_check
 import cross_strategy_registry
+import expiry_square_off
 import order_safety
 import fund_allocation
 import paper_mode_control
+import position_memory
 from trade_history import append_jsonl, attribute_open_broker_position
 
 from . import config, signals
@@ -756,6 +758,19 @@ async def _check_paper_positions(profile: Profile, square_off_symbols: Optional[
             await _check_paper_position(profile, symbol, ltp)
 
 
+async def _expiring_today_and_due(positions: dict) -> set[str]:
+    """Expiry-day square-off (see expiry_square_off.py): the symbols in
+    `positions` (a real store's live_positions or a paper book) whose OWN
+    contract expires today, once config.EXPIRY_DAY_SQUARE_OFF_TIME (MCX: its
+    own time) has passed."""
+    if not config.EXPIRY_DAY_SQUARE_OFF_ENABLED:
+        return set()
+    now = _now_ist()
+    return {s for s, p in list(positions.items())
+            if await expiry_square_off.due_today(p.trading_symbol, p.exchange_segment == "MCX_COMM", now,
+                                                 config.EXPIRY_DAY_SQUARE_OFF_TIME, config.MCX_EXPIRY_DAY_SQUARE_OFF_TIME)}
+
+
 def _non_mcx(book: PaperBook) -> set[str]:
     return {s for s, p in book.positions.items() if p.exchange_segment != "MCX_COMM"}
 
@@ -1151,6 +1166,16 @@ async def _monitor_tick() -> None:
         for profile in profiles:
             await _check_paper_positions(profile, _mcx(profile.paper_book), "MCX_FRIDAY_SQUARE_OFF")
 
+    # Expiry-day square-off - any weekday: a position (real or paper) whose
+    # own contract expires today never carries past EXPIRY_DAY_SQUARE_OFF_TIME.
+    expiring = await _expiring_today_and_due(position_store.live_positions)
+    if expiring:
+        await _square_off_all("EXPIRY_DAY_SQUARE_OFF", symbols=expiring)
+    for profile in profiles:
+        expiring_paper = await _expiring_today_and_due(profile.paper_book.positions)
+        if expiring_paper:
+            await _check_paper_positions(profile, expiring_paper, "EXPIRY_DAY_SQUARE_OFF")
+
     if friday_square_off_now:
         # No point evaluating new entries for the rest of Friday. MCX
         # positions still get their normal exit-check below (not forced
@@ -1313,6 +1338,12 @@ async def monitor_loop() -> None:
             await _monitor_tick()
         except Exception:  # noqa: BLE001
             logger.exception("Error in Bollinger monitor loop tick")
+        try:
+            # restart memory of every live REAL position (written only when something changed)
+            position_memory.record("Bollinger", list(position_store.live_positions.values()),
+                                   position_memory.BOLLINGER_FIELDS)
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not record Bollinger position memory")
         await asyncio.sleep(config.MONITOR_INTERVAL_SECONDS)
 
 

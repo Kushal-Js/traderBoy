@@ -858,6 +858,14 @@ ENABLE_FRIDAY_SQUARE_OFF = os.getenv("ENABLE_FRIDAY_SQUARE_OFF", "true").lower()
 # position after Friday 15:25 PM, square them off").
 FRIDAY_SQUARE_OFF_TIME = os.getenv("FRIDAY_SQUARE_OFF_TIME", "15:25")
 
+# Expiry-day square-off (30 Sep 2026, user: "On day of the monthly expiry of
+# Options, all open positions need to be squared off also at 15:25. No carry
+# forward after EXPIRY date.") - a position whose OWN contract expires today
+# is closed at this time whatever the weekday (the Friday rule above does not
+# cover a Tuesday monthly expiry). See expiry_square_off.py.
+ENABLE_EXPIRY_DAY_SQUARE_OFF = os.getenv("ENABLE_EXPIRY_DAY_SQUARE_OFF", "true").lower() == "true"
+EXPIRY_DAY_SQUARE_OFF_TIME = os.getenv("EXPIRY_DAY_SQUARE_OFF_TIME", "15:25")
+
 # Restricts NEW entries to before a cutoff time - independent of
 # SQUARE_OFF_TIME above, which governs closing EXISTING positions, not
 # opening new ones. When false (default), new entries are allowed all day

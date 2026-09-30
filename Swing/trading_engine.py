@@ -44,8 +44,10 @@ from typing import Optional
 
 import entry_backlog
 import broker_flat_check
+import expiry_square_off
 import fund_allocation
 import paper_mode_control
+import position_memory
 import trade_history
 from trade_history import append_jsonl, attribute_open_broker_position
 
@@ -180,6 +182,17 @@ def _is_index_square_off_time() -> bool:
     on a weekend that wasn't already force-closed the prior Friday."""
     now = _now_ist()
     return now.weekday() < 5 and now >= _parse_hhmm_today(config.INDEX_DAILY_SQUARE_OFF_TIME)
+
+
+async def _expires_today_and_due(position) -> bool:
+    """Expiry-day square-off (see expiry_square_off.py): True once the
+    position's OWN contract expires today and config.EXPIRY_DAY_SQUARE_OFF_
+    TIME (MCX: its own time) has passed. Equity has no expiry."""
+    if not config.EXPIRY_DAY_SQUARE_OFF_ENABLED or position.exchange_segment == "NSE_EQ":
+        return False
+    return await expiry_square_off.due_today(
+        position.trading_symbol, position.exchange_segment == "MCX_COMM", _now_ist(),
+        config.EXPIRY_DAY_SQUARE_OFF_TIME, config.MCX_EXPIRY_DAY_SQUARE_OFF_TIME)
 
 
 def _should_paper_trade(symbol: str) -> bool:
@@ -1723,6 +1736,13 @@ async def _monitor_tick() -> None:
         mcx_open = {s for s, p in position_store.live_positions.items() if p.exchange_segment == "MCX_COMM"}
         await _square_off_all("MCX_FRIDAY_SQUARE_OFF", symbols=mcx_open)
 
+    # Expiry-day square-off - any weekday: a position whose own contract
+    # expires today never carries past EXPIRY_DAY_SQUARE_OFF_TIME. Retried
+    # every tick until flat, like the Friday one.
+    expiring = {s for s, p in list(position_store.live_positions.items()) if await _expires_today_and_due(p)}
+    if expiring:
+        await _square_off_all("EXPIRY_DAY_SQUARE_OFF", symbols=expiring)
+
     if friday_square_off_now:
         # No point evaluating new entries for the rest of Friday - they'd
         # just have to be immediately closed again (non-MCX) or carry into
@@ -1868,6 +1888,11 @@ async def monitor_loop() -> None:
             await _monitor_tick()
         except Exception:  # noqa: BLE001
             logger.exception("Error in Swing v2 monitor loop tick")
+        try:
+            # restart memory of every live REAL position (written only when something changed)
+            position_memory.record("Swing", list(position_store.live_positions.values()), position_memory.SWING_FIELDS)
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not record Swing position memory")
         await asyncio.sleep(config.MONITOR_INTERVAL_SECONDS)
 
 

@@ -60,12 +60,16 @@ What it does, in order:
      that is only recorded and, a week later, scored against the live list
      (data/super_bollinger_shadow_watchlist.json / _shadow_scores.jsonl).
      Never traded; best-effort, time-boxed, cannot change any watchlist.
-  8. Restarts dhanboy.service - UNCONDITIONALLY, per explicit user
-     instruction. The bot's own broker-reconciliation-on-restart logic
-     (verified live 17 Sep 2026, see TRADING_JOURNAL.md) recovers any
-     position still open across the restart; the one known, already-
-     accepted tradeoff is that a recovered position's trailing-stop
-     memory (highest_price) resets to the broker's reported entry price.
+  8. Restarts dhanboy.service THROUGH safe_restart.py (user request 30 Sep
+     2026; until then a plain `systemctl restart`): snapshot of every
+     strategy's positions, checks that no order/exit is in flight and that
+     every real Super Bollinger position has its broker stop and is in the
+     state file, restart, wait for /health, restart report in this job's
+     log. If a check fails the restart is SKIPPED, not forced - the new
+     watchlists are already live (every store re-reads its file on each
+     monitor tick) and the 08:00 IST morning refresh restarts the bot
+     anyway. If safe_restart.py itself cannot run, falls back to the plain
+     restart.
 
 ONE safety net this script DOES still apply - NOT a position holdback,
 the user never asked for that to be skipped, just a basic defense against
@@ -163,8 +167,24 @@ def snapshot_live_positions() -> dict:
     return positions
 
 
-def restart_bot() -> None:
-    subprocess.run(["systemctl", "restart", "dhanboy.service"], check=True)
+SAFE_RESTART = REPO_ROOT / "safe_restart.py"
+SAFE_RESTART_TIMEOUT_SECONDS = 300
+
+
+def restart_bot(log=print) -> str:
+    """Restart via safe_restart.py; returns "restarted" | "restarted_needs_review" | "skipped_checks_failed" |
+    "restarted_health_not_back" | "restarted_plain". Its output goes to `log`."""
+    try:
+        proc = subprocess.run([sys.executable, str(SAFE_RESTART)], cwd=str(REPO_ROOT), capture_output=True, text=True,
+                              timeout=SAFE_RESTART_TIMEOUT_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - the tool itself could not run: do what this job did before
+        log(f"safe_restart.py could not be run ({exc!r}) - falling back to a plain restart")
+        subprocess.run(["systemctl", "restart", "dhanboy.service"], check=True)
+        return "restarted_plain"
+    for line in (proc.stdout + proc.stderr).splitlines():
+        log(f"  safe_restart: {line}")
+    return {0: "restarted", 1: "restarted_needs_review", 2: "skipped_checks_failed",
+            3: "restarted_health_not_back"}.get(proc.returncode, f"safe_restart_exit_{proc.returncode}")
 
 
 def main() -> None:
@@ -238,12 +258,18 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         log(f"Shadow list step FAILED ({exc!r}) - nothing else is affected.")
 
-    log("\nRestarting dhanboy.service (unconditional, per explicit user instruction - broker "
-        "reconciliation on restart recovers any position still open; its trailing-stop memory "
-        "resets to the broker's reported entry price, an already-accepted tradeoff)...")
+    log("\nRestarting dhanboy.service through safe_restart.py (snapshot, checks, restart, /health, restart report)...")
     try:
-        restart_bot()
-        log("Restart command issued successfully.")
+        outcome = restart_bot(log)
+        log({"restarted": "Restarted; the restart report is clean.",
+             "restarted_needs_review": "Restarted, but the restart report says NEEDS REVIEW - see the lines above.",
+             "skipped_checks_failed": "NOT restarted: a safe-restart check failed (see above). The new watchlists are "
+                                      "already live - every store re-reads its file on each monitor tick - and the "
+                                      "08:00 IST morning refresh restarts the bot.",
+             "restarted_health_not_back": "Restart issued but /health did not come back within 2 minutes - check "
+                                          "journalctl -u dhanboy.service.",
+             "restarted_plain": "Restarted with a plain systemctl restart (safe_restart.py could not run)."}
+            .get(outcome, f"safe_restart.py ended unexpectedly ({outcome}) - check the bot."))
     except Exception as exc:  # noqa: BLE001
         log(f"RESTART FAILED: {exc}. Watchlist files were already updated - both stores re-read "
             f"the file on every monitor tick regardless, so the new watchlist is live even without "

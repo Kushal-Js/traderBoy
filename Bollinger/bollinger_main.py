@@ -19,6 +19,7 @@ import json
 from datetime import date
 
 import paper_mode_control
+import position_memory
 from trade_history import dated_path
 from Options.dhan_client import dhan_wrapper
 
@@ -52,6 +53,13 @@ async def lifespan(app: FastAPI):
 
     try:
         reconciled = await reconcile_broker_positions()
+        # The per-trade stop, the trailing state and the best price come back
+        # from position_memory instead of the flat MIN_STOP_PCT fallback - only
+        # for the same contract/quantity/side/entry (see that module).
+        try:
+            position_memory.restore("Bollinger", reconciled, position_memory.BOLLINGER_FIELDS)
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not restore Bollinger position memory - positions stay as the broker reconciliation built them.")
         if reconciled:
             await position_store.reconcile_from_broker(reconciled)
             logger.info("Reconciled %d existing Bollinger position(s) at startup: %s",
@@ -152,6 +160,14 @@ async def get_watchlist():
 @router.get("/bollinger/positions")
 async def get_positions():
     return await position_store.snapshot()
+
+
+@router.get("/bollinger/restart-report")
+async def get_restart_report():
+    """What the last startup put back on the real positions from
+    position_memory (per-trade stop, trailing state, best price) and what it
+    is remembering now."""
+    return {"last_restore": position_memory.last_report("Bollinger"), "remembered": position_memory.remembered("Bollinger")}
 
 
 def _paper_report(book: PaperBook, day: Optional[str]) -> dict:

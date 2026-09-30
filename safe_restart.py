@@ -12,9 +12,10 @@ at 11:35 IST a failed seed script was, and a hedge lost its profit trail).
 Steps: 1) snapshot every strategy's positions + Super Bollinger's live state
 to history/restart_snapshots/<time>_*.json; 2) checks - no order in flight, no
 exit in flight, every real Super Bollinger position has its broker stop order
-and is in the state file on disk (fresh); 3) systemctl restart; 4) wait for
-/health; 5) print GET /super-bollinger/restart-report and exit 1 if it says
-needs_review. Standard library only.
+and is in the state file on disk (fresh), every real Swing/Bollinger position
+is in its position-memory file; 3) systemctl restart; 4) wait for /health;
+5) print GET /super-bollinger/restart-report plus what Swing and Bollinger
+restored, and exit 1 if anything needs review. Standard library only.
 """
 import json
 import subprocess
@@ -31,6 +32,9 @@ SNAP_DIR = Path("history/restart_snapshots")
 ENDPOINTS = ["super-bollinger/positions", "super-bollinger/supervisor", "super-bollinger/scale",
              "super-bollinger/live-state", "positions", "luxury/positions", "swing/positions", "bollinger/positions",
              "paper-mode"]
+# Swing and Bollinger remember their real positions' trailing state themselves (position_memory.py)
+MEMORY_FILES = {"swing/positions": Path("data/swing_position_memory.json"),
+                "bollinger/positions": Path("data/bollinger_position_memory.json")}
 
 
 def get(path: str, timeout: float = 10):
@@ -92,9 +96,27 @@ def main() -> int:
             except Exception as exc:  # noqa: BLE001
                 problems.append(f"state file unreadable: {exc!r}")
     for ep in ("positions", "luxury/positions", "swing/positions", "bollinger/positions"):
-        n = len((snap.get(ep) or {}).get("live_positions", []))
-        if n:
-            notes.append(f"/{ep}: {n} real position(s) - rebuilt from the broker only (best price / trailing memory resets)")
+        rows = (snap.get(ep) or {}).get("live_positions", [])
+        if not rows:
+            continue
+        if ep not in MEMORY_FILES:
+            notes.append(f"/{ep}: {len(rows)} real position(s) - rebuilt from the broker only (best price / trailing memory resets)")
+            continue
+        try:
+            mem = json.loads(MEMORY_FILES[ep].read_text())
+        except Exception as exc:  # noqa: BLE001
+            mem = {}
+            notes.append(f"/{ep}: memory file unreadable ({exc!r})")
+        for p in rows:
+            row = mem.get(p.get("trading_symbol"))
+            if p.get("pending_exit_order_id"):
+                problems.append(f"{p.get('trading_symbol')}: an exit order is in flight")
+            if row is None:
+                problems.append(f"{p.get('trading_symbol')} ({ep.split('/')[0]}): not in {MEMORY_FILES[ep]} - its trailing "
+                                f"state would be lost")
+            else:
+                print(f"  real {ep.split('/')[0]}: {p.get('trading_symbol')} x{p.get('quantity')} entry {p.get('entry_price')} "
+                      f"best {p.get('best_price')} (remembered best {row.get('best_price')})")
 
     for n in notes:
         print("  note:", n)
@@ -131,7 +153,21 @@ def main() -> int:
             print(f"  {key}: {json.dumps(row, default=str)}")
     print(f"  day_state: {report.get('day_state')}  broker_reachable: {report.get('broker_reachable')}  "
           f"needs_review: {report.get('needs_review')}")
-    return 1 if report.get("needs_review") else 0
+    review = bool(report.get("needs_review"))
+    for name in ("swing", "bollinger"):
+        try:
+            last = (get(f"{name}/restart-report") or {}).get("last_restore") or {}
+        except Exception:  # noqa: BLE001
+            continue
+        for row in last.get("restored", []):
+            print(f"  {name} restored: {json.dumps(row, default=str)}")
+        for row in last.get("not_restored", []):
+            print(f"  {name} NOT restored: {json.dumps(row, default=str)}")
+            review = True
+        for sym in last.get("remembered_but_not_at_broker", []):
+            print(f"  {name}: {sym} was open before the restart but is not at the broker now (closed while down?)")
+            review = True
+    return 1 if review else 0
 
 
 if __name__ == "__main__":
