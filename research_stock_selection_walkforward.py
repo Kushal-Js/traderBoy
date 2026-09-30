@@ -146,14 +146,19 @@ def _fit_scores(syms, as_of, fits, days, min_trades=3):
 
 
 def select(rule: str, as_of: date, dailies: dict, universe: list[str], fits: dict, days: list[date], seed: int = 0):
+    """Rule names may carry a watchlist-size suffix, e.g. HYBRID_TOP20 (default TOP_N)."""
     rule = rule.replace("_DAILY", "")
+    top_n = TOP_N
+    if "_TOP" in rule:
+        rule, n = rule.split("_TOP")
+        top_n = int(n)
     gated = [s for s in universe if s in dailies and wf.gate_check(dailies[s], as_of)[0]]
     if rule == "HYBRID":
         ath = wf.ath_scores({s: dailies[s] for s in gated}, as_of)
         pool = sorted(ath, key=lambda s: ath[s], reverse=True)[:40]
         fit = _fit_scores(pool, as_of, fits, days)
-        ranked = sorted(fit, key=lambda s: fit[s], reverse=True)[:TOP_N]
-        ranked += [s for s in pool if s not in ranked][:TOP_N - len(ranked)]
+        ranked = sorted(fit, key=lambda s: fit[s], reverse=True)[:top_n]
+        ranked += [s for s in pool if s not in ranked][:top_n - len(ranked)]
         return set(ranked)
     if rule == "TREND_ATH":
         sc = wf.ath_scores({s: dailies[s] for s in universe if s in dailies}, as_of)
@@ -165,10 +170,10 @@ def select(rule: str, as_of: date, dailies: dict, universe: list[str], fits: dic
         sc = _fit_scores(gated, as_of, fits, days)
     elif rule.startswith("RANDOM"):
         rng = random.Random(f"{seed}-{as_of}")
-        return set(rng.sample(gated, min(TOP_N, len(gated))))
+        return set(rng.sample(gated, min(top_n, len(gated))))
     else:
         raise ValueError(rule)
-    return set(sorted(sc, key=lambda s: sc[s], reverse=True)[:TOP_N])
+    return set(sorted(sc, key=lambda s: sc[s], reverse=True)[:top_n])
 
 
 def main():

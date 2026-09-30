@@ -36,7 +36,9 @@ LONG = Path("history/bt_walkforward_long")
 FIVE_CHUNKS = [("2026-05-25", "2026-08-09"), ("2026-08-10", "2026-09-30")]
 ONE_MIN_FROM, ONE_MIN_TO = "2026-07-31", "2026-09-30"
 AUG_END = date(2026, 8, 31)
-RULES = ["HYBRID", "STRATEGY_FIT", "TREND_ATH", "TREND_ATH_GATE", "MOMENTUM"] + [f"RANDOM_{k}" for k in range(1, 11)]
+# HYBRID = top 15 (live); HYBRID_TOP10 / HYBRID_TOP20 = watchlist-size check (user request 30 Sep).
+RULES = ["HYBRID", "HYBRID_TOP10", "HYBRID_TOP20", "STRATEGY_FIT", "TREND_ATH", "TREND_ATH_GATE", "MOMENTUM"] + \
+    [f"RANDOM_{k}" for k in range(1, 11)]
 
 
 def _get(sid: str, seg: str, inst: str, frm: str, to: str, interval: int) -> dict:
