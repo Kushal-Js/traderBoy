@@ -14,25 +14,34 @@ Indices on their own (one position per index, so the 5 slots never bind).
 Index option prices as in research_super_bollinger_indices.py (NIFTY
 weeklies, BANKNIFTY monthlies, fixed entry strike, modeled slippage).
 
-CACHE ONLY - no Dhan calls. The option cache was filled by the earlier index
-run (other entry times, 2,000 hedge trigger), so some legs are not in it;
-every such leg is counted and listed instead of guessed:
+CACHE ONLY by default - no Dhan calls. A leg whose prices are not in the cache
+is counted and listed instead of guessed:
   "no option data"  the call itself could not be priced -> trade left out
   "unpriced hedge"  the hedge fired but its PUT could not be priced -> PUT side counted as 0
   "partial"         the leg's strike was rebuilt from an incomplete set of cached files
+`fetch` downloads exactly those missing legs first (read-only market data,
+after 15:30 IST only, hand-off token - never pin_totp).
 
-Window: the cache covers 3 Aug - 29 Sep; "last 30 days" = 31 Aug - 29 Sep (21
-sessions). 30 Sep needs a fresh download.
+Window: 3 Aug - 30 Sep; "last 30 days" = 31 Aug - 30 Sep (22 sessions).
 
 Run: uv run python research_super_bollinger_index_final_setup.py
+     HANDOFF_DHAN_ACCESS_TOKEN=... uv run python research_super_bollinger_index_final_setup.py fetch
 """
 from __future__ import annotations
 
+import bisect
 import contextlib
 import csv
 import io
+import sys
+import time
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timedelta
+
+FETCH = "fetch" in sys.argv[1:]
+import backtest_super_trader_30day as _st0          # noqa: E402
+import walkforward_selector_eval as _wf0            # noqa: E402
+_real_save, _real_retry, _real_auth = _st0._save, _wf0._retry, _wf0.authenticate   # before the cache-only switches below
 
 with contextlib.redirect_stdout(io.StringIO()):
     import research_super_bollinger_chop_filter_resim as rsim      # cache-only switches + long-history dirs
@@ -40,6 +49,7 @@ with contextlib.redirect_stdout(io.StringIO()):
 rs, m, u, r = rsim.rs, rsim.m, rsim.u, rsim.r
 st = ix.st
 LAST_30_FROM = "2026-08-31"
+u.WINDOW_TO = date(2026, 9, 30)
 EMPTY = {"timestamps": [], "opens": [], "highs": [], "lows": [], "closes": [], "strikes": [], "spots": []}
 
 
@@ -47,30 +57,82 @@ def _no_network(*_a, **_k):
     raise RuntimeError("cache-only run - no Dhan calls")
 
 
-ix._retry = _no_network
+if FETCH:
+    _real_auth()
+    ix.dhan_wrapper.client.Dhan.dhan_http.timeout = 90
+    ix._retry, st._save = _real_retry, _real_save     # index option data only; the stock paths stay cache-only
+else:
+    ix._retry = _no_network
 
 
 class CachedIndexPricer(ix.IndexPricer):
-    """IndexPricer that never leaves the cache and remembers what was missing."""
+    """IndexPricer that stays in the cache (or, with `fetch`, downloads only
+    what is missing) and remembers every leg it could not price."""
 
     def __init__(self):
         super().__init__()
         self.misses: list[tuple] = []
+        self.fetched = 0
 
     def _rolling(self, sym, day, code, ot, offset):
-        if sym in ix.INDEX:
-            tag = "ATM" if offset == 0 else f"ATM{offset:+d}"
-            if not (st.OUT / "options" / sym / f"{day}_c{code}_{ot}_{tag}.json").exists():
-                self.misses.append((sym, day, ot, tag))
-                return dict(EMPTY)
-        return super()._rolling(sym, day, code, ot, offset)
+        if sym not in ix.INDEX:
+            return super()._rolling(sym, day, code, ot, offset)
+        tag = "ATM" if offset == 0 else f"ATM{offset:+d}"
+        cache = st.OUT / "options" / sym / f"{day}_c{code}_{ot}_{tag}.json"
+        if cache.exists():
+            return super()._rolling(sym, day, code, ot, offset)
+        if FETCH:
+            out = super()._rolling(sym, day, code, ot, offset)
+            if out["timestamps"]:
+                self.fetched += 1
+                return out
+            cache.unlink(missing_ok=True)      # never leave an empty file behind: it would look like "cached"
+        self.misses.append((sym, day, ot, tag))
+        return dict(EMPTY)
+
+    def _listed_minutes(self, sym, sid, day):
+        """1-min bars of a listed contract for ONE day (the parent's cache is per contract, not per day)."""
+        lo = int(datetime.combine(day, datetime.min.time(), ix.IST).timestamp())
+        for cache in (st.OUT / "options" / sym / f"listed_{sid}_{day}.json", st.OUT / "options" / sym / f"listed_{sid}.json"):
+            data = st._load(cache)
+            if data and any(lo <= t < lo + 86400 for t in data["timestamps"]):
+                return data
+        if not FETCH:
+            return None
+        resp = ix._retry(ix.dhan_wrapper.client.Dhan.intraday_minute_data, security_id=sid, exchange_segment="NSE_FNO",
+                         instrument_type="OPTIDX", from_date=day.isoformat(), to_date=(day + timedelta(days=1)).isoformat(),
+                         interval=1)
+        d = (resp or {}).get("data") or {}
+        data = {"timestamps": [int(t) for t in d.get("timestamp") or []], "opens": d.get("open") or [],
+                "highs": d.get("high") or [], "lows": d.get("low") or [], "closes": d.get("close") or []}
+        time.sleep(st.PACE)
+        if not data["timestamps"]:
+            return None
+        self.fetched += 1
+        st._save(st.OUT / "options" / sym / f"listed_{sid}_{day}.json", data)
+        return data
 
     def open_leg(self, sym, day, side, entry_t, until_t, spot):
-        try:
+        ot = "CE" if side == "LONG" else "PE"
+        if sym not in ix.INDEX or day <= st.ROLLING_LAST_DAY:
             return super().open_leg(sym, day, side, entry_t, until_t, spot)
-        except Exception:  # noqa: BLE001 - a listed contract (29 Sep) that is not cached
-            self.misses.append((sym, day, "CE" if side == "LONG" else "PE", "listed"))
+        expiry, _code = ix.index_contract(sym, day)
+        rows = self._index_rows(sym)
+        rows = rows[(rows["SEM_EXPIRY_DATE"].astype(str).str.startswith(expiry.isoformat())) & (rows["SEM_OPTION_TYPE"] == ot)]
+        if rows.empty:
+            self.misses.append((sym, day, ot, "listed: contract not in the instrument file"))
             return None
+        row = rows.assign(dist=(rows["SEM_STRIKE_PRICE"] - spot).abs()).sort_values("dist").iloc[0]
+        try:
+            data = self._listed_minutes(sym, str(int(row["SEM_SMST_SECURITY_ID"])), day)
+        except Exception as exc:  # noqa: BLE001
+            print(f"    listed fetch failed {sym} {day} {ot}: {exc!r}", flush=True)
+            data = None
+        if not data:
+            self.misses.append((sym, day, ot, "listed"))
+            return None
+        return {"ot": ot, "expiry": expiry, "strike": float(row["SEM_STRIKE_PRICE"]),
+                "mins": st.Minutes(data["timestamps"], data["opens"], data["highs"], data["lows"], data["closes"])}
 
 
 pricer = CachedIndexPricer()
@@ -147,9 +209,9 @@ for name, gate in (("WITH the 1-hour-green entry filter (the live setup)", rsim.
           f"{sum(x['hedge_fired'] for x in rows)} (priced {sum(x['hedge_priced'] for x in rows)}) | 2nd PUT lots "
           f"{sum('2nd lot' in x['put_side'] for x in rows)} | call re-adds {sum(bool(x['extra_call']) for x in rows)} | "
           f"calls priced from partial cache {sum(x['call_prices'] == 'partial' for x in rows)}")
-    summary(last30, "LAST 30 DAYS (31 Aug - 29 Sep)")
+    summary(last30, "LAST 30 DAYS (31 Aug - 30 Sep)")
     summary([x for x in rows if x["day"] < LAST_30_FROM], "earlier (3 - 28 Aug)        ")
-    summary(rows, "whole cache (3 Aug - 29 Sep)")
+    summary(rows, "whole window (3 Aug - 30 Sep)")
     if gate is not None:
         with open("research_results/2026-09-30_index_final_setup_trades.csv", "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=list(rows[0]))
@@ -164,3 +226,5 @@ for name, gate in (("WITH the 1-hour-green entry filter (the live setup)", rsim.
         print(f"{x['day']:10s} {x['symbol']:10s} {x['contract']:28s} {x['entry_time']:>5s} {x['exit_time']:>5s} {x['qty']:>4d} "
               f"{x['entry']:>8.2f} {x['exit']:>8.2f} {x['exit_reason']:20s} {x['call_pnl']:>+8,} {x['put_side_pnl']:>+9,} "
               f"{x['extra_call_pnl']:>+10,} {x['trade_total']:>+8,}  {notes}   [running {cum:+,}]")
+if FETCH:
+    print(f"\nindex option files downloaded: {pricer.fetched}")

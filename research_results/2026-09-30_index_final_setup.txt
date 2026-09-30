@@ -1,15 +1,15 @@
 lot sizes: NIFTY 65, BANKNIFTY 30
 
 ================ WITH the 1-hour-green entry filter (the live setup) ================
-signals refused by the 1-hour filter 9 | calls left out, no option data 0 | hedges fired 4 (priced 2) | 2nd PUT lots 1 | call re-adds 0 | calls priced from partial cache 0
-LAST 30 DAYS (31 Aug - 29 Sep): trades 8, winning 2 | calls +3,999 | PUT side +0 | extra call +0 | TOTAL +3,999 | max drawdown -3,319 | worst day -2,104 | best day +8,775 | green days 2/6
-    NIFTY      trades  5, winning  0 | calls -4,767 | PUT side +0 | extra call +0 | total -4,767
+signals refused by the 1-hour filter 10 | calls left out, no option data 0 | hedges fired 5 (priced 5) | 2nd PUT lots 3 | call re-adds 1 | calls priced from partial cache 0
+LAST 30 DAYS (31 Aug - 30 Sep): trades 9, winning 2 | calls +3,893 | PUT side -3,111 | extra call +121 | TOTAL +903 | max drawdown -5,006 | worst day -2,925 | best day +8,775 | green days 2/7
+    NIFTY      trades  6, winning  0 | calls -4,873 | PUT side -3,111 | extra call +121 | total -7,863
     BANKNIFTY  trades  3, winning  2 | calls +8,766 | PUT side +0 | extra call +0 | total +8,766
 earlier (3 - 28 Aug)        : trades 7, winning 2 | calls +210 | PUT side +1,943 | extra call +0 | TOTAL +2,154 | max drawdown -2,856 | worst day -1,688 | best day +5,010 | green days 2/6
     NIFTY      trades  4, winning  1 | calls +2,418 | PUT side +0 | extra call +0 | total +2,418
     BANKNIFTY  trades  3, winning  1 | calls -2,208 | PUT side +1,943 | extra call +0 | total -264
-whole cache (3 Aug - 29 Sep): trades 15, winning 4 | calls +4,209 | PUT side +1,943 | extra call +0 | TOTAL +6,153 | max drawdown -3,319 | worst day -2,104 | best day +8,775 | green days 4/12
-    NIFTY      trades  9, winning  1 | calls -2,349 | PUT side +0 | extra call +0 | total -2,349
+whole window (3 Aug - 30 Sep): trades 16, winning 4 | calls +4,103 | PUT side -1,168 | extra call +121 | TOTAL +3,057 | max drawdown -5,006 | worst day -2,925 | best day +8,775 | green days 4/13
+    NIFTY      trades 10, winning  1 | calls -2,455 | PUT side -3,111 | extra call +121 | total -5,445
     BANKNIFTY  trades  6, winning  3 | calls +6,558 | PUT side +1,943 | extra call +0 | total +8,502
 
 day        index      contract                        in   out  qty    entry     exit call exit                call  PUT side extra call    TOTAL  notes
@@ -20,26 +20,27 @@ day        index      contract                        in   out  qty    entry    
 2026-08-17 NIFTY      NIFTY 25 Aug 24350 CE        13:42 15:15   65   188.00   172.90 DAILY_SQUARE_OFF       -1,099        +0         +0   -1,099     [running -1,168]
 2026-08-20 BANKNIFTY  BANKNIFTY 25 Aug 57700 CE    10:16 15:15   30   358.32   254.60 DAILY_SQUARE_OFF       -3,204    +1,516         +0   -1,688  hedge + 2nd lot   [running -2,856]
 2026-08-25 NIFTY      NIFTY 01 Sep 24150 CE        11:53 15:15   65   172.50   251.70 DAILY_SQUARE_OFF       +5,010        +0         +0   +5,010     [running +2,154]
-2026-09-04 NIFTY      NIFTY 15 Sep 23950 CE        10:29 15:15   65   205.38   184.00 DAILY_SQUARE_OFF       -1,516        +0         +0   -1,516  hedge fired, PUT not in cache (counted 0)   [running +638]
-2026-09-11 BANKNIFTY  BANKNIFTY 29 Sep 56100 CE    11:12 15:15   30   791.70  1098.30 DAILY_SQUARE_OFF       +8,914        +0         +0   +8,914     [running +9,552]
-2026-09-11 NIFTY      NIFTY 22 Sep 23300 CE        11:12 13:41   65   214.35   214.35 BREAKEVEN_STOP_HIT       -139        +0         +0     -139     [running +9,413]
-2026-09-18 NIFTY      NIFTY 29 Sep 23350 CE        12:37 15:15   65   176.93   176.45 DAILY_SQUARE_OFF         -146        +0         +0     -146     [running +9,267]
-2026-09-21 BANKNIFTY  BANKNIFTY 29 Sep 56500 CE    11:58 15:15   30   467.02   478.60 DAILY_SQUARE_OFF         +205        +0         +0     +205     [running +9,472]
-2026-09-23 NIFTY      NIFTY 29 Sep 23450 CE        12:03 15:15   65   122.65   105.10 DAILY_SQUARE_OFF       -1,215        +0         +0   -1,215     [running +8,257]
-2026-09-29 BANKNIFTY  BANKNIFTY 27 Oct 54200 CE    11:30 12:28   30  1177.35  1177.35 BREAKEVEN_STOP_HIT       -353        +0         +0     -353     [running +7,904]
-2026-09-29 NIFTY      NIFTY 06 Oct 22700 CE        11:30 15:15   65   229.33   204.55 DAILY_SQUARE_OFF       -1,751        +0         +0   -1,751  hedge fired, PUT not in cache (counted 0)   [running +6,153]
+2026-09-04 NIFTY      NIFTY 15 Sep 23950 CE        10:29 15:15   65   205.38   184.00 DAILY_SQUARE_OFF       -1,516    -1,409         +0   -2,925  hedge + 2nd lot   [running -771]
+2026-09-11 BANKNIFTY  BANKNIFTY 29 Sep 56100 CE    11:12 15:15   30   791.70  1098.30 DAILY_SQUARE_OFF       +8,914        +0         +0   +8,914     [running +8,143]
+2026-09-11 NIFTY      NIFTY 22 Sep 23300 CE        11:12 13:41   65   214.35   214.35 BREAKEVEN_STOP_HIT       -139        +0         +0     -139     [running +8,004]
+2026-09-18 NIFTY      NIFTY 29 Sep 23350 CE        12:37 15:15   65   176.93   176.45 DAILY_SQUARE_OFF         -146        +0         +0     -146     [running +7,858]
+2026-09-21 BANKNIFTY  BANKNIFTY 29 Sep 56500 CE    11:58 15:15   30   467.02   478.60 DAILY_SQUARE_OFF         +205        +0         +0     +205     [running +8,063]
+2026-09-23 NIFTY      NIFTY 29 Sep 23450 CE        12:03 15:15   65   122.65   105.10 DAILY_SQUARE_OFF       -1,215        +0         +0   -1,215     [running +6,848]
+2026-09-29 BANKNIFTY  BANKNIFTY 27 Oct 54200 CE    11:30 12:28   30  1177.35  1177.35 BREAKEVEN_STOP_HIT       -353        +0         +0     -353     [running +6,495]
+2026-09-29 NIFTY      NIFTY 06 Oct 22700 CE        11:30 15:15   65   229.33   204.55 DAILY_SQUARE_OFF       -1,751      +705         +0   -1,046  hedge   [running +5,449]
+2026-09-30 NIFTY      NIFTY 06 Oct 22750 CE        10:05 13:37   65   163.03   163.03 BREAKEVEN_STOP_HIT       -106    -2,407       +121   -2,392  hedge + 2nd lot; call re-added   [running +3,057]
 
 ================ WITHOUT the entry filter (reference) ================
-signals refused by the 1-hour filter 0 | calls left out, no option data 0 | hedges fired 6 (priced 4) | 2nd PUT lots 1 | call re-adds 1 | calls priced from partial cache 0
-LAST 30 DAYS (31 Aug - 29 Sep): trades 14, winning 2 | calls +1,159 | PUT side -1,703 | extra call +502 | TOTAL -42 | max drawdown -6,950 | worst day -2,280 | best day +8,775 | green days 2/8
-    NIFTY      trades  7, winning  0 | calls -6,850 | PUT side -84 | extra call +0 | total -6,934
-    BANKNIFTY  trades  7, winning  2 | calls +8,009 | PUT side -1,619 | extra call +502 | total +6,892
+signals refused by the 1-hour filter 0 | calls left out, no option data 0 | hedges fired 7 (priced 7) | 2nd PUT lots 3 | call re-adds 2 | calls priced from partial cache 0
+LAST 30 DAYS (31 Aug - 30 Sep): trades 16, winning 2 | calls +711 | PUT side -4,814 | extra call +623 | TOTAL -3,480 | max drawdown -8,979 | worst day -3,179 | best day +8,775 | green days 2/9
+    NIFTY      trades  8, winning  0 | calls -6,956 | PUT side -3,195 | extra call +121 | total -10,030
+    BANKNIFTY  trades  8, winning  2 | calls +7,667 | PUT side -1,619 | extra call +502 | total +6,550
 earlier (3 - 28 Aug)        : trades 9, winning 4 | calls +1,118 | PUT side +1,943 | extra call +0 | TOTAL +3,062 | max drawdown -2,284 | worst day -1,415 | best day +5,010 | green days 3/7
     NIFTY      trades  5, winning  2 | calls +2,921 | PUT side +0 | extra call +0 | total +2,921
     BANKNIFTY  trades  4, winning  2 | calls -1,803 | PUT side +1,943 | extra call +0 | total +141
-whole cache (3 Aug - 29 Sep): trades 23, winning 6 | calls +2,277 | PUT side +240 | extra call +502 | TOTAL +3,020 | max drawdown -6,950 | worst day -2,280 | best day +8,775 | green days 5/15
-    NIFTY      trades 12, winning  2 | calls -3,929 | PUT side -84 | extra call +0 | total -4,013
-    BANKNIFTY  trades 11, winning  4 | calls +6,206 | PUT side +324 | extra call +502 | total +7,033
+whole window (3 Aug - 30 Sep): trades 25, winning 6 | calls +1,829 | PUT side -2,871 | extra call +623 | TOTAL -418 | max drawdown -8,979 | worst day -3,179 | best day +8,775 | green days 5/16
+    NIFTY      trades 13, winning  2 | calls -4,035 | PUT side -3,195 | extra call +121 | total -7,109
+    BANKNIFTY  trades 12, winning  4 | calls +5,864 | PUT side +324 | extra call +502 | total +6,691
 
 day        index      contract                        in   out  qty    entry     exit call exit                call  PUT side extra call    TOTAL  notes
 2026-08-03 NIFTY      NIFTY 11 Aug 24600 CE        11:50 15:15   65   161.75   141.50 DAILY_SQUARE_OFF       -1,415        +0         +0   -1,415     [running -1,415]
@@ -52,17 +53,19 @@ day        index      contract                        in   out  qty    entry    
 2026-08-20 BANKNIFTY  BANKNIFTY 25 Aug 57700 CE    10:16 15:15   30   358.32   254.60 DAILY_SQUARE_OFF       -3,204    +1,516         +0   -1,688  hedge + 2nd lot   [running -1,948]
 2026-08-25 NIFTY      NIFTY 01 Sep 24150 CE        11:53 15:15   65   172.50   251.70 DAILY_SQUARE_OFF       +5,010        +0         +0   +5,010     [running +3,062]
 2026-09-01 NIFTY      NIFTY 08 Sep 24100 CE        11:08 13:01   65   149.15   149.15 BREAKEVEN_STOP_HIT        -97        +0         +0      -97     [running +2,965]
-2026-09-04 NIFTY      NIFTY 15 Sep 23950 CE        10:29 15:15   65   205.38   184.00 DAILY_SQUARE_OFF       -1,516        +0         +0   -1,516  hedge fired, PUT not in cache (counted 0)   [running +1,449]
-2026-09-04 BANKNIFTY  BANKNIFTY 29 Sep 57500 CE    11:04 12:16   30   845.30   845.30 BREAKEVEN_STOP_HIT       -254        +0         +0     -254     [running +1,195]
-2026-09-11 BANKNIFTY  BANKNIFTY 29 Sep 56100 CE    11:12 15:15   30   791.70  1098.30 DAILY_SQUARE_OFF       +8,914        +0         +0   +8,914     [running +10,109]
-2026-09-11 NIFTY      NIFTY 22 Sep 23300 CE        11:12 13:41   65   214.35   214.35 BREAKEVEN_STOP_HIT       -139        +0         +0     -139     [running +9,970]
-2026-09-16 BANKNIFTY  BANKNIFTY 29 Sep 56300 CE    13:04 13:26   30   700.23   700.23 BREAKEVEN_STOP_HIT       -210        +0         +0     -210     [running +9,760]
-2026-09-16 NIFTY      NIFTY 22 Sep 23250 CE        13:06 15:15   65   177.73   148.80 DAILY_SQUARE_OFF       -1,986       -84         +0   -2,070  hedge   [running +7,690]
-2026-09-18 BANKNIFTY  BANKNIFTY 29 Sep 56300 CE    09:57 15:02   30   603.92   603.92 BREAKEVEN_STOP_HIT       -181    -1,619       +502   -1,298  hedge; call re-added   [running +6,392]
-2026-09-18 NIFTY      NIFTY 29 Sep 23350 CE        12:37 15:15   65   176.93   176.45 DAILY_SQUARE_OFF         -146        +0         +0     -146     [running +6,246]
-2026-09-21 BANKNIFTY  BANKNIFTY 29 Sep 56500 CE    11:58 15:15   30   467.02   478.60 DAILY_SQUARE_OFF         +205        +0         +0     +205     [running +6,451]
-2026-09-23 BANKNIFTY  BANKNIFTY 29 Sep 56500 CE    09:59 14:59   30   371.75   371.75 BREAKEVEN_STOP_HIT       -112        +0         +0     -112     [running +6,339]
-2026-09-23 NIFTY      NIFTY 29 Sep 23450 CE        12:03 15:15   65   122.65   105.10 DAILY_SQUARE_OFF       -1,215        +0         +0   -1,215     [running +5,124]
-2026-09-29 BANKNIFTY  BANKNIFTY 27 Oct 54200 CE    11:30 12:28   30  1177.35  1177.35 BREAKEVEN_STOP_HIT       -353        +0         +0     -353     [running +4,771]
-2026-09-29 NIFTY      NIFTY 06 Oct 22700 CE        11:30 15:15   65   229.33   204.55 DAILY_SQUARE_OFF       -1,751        +0         +0   -1,751  hedge fired, PUT not in cache (counted 0)   [running +3,020]
+2026-09-04 NIFTY      NIFTY 15 Sep 23950 CE        10:29 15:15   65   205.38   184.00 DAILY_SQUARE_OFF       -1,516    -1,409         +0   -2,925  hedge + 2nd lot   [running +40]
+2026-09-04 BANKNIFTY  BANKNIFTY 29 Sep 57500 CE    11:04 12:16   30   845.30   845.30 BREAKEVEN_STOP_HIT       -254        +0         +0     -254     [running -214]
+2026-09-11 BANKNIFTY  BANKNIFTY 29 Sep 56100 CE    11:12 15:15   30   791.70  1098.30 DAILY_SQUARE_OFF       +8,914        +0         +0   +8,914     [running +8,700]
+2026-09-11 NIFTY      NIFTY 22 Sep 23300 CE        11:12 13:41   65   214.35   214.35 BREAKEVEN_STOP_HIT       -139        +0         +0     -139     [running +8,561]
+2026-09-16 BANKNIFTY  BANKNIFTY 29 Sep 56300 CE    13:04 13:26   30   700.23   700.23 BREAKEVEN_STOP_HIT       -210        +0         +0     -210     [running +8,351]
+2026-09-16 NIFTY      NIFTY 22 Sep 23250 CE        13:06 15:15   65   177.73   148.80 DAILY_SQUARE_OFF       -1,986       -84         +0   -2,070  hedge   [running +6,281]
+2026-09-18 BANKNIFTY  BANKNIFTY 29 Sep 56300 CE    09:57 15:02   30   603.92   603.92 BREAKEVEN_STOP_HIT       -181    -1,619       +502   -1,298  hedge; call re-added   [running +4,983]
+2026-09-18 NIFTY      NIFTY 29 Sep 23350 CE        12:37 15:15   65   176.93   176.45 DAILY_SQUARE_OFF         -146        +0         +0     -146     [running +4,837]
+2026-09-21 BANKNIFTY  BANKNIFTY 29 Sep 56500 CE    11:58 15:15   30   467.02   478.60 DAILY_SQUARE_OFF         +205        +0         +0     +205     [running +5,042]
+2026-09-23 BANKNIFTY  BANKNIFTY 29 Sep 56500 CE    09:59 14:59   30   371.75   371.75 BREAKEVEN_STOP_HIT       -112        +0         +0     -112     [running +4,930]
+2026-09-23 NIFTY      NIFTY 29 Sep 23450 CE        12:03 15:15   65   122.65   105.10 DAILY_SQUARE_OFF       -1,215        +0         +0   -1,215     [running +3,715]
+2026-09-29 BANKNIFTY  BANKNIFTY 27 Oct 54200 CE    11:30 12:28   30  1177.35  1177.35 BREAKEVEN_STOP_HIT       -353        +0         +0     -353     [running +3,362]
+2026-09-29 NIFTY      NIFTY 06 Oct 22700 CE        11:30 15:15   65   229.33   204.55 DAILY_SQUARE_OFF       -1,751      +705         +0   -1,046  hedge   [running +2,316]
+2026-09-30 BANKNIFTY  BANKNIFTY 27 Oct 54600 CE    09:45 14:29   30  1141.35  1141.35 BREAKEVEN_STOP_HIT       -342        +0         +0     -342     [running +1,974]
+2026-09-30 NIFTY      NIFTY 06 Oct 22750 CE        10:05 13:37   65   163.03   163.03 BREAKEVEN_STOP_HIT       -106    -2,407       +121   -2,392  hedge + 2nd lot; call re-added   [running -418]
 exit 0
