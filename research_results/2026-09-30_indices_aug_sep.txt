@@ -1,0 +1,15 @@
+
+=== A. indices alone (3 Aug - 29 Sep) ===
+NIFTY+BANKNIFTY, CE only                         trades  23 win 26.1% net     2,279  (Aug     1,119 / Sep     1,160)  dd    -5,749  | by side {'LONG': [23, 2279]} | index legs {'NIFTY': [12, -3929], 'BANKNIFTY': [11, 6208]}
+   + live hedge rule on these CE trades: 5 hedges, hedge PnL -4,989
+NIFTY+BANKNIFTY, CE + PE                         trades  52 win 25.0% net    -2,262  (Aug    -9,469 / Sep     7,207)  dd   -17,669  | by side {'LONG': [22, 2357], 'SHORT': [30, -4619]} | index legs {'NIFTY': [31, -259], 'BANKNIFTY': [21, -2003]}
+
+=== B. HYBRID stocks + indices, shared 5 slots (CE only) ===
+HYBRID (stocks only)                             trades 193 win 28.5% net    63,495  (Aug    17,117 / Sep    46,378)  dd   -45,752  | by side {'LONG': [193, 63495]} | index legs {}
+HYBRID + NIFTY/BANKNIFTY                         trades 209 win 28.2% net    60,662  (Aug    20,684 / Sep    39,978)  dd   -47,646  | by side {'LONG': [209, 60662]} | index legs {'NIFTY': [11, -2714], 'BANKNIFTY': [11, 6208]}
+HYBRID_TOP10 (stocks only)                       trades 135 win 28.9% net    65,349  (Aug     6,664 / Sep    58,685)  dd   -53,242  | by side {'LONG': [135, 65349]} | index legs {}
+HYBRID_TOP10 + NIFTY/BANKNIFTY                   trades 156 win 28.2% net    63,984  (Aug     7,783 / Sep    56,201)  dd   -57,123  | by side {'LONG': [156, 63984]} | index legs {'NIFTY': [12, -3929], 'BANKNIFTY': [11, 6208]}
+HYBRID_TOP20 (stocks only)                       trades 238 win 28.2% net    77,509  (Aug    11,942 / Sep    65,567)  dd   -46,806  | by side {'LONG': [238, 77509]} | index legs {}
+HYBRID_TOP20 + NIFTY/BANKNIFTY                   trades 251 win 28.7% net    81,740  (Aug    16,196 / Sep    65,544)  dd   -48,022  | by side {'LONG': [251, 81740]} | index legs {'NIFTY': [10, -1615], 'BANKNIFTY': [11, 6208]}
+
+option calls made: 194

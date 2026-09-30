@@ -1,0 +1,60 @@
+mode=sep cache_only=False window 2026-08-31..2026-09-29
+
+[long] 30 symbols | trades 92 (CE 92, PE 0) | skipped no option data 1 | overlay coverage {'tadd': 49, 'hedges': 36, 'hedge_unpriced': 1, 'hadd': 16} | option fetch attempts 1
+  long   base               total   +46,378  H1   +10,654  H2   +35,724  CE   +46,378  PE        +0  dd   -22,530  worst  -13,368  green 9/21
+  long   +hedge             total   +60,491  H1   +18,770  H2   +41,721  CE   +60,491  PE        +0  dd   -20,201  worst  -11,649  green 9/21
+  long   +hedge+hadd        total   +69,037  H1   +25,134  H2   +43,903  CE   +69,037  PE        +0  dd   -16,367  worst   -8,993  green 9/21
+  long   +tadd              total   +99,249  H1   +38,077  H2   +61,172  CE   +99,249  PE        +0  dd   -30,189  worst  -13,689  green 10/21
+  long   +hedge+hadd+tadd   total  +121,908  H1   +52,558  H2   +69,351  CE  +121,908  PE        +0  dd   -24,027  worst  -10,599  green 10/21
+
+[short@HYBRID] 30 symbols | trades 110 (CE 0, PE 110) | skipped no option data 7 | overlay coverage {'tadd': 60, 'hedges': 29, 'hadd': 19} | option fetch attempts 291
+  short@ base               total   -50,835  H1   -31,454  H2   -19,381  CE        +0  PE   -50,835  dd   -60,355  worst  -16,271  green 6/21
+  short@ +hedge             total   -23,034  H1   -28,660  H2    +5,626  CE        +0  PE   -23,034  dd   -43,882  worst  -16,239  green 8/21
+  short@ +hedge+hadd        total   -16,588  H1   -21,040  H2    +4,452  CE        +0  PE   -16,588  dd   -32,497  worst  -17,589  green 10/21
+  short@ +tadd              total   -90,220  H1   -59,612  H2   -30,609  CE        +0  PE   -90,220  dd   -98,636  worst  -27,255  green 5/21
+  short@ +hedge+hadd+tadd   total   -55,973  H1   -49,197  H2    -6,776  CE        +0  PE   -55,973  dd   -66,369  worst  -28,574  green 7/21
+
+[short@BEAR] 39 symbols | trades 98 (CE 0, PE 98) | skipped no option data 1 | overlay coverage {'hedges': 21, 'hadd': 13, 'tadd': 33} | option fetch attempts 508
+  short@ base               total   +10,616  H1    -3,270  H2   +13,885  CE        +0  PE   +10,616  dd   -14,983  worst  -12,761  green 10/21
+  short@ +hedge             total      +767  H1    -7,949  H2    +8,716  CE        +0  PE      +767  dd   -18,995  worst  -13,991  green 7/21
+  short@ +hedge+hadd        total    -7,413  H1   -13,139  H2    +5,726  CE        +0  PE    -7,413  dd   -19,815  worst  -13,991  green 7/21
+  short@ +tadd              total   +10,855  H1   -15,379  H2   +26,234  CE        +0  PE   +10,855  dd   -19,047  worst  -13,708  green 7/21
+  short@ +hedge+hadd+tadd   total    -7,174  H1   -25,248  H2   +18,074  CE        +0  PE    -7,174  dd   -25,248  worst  -14,938  green 5/21
+
+[both@HYBRID] 30 symbols | trades 165 (CE 75, PE 90) | skipped no option data 7 | overlay coverage {'tadd': 94, 'hedges': 52, 'hedge_unpriced': 1, 'hadd': 28} | option fetch attempts 510
+  both@H base               total   -13,833  H1   -35,019  H2   +21,187  CE   +29,992  PE   -43,825  dd   -35,019  worst  -17,972  green 8/21
+  both@H +hedge             total   +34,879  H1   -18,786  H2   +53,665  CE   +45,486  PE   -10,607  dd   -24,673  worst  -15,367  green 9/21
+  both@H +hedge+hadd        total   +46,960  H1    -2,377  H2   +49,337  CE   +55,304  PE    -8,344  dd   -24,306  worst  -16,093  green 9/21
+  both@H +tadd              total    -5,137  H1   -43,656  H2   +38,519  CE   +74,496  PE   -79,633  dd   -56,293  worst  -23,924  green 9/21
+  both@H +hedge+hadd+tadd   total   +55,655  H1   -11,014  H2   +66,669  CE   +99,808  PE   -44,152  dd   -34,467  worst  -25,243  green 10/21
+
+[long@HYBRID + short@BEAR, separate 5-slot books - funds not shared]
+  L+S    base               total   +56,994  H1    +7,384  H2   +49,610  CE   +46,378  PE   +10,616  dd   -23,097  worst  -13,249  green 12/21
+  L+S    +hedge             total   +61,258  H1   +10,821  H2   +50,438  CE   +60,491  PE      +767  dd   -21,326  worst  -13,368  green 10/21
+  L+S    +hedge+hadd        total   +61,624  H1   +11,996  H2   +49,629  CE   +69,037  PE    -7,413  dd   -18,796  worst  -10,712  green 10/21
+  L+S    +tadd              total  +110,104  H1   +22,698  H2   +87,406  CE   +99,249  PE   +10,855  dd   -34,320  worst  -18,761  green 11/21
+  L+S    +hedge+hadd+tadd   total  +114,735  H1   +27,310  H2   +87,425  CE  +121,908  PE    -7,174  dd   -32,381  worst  -19,360  green 10/21
+
+[hedge grid on long@HYBRID: trigger x giveback x cutoff]
+  cutoff 15:00 giveback 30% trigger 1500       hedges  41 (unpriced  1) won  26  hedge  +11,636 (H1   +8,718 H2   +2,918)  total   +58,014  worst  -11,649
+  cutoff 15:00 giveback 30% trigger 1800       hedges  38 (unpriced  1) won  25  hedge  +14,108 (H1   +6,904 H2   +7,203)  total   +60,486  worst  -11,649
+  cutoff 15:00 giveback 30% trigger 2000       hedges  36 (unpriced  1) won  25  hedge  +16,389 (H1   +7,610 H2   +8,779)  total   +62,766  worst  -11,649
+  cutoff 15:00 giveback 30% trigger 2200       hedges  35 (unpriced  1) won  22  hedge   +6,260 (H1   -1,930 H2   +8,190)  total   +52,638  worst  -12,118
+  cutoff 15:00 giveback 30% trigger 2500       hedges  30 (unpriced  1) won  17  hedge   +1,547 (H1     -432 H2   +1,979)  total   +47,925  worst  -12,118
+  cutoff 15:00 giveback 40% trigger 1500       hedges  41 (unpriced  1) won  26  hedge   +8,717 (H1   +8,009 H2     +708)  total   +55,095  worst  -11,649
+  cutoff 15:00 giveback 40% trigger 1800       hedges  38 (unpriced  1) won  25  hedge  +11,341 (H1   +6,786 H2   +4,555)  total   +57,719  worst  -11,649
+  cutoff 15:00 giveback 40% trigger 2000       hedges  36 (unpriced  1) won  25  hedge  +14,113 (H1   +8,116 H2   +5,997)  total   +60,491  worst  -11,649
+  cutoff 15:00 giveback 40% trigger 2200       hedges  35 (unpriced  1) won  22  hedge   +3,571 (H1   -2,072 H2   +5,643)  total   +49,949  worst  -12,118
+  cutoff 15:00 giveback 40% trigger 2500       hedges  30 (unpriced  1) won  17  hedge     -730 (H1   -1,666 H2     +936)  total   +45,648  worst  -12,118
+  cutoff none giveback 30% trigger 1500        hedges  42 (unpriced  1) won  26  hedge  +11,454 (H1   +8,536 H2   +2,918)  total   +57,832  worst  -11,649
+  cutoff none giveback 30% trigger 1800        hedges  39 (unpriced  1) won  25  hedge  +13,926 (H1   +6,723 H2   +7,203)  total   +60,304  worst  -11,649
+  cutoff none giveback 30% trigger 2000        hedges  36 (unpriced  1) won  25  hedge  +16,389 (H1   +7,610 H2   +8,779)  total   +62,766  worst  -11,649
+  cutoff none giveback 30% trigger 2200        hedges  36 (unpriced  1) won  22  hedge   +5,510 (H1   -1,930 H2   +7,440)  total   +51,888  worst  -12,118
+  cutoff none giveback 30% trigger 2500        hedges  32 (unpriced  1) won  18  hedge   +1,457 (H1      +28 H2   +1,429)  total   +47,835  worst  -12,118
+  cutoff none giveback 40% trigger 1500        hedges  42 (unpriced  1) won  26  hedge   +8,535 (H1   +7,827 H2     +708)  total   +54,913  worst  -11,649
+  cutoff none giveback 40% trigger 1800        hedges  39 (unpriced  1) won  25  hedge  +11,159 (H1   +6,604 H2   +4,555)  total   +57,537  worst  -11,649
+  cutoff none giveback 40% trigger 2000        hedges  36 (unpriced  1) won  25  hedge  +14,113 (H1   +8,116 H2   +5,997)  total   +60,491  worst  -11,649
+  cutoff none giveback 40% trigger 2200        hedges  36 (unpriced  1) won  22  hedge   +2,821 (H1   -2,072 H2   +4,893)  total   +49,199  worst  -12,118
+  cutoff none giveback 40% trigger 2500        hedges  32 (unpriced  1) won  18  hedge     -820 (H1   -1,206 H2     +386)  total   +45,558  worst  -12,118
+
+written history/bt_super_bollinger_universe_30day/bearish_side_sep.json

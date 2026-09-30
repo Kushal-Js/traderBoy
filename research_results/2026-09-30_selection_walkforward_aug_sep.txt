@@ -1,0 +1,19 @@
+=== August (3-28 Aug, never used to design HYBRID) vs September ===
+HYBRID           total    63,495  Aug    17,117  Sep    46,379  weeks+ 6/9
+HYBRID_TOP10     total    65,349  Aug     6,665  Sep    58,684  weeks+ 5/9
+HYBRID_TOP20     total    77,509  Aug    11,942  Sep    65,567  weeks+ 5/9
+BEAR_HYBRID      total   -96,121  Aug   -52,261  Sep   -43,860  weeks+ 1/9
+STRATEGY_FIT     total    41,790  Aug    17,963  Sep    23,827  weeks+ 5/9
+TREND_ATH        total   -42,789  Aug   -11,787  Sep   -31,003  weeks+ 3/9
+TREND_ATH_GATE   total   -30,347  Aug    -2,512  Sep   -27,835  weeks+ 3/9
+MOMENTUM         total   -67,913  Aug   -18,432  Sep   -49,481  weeks+ 4/9
+RANDOM_1         total   -78,380  Aug   -43,599  Sep   -34,780  weeks+ 1/9
+RANDOM_2         total   -33,514  Aug   -37,711  Sep     4,198  weeks+ 4/9
+RANDOM_3         total   -30,235  Aug   -44,889  Sep    14,656  weeks+ 4/9
+RANDOM_4         total   -61,348  Aug   -34,825  Sep   -26,522  weeks+ 3/9
+RANDOM_5         total   -53,681  Aug    10,907  Sep   -64,589  weeks+ 3/9
+RANDOM_6         total    74,396  Aug    58,892  Sep    15,506  weeks+ 7/9
+RANDOM_7         total   -41,420  Aug     9,459  Sep   -50,880  weeks+ 4/9
+RANDOM_8         total   -27,256  Aug   -13,131  Sep   -14,126  weeks+ 3/9
+RANDOM_9         total   -63,701  Aug   -52,062  Sep   -11,639  weeks+ 2/9
+RANDOM_10        total     3,473  Aug    21,687  Sep   -18,213  weeks+ 5/9

@@ -1,0 +1,60 @@
+mode=aug cache_only=False window 2026-08-03..2026-09-29
+
+[long] 47 symbols | trades 193 (CE 193, PE 0) | skipped no option data 1 | overlay coverage {'tadd': 104, 'hedges': 70, 'hadd': 32, 'hedge_unpriced': 1} | option fetch attempts 91
+  long   base               total   +63,495  Aug   +17,117  Sep   +46,378  CE   +63,495  PE        +0  dd   -45,752  worst  -13,368  green 18/41
+  long   +hedge             total   +75,496  Aug   +15,004  Sep   +60,491  CE   +75,496  PE        +0  dd   -48,917  worst  -11,914  green 16/41
+  long   +hedge+hadd        total   +83,197  Aug   +14,160  Sep   +69,037  CE   +83,197  PE        +0  dd   -50,459  worst  -12,391  green 16/41
+  long   +tadd              total  +130,686  Aug   +31,437  Sep   +99,249  CE  +130,686  PE        +0  dd   -77,310  worst  -25,834  green 15/41
+  long   +hedge+hadd+tadd   total  +150,387  Aug   +28,479  Sep  +121,908  CE  +150,387  PE        +0  dd   -82,027  worst  -25,256  green 15/41
+
+[short@HYBRID] 47 symbols | trades 208 (CE 0, PE 208) | skipped no option data 7 | overlay coverage {'tadd': 111, 'hedges': 55, 'hadd': 31} | option fetch attempts 320
+  short@ base               total   -67,058  Aug   -16,223  Sep   -50,835  CE        +0  PE   -67,058  dd   -84,163  worst  -16,271  green 14/41
+  short@ +hedge             total   -45,083  Aug   -22,048  Sep   -23,034  CE        +0  PE   -45,083  dd   -67,964  worst  -16,239  green 13/41
+  short@ +hedge+hadd        total   -48,456  Aug   -31,868  Sep   -16,588  CE        +0  PE   -48,456  dd   -65,033  worst  -17,589  green 16/41
+  short@ +tadd              total  -142,473  Aug   -52,252  Sep   -90,220  CE        +0  PE  -142,473  dd  -156,473  worst  -27,255  green 12/41
+  short@ +hedge+hadd+tadd   total  -123,871  Aug   -67,897  Sep   -55,973  CE        +0  PE  -123,871  dd  -139,852  worst  -28,574  green 11/41
+
+[short@BEAR] 64 symbols | trades 182 (CE 0, PE 182) | skipped no option data 5 | overlay coverage {'tadd': 60, 'hedges': 42, 'hadd': 25} | option fetch attempts 559
+  short@ base               total    -1,777  Aug   -12,393  Sep   +10,616  CE        +0  PE    -1,777  dd   -39,835  worst  -12,761  green 19/40
+  short@ +hedge             total   -19,618  Aug   -20,385  Sep      +767  CE        +0  PE   -19,618  dd   -48,643  worst  -13,991  green 15/40
+  short@ +hedge+hadd        total   -28,815  Aug   -21,402  Sep    -7,413  CE        +0  PE   -28,815  dd   -50,642  worst  -13,991  green 15/40
+  short@ +tadd              total    -6,935  Aug   -17,790  Sep   +10,855  CE        +0  PE    -6,935  dd   -70,151  worst  -13,708  green 14/40
+  short@ +hedge+hadd+tadd   total   -33,973  Aug   -26,799  Sep    -7,174  CE        +0  PE   -33,973  dd   -82,959  worst  -14,938  green 12/40
+
+[both@HYBRID] 47 symbols | trades 318 (CE 151, PE 167) | skipped no option data 7 | overlay coverage {'tadd': 183, 'hedges': 100, 'hadd': 50, 'hedge_unpriced': 1} | option fetch attempts 559
+  both@H base               total   -14,945  Aug    -1,112  Sep   -13,833  CE   +31,619  PE   -46,564  dd   -50,696  worst  -17,972  green 17/41
+  both@H +hedge             total   +30,764  Aug    -4,115  Sep   +34,879  CE   +46,372  PE   -15,609  dd   -53,246  worst  -16,198  green 20/41
+  both@H +hedge+hadd        total   +37,855  Aug    -9,105  Sep   +46,960  CE   +59,620  PE   -21,765  dd   -55,582  worst  -16,093  green 20/41
+  both@H +tadd              total   -33,464  Aug   -28,327  Sep    -5,137  CE   +74,577  PE  -108,042  dd   -95,166  worst  -36,612  green 17/41
+  both@H +hedge+hadd+tadd   total   +19,335  Aug   -36,320  Sep   +55,655  CE  +102,579  PE   -83,243  dd   -91,734  worst  -36,323  green 19/41
+
+[long@HYBRID + short@BEAR, separate 5-slot books - funds not shared]
+  L+S    base               total   +61,718  Aug    +4,724  Sep   +56,994  CE   +63,495  PE    -1,777  dd   -70,139  worst  -20,370  green 20/41
+  L+S    +hedge             total   +55,878  Aug    -5,380  Sep   +61,258  CE   +75,496  PE   -19,618  dd   -79,078  worst  -22,441  green 18/41
+  L+S    +hedge+hadd        total   +54,382  Aug    -7,243  Sep   +61,624  CE   +83,197  PE   -28,815  dd   -80,276  worst  -22,767  green 18/41
+  L+S    +tadd              total  +123,751  Aug   +13,647  Sep  +110,104  CE  +130,686  PE    -6,935  dd  -110,504  worst  -32,651  green 19/41
+  L+S    +hedge+hadd+tadd   total  +116,414  Aug    +1,680  Sep  +114,735  CE  +150,387  PE   -33,973  dd  -120,641  worst  -34,754  green 18/41
+
+[hedge grid on long@HYBRID: trigger x giveback x cutoff]
+  cutoff 15:00 giveback 30% trigger 1500       hedges  79 (unpriced  1) won  49  hedge   +5,991 (Aug   -5,645 Sep  +11,636)  total   +69,486  worst  -13,964
+  cutoff 15:00 giveback 30% trigger 1800       hedges  73 (unpriced  1) won  48  hedge  +15,891 (Aug   +1,784 Sep  +14,108)  total   +79,387  worst  -11,649
+  cutoff 15:00 giveback 30% trigger 2000       hedges  70 (unpriced  1) won  43  hedge   +9,818 (Aug   -6,571 Sep  +16,389)  total   +73,313  worst  -12,294
+  cutoff 15:00 giveback 30% trigger 2200       hedges  68 (unpriced  1) won  39  hedge   -3,536 (Aug   -9,796 Sep   +6,260)  total   +59,959  worst  -12,118
+  cutoff 15:00 giveback 30% trigger 2500       hedges  60 (unpriced  1) won  31  hedge  -16,559 (Aug  -18,106 Sep   +1,547)  total   +46,936  worst  -14,427
+  cutoff 15:00 giveback 40% trigger 1500       hedges  79 (unpriced  1) won  48  hedge   +1,593 (Aug   -7,123 Sep   +8,717)  total   +65,089  worst  -14,143
+  cutoff 15:00 giveback 40% trigger 1800       hedges  73 (unpriced  1) won  47  hedge  +13,182 (Aug   +1,841 Sep  +11,341)  total   +76,677  worst  -11,649
+  cutoff 15:00 giveback 40% trigger 2000       hedges  70 (unpriced  1) won  43  hedge  +12,000 (Aug   -2,113 Sep  +14,113)  total   +75,496  worst  -11,914
+  cutoff 15:00 giveback 40% trigger 2200       hedges  68 (unpriced  1) won  39  hedge   -3,925 (Aug   -7,496 Sep   +3,571)  total   +59,570  worst  -12,118
+  cutoff 15:00 giveback 40% trigger 2500       hedges  60 (unpriced  1) won  31  hedge  -16,396 (Aug  -15,666 Sep     -730)  total   +47,100  worst  -14,046
+  cutoff none giveback 30% trigger 1500        hedges  80 (unpriced  1) won  49  hedge   +5,809 (Aug   -5,645 Sep  +11,454)  total   +69,305  worst  -13,964
+  cutoff none giveback 30% trigger 1800        hedges  74 (unpriced  1) won  48  hedge  +15,710 (Aug   +1,784 Sep  +13,926)  total   +79,205  worst  -11,649
+  cutoff none giveback 30% trigger 2000        hedges  71 (unpriced  1) won  43  hedge   +9,690 (Aug   -6,698 Sep  +16,389)  total   +73,186  worst  -12,294
+  cutoff none giveback 30% trigger 2200        hedges  70 (unpriced  1) won  39  hedge   -4,572 (Aug  -10,082 Sep   +5,510)  total   +58,923  worst  -12,118
+  cutoff none giveback 30% trigger 2500        hedges  64 (unpriced  1) won  32  hedge  -17,320 (Aug  -18,776 Sep   +1,457)  total   +46,176  worst  -14,427
+  cutoff none giveback 40% trigger 1500        hedges  80 (unpriced  1) won  48  hedge   +1,411 (Aug   -7,123 Sep   +8,535)  total   +64,907  worst  -14,143
+  cutoff none giveback 40% trigger 1800        hedges  74 (unpriced  1) won  47  hedge  +13,000 (Aug   +1,841 Sep  +11,159)  total   +76,495  worst  -11,649
+  cutoff none giveback 40% trigger 2000        hedges  71 (unpriced  1) won  43  hedge  +11,872 (Aug   -2,241 Sep  +14,113)  total   +75,368  worst  -11,914
+  cutoff none giveback 40% trigger 2200        hedges  70 (unpriced  1) won  39  hedge   -4,961 (Aug   -7,782 Sep   +2,821)  total   +58,534  worst  -12,118
+  cutoff none giveback 40% trigger 2500        hedges  64 (unpriced  1) won  32  hedge  -17,156 (Aug  -16,336 Sep     -820)  total   +46,339  worst  -14,046
+
+written history/bt_walkforward_long/bearish_side_aug.json
