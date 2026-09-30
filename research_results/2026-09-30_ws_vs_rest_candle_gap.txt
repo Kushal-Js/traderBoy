@@ -1,0 +1,24 @@
+Mibian requires scipy to work properly
+Codebase Version 3.3.2
+symbols 27, sessions 6 (2026-09-23 .. 2026-09-30), bars compared 4178; REST bars with no live bar at all: 142 ({'2026-09-23': 29, '2026-09-24': 26, '2026-09-25': 18, '2026-09-28': 36, '2026-09-29': 7, '2026-09-30': 26})
+HIGH: REST high above the live bar's high: in 31% of bars | median shortfall 0.000% | 90th pct 0.030% | 99th pct 0.164% | worst 0.97% | bars short by > 0.05%: 5.4%, > 0.10%: 2.1%, > 0.20%: 0.6%
+LOW: REST low below the live bar's low: in 33% of bars | median shortfall 0.000% | 90th pct 0.032% | 99th pct 0.123% | worst 0.65% | bars short by > 0.05%: 5.6%, > 0.10%: 1.5%, > 0.20%: 0.4%
+live bar's high ABOVE the REST high (should not happen): 0.2% of bars
+
+by session (share of bars whose live high is short by > 0.05%):
+  2026-09-23:    43 bars,   4.7%
+  2026-09-24:    46 bars,  10.9%
+  2026-09-25:   342 bars,   4.7%
+  2026-09-28:  1044 bars,   5.4%
+  2026-09-29:  1073 bars,   5.3%
+  2026-09-30:  1630 bars,   5.4%
+
+BULLISH resting triggers touched on the REST bars (before 14:00) - would the live bar have shown the touch?
+  seen same bar                  20  (87%)
+  seen 1 to 3 bars later          1  (4%)
+  not seen within 15 min          1  (4%)
+  no live bar                     1  (4%)
+  total touches 23
+   e.g. BOSCHLTD 30 Sep 12:40 trigger 47235.00: REST high 47235.00, live high 47230.00 (seen 2 bar(s) later)
+   e.g. RBLBANK 30 Sep 09:35 trigger 409.20: REST high 409.25, live high 408.45 (not seen in the next 15 min)
+exit 0
