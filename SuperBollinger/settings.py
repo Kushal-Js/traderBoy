@@ -70,6 +70,16 @@ def _parse_mode(v) -> str:
     return v
 
 
+def _parse_scale_mode(v) -> str:
+    v = str(v).strip().lower()
+    if v == "real":
+        raise ValueError("real is not built yet - scale-in runs off, shadow or paper only (paper first, "
+                         "then real once the paper results match the backtest)")
+    if v not in ("off", "shadow", "paper"):
+        raise ValueError("must be off, shadow or paper")
+    return v
+
+
 def _to_env(v) -> str:
     if isinstance(v, bool):
         return "true" if v else "false"
@@ -122,6 +132,30 @@ _FIELDS = {
     # Shadow-only candidate rules (logged, never acted on).
     "shadow_stop_reenter_rs": (float, "SUPER_BOLLINGER_SHADOW_STOP_REENTER_RS", "2000",
                                lambda v: None if v >= 0 else "must be >= 0 (0 = off)"),
+    # ---- Scale-in variant (SuperBollinger/scale.py, 30 Sep 2026) ----
+    # scale_mode: off | shadow (log would-add/would-exit) | paper (the added
+    # lots live in their own paper book; real trades are never touched).
+    # CE: one extra lot once the CE is scale_ce_add_at_rs in profit (before
+    # scale_ce_add_cutoff_time); the extra lot is sold on its own when
+    # Supertrend on the last closed 5-min bar turns bearish
+    # (scale_ce_add_st_exit), otherwise it exits together with the original CE.
+    # PE: once a hedge is open and Supertrend(scale_supertrend_*) on the last closed
+    # 5-min bar is bearish (before scale_pe_add_cutoff_time), one extra PE
+    # lot; both PE lots then exit as soon as CE + PE PnL >= 0 (the pair's loss
+    # is recovered), else on the hedge's own trail/stop/square-off; the added
+    # lot also has its own scale_pe_add_stop_rs stop.
+    "scale_mode": (_parse_scale_mode, "SUPER_BOLLINGER_SCALE_MODE", "off", None),
+    "scale_ce_add_at_rs": (float, "SUPER_BOLLINGER_SCALE_CE_ADD_AT_RS", "1500",
+                           lambda v: None if v > 0 else "must be > 0"),
+    "scale_ce_add_cutoff_time": (_parse_hhmm, "SUPER_BOLLINGER_SCALE_CE_ADD_CUTOFF_TIME", "14:00", None),
+    "scale_ce_add_st_exit": (_parse_bool, "SUPER_BOLLINGER_SCALE_CE_ADD_ST_EXIT", "true", None),
+    "scale_pe_add_cutoff_time": (_parse_hhmm, "SUPER_BOLLINGER_SCALE_PE_ADD_CUTOFF_TIME", "14:30", None),
+    "scale_pe_add_stop_rs": (float, "SUPER_BOLLINGER_SCALE_PE_ADD_STOP_RS", "750",
+                             lambda v: None if v > 0 else "must be > 0"),
+    "scale_supertrend_period": (int, "SUPER_BOLLINGER_SCALE_SUPERTREND_PERIOD", "10",
+                                   lambda v: None if 2 <= v <= 50 else "must be 2-50"),
+    "scale_supertrend_mult": (float, "SUPER_BOLLINGER_SCALE_SUPERTREND_MULT", "3.0",
+                                 lambda v: None if v > 0 else "must be > 0"),
 }
 FIELD_NAMES = tuple(_FIELDS)
 

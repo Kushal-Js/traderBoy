@@ -53,9 +53,9 @@ from Swing import candle_feed
 from Swing.position_store import broker_stop_trigger_and_limit
 from SuperTrader.strategy import atr as atr_series
 
-from . import settings
-from .state import (EVENTS_LOG, HEDGE_STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store, paper_book,
-                    position_store)
+from . import best_price_memory, scale, settings
+from .state import (EVENTS_LOG, HEDGE_STRATEGY, STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store,
+                    paper_book, position_store)
 from .trading_engine import NO_TRAILING, PROFILE, square_off_all as square_off_ce
 
 logger = logging.getLogger("super_bollinger_supervisor")
@@ -131,7 +131,17 @@ def _state(symbol: str, pos: Position) -> dict:
 # --------------------------------------------------------------------------- #
 # CE watch: shadow rules + hedge trigger
 # --------------------------------------------------------------------------- #
+async def _scale_safe(coro) -> None:
+    """The scale-in variant is paper-only research: a failure there must
+    never stop the supervisor's real work."""
+    try:
+        await coro
+    except Exception:  # noqa: BLE001
+        logger.exception("[supervisor] scale-in variant hook failed")
+
+
 async def check_ce(symbol: str, pos: Position, ltp: float, ce_is_real: bool) -> None:
+    await _scale_safe(scale.on_ce_price(symbol, pos, ltp, ce_is_real))
     st = _state(symbol, pos)
     loss = (pos.entry_price - ltp) * pos.pnl_multiplier
     now = _now()
@@ -301,6 +311,8 @@ async def _apply_hedge_price(symbol: str, ltp: float, real: bool, square_off: bo
             await _log("HEDGE_EXIT_DECIDED", symbol, pe=pos.trading_symbol, reason=reason, pe_entry=pos.entry_price,
                        pe_ltp=ltp, pe_best=pos.best_price, est_pnl=round((ltp - pos.entry_price) * pos.pnl_multiplier), mode="real")
             await engine._exit_position(symbol, pos, ltp, reason, hedge_store)
+        elif not reason:
+            await _scale_safe(scale.on_hedge_price(symbol, pos, ltp, True))
     else:
         pos = await hedge_paper_book.update(symbol, ltp)
         if pos is None:
@@ -310,10 +322,13 @@ async def _apply_hedge_price(symbol: str, ltp: float, real: bool, square_off: bo
             record = await hedge_paper_book.close(symbol, ltp, reason)
             if record:
                 await _log("HEDGE_CLOSED", symbol, mode="paper", **record)
+        else:
+            await _scale_safe(scale.on_hedge_price(symbol, pos, ltp, False))
 
 
 async def on_price_tick(trading_symbol: str, ltp: float) -> None:
     """WS fast path: hedge exits and CE hedge triggers."""
+    await _scale_safe(scale.on_option_tick(trading_symbol, ltp))
     try:
         for sym, pos in list(hedge_store.live_positions.items()):
             if pos.trading_symbol == trading_symbol:
@@ -408,6 +423,13 @@ async def _tick() -> None:
                 ltp = await _ltp(pos) or pos.entry_price
                 if await hedge_store.try_start_exit(sym):
                     await engine._exit_position(sym, pos, ltp, "DISASTER_BRAKE", hedge_store)
+
+    await _scale_safe(scale.tick())
+    try:
+        best_price_memory.record(STRATEGY, list(position_store.live_positions.values()))
+        best_price_memory.record(HEDGE_STRATEGY, list(hedge_store.live_positions.values()))
+    except Exception:  # noqa: BLE001
+        logger.exception("[supervisor] best-price memory write failed")
 
     live_keys = {(s, p.opened_at.isoformat()) for s, p in list(position_store.live_positions.items()) + list(paper_book.positions.items())}
     for key in [k for k in _track if k not in live_keys and k[1][:10] != now.date().isoformat()]:

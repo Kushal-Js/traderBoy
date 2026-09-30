@@ -18,6 +18,7 @@ Endpoints:
   POST /super-bollinger/square-off-now    manual kill switch - exits every open real position
   GET  /super-bollinger/supervisor        supervisor status: hedge mode, open hedges, today's hedge trades, brake
   POST /super-bollinger/supervisor/square-off-hedges   exits every open REAL hedge (CE trades untouched)
+  GET  /super-bollinger/scale?day=        scale-in PAPER variant: open added lots, closed ones, PnL vs the real hedge
 """
 from __future__ import annotations
 
@@ -35,7 +36,7 @@ import paper_mode_control
 from trade_history import REAL_TRADES_NAME, dated_path
 from Options.dhan_client import dhan_wrapper
 
-from . import settings
+from . import best_price_memory, scale, settings
 from . import supervisor
 from . import watchlist as super_watchlist
 from .state import (HEDGE_STRATEGY, STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store, paper_book,
@@ -58,6 +59,9 @@ async def lifespan(app: FastAPI):
     try:
         reconciled = await reconcile_broker_positions()
         if reconciled:
+            restored = best_price_memory.restore(STRATEGY, reconciled)
+            if restored:
+                logger.info("[%s] best price restored for re-adopted CE(s): %s", STRATEGY, restored)
             await position_store.reconcile_from_broker(reconciled)
             logger.info("[%s] reconciled %d open position(s) at startup: %s", STRATEGY, len(reconciled),
                         [p.underlying_symbol for p in reconciled])
@@ -67,10 +71,17 @@ async def lifespan(app: FastAPI):
     try:
         hedges = await supervisor.reconcile_hedges()
         if hedges:
+            restored = best_price_memory.restore(HEDGE_STRATEGY, hedges)
+            if restored:
+                logger.info("[%s] best price restored for re-adopted hedge(s) (profit trail kept): %s", STRATEGY, restored)
             await hedge_store.reconcile_from_broker(hedges)
             logger.info("[%s] reconciled %d open REAL hedge(s): %s", STRATEGY, len(hedges), [p.underlying_symbol for p in hedges])
     except Exception:  # noqa: BLE001
         logger.exception("[%s] could not reconcile hedge positions at startup", STRATEGY)
+    try:
+        scale.load()
+    except Exception:  # noqa: BLE001
+        logger.exception("[%s] could not restore the scale-in variant's paper legs", STRATEGY)
     for pos in paper_book.load() + hedge_paper_book.load():
         try:
             dhan_wrapper.subscribe_option_price(pos.trading_symbol)
@@ -241,6 +252,33 @@ async def get_supervisor(day: Optional[str] = None):
                                 "paper_pnl_modeled": round(sum(x["pnl_modeled"] for x in hedges_paper), 2)},
         "event_counts": counts, "last_events": events[-30:],
     }
+
+
+@router.get("/super-bollinger/scale")
+async def get_scale(day: Optional[str] = None):
+    """Scale-in PAPER variant (SuperBollinger/scale.py). variant_vs_real_hedge =
+    the variant's PE legs (hedge copy + added lot) minus the real/paper
+    hedge's PnL for the same symbols, i.e. what the PE-add rule changed."""
+    d = date.fromisoformat(day) if day else date.today()
+    closed = _read_log(scale.SCALE_TRADES_LOG, d)
+    events = _read_log(scale.SCALE_EVENTS_LOG, d)
+    by_leg: dict = {}
+    for t in closed:
+        leg = by_leg.setdefault(t.get("leg"), {"count": 0, "pnl_raw": 0.0, "pnl_modeled": 0.0})
+        leg["count"] += 1
+        leg["pnl_raw"] = round(leg["pnl_raw"] + t["pnl_raw"], 2)
+        leg["pnl_modeled"] = round(leg["pnl_modeled"] + t["pnl_modeled"], 2)
+    pe_syms = {t["underlying_symbol"] for t in closed if t.get("leg") in ("PE_HEDGE_COPY", "PE_ADD")}
+    hedges = [x for x in _read_log(REAL_TRADES_NAME, d) if x.get("strategy") == HEDGE_STRATEGY] + \
+        _read_log(hedge_paper_book.log_name, d)
+    hedge_pnl = sum((x.get("pnl") if x.get("pnl") is not None else x.get("pnl_raw")) or 0
+                    for x in hedges if x.get("underlying_symbol") in pe_syms)
+    variant_pe = sum(t["pnl_raw"] for t in closed if t.get("leg") in ("PE_HEDGE_COPY", "PE_ADD"))
+    return {**scale.snapshot(), "day": d.isoformat(), "closed_by_leg": by_leg, "closed": closed,
+            "pe_variant_vs_hedge_raw": {"variant_pe_legs": round(variant_pe, 2), "hedge_same_symbols": round(hedge_pnl, 2),
+                                        "difference": round(variant_pe - hedge_pnl, 2),
+                                        "note": "only symbols where the variant's PE legs have closed"},
+            "events": events[-50:]}
 
 
 @router.post("/super-bollinger/supervisor/square-off-hedges")
