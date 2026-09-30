@@ -56,7 +56,7 @@ from SuperTrader.strategy import atr as atr_series
 from . import best_price_memory, scale, settings
 from .state import (EVENTS_LOG, HEDGE_STRATEGY, STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store,
                     paper_book, position_store)
-from .trading_engine import NO_TRAILING, PROFILE, square_off_all as square_off_ce
+from .trading_engine import NO_TRAILING, PROFILE, settle_unfilled_order, square_off_all as square_off_ce
 
 logger = logging.getLogger("super_bollinger_supervisor")
 LOOP_SECONDS = 2
@@ -251,6 +251,9 @@ async def _open_hedge(symbol, ce: Position, ce_ltp, loss, spot, atr_v, drop, mod
             result = OrderResult(order_id=order_id, status=OrderStatus.TRANSIT, remark="order_confirmation_timeout",
                                  fill_price=0.0, filled_quantity=0, is_amo=is_amo)
         await hedge_store.update_order_status(order_id, result.status, result.remark)
+        if result.status != OrderStatus.TRADED:   # never leave an unfilled hedge order resting at the broker
+            result = await settle_unfilled_order(symbol, leg["trading_symbol"], order_id, result, is_amo, "hedge")
+            await hedge_store.update_order_status(order_id, result.status, result.remark)
         if result.status != OrderStatus.TRADED:
             await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, leg["trading_symbol"])
             await _log("HEDGE_ORDER_NOT_FILLED", symbol, pe=leg["trading_symbol"], order_id=order_id,

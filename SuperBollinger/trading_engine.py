@@ -182,6 +182,50 @@ async def _resolve_leg(symbol: str) -> tuple[dict, float]:
     return leg, price
 
 
+async def settle_unfilled_order(symbol: str, trading_symbol: str, order_id: str, result: OrderResult,
+                                is_amo: bool, what: str) -> OrderResult:
+    """An order that is not TRADED when the wait ends may still be RESTING at
+    the broker. Found live 30 Sep 2026 (SONACOMS 27 OCT 830 CALL x1225): the
+    market BUY came back PENDING after ~6s, the entry was treated as failed
+    and the order was simply left at Dhan - blocking ~Rs 34k of funds and, had
+    it filled later, leaving a real position nobody managed (no stop, no
+    square-off). Now: cancel it, then read its final status once more - a fill
+    that raced the cancel comes back TRADED and is handled as a normal fill
+    by the caller. If it is STILL open after that, log loudly (event
+    ORDER_STILL_RESTING_AT_BROKER) - it needs a manual cancel."""
+    if result.status not in OrderStatus.OPEN_STATUSES:
+        return result
+    loop = asyncio.get_running_loop()
+    cancel_error = None
+    try:
+        await loop.run_in_executor(None, dhan_wrapper.cancel_order, order_id)
+    except Exception as exc:  # noqa: BLE001
+        cancel_error = repr(exc)
+        logger.warning("[%s] %s: cancel of unfilled %s order %s failed (%s) - re-checking its status", STRATEGY, symbol,
+                       what, order_id, cancel_error)
+    final = result
+    try:
+        final = await asyncio.wait_for(
+            loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, is_amo, 4, 1.0), timeout=20)
+    except Exception:  # noqa: BLE001
+        logger.exception("[%s] %s: could not re-check %s order %s after the cancel", STRATEGY, symbol, what, order_id)
+    if final.status == OrderStatus.TRADED:
+        event = "ORDER_FILLED_DURING_CANCEL"
+    elif final.status in OrderStatus.OPEN_STATUSES:
+        event = "ORDER_STILL_RESTING_AT_BROKER"
+        logger.error("[%s] %s: %s order %s for %s is STILL OPEN at the broker (status=%s) after a cancel attempt - "
+                     "cancel it by hand", STRATEGY, symbol, what, order_id, trading_symbol, final.status)
+    else:
+        event = "ORDER_UNFILLED_CANCELLED"
+    if final.status != OrderStatus.TRADED and final.filled_quantity:
+        logger.error("[%s] %s: %s order %s ended %s with %s qty FILLED - that quantity is NOT managed by the bot",
+                     STRATEGY, symbol, what, order_id, final.status, final.filled_quantity)
+    await _event(event, symbol, {"what": what, "trading_symbol": trading_symbol, "order_id": order_id,
+                                 "status_at_timeout": result.status, "final_status": final.status,
+                                 "filled_quantity": final.filled_quantity, "cancel_error": cancel_error})
+    return final
+
+
 def _new_position(symbol: str, leg: dict, entry_price: float, order_id: str,
                   stop_loss_order_id: Optional[str] = None, reconciled: bool = False) -> Position:
     return Position(
@@ -288,6 +332,9 @@ async def _enter_real_reserved(symbol: str, trigger_price: float, stop_price: fl
             result = OrderResult(order_id=order_id, status=OrderStatus.TRANSIT, remark="order_confirmation_timeout",
                                  fill_price=0.0, filled_quantity=0, is_amo=is_amo)
         await position_store.update_order_status(order_id, result.status, result.remark)
+        if result.status != OrderStatus.TRADED:
+            result = await settle_unfilled_order(symbol, trading_symbol, order_id, result, is_amo, "entry")
+            await position_store.update_order_status(order_id, result.status, result.remark)
         if result.status != OrderStatus.TRADED:  # literal TRADED-only fill discipline
             await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, trading_symbol)
             logger.warning("[%s] %s: entry order %s not TRADED (status=%s remark=%s)", STRATEGY, symbol, order_id,
