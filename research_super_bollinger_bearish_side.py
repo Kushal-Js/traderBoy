@@ -272,6 +272,38 @@ def summarize(name, trades, ov):
     return res
 
 
+def hedge_grid(trades: list) -> dict:
+    """Hedge-only grid on the CE book (30 Sep 2026 user decisions to validate:
+    trigger 2,000 -> 1,800, trail giveback 40% -> 30%, no time cutoff).
+    Every cell = the CE book + its hedge PnL, split like the other reports."""
+    global HEDGE_TRIGGER, GIVEBACK, HEDGE_CUTOFF
+    keep = (HEDGE_TRIGGER, GIVEBACK, HEDGE_CUTOFF)
+    out = {}
+    print("\n[hedge grid on long@HYBRID: trigger x giveback x cutoff]", flush=True)
+    for cutoff_name, cutoff in (("15:00", dtime(15, 0)), ("none", dtime(15, 15))):
+        for gb in (0.30, 0.40):
+            for trig in (1500, 1800, 2000, 2200, 2500):
+                HEDGE_TRIGGER, GIVEBACK, HEDGE_CUTOFF = trig, gb, cutoff
+                cov = defaultdict(int)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    ov = [overlays(t, cov) for t in trades]
+                a = sum(o["HEDGE"] for t, o in zip(trades, ov) if t["day"] < SPLIT)
+                b = sum(o["HEDGE"] for t, o in zip(trades, ov) if t["day"] >= SPLIT)
+                daily = defaultdict(float)
+                for t, o in zip(trades, ov):
+                    daily[t["day"]] += float(t["pnl_modeled"]) + o["HEDGE"]
+                wins = sum(o["HEDGE"] > 0 for o in ov)
+                key = f"cutoff {cutoff_name} giveback {int(gb * 100)}% trigger {trig}"
+                out[key] = {"hedges": cov["hedges"], "unpriced": cov["hedge_unpriced"], "wins": wins, "hedge_pnl": round(a + b),
+                            SPLIT_NAMES[0]: round(a), SPLIT_NAMES[1]: round(b), "total": round(sum(daily.values())),
+                            "worst_day": round(min(daily.values()))}
+                print(f"  {key:44s} hedges {cov['hedges']:3d} (unpriced {cov['hedge_unpriced']:2d}) won {wins:3d}  hedge "
+                      f"{a + b:>+8,.0f} ({SPLIT_NAMES[0]} {a:>+8,.0f} {SPLIT_NAMES[1]} {b:>+8,.0f})  total "
+                      f"{sum(daily.values()):>+9,.0f}  worst {min(daily.values()):>+8,.0f}", flush=True)
+    HEDGE_TRIGGER, GIVEBACK, HEDGE_CUTOFF = keep
+    return out
+
+
 def load_picks(rule: str) -> dict:
     """Walk-forward weekly picks: from the selection run's JSON, else (BEAR_HYBRID
     on the September window) computed here with the same select() code."""
@@ -317,6 +349,7 @@ def main():
     bt_, bo = books["short@BEAR"]
     print("\n[long@HYBRID + short@BEAR, separate 5-slot books - funds not shared]", flush=True)
     report["long+short@BEAR"] = {"summary": summarize("L+S", lt + bt_, lo + bo)}
+    report["hedge_grid_long"] = hedge_grid(books["long"][0])
     name = f"bearish_side_{MODE}{'_cacheonly' if CACHE_ONLY else ''}.json"
     (OUT / name).write_text(json.dumps(report, indent=2, default=str))
     print(f"\nwritten {OUT / name}")
