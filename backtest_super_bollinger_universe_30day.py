@@ -92,7 +92,8 @@ _cand_cache: dict = {}
 def simulate(syms: list[str], cap: int, pricer: st.OptionPricer, label: str, sides: str = "long",
              allowed: dict | None = None, daily_loss_limit: float | None = None,
              entry_gate=None, cooloff_week_of: dict | None = None, symbol_gate=None,
-             soft_stop_rs: float | None = None, max_reentries: int = 0, reentry_cutoff: dtime = dtime(14, 0)):
+             soft_stop_rs: float | None = None, max_reentries: int = 0, reentry_cutoff: dtime = dtime(14, 0),
+             cap_for_day=None):
     """`allowed` (optional): {date: set of symbols} - only those symbols may
     enter on that day (walk-forward stock selection).
     Loss-reduction switches (30 Sep 2026, all off by default):
@@ -109,7 +110,9 @@ def simulate(syms: list[str], cap: int, pricer: st.OptionPricer, label: str, sid
                          (SOFT_STOP), keep watching that option, and buy it
                          again when it trades back up to the ORIGINAL entry
                          price, before reentry_cutoff, at most max_reentries
-                         times per signal; re-entered legs use the same exits."""
+                         times per signal; re-entered legs use the same exits.
+      cap_for_day(date) -> int - the slot limit for NEW entries on that day
+                         (e.g. fewer slots in a market regime); default `cap`."""
     events = []
     for s in syms:
         if (s, sides) not in _cand_cache:
@@ -208,7 +211,7 @@ def simulate(syms: list[str], cap: int, pricer: st.OptionPricer, label: str, sid
         for (_t, sym, side, fill_u, und_close, key) in by_t[t]:
             if (sym, key) in consumed or sym in open_pos or sym in watches:
                 continue
-            if len(open_pos) >= cap:
+            if len(open_pos) >= (cap_for_day(d) if cap_for_day is not None else cap):
                 stats["touch_while_full"] += 1
                 continue
             if daily_loss_limit is not None and day_pnl[d] <= -daily_loss_limit:

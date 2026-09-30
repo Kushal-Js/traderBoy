@@ -1,0 +1,38 @@
+book: 159 call trades (4 slots, 1-hour filter), hedge fired and priced on 56
+peaks: 35 hedges were ever up 1,000+, 19 up 2,000+, 13 up 3,000+ (before any trail exit)
+
+== HEDGE PUT: trail variants x how the exit is executed ==
+trail                                            |                BOT EXIT (1-min close)                |            RATCHETED BROKER STOP (touch)            
+                                                 | hedge PnL      Aug      Sep   wins  book dd trail exits | hedge PnL      Aug      Sep   wins  book dd trail exits
+LIVE: 30% from 1,000                             |      +297   -4,097   +4,394  33/56  -23,483          33 |    +1,640   -3,570   +5,211  33/56  -24,686          33
+40% from 1,000 (live until 30 Sep 12:16)         |    -2,704   -4,311   +1,606  32/56  -22,699          33 |    -1,880   -4,030   +2,151  33/56  -23,958          33
+25% from 1,000                                   |      +979   -2,593   +3,572  35/56  -24,424          34 |      +977   -2,593   +3,569  34/56  -24,791          34
+20% from 1,000                                   |    +2,573   -2,260   +4,832  35/56  -24,233          34 |    +3,162   -2,017   +5,179  34/56  -24,291          34
+PROPOSED stepped: 40% from 1k, 25% from 2k       |    +3,374      -88   +3,462  33/56  -22,452          34 |    +5,250     +772   +4,478  34/56  -23,492          34
+stepped: 30% from 1k, 20% from 2k                |    +3,510   -2,158   +5,667  34/56  -23,582          34 |    +4,704   -1,946   +6,650  34/56  -24,686          34
+stepped: 30% from 1k, 25% from 2k, 20% from 3k   |    +6,972   +1,305   +5,667  34/56  -23,246          34 |    +7,580   +1,181   +6,399  34/56  -24,686          34
+stepped: 40% from 1k, 30% from 2k, 20% from 3k   |    +1,546   -2,517   +4,063  32/56  -22,096          33 |    +2,738   -2,427   +5,165  33/56  -23,492          33
+stepped: 30% from 1k, 15% from 3k                |    +3,035   -2,297   +5,332  33/56  -22,873          33 |    +3,354   -2,794   +6,148  33/56  -24,686          33
+arm later: 30% from 1,500                        |    -9,057  -11,710   +2,653  27/56  -25,159          25 |    -8,866  -12,169   +3,303  27/56  -26,032          25
+arm earlier: 30% from 500                        |    -5,224   -6,691   +1,467  33/56  -23,830          40 |    -2,941   -5,507   +2,566  35/56  -23,859          40
+   (book dd = max drawdown of calls + hedge together)
+
+== CALL: profit trail on top of today's rules ==
+TODAY (no trail)                                 total   +90,287  Aug  +39,150  Sep  +51,137  dd  -22,773  worst day  -12,597
+after +2k, give back 30%                         total    -9,201  Aug   -5,410  Sep   -3,791  dd  -33,935  worst day  -12,597  (79 trades exit earlier,   -99,488 vs today)
+after +2k, give back 40%                         total      -819  Aug   +7,475  Sep   -8,294  dd  -31,945  worst day  -12,597  (71 trades exit earlier,   -91,106 vs today)
+after +2k, give back 50%                         total   +15,795  Aug  +16,159  Sep     -364  dd  -37,323  worst day  -12,597  (67 trades exit earlier,   -74,492 vs today)
+after +3k, give back 30%                         total   +14,592  Aug   +4,485  Sep  +10,107  dd  -21,281  worst day  -12,597  (57 trades exit earlier,   -75,695 vs today)
+after +3k, give back 40%                         total   +27,975  Aug  +16,191  Sep  +11,784  dd  -19,142  worst day  -12,597  (49 trades exit earlier,   -62,313 vs today)
+after +3k, give back 50%                         total   +79,161  Aug  +52,079  Sep  +27,083  dd  -21,099  worst day  -12,597  (42 trades exit earlier,   -11,126 vs today)
+after +4k, give back 30%                         total    -7,127  Aug  -13,590  Sep   +6,463  dd  -37,297  worst day  -12,597  (33 trades exit earlier,   -97,414 vs today)
+after +4k, give back 40%                         total    +4,815  Aug   -5,658  Sep  +10,473  dd  -34,137  worst day  -12,597  (25 trades exit earlier,   -85,473 vs today)
+after +4k, give back 50%                         total   +58,576  Aug  +37,783  Sep  +20,793  dd  -23,704  worst day  -12,597  (20 trades exit earlier,   -31,711 vs today)
+after +6k, give back 30%                         total   +11,778  Aug  -17,920  Sep  +29,698  dd  -43,071  worst day  -12,597  (22 trades exit earlier,   -78,509 vs today)
+after +6k, give back 40%                         total   +26,056  Aug   -9,312  Sep  +35,368  dd  -37,791  worst day  -12,597  (16 trades exit earlier,   -64,231 vs today)
+after +6k, give back 50%                         total   +85,471  Aug  +34,401  Sep  +51,071  dd  -26,365  worst day  -12,597  (10 trades exit earlier,    -4,816 vs today)
+stepped: 50% from 3k, 35% from 6k, 25% from 10k  total    +3,406  Aug   -1,743  Sep   +5,149  dd  -29,437  worst day  -12,597  (52 trades exit earlier,   -86,882 vs today)
+stepped: 50% from 4k, 30% from 8k                total   +30,880  Aug  +10,808  Sep  +20,072  dd  -30,280  worst day  -12,597  (27 trades exit earlier,   -59,407 vs today)
+only big winners: 30% from 8k                    total   +55,628  Aug   +9,875  Sep  +45,753  dd  -31,650  worst day  -12,597  (16 trades exit earlier,   -34,659 vs today)
+only big winners: 25% from 10k                   total   +60,990  Aug  +14,364  Sep  +46,626  dd  -29,449  worst day  -12,597  (13 trades exit earlier,   -29,297 vs today)
+exit 0

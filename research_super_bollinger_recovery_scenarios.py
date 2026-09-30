@@ -88,43 +88,54 @@ def put_side(ev, add: bool, target: float | None):
         return 0.0, {}
     hm, i0, q0, qty, sq, f = ev["hm"], ev["i0"], ev["q0"], ev["qty"], ev["sq"], ev["f"]
     a_open, b, booked = True, None, False          # b = {"q":..., "open":bool}
-    a_stop, peak, pnl, info = q0 - HEDGE_STOP / qty, 0.0, 0.0, {"added": False, "booked": False}
+    a_stop, peak, pnl = q0 - HEDGE_STOP / qty, 0.0, 0.0
+    info = {"added": False, "booked": False, "a_t": hm.ts[i0], "a_q": q0}      # leg times/prices: for capital studies only
+
+    def out(t):
+        info["a_exit_t"] = t
+        if b:
+            info.setdefault("b_exit_t", t)
+        return pnl, info
+
     for j in range(i0 + 1, len(hm.ts)):
         t = hm.ts[j]
         if t >= sq:
             pnl += m.mod(q0, hm.o[j], qty)
             if b and b["open"]:
                 pnl += m.mod(b["q"], hm.o[j], qty)
-            return pnl, info
+            return out(t)
         if hm.l[j] <= a_stop:                                        # A's stop / floor -> everything out
             pnl += m.mod(q0, min(a_stop, hm.o[j]), qty)
             if b and b["open"]:
                 pnl += m.mod(b["q"], hm.c[j], qty)
-            return pnl, info
+            return out(t)
         if b and b["open"] and hm.l[j] <= b["q"] - B_STOP / qty:       # B's own stop
             pnl += m.mod(b["q"], min(b["q"] - B_STOP / qty, hm.o[j]), qty)
             b["open"] = False
+            info["b_exit_t"] = t
         if target is not None and b and b["open"] and not booked:
             lvl = (target / qty + q0 + b["q"]) / 2
             if hm.h[j] >= lvl:                                         # combined profit reached: book lot B
                 pnl += m.mod(b["q"], max(lvl, hm.o[j]), qty)
                 b["open"], booked, info["booked"] = False, True, True
+                info["b_exit_t"] = t
                 a_stop = max(a_stop, q0)                               # kept lot: floor at its purchase price
         peak = max(peak, (hm.h[j] - q0) * qty)
         if peak >= ARM and (hm.c[j] - q0) * qty <= peak * (1 - GIVEBACK):
             pnl += m.mod(q0, hm.c[j], qty)
             if b and b["open"]:
                 pnl += m.mod(b["q"], hm.c[j], qty)
-            return pnl, info
+            return out(t)
         if add and b is None:
             k = m.bar_at(f, t)
             if k is not None and f["st"][k] == -1:
                 b = {"q": hm.c[j], "open": True}
                 info["added"] = True
+                info["b_t"], info["b_q"] = t, hm.c[j]
     pnl += m.mod(q0, hm.c[-1], qty)
     if b and b["open"]:
         pnl += m.mod(b["q"], hm.c[-1], qty)
-    return pnl, info
+    return out(hm.ts[-1])
 
 
 # --------------------------------------------------------------------------- #
@@ -156,10 +167,11 @@ def call_side(ev, confirm: bool, lot2_exit: str, arm: float, pair_cap: bool, ree
     orig_open = ta < t1
     if not orig_open and not reentry:
         return 0.0, {}
-    info = {"readd": orig_open, "reentry": not orig_open}
+    info = {"readd": orig_open, "reentry": not orig_open, "c_t": ta, "c_q": p2, "c_exit_t": sq}   # leg time/price: capital studies
     peak2, lot1_pnl, be_armed = 0.0, base, False
     for j in range(ia + 1, len(tm.ts)):
         t = tm.ts[j]
+        info["c_exit_t"] = t                                           # overwritten until the minute it actually exits
         if t >= sq:
             return (lot1_pnl - base) + m.mod(p2, tm.o[j], qty), info
         if orig_open and t >= t1:                                      # the original lot exits by its own rules
