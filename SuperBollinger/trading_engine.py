@@ -481,11 +481,27 @@ def _on_underlying_tick(symbol: str, ltp: float, tick_time: datetime) -> None:
     asyncio.run_coroutine_threadsafe(_tick_entry(symbol), _loop)
 
 
+# One forced refresh at a time (30 Sep 2026): every Dhan REST call runs on the
+# shared, small worker-thread pool (EXECUTOR_MAX_WORKERS=5) and history fetches
+# are paced by SLEEPING inside a worker. Refreshing all watchlist stocks at the
+# same instant at each bar start could tie up every worker for several seconds
+# and delay entry/exit/hedge orders; queued one by one they use at most one
+# worker. A stock already queued is not queued again.
+_refresh_lock = asyncio.Semaphore(1)
+_refresh_pending: set[str] = set()
+
+
 async def _refresh_signal(symbol: str) -> None:
+    if symbol in _refresh_pending:
+        return
+    _refresh_pending.add(symbol)
     try:
-        await signals.get_signal_state(symbol, force=True)
+        async with _refresh_lock:
+            await signals.get_signal_state(symbol, force=True)
     except Exception:  # noqa: BLE001
         logger.exception("[%s] %s: forced signal refresh failed", STRATEGY, symbol)
+    finally:
+        _refresh_pending.discard(symbol)
 
 
 def _peek_entry_signal(symbol: str) -> Optional[tuple]:
