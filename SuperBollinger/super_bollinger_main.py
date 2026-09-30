@@ -14,6 +14,7 @@ Endpoints:
   GET  /super-bollinger/trades?day=       closed real + paper trades for a day, with PnL totals
   GET  /super-bollinger/symbols           which symbols it trades now (weekly stock list + permanent index symbols)
   GET  /super-bollinger/watchlist         its own HYBRID-picked watchlist (data/super_bollinger_watchlist)
+  GET  /super-bollinger/watchlist/shadow  the shadow list (recorded + scored weekly, never traded) vs the live list
   POST /super-bollinger/watchlist/replace replace it by hand, e.g. {"symbols": ["LAURUSLABS", "ZYDUSLIFE"]}
   POST /super-bollinger/square-off-now    manual kill switch - exits every open real position
   GET  /super-bollinger/supervisor        supervisor status: hedge mode, open hedges, today's hedge trades, brake
@@ -242,6 +243,15 @@ async def get_watchlist():
     return {"file": str(super_watchlist.WATCHLIST_FILE), "source": source, "count": len(symbols), "symbols": symbols,
             "permanent_index_symbols": index_symbols(),
             "note": "index symbols are not stored in this file - the weekly refresh never touches them"}
+
+
+@router.get("/super-bollinger/watchlist/shadow")
+async def get_shadow_watchlist():
+    """The shadow list (40-session fit with the 1-hour filter) next to the
+    live list, and how both did week by week. Recorded by the Friday
+    refresh; never traded."""
+    import stock_selection
+    return await asyncio.get_running_loop().run_in_executor(None, stock_selection.shadow_status)
 
 
 @router.post("/super-bollinger/watchlist/replace")

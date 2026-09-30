@@ -55,6 +55,11 @@ What it does, in order:
      sessions). Swing/Bollinger above keep plain ATH. Best-effort: a
      failure or fewer than 10 picks leaves last week's Super Bollinger list
      in place and never blocks the ATH update or the restart.
+  7c. (added 30 Sep 2026) the SHADOW list: a second Super Bollinger pick
+     (40-session fit with the 1-hour filter, stock_selection.run_shadow)
+     that is only recorded and, a week later, scored against the live list
+     (data/super_bollinger_shadow_watchlist.json / _shadow_scores.jsonl).
+     Never traded; best-effort, time-boxed, cannot change any watchlist.
   8. Restarts dhanboy.service - UNCONDITIONALLY, per explicit user
      instruction. The bot's own broker-reconciliation-on-restart logic
      (verified live 17 Sep 2026, see TRADING_JOURNAL.md) recovers any
@@ -226,6 +231,12 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         log(f"Super Bollinger HYBRID selection FAILED ({exc!r}) - keeping last week's list; the ATH "
             f"watchlists above were already updated normally.")
+
+    log("\nSuper Bollinger SHADOW list (recorded and scored only - never traded, never written to a watchlist)...")
+    try:
+        stock_selection.run_shadow(log, read_watchlist_file(stock_selection.SUPER_BOLLINGER_WATCHLIST_FILE))
+    except Exception as exc:  # noqa: BLE001
+        log(f"Shadow list step FAILED ({exc!r}) - nothing else is affected.")
 
     log("\nRestarting dhanboy.service (unconditional, per explicit user instruction - broker "
         "reconciliation on restart recovers any position still open; its trailing-stop memory "
