@@ -29,7 +29,7 @@ BASE = "http://localhost:8000"
 IST = timezone(timedelta(hours=5, minutes=30))
 STATE_FILE = Path("data/super_bollinger_live_state.json")
 SNAP_DIR = Path("history/restart_snapshots")
-ENDPOINTS = ["super-bollinger/positions", "super-bollinger/supervisor", "super-bollinger/scale",
+ENDPOINTS = ["scalper/positions", "super-bollinger/positions", "super-bollinger/supervisor", "super-bollinger/scale",
              "super-bollinger/live-state", "positions", "luxury/positions", "swing/positions", "bollinger/positions",
              "paper-mode"]
 # Swing and Bollinger remember their real positions' trailing state themselves (position_memory.py)
@@ -99,6 +99,21 @@ def main() -> int:
                 print(f"  state file: {len(on_disk)} position(s), saved {age:.0f}s ago")
             except Exception as exc:  # noqa: BLE001
                 problems.append(f"state file unreadable: {exc!r}")
+    # Scalper (1 Oct 2026): real BANKNIFTY positions remember best price / entry candle in
+    # data/scalper_position_memory.json; an exit in flight must finish first.
+    sc = snap.get("scalper/positions") or {}
+    try:
+        sc_mem = json.loads(Path("data/scalper_position_memory.json").read_text())
+    except Exception:  # noqa: BLE001
+        sc_mem = {}
+    for p in sc.get("live_positions", []):
+        sym = p.get("trading_symbol")
+        if p.get("pending_exit_order_id"):
+            problems.append(f"{sym} (scalper): an exit order is in flight")
+        if not p.get("stop_loss_order_id"):
+            notes.append(f"{sym} (scalper): no broker stop on record")
+        print(f"  real scalper: {sym} x{p.get('quantity')} entry {p.get('entry_price')} best {p.get('best_price')} "
+              f"(remembered best {(sc_mem.get(sym) or {}).get('best_price')})")
     for ep in ("positions", "luxury/positions", "swing/positions", "bollinger/positions"):
         rows = (snap.get(ep) or {}).get("live_positions", [])
         if not rows:

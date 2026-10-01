@@ -82,7 +82,7 @@ from pathlib import Path
 logger = logging.getLogger("paper_mode_control")
 
 STRATEGIES = ("Options", "Luxury", "Swing", "Bollinger", "SwingIndex", "SwingMCX", "SuperBollinger", "BollingerIndex",
-              "SuperBollingerIndex")
+              "SuperBollingerIndex", "Scalper")
 
 OVERRIDE_FILE = Path("data/paper_mode_overrides.json")
 ENV_FILE = Path(".env")
@@ -122,6 +122,8 @@ _ENV_VAR_NAMES = {
     # Bollinger's permanent NIFTY/BANKNIFTY symbols only; "SuperBollinger"
     # above then covers its HYBRID stock watchlist.
     "SuperBollingerIndex": "SUPER_BOLLINGER_INDEX_PAPER_MODE_ENABLED",
+    # "Scalper" (added 1 Oct 2026) - Scalper/, BANKNIFTY options on Swing's rules with 1-minute candles.
+    "Scalper": "SCALPER_PAPER_MODE_ENABLED",
 }
 
 _overrides: dict[str, bool] = {}
@@ -164,6 +166,9 @@ def _env_default(strategy: str) -> bool:
     if strategy == "SuperBollingerIndex":
         from SuperBollinger import settings as cfg
         return bool(cfg.INDEX_PAPER_MODE_ENABLED_DEFAULT)
+    if strategy == "Scalper":
+        from Scalper import settings as cfg
+        return bool(cfg.PAPER_MODE_ENABLED_DEFAULT)
     raise ValueError(f"unknown strategy {strategy!r} - must be one of {STRATEGIES}")
 
 

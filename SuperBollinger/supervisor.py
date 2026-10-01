@@ -588,7 +588,8 @@ def _stops_owned_by_open_positions() -> set[str]:
     review): even if Dhan's position list ever came back missing a held contract, its stop is never swept."""
     owned: set[str] = set()
     stores = [position_store, hedge_store]
-    for mod in ("Bollinger.position_store", "Swing.position_store", "Options.position_store", "Luxury.position_store"):
+    for mod in ("Bollinger.position_store", "Swing.position_store", "Options.position_store", "Luxury.position_store",
+                "Scalper.state"):
         try:
             stores.append(__import__(mod, fromlist=["position_store"]).position_store)
         except Exception:  # noqa: BLE001

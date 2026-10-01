@@ -77,6 +77,7 @@ from Swing import swing_main
 from Swing import swing_paper_engine
 from Bollinger import bollinger_main
 from SuperBollinger import super_bollinger_main
+from Scalper import scalper_main
 import universe_bucket
 import breakout_signal
 import breakout_paper_engine
@@ -165,7 +166,7 @@ async def lifespan(app: FastAPI):
                 # Bollinger has no breakout/CE-PE dispatch relationship
                 # with Options/Luxury, so it doesn't sit alongside the
                 # dispatcher-task block below.
-                async with bollinger_main.lifespan(app), super_bollinger_main.lifespan(app):
+                async with bollinger_main.lifespan(app), super_bollinger_main.lifespan(app), scalper_main.lifespan(app):
                     # Super Bollinger (30 Sep 2026) nests right after
                     # Bollinger - it reads Bollinger's own signal cache and
                     # watchlist, already loaded by the lifespan above.
@@ -245,6 +246,7 @@ app.include_router(luxury_main.router)
 app.include_router(swing_main.router)
 app.include_router(bollinger_main.router)
 app.include_router(super_bollinger_main.router)
+app.include_router(scalper_main.router)
 app.include_router(universe_bucket.router)
 
 
