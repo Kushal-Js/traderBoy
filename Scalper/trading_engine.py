@@ -9,8 +9,11 @@ SWING rules for entry and exit with 1 min candle timeframe as we saw right now i
             paper counted separately; options cheaper than min_premium_rs are skipped.
   Entry     Swing's live v3 signal on CLOSED 1-minute candles (Scalper/signals.py): BULLISH -> buy 1 lot of the
             ATM CE, BEARISH -> the ATM PE (nearest expiry, rolled on expiry day). One position per index at a
-            time. Re-entry rule as Swing: after a trade on one side, that side waits until the EMA200 regime has
-            been seen on the other side. No new entries from square_off_time, nor for the rest of the day once
+            time. Re-entry rule: after a trade on one side, that side waits for a FRESH formation - the 1-min
+            Supertrend seen on the other side on a closed candle after the entry candle (or the EMA200 regime
+            seen on the other side, Swing's rule). Since 1 Oct 2026: the 12:44 BANKNIFTY bearish cross after the
+            12:06 PE trade was skipped although the Supertrend had turned bullish in between - the regime alone
+            stays on one side for hours. No new entries from square_off_time, nor for the rest of the day once
             today's realised loss reaches daily_loss_limit_rs (DAILY_LOSS_STOP).
   Exit      Swing's options ladder, checked every MONITOR_INTERVAL_SECONDS and on every option tick:
             MAX_LOSS_HIT (Rs max_loss_rs) -> TARGET_HIT (+target_pct) -> PROFIT_PROTECTION_HIT (peak profit >
@@ -58,7 +61,8 @@ PROFILE = engine.Profile(name=STRATEGY, entry_mode="bar_close", sides="both", ex
 
 _last_eval: dict[str, dict] = {}          # symbol -> last signal evaluation (for GET /scalper/signal)
 _evaluated_bar: dict[str, int] = {}       # symbol -> bar start already evaluated
-_consumed: dict[str, Optional[int]] = {}  # symbol -> side of the last entry (+1 CE / -1 PE) until the regime flips
+_consumed: dict[str, Optional[int]] = {}  # symbol -> side of the last entry (+1 CE / -1 PE) until a fresh formation
+_consumed_bar: dict[str, int] = {}        # symbol -> that entry's 1-min bar start
 _entry_candle: dict[str, int] = {}        # trading_symbol -> entry 1-min bar start (Supertrend-exit guard)
 _day_pnl_cache: dict = {"at": 0.0, "day": None, "real": 0.0, "paper": 0.0}
 _stop_logged: dict = {"day": None}
@@ -487,6 +491,31 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
 # --------------------------------------------------------------------------- #
 # Signal + entries, once per closed 1-minute candle
 # --------------------------------------------------------------------------- #
+def _release_consumed_side(symbol: str, ev: dict) -> None:
+    """Frees the traded side once a fresh formation is seen: the EMA200 regime on the other side (Swing's
+    rule), or the 1-min Supertrend on the other side on a closed candle after the entry candle. A Supertrend
+    cross back to the traded side after the entry candle counts too - the candle before it was on the other
+    side, even when that minute was never evaluated (no candle at the time)."""
+    side = _consumed.get(symbol)
+    if side is None:
+        return
+    after_entry = ev["bar_start"] > _consumed_bar.get(symbol, 0)
+    st_side = 1 if ev["close"] > ev["st_line"] else -1
+    fresh_cross = ev["crossed_up"] if side == 1 else ev["crossed_down"]
+    if (1 if ev["regime_bullish"] else -1) != side:
+        reason = "EMA200 regime on the other side"
+    elif after_entry and st_side != side:
+        reason = "1-min Supertrend on the other side"
+    elif after_entry and fresh_cross:
+        reason = "fresh 1-min Supertrend cross"
+    else:
+        return
+    _consumed[symbol] = None
+    logger.info("[%s] %s: %s side free again (%s, %s candle)", STRATEGY, symbol,
+                "BULLISH" if side == 1 else "BEARISH", reason,
+                datetime.fromtimestamp(ev["bar_start"], IST).strftime("%H:%M"))
+
+
 async def _evaluate_new_bar(symbol: str) -> None:
     now_ts = time.time()
     minute_start = int(now_ts) - int(now_ts) % 60
@@ -509,9 +538,7 @@ async def _evaluate_new_bar(symbol: str) -> None:
         return
     ev["evaluated_at"] = datetime.now(IST).isoformat()
     _last_eval[symbol] = ev
-    reg_side = 1 if ev["regime_bullish"] else -1
-    if _consumed.get(symbol) is not None and reg_side != _consumed[symbol]:
-        _consumed[symbol] = None                         # the regime left the traded side - fresh formation
+    _release_consumed_side(symbol, ev)
     side = 1 if ev["bull"] else -1 if ev["bear"] else 0
     if not side:
         return
@@ -533,6 +560,7 @@ async def _evaluate_new_bar(symbol: str) -> None:
     result = await (enter_paper(symbol, signal, ev) if paper else enter_real(symbol, signal, ev))
     if result.get("status") in ("entered", "paper_entered"):
         _consumed[symbol] = side
+        _consumed_bar[symbol] = ev["bar_start"]
     logger.info("[%s] %s: %s signal on the %s candle -> %s", STRATEGY, symbol, signal,
                 datetime.fromtimestamp(closed_start, IST).strftime("%H:%M"), result)
 
