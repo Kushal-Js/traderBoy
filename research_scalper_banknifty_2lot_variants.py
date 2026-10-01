@@ -13,6 +13,11 @@ same-side re-entry only after the EMA200 regime has been on the other side, no e
 the day's realised loss reaches the daily stop. Entry price = the option's 1-min close of the minute the
 signal candle closes.
 
+Re-entry: as live since 6a66544 (1 Oct 13:02, deployed during this test): after a trade on one side, that
+side is free again once the EMA200 regime is on the other side (Swing's rule) OR the 1-min Supertrend is on the
+other side on a closed candle after the entry candle OR a fresh Supertrend cross back to the side after it.
+The "OLD re-entry rule" rows keep the regime-only rule for comparison.
+
 Size: 2 lots x 30 (today's BANKNIFTY lot) = 60 for every day. The live rupee limits are per 1 lot, so the main
 runs keep the same PRICE levels as live by doubling them: max loss Rs 3,000 (50 points), profit protection
 arms above Rs 6,000 peak (100 points), daily stop Rs 6,000. The "same rupees" runs keep the live numbers
@@ -62,7 +67,7 @@ QTY = LOT * LOTS
 TARGET_PCT, HARD_STOP_PCT, GIVEBACK = 0.35, 0.20, 0.02
 SQUARE_OFF = dtime(15, 25)
 MAX_OFFSET = 8
-PACE = 0.5
+PACE = 1.2                    # gentle: the live bot shares this account's data-API budget
 HAVE_TOKEN = bool(os.environ.get("HANDOFF_DHAN_ACCESS_TOKEN"))
 OLD_ROLLING = Path("history/bt_super_trader_30day/options/BANKNIFTY")
 OLD_LISTED = Path("history/bt_swing_index_tf/option")
@@ -184,12 +189,10 @@ def listed_series(day: date, ot: str, spot: float) -> tuple[str, dict] | None:
     p = OUT / "listed" / (name.replace(" ", "_") + ".json")
     complete = lambda d: d and d["ts"] and datetime.fromtimestamp(d["ts"][-1], IST) >= datetime.combine(
         LAST_DAY, dtime(15, 25), IST)
-    data = json.loads(p.read_text()) if p.exists() else None
+    have = [json.loads(f.read_text()) for f in (p, OLD_LISTED / (name.replace(" ", "_") + ".json")) if f.exists()]
+    data = max(have, key=lambda d: d["ts"][-1] if d.get("ts") else 0) if have else None   # the longest copy
     if not complete(data):
-        old = OLD_LISTED / (name.replace(" ", "_") + ".json")
-        if old.exists():
-            data = json.loads(old.read_text())
-        if not complete(data) and HAVE_TOKEN:
+        if HAVE_TOKEN:
             resp = R.dhan().intraday_minute_data(c["sid"], "NSE_FNO", "OPTIDX", "2026-09-29", "2026-10-02", 1)
             CALLS["n"] += 1
             d = (resp or {}).get("data") or {}
@@ -228,6 +231,12 @@ CONFIGS = [
      "arm": 3000, "daily": 3000},
     {"key": "C$", "name": "C  split at the profit level, live rupee limits", "mode": "split_arm", "ml": 1500,
      "arm": 3000, "daily": 3000},
+    {"key": "A-old", "name": "A  as live, OLD re-entry rule (regime only)", "mode": "all", "ml": 3000, "arm": 6000,
+     "daily": 6000, "reentry": "regime"},
+    {"key": "B-old", "name": "B  split at the profit exit, OLD re-entry rule", "mode": "split_exit", "ml": 3000,
+     "arm": 6000, "daily": 6000, "reentry": "regime"},
+    {"key": "C-old", "name": "C  split at the profit level, OLD re-entry rule", "mode": "split_arm", "ml": 3000,
+     "arm": 6000, "daily": 6000, "reentry": "regime"},
 ]
 
 
@@ -238,7 +247,10 @@ def bar_at(s: dict, t: int) -> int:
 
 def simulate(spot: dict, sig: dict, cfg: dict) -> list[dict]:
     close_at = {t + 60: k for k, t in enumerate(spot["ts"])}
-    trades, pos, consumed, last_k = [], None, None, None
+    trades, pos, consumed, consumed_k, last_k = [], None, None, None, None
+    fresh_rule = cfg.get("reentry", "fresh") == "fresh"
+    st, cl = sig["st"], spot["c"]
+    above = [None if st[k] is None else cl[k] > st[k] for k in range(len(cl))]
     realised: dict[date, float] = {}
 
     def close_leg(qty, t_out, px, reason):
@@ -257,7 +269,16 @@ def simulate(spot: dict, sig: dict, cfg: dict) -> list[dict]:
             last_k = close_at[now]
             reg = sig["regime"][last_k]
             if consumed is not None and reg is not None and (1 if reg else -1) != consumed:
-                consumed = None
+                consumed = None                        # Swing's rule: the EMA200 regime left the traded side
+            elif consumed is not None and fresh_rule and last_k > consumed_k and above[last_k] is not None:
+                # live since 6a66544 (1 Oct 13:02): the 1-min Supertrend on the other side on a closed candle after
+                # the entry candle, or a fresh cross back to the traded side after it, frees the side
+                st_side = 1 if above[last_k] else -1
+                fresh_cross = above[last_k - 1] is not None and (
+                    (consumed == 1 and not above[last_k - 1] and above[last_k])
+                    or (consumed == -1 and above[last_k - 1] and not above[last_k]))
+                if st_side != consumed or fresh_cross:
+                    consumed = None
         if pos is not None and pos["day"] != day:          # no data after the last bar of a day: close at the last price
             close_leg(pos["open"], pos["last_t"], pos["last_px"], "DAY_END_NO_DATA")
             trades.append(pos)
@@ -323,7 +344,7 @@ def simulate(spot: dict, sig: dict, cfg: dict) -> list[dict]:
                     pos = {"contract": got[0], "side": side, "day": day, "t_in": now, "k_in": k,
                            "p0": got[1]["c"][j], "best": got[1]["c"][j], "opt": got[1], "open": QTY, "legs": [],
                            "split_at": None, "last_t": now, "last_px": got[1]["c"][j]}
-                    consumed = side
+                    consumed, consumed_k = side, k
     if pos is not None:
         close_leg(pos["open"], pos["last_t"], pos["last_px"], "OPEN_AT_DATA_END")
         trades.append(pos)
@@ -336,6 +357,20 @@ def simulate(spot: dict, sig: dict, cfg: dict) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # Report
 # --------------------------------------------------------------------------- #
+def real_cost(tr: dict) -> float:
+    """Estimated real cost of one trade on Dhan: Rs 20 brokerage per order (1 buy + each sell leg), STT 0.1% of
+    the sell premium, NSE options transaction charge 0.03503% and SEBI Rs 10/crore on both sides, 18% GST on
+    brokerage + exchange + SEBI, stamp duty 0.003% on the buy, plus 1 point of slippage per unit on every fill
+    (about half a typical BANKNIFTY ATM spread). The "after costs" column uses the paper books' much heavier
+    0.5%-per-side model."""
+    qty_in = sum(lg["qty"] for lg in tr["legs"])
+    buy = tr["p0"] * qty_in
+    sells = sum(lg["exit"] * lg["qty"] for lg in tr["legs"])
+    brokerage = 20.0 * (1 + len(tr["legs"]))
+    exch, sebi = 0.0003503 * (buy + sells), 1e-6 * (buy + sells)
+    return brokerage + 0.001 * sells + exch + sebi + 0.18 * (brokerage + exch + sebi) + 0.00003 * buy + 2 * qty_in * 1.0
+
+
 def stats(trades: list[dict]) -> dict:
     by_day: dict[date, list[float]] = {}
     for tr in trades:
@@ -344,8 +379,16 @@ def stats(trades: list[dict]) -> dict:
     eq = peak = dd = 0.0
     for d in sorted(by_day):
         eq += by_day[d][1]; peak = max(peak, eq); dd = min(dd, eq - peak)
+    eq = peak = dd_real = 0.0
+    real_by_day: dict[date, float] = {}
+    for tr in trades:
+        real_by_day[tr["day"]] = real_by_day.get(tr["day"], 0.0) + tr["pnl"] - real_cost(tr)
+    for d in sorted(real_by_day):
+        eq += real_by_day[d]; peak = max(peak, eq); dd_real = min(dd_real, eq - peak)
     return {"n": len(trades), "wins": sum(1 for t in trades if t["pnl_modeled"] > 0),
             "raw": sum(t["pnl"] for t in trades), "mod": sum(t["pnl_modeled"] for t in trades), "dd": dd,
+            "real": sum(t["pnl"] - real_cost(t) for t in trades), "dd_real": dd_real,
+            "real_wins": sum(1 for t in trades if t["pnl"] - real_cost(t) > 0),
             "days": by_day, "best_day": max((v[1] for v in by_day.values()), default=0),
             "worst_day": min((v[1] for v in by_day.values()), default=0),
             "pos_days": sum(1 for v in by_day.values() if v[1] > 0)}
@@ -366,12 +409,15 @@ def main() -> None:
     say(f"Option data: {'downloaded as needed' if HAVE_TOKEN else 'CACHE ONLY'}; {CALLS['n']} Dhan calls this run; "
         f"{len(set(MISSING))} signal(s) could not be priced")
     say()
-    say(f"{'variant':58s} {'trades':>6s} {'wins':>5s} {'P&L raw':>10s} {'after costs':>12s} {'max DD':>9s} "
-        f"{'best day':>9s} {'worst day':>10s} {'+days':>6s}")
+    say(f"{'variant':58s} {'trades':>6s} {'P&L raw':>10s} | {'est. real':>10s} {'wins':>5s} {'max DD':>9s} | "
+        f"{'paper model':>11s} {'max DD':>9s} {'best day':>9s} {'worst day':>10s} {'+days':>6s}")
     for cfg in CONFIGS:
         s = stats(results[cfg["key"]])
-        say(f"{cfg['name']:58s} {s['n']:>6d} {s['wins']:>5d} {s['raw']:>+10,.0f} {s['mod']:>+12,.0f} {s['dd']:>+9,.0f} "
-            f"{s['best_day']:>+9,.0f} {s['worst_day']:>+10,.0f} {s['pos_days']:>3d}/{len(s['days']):<2d}")
+        say(f"{cfg['name']:58s} {s['n']:>6d} {s['raw']:>+10,.0f} | {s['real']:>+10,.0f} {s['real_wins']:>5d} "
+            f"{s['dd_real']:>+9,.0f} | {s['mod']:>+11,.0f} {s['dd']:>+9,.0f} {s['best_day']:>+9,.0f} "
+            f"{s['worst_day']:>+10,.0f} {s['pos_days']:>3d}/{len(s['days']):<2d}")
+    say("est. real = raw minus Dhan charges + 1 point slippage per fill (see real_cost); paper model = 0.5%/side; "
+        "best/worst day and +days on the paper model")
     for key in ("A", "B", "C"):
         tr = results[key]
         say()
