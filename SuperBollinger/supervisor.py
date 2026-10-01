@@ -580,23 +580,26 @@ def _order_age_seconds(created: Optional[str]) -> float:
         return 1e9   # unknown age = old
 
 
-_stop_orphan_seen: dict[str, float] = {}   # SELL stop order id -> when it was first seen on a flat contract
+_stop_orphan_seen: dict[str, float] = {}   # bot stop order id -> when it was first seen on a flat contract
 
 
 async def _sweep_orphan_stops(loop, out: dict) -> None:
-    """1 Oct 2026 (ratcheted broker stop): cancel any SELL stop-loss order resting on an option contract the
-    account holds NONE of - it can only ever open a short (e.g. a stop left live after a failed cancel during
-    a bot exit). Only the bots' own stops (tag "SL-...", every strategy's - none of them sells options short;
-    a manual order has no tag), checked against Dhan's raw position list in every segment. Cancelled only
-    when seen on a flat contract in two sweeps in a row (a stop placed right after a fill never races the
-    position list)."""
+    """1 Oct 2026 (ratcheted broker stop): cancel any bot stop-loss order resting on a contract the account
+    holds NONE of - it can only ever open a new position (e.g. a stop left live after a failed cancel during
+    a bot exit). Both sides: a SELL stop protects a long (every options strategy), a BUY stop protects a
+    Swing SHORT (futures / MCX / equity) - on a flat contract either one would open the opposite side. Only
+    the bots' own stops (tag "SL-...", which every strategy uses for its protective exit stop and for nothing
+    else; a manual order has no tag), checked against Dhan's raw position list in every segment. Cancelled
+    only when seen on a flat contract in two sweeps in a row (a stop placed right after a fill never races
+    the position list)."""
     try:
-        sells = [o for o in await loop.run_in_executor(None, dhan_wrapper.list_open_orders, "SELL")
-                 if str(o.get("order_type") or "").startswith("STOP_LOSS") and str(o.get("tag") or "").startswith("SL-")]
+        stops = [o for o in await loop.run_in_executor(None, dhan_wrapper.list_open_orders, None)
+                 if o.get("transaction_type") in ("SELL", "BUY")
+                 and str(o.get("order_type") or "").startswith("STOP_LOSS") and str(o.get("tag") or "").startswith("SL-")]
     except Exception:  # noqa: BLE001
         logger.exception("[supervisor] stop sweep: could not read the order book")
         return
-    if not sells:
+    if not stops:
         _stop_orphan_seen.clear()
         return
     try:
@@ -605,7 +608,7 @@ async def _sweep_orphan_stops(loop, out: dict) -> None:
         logger.exception("[supervisor] stop sweep: could not read the broker positions - nothing cancelled")
         return
     now, seen_now = time.monotonic(), set()
-    for o in sells:
+    for o in stops:
         if not o.get("security_id") or o["security_id"] in held:
             continue
         seen_now.add(o["order_id"])
@@ -622,26 +625,29 @@ async def _sweep_orphan_stops(loop, out: dict) -> None:
         except Exception:  # noqa: BLE001
             status = "UNKNOWN"
         await _log("ORPHAN_STOP_CANCELLED" if status == OrderStatus.CANCELLED else "ORPHAN_STOP_FOUND", "*",
-                   order_id=o["order_id"], broker_symbol=o["trading_symbol"], tag=o.get("tag"),
-                   status_before=o["status"], status_after=status, price=o.get("price"))
-        logger.error("[supervisor] ORPHAN STOP order %s (%s) on a contract the account does not hold - now %s",
-                     o["order_id"], o["trading_symbol"], status)
+                   order_id=o["order_id"], side=o["transaction_type"], broker_symbol=o["trading_symbol"],
+                   tag=o.get("tag"), status_before=o["status"], status_after=status, price=o.get("price"))
+        logger.error("[supervisor] ORPHAN %s STOP order %s (%s) on a contract the account does not hold - now %s",
+                     o["transaction_type"], o["order_id"], o["trading_symbol"], status)
         out.setdefault("stops_cancelled", []).append(o["order_id"])
     for oid in [k for k in _stop_orphan_seen if k not in seen_now]:
         _stop_orphan_seen.pop(oid, None)
 
 
-async def sweep_orphans() -> dict:
+async def sweep_orphans(stops_only: bool = False) -> dict:
     """Cancel open BUY orders carrying this strategy's tags that no order in
     flight owns (adopting a fill that raced the cancel), flag broker
     positions in our books' contracts that nothing tracks, and (1 Oct 2026)
-    cancel SELL stop orders resting on contracts the account no longer holds."""
+    cancel bot stop orders (SELL or BUY) resting on contracts the account no longer holds.
+    stops_only: just the stop part (the MCX evening session, after NSE has closed)."""
     loop = asyncio.get_running_loop()
     out = {"cancelled": [], "adopted": [], "untracked": []}
     try:
         await _sweep_orphan_stops(loop, out)
     except Exception:  # noqa: BLE001
         logger.exception("[supervisor] stop sweep failed")
+    if stops_only:
+        return out
     in_flight = {it.get("order_id") for it in live_state._intents.values() if it.get("order_id")}
     try:
         orders = await loop.run_in_executor(None, dhan_wrapper.list_open_orders, "BUY")
@@ -716,9 +722,9 @@ async def sweep_orphans() -> dict:
     return out
 
 
-async def _sweep_task() -> None:
+async def _sweep_task(stops_only: bool = False) -> None:
     try:
-        await sweep_orphans()
+        await sweep_orphans(stops_only)
     finally:
         _sweep["running"] = False
 
@@ -726,10 +732,13 @@ async def _sweep_task() -> None:
 def _maybe_sweep() -> None:
     every = settings.get("orphan_sweep_seconds")
     now = time.monotonic()
-    if every <= 0 or _sweep["running"] or now - _sweep["last"] < every or not dhan_wrapper.is_market_open():
+    if every <= 0 or _sweep["running"] or now - _sweep["last"] < every:
+        return
+    nse_open = dhan_wrapper.is_market_open()
+    if not nse_open and not dhan_wrapper.is_market_open("MCX_COMM"):   # MCX evening: Swing MCX stops still swept
         return
     _sweep["last"], _sweep["running"] = now, True
-    asyncio.create_task(_sweep_task())
+    asyncio.create_task(_sweep_task(stops_only=not nse_open))
 
 
 async def supervisor_loop() -> None:
