@@ -54,7 +54,7 @@ from Swing import candle_feed
 from Swing.position_store import broker_stop_trigger_and_limit
 from SuperTrader.strategy import atr as atr_series
 
-from . import best_price_memory, live_state, pricing, scale, settings
+from . import best_price_memory, live_state, pricing, scale, settings, stop_ratchet
 from .state import (EVENTS_LOG, HEDGE_STRATEGY, STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store,
                     paper_book, position_store)
 from .trading_engine import (NO_TRAILING, PROFILE, retry_unfilled_buy, settle_unfilled_order,
@@ -431,6 +431,7 @@ async def _apply_hedge_price(symbol: str, ltp: float, real: bool, square_off: bo
                        pe_ltp=ltp, pe_best=pos.best_price, est_pnl=round((ltp - pos.entry_price) * pos.pnl_multiplier), mode="real")
             await engine._exit_position(symbol, pos, ltp, reason, hedge_store)
         elif not reason:
+            await stop_ratchet.maybe_ratchet("hedge", symbol, pos, ltp)    # broker stop follows the 30% trail
             await _scale_safe(scale.on_hedge_price(symbol, pos, ltp, True))
     else:
         pos = await hedge_paper_book.update(symbol, ltp)

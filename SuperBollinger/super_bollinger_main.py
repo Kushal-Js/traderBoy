@@ -204,6 +204,14 @@ async def get_positions():
             **await position_store.snapshot(), **paper_book.snapshot()}
 
 
+@router.get("/super-bollinger/stop-ratchet")
+async def get_stop_ratchet():
+    """Ratcheted broker stops (SuperBollinger/stop_ratchet.py): the mode, the limits, and the level each
+    real position's broker stop-loss order has been moved to today."""
+    from . import stop_ratchet
+    return stop_ratchet.snapshot()
+
+
 @router.get("/super-bollinger/shadow-trades")
 async def get_shadow_trades(day: Optional[str] = None):
     """The shadow watchlist traded on PAPER (SuperBollinger/shadow_list.py): the list in use, open paper

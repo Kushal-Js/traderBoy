@@ -83,6 +83,13 @@ def _parse_scale_mode(v) -> str:
     return v
 
 
+def _parse_filter_mode_ratchet(v) -> str:
+    v = str(v).strip().lower()
+    if v not in ("off", "shadow", "on"):
+        raise ValueError("must be off, shadow or on")
+    return v
+
+
 def _parse_shadow_list_mode(v) -> str:
     v = str(v).strip().lower()
     if v not in ("off", "paper"):
@@ -212,6 +219,17 @@ _FIELDS = {
     # lots' combined profit reaches scale_pe_target_rs one is sold and the
     # other rides the hedge trail with a floor at its purchase price.
     "scale_mode": (_parse_scale_mode, "SUPER_BOLLINGER_SCALE_MODE", "off", None),
+    # ---- Ratcheted broker stop (SuperBollinger/stop_ratchet.py, 1 Oct 2026) ----
+    # off | shadow (log the moves it would make) | on: move the broker's stop-loss
+    # order of REAL positions up to the bot's own profit exit (hedge: the 30% trail
+    # level; call: entry price once +breakeven_after_rs), only up, at least
+    # min_step_rs at a time (on the whole quantity), at most once per
+    # min_interval_seconds per order.
+    "stop_ratchet_mode": (_parse_filter_mode_ratchet, "SUPER_BOLLINGER_STOP_RATCHET_MODE", "off", None),
+    "stop_ratchet_min_step_rs": (float, "SUPER_BOLLINGER_STOP_RATCHET_MIN_STEP_RS", "250",
+                                 lambda v: None if 50 <= v <= 5000 else "must be 50-5000"),
+    "stop_ratchet_min_interval_seconds": (float, "SUPER_BOLLINGER_STOP_RATCHET_MIN_INTERVAL_SECONDS", "5",
+                                          lambda v: None if 1 <= v <= 120 else "must be 1-120"),
     # ---- Shadow watchlist on PAPER (SuperBollinger/shadow_list.py, 1 Oct 2026) ----
     # off | paper: trade the Friday shadow list (stock_selection.run_shadow) on
     # paper with the same entry/exit rules and slot limit, own book and logs.

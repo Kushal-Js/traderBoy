@@ -503,6 +503,9 @@ async def _apply_price_real(symbol: str, position: Position, ltp: float) -> None
     reason = _position_exit_reason(position, ltp)
     if reason and await position_store.try_start_exit(symbol):
         await engine._exit_position(symbol, position, ltp, reason, position_store)
+    elif not reason:
+        from . import stop_ratchet          # broker stop to the entry price once the breakeven rule is armed
+        await stop_ratchet.maybe_ratchet("ce", symbol, position, ltp)
 
 
 async def _close_paper(symbol: str, exit_price: float, reason: str) -> None:

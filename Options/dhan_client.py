@@ -4122,6 +4122,36 @@ class DhanWrapper:
             )
         return {"order_id": str(order_id)}
 
+    def modify_stop_loss_limit_order(
+        self, order_id: str, trading_symbol: str, quantity: int, trigger_price: float, limit_price: float,
+    ) -> dict:
+        """Moves a RESTING stop-loss LIMIT order (placed by place_stop_loss_
+        limit_order above) to a new trigger/limit - added 1 Oct 2026 for
+        Super Bollinger's ratcheted broker stop (SuperBollinger/stop_ratchet.py:
+        the order follows the bot's own profit exit up). Same tick-size
+        rounding as the placement. Dhan's PUT /orders/{id} via dhanhq's
+        modify_order (orderType STOP_LOSS = SL-L, legName ENTRY_LEG for a
+        plain order, validity DAY). Raises on any failure - the caller keeps
+        the order where it was and logs it; nothing else depends on the move
+        succeeding."""
+        try:
+            tick_size = self._instrument_meta(trading_symbol, expected_exchange="NSE").get("tick_size")
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not look up the tick size before modifying SL-L %s - plain 2-decimal "
+                             "rounding", trading_symbol, order_id)
+            tick_size = None
+        trigger_price = _round_to_tick(trigger_price, tick_size)
+        limit_price = _round_to_tick(limit_price, tick_size)
+        logger.info("Modifying STOP-LOSS LIMIT order %s (%s x%s): trigger=%.2f limit=%.2f",
+                    order_id, trading_symbol, quantity, trigger_price, limit_price)
+        resp = self.client.Dhan.modify_order(
+            order_id=str(order_id), order_type="STOP_LOSS", leg_name="ENTRY_LEG", quantity=int(quantity),
+            price=float(limit_price), trigger_price=float(trigger_price), disclosed_quantity=0, validity="DAY",
+        )
+        if not isinstance(resp, dict) or resp.get("status") != "success":
+            raise RuntimeError(f"modify_order({order_id}) failed: {resp!r}"[:400])
+        return {"order_id": str(order_id), "trigger_price": trigger_price, "limit_price": limit_price}
+
     def check_if_order_filled(self, order_id: str) -> Optional[OrderResult]:
         """Cheap, non-blocking check for whether `order_id` has ALREADY
         reached a terminal status - added 8 Sep 2026 alongside the broker-
