@@ -960,3 +960,20 @@ ENTRY_RETRY_COOLDOWN_SECONDS = int(os.getenv("SWING_ENTRY_RETRY_COOLDOWN_SECONDS
 # rationale as every other per-symbol pacing sleep in this codebase.
 SYMBOL_PACING_SECONDS = float(os.getenv("SWING_SYMBOL_PACING_SECONDS", "0.35"))
 ORDER_TAG_PREFIX = os.getenv("SWING_ORDER_TAG_PREFIX", "Sw2")
+
+# Momentum vs sideways/choppy entry filter (1 Oct 2026, user request - see
+# Swing/regime.py for the rule and the 30-day evidence). off | shadow | on:
+#   shadow (default) - every entry signal logs REGIME_AT_SIGNAL (state, 2 h and
+#            today's efficiency ratios, would_skip) and trades as before, so
+#            the paper book can be split by regime afterwards;
+#   on     - entries are taken only in MOMENTUM (or UNKNOWN = too little data,
+#            fail open); SIDEWAYS / CHOPPY signals are skipped (REGIME_SKIP).
+# COPPER's structure-break branch is not affected.
+REGIME_FILTER_MODE = os.getenv("SWING_REGIME_FILTER_MODE", "shadow").strip().lower()
+if REGIME_FILTER_MODE not in ("off", "shadow", "on"):
+    raise ValueError(f"SWING_REGIME_FILTER_MODE must be off, shadow or on, not {REGIME_FILTER_MODE!r}")
+REGIME_ER_BARS = int(os.getenv("SWING_REGIME_ER_BARS", "24"))                 # 24 x 5 min = 2 h
+REGIME_ER_MIN = float(os.getenv("SWING_REGIME_ER_MIN", "0.25"))              # MOMENTUM at or above
+REGIME_ER_CHOPPY = float(os.getenv("SWING_REGIME_ER_CHOPPY", "0.15"))        # CHOPPY below
+REGIME_TODAY_ER_MIN = float(os.getenv("SWING_REGIME_TODAY_ER_MIN", "0.15"))  # today's ER below -> CHOPPY
+REGIME_TODAY_MIN_BARS = int(os.getenv("SWING_REGIME_TODAY_MIN_BARS", "6"))   # 30 min of today before it counts

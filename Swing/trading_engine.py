@@ -520,10 +520,39 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
             logger.info("%s: %s signal skipped - same formation as the last %s entry (no fresh Supertrend "
                         "formation or regime flip since)", symbol, direction, direction)
         return None
+    if direction and config.REGIME_FILTER_MODE != "off" and not await _regime_allows(symbol, direction, st):
+        return None
     return direction
 
 
 _same_formation_logged: set[tuple] = set()
+_regime_logged: dict[tuple, object] = {}   # (symbol, direction, candle) -> RegimeReading, one log per signal candle
+
+
+async def _regime_allows(symbol: str, direction: str, st) -> bool:
+    """Momentum vs sideways/choppy filter (config.REGIME_FILTER_MODE, Swing/regime.py). Read once per signal
+    candle (the signal is re-offered every tick while a downstream gate blocks it). shadow: log
+    REGIME_AT_SIGNAL and allow; on: SIDEWAYS / CHOPPY -> REGIME_SKIP. A failed read fails open."""
+    from . import regime
+    key = (symbol, direction, st.candle_start)
+    reading = _regime_logged.get(key)
+    if reading is None:
+        try:
+            reading = await asyncio.get_running_loop().run_in_executor(None, regime.read, symbol)
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: regime read failed - entry not filtered", symbol)
+            return True
+        if len(_regime_logged) > 5000:
+            _regime_logged.clear()
+        _regime_logged[key] = reading
+        mode = config.REGIME_FILTER_MODE
+        skip = mode == "on" and not reading.allows_entry
+        logger.info("%s: %s signal - regime %s (%s)%s", symbol, direction, reading.state, "; ".join(reading.reasons),
+                    " -> SKIPPED" if skip else (" -> would skip (shadow)" if not reading.allows_entry else ""))
+        await _record_swing_event("REGIME_SKIP" if skip else "REGIME_AT_SIGNAL", symbol, {
+            "direction": direction, "mode": mode, "would_skip": not reading.allows_entry,
+            "signal_candle": st.candle_start.isoformat() if st.candle_start else None, **reading.as_dict()})
+    return config.REGIME_FILTER_MODE != "on" or reading.allows_entry
 
 
 async def _entry_direction(symbol: str, regime, st) -> Optional[str]:

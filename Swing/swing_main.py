@@ -298,6 +298,26 @@ async def get_entry_backlog():
     return {"count": len(pending), "pending": pending}
 
 
+@router.get("/swing/regime")
+async def get_regime():
+    """Momentum / sideways / choppy state of every watchlist stock right now (Swing/regime.py, 1 Oct 2026) - the
+    2 h and today's efficiency ratios that decide it, plus CHOP(14) 15-min and the 2 h Supertrend flips as
+    context. Reads the same cached series the signals use (no extra Dhan calls in normal operation)."""
+    from . import regime
+    loop = asyncio.get_running_loop()
+    out = {}
+    for symbol in await watchlist_store.symbols():
+        try:
+            out[symbol] = (await loop.run_in_executor(None, regime.read, symbol)).as_dict()
+        except Exception as exc:  # noqa: BLE001
+            out[symbol] = {"state": "ERROR", "error": str(exc)}
+    return {"mode": config.REGIME_FILTER_MODE, "rule": {
+        "momentum": f"2h ER >= {config.REGIME_ER_MIN} and today's ER >= {config.REGIME_TODAY_ER_MIN}",
+        "sideways": f"{config.REGIME_ER_CHOPPY} <= 2h ER < {config.REGIME_ER_MIN}",
+        "choppy": f"2h ER < {config.REGIME_ER_CHOPPY} or today's ER < {config.REGIME_TODAY_ER_MIN}",
+        "er_bars_5min": config.REGIME_ER_BARS}, "symbols": out}
+
+
 @router.get("/swing/signals")
 async def get_signals():
     """Cache-only regime + Supertrend state for every watchlist symbol -
