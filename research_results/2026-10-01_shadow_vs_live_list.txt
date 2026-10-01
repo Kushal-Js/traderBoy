@@ -1,0 +1,24 @@
+Live list (data/super_bollinger_watchlist on the droplet, written 30 Sep 02:55 IST): LAURUSLABS APLAPOLLO KALYANKJIL PNBHOUSING BOSCHLTD SAIL MOTILALOFS TITAN MANAPPURAM SONACOMS GLENMARK MCX TORNTPHARM PHOENIXLTD PAGEIND 
+
+pool = top 40 of 171 liquid stocks by ATH score; sessions used up to 2026-09-30
+stock        ATH rank in pool |  LIVE rule: 20 sessions, no filter |  SHADOW rule: 40 sessions, 1h filter | list
+APLAPOLLO           6     yes | fit   +1.23%  11 trades, rank  11 | fit   +4.97%  11 trades, rank   6 | both
+BOSCHLTD            8     yes | fit   +2.52%   7 trades, rank   4 | fit   +6.06%  11 trades, rank   5 | both
+GLENMARK           16     yes | fit   +1.43%   9 trades, rank  10 | fit   +4.68%  19 trades, rank   7 | both
+LAURUSLABS          9     yes | fit   +6.04%   9 trades, rank   1 | fit   +9.45%  15 trades, rank   2 | both
+MCX                 7     yes | fit   +1.22%   9 trades, rank  12 | fit   +7.51%  17 trades, rank   3 | both
+MOTILALOFS         14     yes | fit   +1.91%   6 trades, rank   6 | fit   +2.67%  13 trades, rank  10 | both
+PHOENIXLTD         13     yes | fit   +1.12%   8 trades, rank  14 | fit   +1.54%  11 trades, rank  15 | both
+PNBHOUSING         40     yes | fit   +3.47%   6 trades, rank   3 | fit   +3.97%  12 trades, rank   8 | both
+SAIL               31     yes | fit   +3.50%   7 trades, rank   2 | fit   +6.73%  14 trades, rank   4 | both
+TORNTPHARM         17     yes | fit   +1.14%   4 trades, rank  13 | fit   +2.57%   6 trades, rank  11 | both
+KALYANKJIL         42      NO | fit   +3.10%   7 trades, rank   - | fit   +3.35%   9 trades, rank   - | LIVE only
+MANAPPURAM         34     yes | fit   +1.60%   7 trades, rank   8 | fit   +0.88%  13 trades, rank  20 | LIVE only
+PAGEIND            44      NO | fit   +1.01%   4 trades, rank   - | fit   -0.71%   9 trades, rank   - | LIVE only
+SONACOMS            2     yes | fit   +2.09%   8 trades, rank   5 | fit   -0.10%  10 trades, rank  25 | LIVE only
+TITAN              18     yes | fit   +1.60%   3 trades, rank   7 | fit   +0.46%  13 trades, rank  22 | LIVE only
+APOLLOHOSP          5     yes | fit   +0.96%   7 trades, rank  16 | fit   +1.80%  11 trades, rank  13 | SHADOW only
+JSWSTEEL           30     yes | fit   -2.20%   8 trades, rank  34 | fit   +1.87%   9 trades, rank  12 | SHADOW only
+NAM-INDIA          38     yes | fit   +0.00%   2 trades, rank   - | fit   +3.38%   6 trades, rank   9 | SHADOW only
+OBEROIRLTY         10     yes | fit   +1.57%   7 trades, rank   9 | fit   +1.61%  12 trades, rank  14 | SHADOW only
+PAYTM              26     yes | fit   +0.67%  10 trades, rank  19 | fit  +11.80%  19 trades, rank   1 | SHADOW only
