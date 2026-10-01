@@ -1,0 +1,84 @@
+UNIFIED SUPER STRATEGY - 3 Aug - 29 Sep 2026, Rs 1,20,000 account, walk-forward HYBRID picks (47 stocks), modelled P&L after slippage
+Candidates: engine A (pullback, Super Bollinger) 166, engine B (trend momentum, SwingMomentum intraday) 119 (without the momentum gate: 453). Unpriced signals skipped: {'A': 0, 'B': 35}. Option data calls this run: 665
+
+setup                                                              total      Aug      Sep   max dd    worst win days trades     A/B  won%
+Super Bollinger as live (A, 2 slots, hedge, premium >= 5)        +87,828  +16,974  +70,854  -16,200  -10,878  19/41      118 118/0     31%
+Super Bollinger, 4 slots, hedge                                  +92,567  +20,788  +71,778  -22,683   -9,192  19/41      142 142/0     32%
+Super Bollinger, 4 slots, hedge + S1 + S2                       +119,005  +32,708  +86,298  -30,329   -9,876  18/41      139 139/0     32%
+SwingMomentum intraday alone (B, 5 slots)                         +4,180  -11,145  +15,324  -25,792   -7,554  14/41      105   0/105   48%
+Swing (no momentum gate) intraday (B raw, 5 slots)              -100,534   -6,767  -93,767 -114,336  -26,746  15/41      370   0/370   43%
+UNIFIED A+B 3 slots, hedge                                       +97,025   +7,398  +89,627  -25,509  -16,181  25/41      210 120/90    39%
+UNIFIED A+B 3 slots, hedge, market chop gate                    +101,490  +31,041  +70,449  -16,300  -16,227  23/41      148  84/64    39%
+UNIFIED A+B 3 slots, hedge, daily stop 6k                        +72,498  -12,549  +85,047  -25,509  -11,837  23/41      196 109/87    37%
+UNIFIED A+B 3 slots, hedge, daily stop 6k, market chop gate      +99,470  +24,631  +74,839  -16,300  -11,837  22/41      141  78/63    39%
+UNIFIED A+B 3 slots, hedge+S1+S2                                +134,058  +24,669 +109,388  -32,704  -16,363  23/41      208 119/89    39%
+UNIFIED A+B 3 slots, hedge+S1+S2, market chop gate              +127,335  +49,768  +77,567  -23,170  -16,408  23/41      148  84/64    40%
+UNIFIED A+B 3 slots, hedge+S1+S2, daily stop 6k                 +109,713   +4,723 +104,990  -32,704  -11,837  21/41      194 108/86    37%
+UNIFIED A+B 3 slots, hedge+S1+S2, daily stop 6k, market chop gate  +125,497  +43,358  +82,138  -23,170  -11,837  22/41      141  78/63    40%
+UNIFIED A+B 4 slots, hedge                                       +97,275  +12,178  +85,096  -26,952  -12,226  23/41      231 136/95    39%
+UNIFIED A+B 4 slots, hedge, market chop gate                    +103,432  +35,170  +68,262  -16,300  -11,005  22/41      160  92/68    39%
+UNIFIED A+B 4 slots, hedge, daily stop 6k                        +59,572  -11,512  +71,084  -26,952  -12,567  21/41      211 121/90    36%
+UNIFIED A+B 4 slots, hedge, daily stop 6k, market chop gate      +90,340  +25,016  +65,324  -16,735  -12,567  21/41      149  84/65    38%
+UNIFIED A+B 4 slots, hedge+S1+S2                                +129,983  +26,132 +103,852  -34,678  -11,850  22/41      227 133/94    39%
+UNIFIED A+B 4 slots, hedge+S1+S2, market chop gate              +126,863  +51,109  +75,754  -23,170  -11,061  22/41      158  91/67    39%
+UNIFIED A+B 4 slots, hedge+S1+S2, daily stop 6k                  +91,654   +2,441  +89,213  -34,678  -12,567  20/41      207 118/89    37%
+UNIFIED A+B 4 slots, hedge+S1+S2, daily stop 6k, market chop gate  +113,145  +40,956  +72,189  -23,170  -12,567  21/41      147  83/64    39%
+UNIFIED A+B 5 slots, hedge                                      +105,122  +15,136  +89,987  -23,995  -12,226  23/41      234 137/97    39%
+UNIFIED A+B 5 slots, hedge, market chop gate                    +110,916  +38,127  +72,790  -13,343  -11,005  22/41      163  92/71    39%
+UNIFIED A+B 5 slots, hedge, daily stop 6k                        +74,509   -8,555  +83,064  -23,995  -11,005  21/41      221 128/93    37%
+UNIFIED A+B 5 slots, hedge, daily stop 6k, market chop gate     +104,869  +27,973  +76,896  -13,343  -11,005  21/41      159  89/70    38%
+UNIFIED A+B 5 slots, hedge+S1+S2                                +138,013  +29,089 +108,924  -31,721  -11,850  22/41      230 134/96    40%
+UNIFIED A+B 5 slots, hedge+S1+S2, market chop gate              +133,721  +54,067  +79,655  -20,213  -11,061  22/41      161  91/70    40%
+UNIFIED A+B 5 slots, hedge+S1+S2, daily stop 6k                 +107,399   +5,399 +102,001  -31,721  -11,061  21/41      217 125/92    37%
+UNIFIED A+B 5 slots, hedge+S1+S2, daily stop 6k, market chop gate  +127,674  +43,913  +83,761  -20,213  -11,061  21/41      157  88/69    39%
+
+Picked on AUGUST (best Aug profit per unit of drawdown): UNIFIED A+B 5 slots, hedge, market chop gate -> Aug +38,127, SEPTEMBER (unseen) +72,790
+Picked on SEPTEMBER: UNIFIED A+B 5 slots, hedge, daily stop 6k, market chop gate -> Sep +76,896, AUGUST (unseen) +27,973
+Unified configs positive in BOTH months: 21/24
+
+Day-wise (Rs, modelled): August-picked unified config vs Super Bollinger as live vs SwingMomentum alone
+day          unified   SB live  SwingMom
+2026-08-03      +327      +786        +0
+2026-08-04      -406       +86        +0
+2026-08-05    -6,880    -4,217        +0
+2026-08-06    +2,055    +6,759        +0
+2026-08-07    -6,031    -6,168        +0
+2026-08-10      -219    -2,410        +0
+2026-08-11    +8,872    +9,099        +0
+2026-08-12    -1,971    -1,971        +0
+2026-08-13    -3,106    -1,962    +2,450
+2026-08-14    +1,483    -4,848      -185
+2026-08-17    -7,140    -1,675    -2,642
+2026-08-18   +20,030   +15,789      +480
+2026-08-19    +2,757    -2,425    +2,848
+2026-08-20    +2,782    -8,717    +6,704
+2026-08-21      -928      +410    -1,463
+2026-08-24   -11,005    -5,469    -5,536
+2026-08-25   +36,197   +23,112    -6,286
+2026-08-26    +4,911    +3,045    -3,566
+2026-08-27    -2,984    -3,015    -4,669
+2026-08-28    +3,369    +1,005    +2,254
+2026-08-31    -3,986      -242    -1,534
+2026-09-01    +2,847   -10,878    +5,621
+2026-09-02    +2,524    +8,640    -1,813
+2026-09-03    -3,531    -4,105      -690
+2026-09-04    -2,022    +3,543    -1,694
+2026-09-07   +14,615   +20,257      -655
+2026-09-08   +16,325   +21,346    -5,761
+2026-09-09    +7,314    -1,278    +7,314
+2026-09-10    -4,168    -4,243    +1,009
+2026-09-11    -5,101      -330    +2,075
+2026-09-15    +9,462    -3,617    +9,462
+2026-09-16   +14,823   +14,823    -1,633
+2026-09-17    -3,445    +9,785    +7,661
+2026-09-18    +9,729    -2,105      -342
+2026-09-21    +3,789    +7,630    -3,576
+2026-09-22    -1,894    +2,295    -7,554
+2026-09-23    -4,361    -2,948    +6,099
+2026-09-24    +7,735      -487    +2,795
+2026-09-25    +5,529    +6,239    +2,814
+2026-09-28      -750    -2,407      -483
+2026-09-29    +3,367    +8,692    -5,325
+
+Skip counters (August-picked config): {'took_A': 92, 'skip_market_chop': 81, 'skip_cash': 6, 'skip_cash_A': 8, 'skip_stock_held': 8, 'took_B': 71, 'skip_premium': 27}
+Exits (August-picked config): A BREAKEVEN_STOP_HIT: 34 (-15,231); A DAILY_SQUARE_OFF: 48 (+161,896); A MAX_LOSS_HIT: 10 (-45,337); B MAX_LOSS_HIT: 4 (-21,072); B PROFIT_PROTECTION_HIT: 25 (+65,006); B SQUARE_OFF_15:15: 7 (-2,435); B STOP_LOSS_HIT: 8 (-23,045); B SUPERTREND_REVERSAL_TICK: 21 (-48,630); B TARGET_HIT: 6 (+39,764)

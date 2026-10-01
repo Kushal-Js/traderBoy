@@ -1,0 +1,96 @@
+UNIFIED STRATEGY + SELF-OPTIMIZER - Rs 1.2L, 3 Aug - 29 Sep 2026 (41 days), walk-forward picks, modelled P&L
+Menu: 66 configurations (all: hedge + S1 + S2 on engine A, premium >= Rs 10)
+
+fixed configuration                                            total      Aug      Sep   max dd    worst  win d     A/B  P/DD
+A2+B2(both) gate 0.10 leg<=45k                              +180,255  +63,467 +116,788  -11,990  -11,061  24/41  83/67   15.0
+A2+B2(both) gate 0.10                                       +170,910  +53,172 +117,738  -11,990  -11,061  25/41  85/71   14.3
+A2+B2(puts) gate 0.10                                       +181,629  +76,316 +105,313  -13,526   -5,503  22/41  88/36   13.4
+A2+B0 gate 0.10                                             +168,400  +69,129  +99,271  -13,401   -7,778  19/41  89/0    12.6
+A2+B2(puts) gate 0.10 leg<=45k                              +167,859  +62,545 +105,313  -13,526   -5,503  22/41  85/36   12.4
+A2+B2(puts) gate 0.15                                       +155,448  +78,631  +76,817  -12,531   -5,287  20/41  80/33   12.4
+A2+B2(puts) gate 0.10 B-follows-NIFTY                       +172,429  +75,336  +97,093  -14,002   -7,778  21/41  88/28   12.3
+A2+B2(both) gate 0.10 B-follows-NIFTY                       +175,510  +78,093  +97,417  -14,954   -9,514  23/41  87/50   11.7
+A2+B2(puts) gate 0.15 B-follows-NIFTY                       +143,282  +77,651  +65,631  -12,403   -7,778  20/41  80/26   11.6
+A2+B0 gate 0.10 leg<=45k                                    +154,630  +55,358  +99,271  -13,401   -7,778  19/41  86/0    11.5
+A2+B2(puts) gate 0.10 leg<=45k B-follows-NIFTY              +158,658  +61,565  +97,093  -14,002   -7,778  21/41  85/28   11.3
+A2+B2(puts) gate 0.15 leg<=45k                              +141,156  +64,339  +76,817  -12,531   -5,287  20/41  78/33   11.3
+A2+B0 gate 0.15                                             +141,778  +70,740  +71,039  -12,925   -7,778  17/41  81/0    11.0
+A2+B2(both) gate 0.10 leg<=45k B-follows-NIFTY              +159,630  +62,213  +97,417  -14,954   -9,514  23/41  84/49   10.7
+A2+B2(both) B-follows-NIFTY                                 +177,725  +64,868 +112,857  -16,798   -9,514  23/41 109/57   10.6
+A2+B2(both) gate 0.15 B-follows-NIFTY                       +141,234  +77,959  +63,275  -13,355   -9,514  22/41  79/45   10.6
+A2+B0                                                       +176,531  +61,513 +115,018  -16,888   -9,400  21/41 113/0    10.5
+A2+B2(puts) gate 0.15 leg<=45k B-follows-NIFTY              +128,990  +63,359  +65,631  -12,403   -7,778  20/41  78/26   10.4
+A3+B2(both) gate 0.10 leg<=45k                              +166,500  +59,299 +107,201  -16,190  -11,061  25/41  97/66   10.3
+A2+B2(both) gate 0.15 leg<=45k                              +142,824  +59,988  +82,837  -13,888  -11,061  22/41  76/59   10.3
+A2+B0 gate 0.15 leg<=45k                                    +127,486  +56,448  +71,039  -12,925   -7,778  17/41  79/0     9.9
+A3+B2(both) gate 0.10                                       +157,155  +49,004 +108,151  -16,190  -11,061  26/41  99/70    9.7
+A2+B2(both) gate 0.15                                       +134,001  +50,214  +83,787  -13,888  -11,061  23/41  77/63    9.6
+A2+B2(both) leg<=45k B-follows-NIFTY                        +161,216  +43,199 +118,017  -16,798   -9,514  23/41 105/56    9.6
+A2+B2(puts)                                                 +189,005  +65,395 +123,611  -19,838   -9,400  24/41 111/41    9.5
+A2+B2(both) gate 0.15 leg<=45k B-follows-NIFTY              +124,832  +61,557  +63,275  -13,355   -9,514  22/41  77/44    9.3
+A2+B2(both) leg<=45k                                        +178,324  +41,358 +136,965  -19,471  -11,061  24/41 105/88    9.2
+A2+B0 leg<=45k                                              +158,042  +42,628 +115,414  -17,634   -9,400  20/41 108/0     9.0
+A2+B2(puts) leg<=45k                                        +175,279  +46,510 +128,770  -19,838   -9,400  24/41 106/41    8.8
+A2+B2(puts) B-follows-NIFTY                                 +172,920  +64,415 +108,505  -19,838   -9,400  23/41 111/30    8.7
+A3+B2(both) gate 0.10 B-follows-NIFTY                       +161,574  +73,925  +87,648  -19,151  -10,135  24/41 101/49    8.4
+A2+B2(both)                                                 +158,557  +25,801 +132,756  -19,471  -11,061  24/41 109/92    8.1
+A2+B2(puts) leg<=45k B-follows-NIFTY                        +159,194  +45,530 +113,664  -19,838   -9,400  23/41 106/30    8.0
+A3+B2(both) gate 0.10 leg<=45k B-follows-NIFTY              +145,694  +58,045  +87,648  -19,151  -10,135  24/41  98/48    7.6
+A3+B2(both) gate 0.15 B-follows-NIFTY                       +129,505  +71,471  +58,034  -17,552  -10,135  22/41  92/45    7.4
+A2+B0 gate 0.10 A+B-follow-NIFTY                             +75,285  +38,351  +36,934  -10,233   -7,778  10/41  43/0     7.4
+A3+B2(both) gate 0.15 leg<=45k B-follows-NIFTY              +113,103  +55,069  +58,034  -17,552  -10,135  22/41  90/44    6.4
+A2+B0 gate 0.15 A+B-follow-NIFTY                             +55,015  +39,748  +15,267   -8,716   -7,778   9/41  39/0     6.3
+A3+B2(both) gate 0.15 leg<=45k                              +131,278  +53,499  +77,778  -23,170  -11,061  22/41  89/59    5.7
+A3+B2(both) gate 0.15                                       +122,454  +43,726  +78,728  -23,170  -11,061  23/41  90/63    5.3
+A2+B0 gate 0.10 leg<=45k A+B-follow-NIFTY                    +47,810  +10,877  +36,934   -9,711   -7,778  10/41  40/0     4.9
+A3+B2(both) B-follows-NIFTY                                 +138,511  +53,194  +85,317  -29,124  -11,850  21/41 133/55    4.8
+A3+B2(both) leg<=45k                                        +141,191  +31,403 +109,788  -31,797  -11,850  22/41 127/86    4.4
+A2+B0 A+B-follow-NIFTY                                       +69,869  +36,796  +33,073  -15,987   -9,400  14/41  60/0     4.4
+A3+B2(both) leg<=45k B-follows-NIFTY                        +123,358  +32,882  +90,476  -29,124  -11,850  21/41 128/54    4.2
+A3+B2(both)                                                 +120,993  +15,413 +105,579  -31,797  -11,850  22/41 132/90    3.8
+A2+B0 gate 0.15 leg<=45k A+B-follow-NIFTY                    +27,018  +11,751  +15,267   -8,716   -7,778   9/41  37/0     3.1
+A2+B2(both) gate 0.10 A+B-follow-NIFTY                       +82,499  +47,316  +35,183  -28,208  -13,159  19/41  42/51    2.9
+A2+B2(puts) gate 0.10 A+B-follow-NIFTY                       +79,417  +44,558  +34,859  -27,431  -12,207  17/41  43/29    2.9
+A3+B2(both) gate 0.10 A+B-follow-NIFTY                       +76,958  +37,731  +39,227  -26,979  -11,931  19/41  49/50    2.9
+A2+B2(both) A+B-follow-NIFTY                                 +76,386  +40,608  +35,778  -30,995  -13,159  20/41  58/58    2.5
+A3+B2(both) A+B-follow-NIFTY                                 +65,592  +31,092  +34,500  -30,015  -11,931  19/41  69/57    2.2
+A2+B2(puts) gate 0.15 A+B-follow-NIFTY                       +56,623  +46,659   +9,963  -26,436  -12,207  16/41  39/27    2.1
+A2+B2(puts) A+B-follow-NIFTY                                 +71,124  +39,698  +31,426  -34,138  -12,207  20/41  59/31    2.1
+A2+B0 leg<=45k A+B-follow-NIFTY                              +39,002   +5,929  +33,073  -18,809   -9,400  14/41  57/0     2.1
+A2+B2(both) gate 0.15 A+B-follow-NIFTY                       +54,574  +46,967   +7,607  -27,213  -13,159  18/41  38/46    2.0
+A3+B2(both) gate 0.15 A+B-follow-NIFTY                       +51,240  +35,062  +16,179  -25,985  -11,931  17/41  44/46    2.0
+A2+B2(puts) gate 0.10 leg<=45k A+B-follow-NIFTY              +51,942  +17,084  +34,859  -27,431  -12,207  17/41  40/29    1.9
+A2+B2(both) gate 0.10 leg<=45k A+B-follow-NIFTY              +52,914  +17,731  +35,183  -28,208  -13,159  19/41  39/50    1.9
+A3+B2(both) gate 0.10 leg<=45k A+B-follow-NIFTY              +47,373   +8,146  +39,227  -26,979  -11,931  19/41  46/49    1.8
+A2+B2(both) leg<=45k A+B-follow-NIFTY                        +43,409   +7,631  +35,778  -30,995  -13,159  19/41  55/57    1.4
+A2+B2(puts) leg<=45k A+B-follow-NIFTY                        +40,257   +8,831  +31,426  -34,138  -12,207  19/41  56/31    1.2
+A2+B2(puts) gate 0.15 leg<=45k A+B-follow-NIFTY              +28,626  +18,663   +9,963  -26,436  -12,207  16/41  37/27    1.1
+A3+B2(both) leg<=45k A+B-follow-NIFTY                        +32,070   -2,430  +34,500  -30,322  -11,931  18/41  65/56    1.1
+A2+B2(both) gate 0.15 leg<=45k A+B-follow-NIFTY              +24,468  +16,861   +7,607  -27,213  -13,159  18/41  36/45    0.9
+A3+B2(both) gate 0.15 leg<=45k A+B-follow-NIFTY              +21,134   +4,955  +16,179  -25,985  -11,931  17/41  42/45    0.8
+
+SELF-OPTIMIZER (picks from the menu on PAST days only)                       total      Aug      Sep   max dd    worst  win d  P/DD
+self-optimizer lookback 20 days, score pnl, re-pick every day             +138,721  +31,047 +107,674  -13,461  -11,061  24/41  10.3
+self-optimizer lookback 10 days, score pnl, re-pick every day             +131,279  +36,895  +94,384  -14,659  -11,061  23/41   9.0
+self-optimizer lookback all days, score pnl/dd, re-pick every day         +124,755  +31,606  +93,149  -14,350   -5,938  22/41   8.7
+self-optimizer lookback all days, score pnl, re-pick every day            +113,880  +31,047  +82,833  -13,461  -11,061  22/41   8.5
+self-optimizer lookback 15 days, score pnl, re-pick every day             +111,127  +30,525  +80,601  -13,461  -11,061  23/41   8.3
+self-optimizer lookback 20 days, score pnl/dd, re-pick every day          +109,142  +31,606  +77,536  -14,350   -7,778  20/41   7.6
+self-optimizer lookback all days, score pnl/dd, re-pick every week         +85,885   +1,328  +84,557  -14,350   -5,938  20/41   6.0
+self-optimizer lookback 10 days, score pnl, re-pick every week            +102,395  +28,307  +74,088  -17,143  -11,061  19/41   6.0
+self-optimizer lookback 15 days, score pnl/dd, re-pick every day           +66,651  +28,629  +38,022  -12,582   -7,778  18/41   5.3
+self-optimizer lookback 15 days, score pnl, re-pick every week            +116,631  +22,460  +94,171  -22,163  -11,061  21/41   5.3
+self-optimizer lookback all days, score pnl, re-pick every week            +90,772  +22,460  +68,312  -17,966  -11,061  19/41   5.1
+self-optimizer lookback 10 days, score pnl/dd, re-pick every week          +67,823  +30,255  +37,568  -15,432   -9,514  17/41   4.4
+self-optimizer lookback 20 days, score pnl/dd, re-pick every week          +72,201   +1,328  +70,873  -18,546  -10,135  19/41   3.9
+self-optimizer lookback 20 days, score pnl, re-pick every week             +73,799  +22,460  +51,339  -22,163  -11,061  18/41   3.3
+self-optimizer lookback 15 days, score pnl/dd, re-pick every week          +66,132   -2,763  +68,896  -22,163  -10,135  19/41   3.0
+self-optimizer lookback 10 days, score pnl/dd, re-pick every day           +49,187  +25,351  +23,837  -19,284   -9,514  17/41   2.6
+
+Fixed menu configs: median total +134,001, worst +21,134 (A3+B2(both) gate 0.15 leg<=45k A+B-follow-NIFTY), best +189,005 (A2+B2(puts)) - the best fixed config is only known in hindsight.
+Self-optimizer variants: median total +102,395, worst +49,187, best +138,721
+
+FINAL (chosen a priori, not by its result): self-optimizer lookback 15 days, score pnl/dd, re-pick every week
+  total +66,132 | Aug -2,763 | Sep +68,896 | max dd -22,163 | worst day -10,135 | winning days 19/41
+  configuration in use: from 03 Aug: A2+B0; from 10 Aug: A2+B0 leg<=45k A+B-follow-NIFTY; from 17 Aug: A2+B2(both) gate 0.10 leg<=45k A+B-follow-NIFTY; from 31 Aug: A3+B2(both) gate 0.10 B-follows-NIFTY; from 15 Sep: A2+B0 gate 0.10; from 21 Sep: A2+B0 gate 0.10 leg<=45k; from 28 Sep: A2+B0 leg<=45k
+  trades 114 (A 80, B 34), won 39; trade-wise CSV research_results/2026-10-01_unified_final_trades.csv, day-wise research_results/2026-10-01_unified_final_days.csv
