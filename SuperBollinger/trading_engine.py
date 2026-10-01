@@ -782,6 +782,98 @@ async def _scan_for_entries() -> None:
             _entry_inflight.discard(symbol)
 
 
+# --------------------------------------------------------------------------- #
+# Triggers the live feed never saw (1 Oct 2026, user request; settings
+# late_entry_mode / late_entry_max_pct). The pending order is armed and fired on
+# the signal series (REST closed bars), but an entry needs the LIVE forming bar
+# to reach the trigger. When the closed REST bar shows the touch and the live
+# bar did not (PAGEIND 1 Oct 10:40: REST high 36,895, live 36,870, trigger
+# 36,875 - ~13% of touches 23-30 Sep, plus ticks lost in a restart), the replay
+# marks the order fired and it used to vanish with no trace. A bar later the
+# new state shows it fired on the newest bar while the pending order of the
+# bar before was never consumed (no tick entry, no filter refusal) ->
+# TRIGGER_TOUCH_NOT_TAKEN, then in shadow LATE_ENTRY_WOULD_ENTER / _SKIP.
+# LOG ONLY - nothing here places an order.
+# --------------------------------------------------------------------------- #
+_seen_state: dict[str, tuple] = {}   # symbol -> (candle_start, pending_side, pending_trigger, pending_stop)
+
+
+async def _check_dropped_triggers() -> None:
+    if settings.get("late_entry_mode") == "off":
+        return
+    interval = timedelta(minutes=bcfg.SIGNAL_INTERVAL_MINUTES)
+    for symbol in sorted(_eligible):
+        state = signals.peek_signal_state(symbol)
+        if state is None or state.candle_start is None:
+            continue
+        prev = _seen_state.get(symbol)
+        if prev is not None and prev[0] == state.candle_start:
+            continue
+        _seen_state[symbol] = (state.candle_start, state.pending_side, state.pending_trigger_price,
+                               state.pending_stop_price)
+        if (prev is None or prev[1] != "BULLISH" or prev[2] is None or state.fired != "BULLISH"
+                or prev[0] != state.candle_start - interval or state.candle_start.date() != _now().date()
+                or PROFILE.consumed.get(symbol) == prev[0]):
+            continue
+        try:
+            await _trigger_not_taken(symbol, state, prev[0], prev[2], prev[3])
+        except Exception:  # noqa: BLE001
+            logger.exception("[%s] %s: could not record a trigger the live feed did not take", STRATEGY, symbol)
+
+
+def _bar_high(series: Optional[dict], bar_start: datetime) -> Optional[float]:
+    if not series:
+        return None
+    ts = int(bar_start.timestamp())
+    for i, t in enumerate(series.get("timestamp") or []):
+        if int(t) == ts:
+            return float(series["high"][i])
+    return None
+
+
+async def _trigger_not_taken(symbol: str, state, pending_candle: datetime, trigger: float,
+                             stop: Optional[float]) -> None:
+    live_high = _bar_high(candle_feed.get_candles_dict(symbol, bcfg.SIGNAL_INTERVAL_MINUTES), state.candle_start)
+    detail = {"pending_candle": pending_candle.isoformat(), "touch_bar": state.candle_start.isoformat(),
+              "trigger_price": trigger, "fired_trigger_price": state.fired_trigger_price, "stop_price": stop,
+              "rest_bar_high": _bar_high(signals._rest_series_cache.get(symbol), state.candle_start),
+              "live_bar_high": live_high, "seen_live": live_high is not None and live_high >= trigger,
+              "paper_symbol": is_paper_symbol(symbol)}
+    logger.warning("[%s] %s: BULLISH trigger %.2f touched on the %s bar but never taken live (live bar high %s)",
+                   STRATEGY, symbol, trigger, state.candle_start.strftime("%H:%M"), live_high)
+    await _event("TRIGGER_TOUCH_NOT_TAKEN", symbol, detail)
+
+    forming = (candle_feed.forming_bar(symbol)
+               if candle_feed.is_fresh(symbol, bcfg.WS_STALE_AFTER_SECONDS) else None)
+    spot = forming["close"] if forming else None
+    cap = settings.get("late_entry_max_pct")
+    late = {"trigger_price": trigger, "stop_price": stop, "spot": spot, "max_pct": cap,
+            "pct_above_trigger": None if spot is None else round((spot / trigger - 1) * 100, 3),
+            "touch_bar": state.candle_start.isoformat(), "paper_symbol": is_paper_symbol(symbol)}
+    reason = None
+    if spot is None:
+        reason = "no_live_price"
+    elif not _entries_open_now():
+        reason = "after_entry_cutoff"
+    elif not await _can_enter_symbol(symbol):
+        reason = "gate_closed"            # slots, cooldown, already held, halted ...
+    elif spot > trigger * (1 + cap / 100):
+        reason = "price_ran"
+    elif stop is not None and spot <= stop:
+        reason = "below_pullback_stop"
+    elif settings.get("entry_filter_1h") == "on":
+        green, h1 = await entry_filters.last_hour_green(symbol)
+        late["h1"] = {k: h1.get(k) for k in ("candle_start", "candle_open", "candle_close")}
+        if green is False:
+            reason = "1h_red"
+    if reason:
+        await _event("LATE_ENTRY_WOULD_SKIP", symbol, {"reason": reason, **late})
+    else:
+        logger.info("[%s] %s: late entry WOULD ENTER (shadow, not traded) at %.2f, %.3f%% vs trigger %.2f",
+                    STRATEGY, symbol, spot, late["pct_above_trigger"], trigger)
+        await _event("LATE_ENTRY_WOULD_ENTER", symbol, late)
+
+
 async def _monitor_tick() -> None:
     square_off = _square_off_now()
     if square_off:
@@ -789,6 +881,11 @@ async def _monitor_tick() -> None:
     await asyncio.gather(*[_check_real(s, p) for s, p in list(position_store.live_positions.items())])
     await _check_paper(square_off)
     await _refresh_gate()
+    if not square_off and settings.get("strategy_enabled"):
+        try:
+            await _check_dropped_triggers()
+        except Exception:  # noqa: BLE001
+            logger.exception("[%s] dropped-trigger check failed", STRATEGY)
     try:
         from . import shadow_list   # paper-only shadow watchlist, background task (never delays this tick)
         shadow_list.kick(square_off, bool(settings.get("strategy_enabled") and not _halted_today() and _entries_open_now()))

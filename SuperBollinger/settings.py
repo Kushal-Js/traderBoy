@@ -90,6 +90,13 @@ def _parse_bypass_mode(v) -> str:
     return v
 
 
+def _parse_late_entry_mode(v) -> str:
+    v = str(v).strip().lower()
+    if v not in ("off", "shadow"):
+        raise ValueError("must be off or shadow (a real late entry is not built - collect shadow data first)")
+    return v
+
+
 def _parse_follow_mode(v) -> str:
     v = str(v).strip().lower()
     if v not in ("follow", "on", "off"):
@@ -200,6 +207,17 @@ _FIELDS = {
     # would have said (h1_green on SHADOW_PAPER_OPENED), so the same list can be
     # compared filtered vs unfiltered (the backtest favoured unfiltered there).
     "shadow_list_entry_filter_1h": (_parse_follow_mode, "SUPER_BOLLINGER_SHADOW_LIST_ENTRY_FILTER_1H", "follow", None),
+    # Triggers the live feed never saw (1 Oct 2026, user request) - LOG ONLY. The
+    # pending order is armed/fired on the signal series (REST closed bars) but an
+    # entry needs the live forming bar to reach the trigger; a REST-only touch
+    # (PAGEIND 1 Oct 10:40) used to vanish with no trace. Every such trigger now
+    # logs TRIGGER_TOUCH_NOT_TAKEN; with shadow it also logs what a late entry
+    # would do: LATE_ENTRY_WOULD_ENTER when the live price is at most
+    # late_entry_max_pct above the trigger (and above the pullback stop) and the
+    # usual gates + 1-hour filter pass, else LATE_ENTRY_WOULD_SKIP with the reason.
+    "late_entry_mode": (_parse_late_entry_mode, "SUPER_BOLLINGER_LATE_ENTRY_MODE", "shadow", None),
+    "late_entry_max_pct": (float, "SUPER_BOLLINGER_LATE_ENTRY_MAX_PCT", "0.3",
+                           lambda v: None if 0 < v <= 2 else "must be > 0 and <= 2"),
     # ---- Unfilled orders: re-price and retry (30 Sep 2026, user request) ----
     # Dhan turns an option MARKET order into a limit near the last price, so on
     # a thin contract it can sit unfilled (SONACOMS 830 CE, 30 Sep). When the
