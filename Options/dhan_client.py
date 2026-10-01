@@ -3438,6 +3438,17 @@ class DhanWrapper:
             })
         return open_positions
 
+    def held_security_ids(self) -> set[str]:
+        """securityId of every position with a non-zero net quantity, in ANY
+        segment, straight from Dhan's positions list - no instrument-master
+        lookup that could drop a row (added 1 Oct 2026 for the supervisor's
+        orphan-stop sweep: a contract missing here reads as "not held", so this
+        must never under-report). Raises if Dhan does not answer."""
+        resp = self.client.Dhan.get_positions()
+        if resp.get("status") != "success":
+            raise RuntimeError(f"get_positions failed: {resp.get('remarks')}")
+        return {str(p.get("securityId", "")) for p in (resp.get("data") or []) if int(p.get("netQty") or 0) != 0}
+
     def get_broker_net_quantity(self, trading_symbol: str, segment: str = "NSE_FNO") -> int:
         """Net quantity currently held at the broker for this EXACT contract
         (matched on trading_symbol, not just underlying - a manual trade on

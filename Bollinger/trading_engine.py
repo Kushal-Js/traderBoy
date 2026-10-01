@@ -828,6 +828,47 @@ async def _close_as_manual_exit(symbol: str, position: Position, store=None) -> 
     await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
 
 
+async def _order_state(order_id: str) -> str:
+    """"filled" | "closed" (cancelled/rejected/expired) | "open" | "unknown" - one REST status read."""
+    loop = asyncio.get_running_loop()
+    try:
+        result = await asyncio.wait_for(loop.run_in_executor(None, dhan_wrapper.refresh_order_status, order_id),
+                                        timeout=_ORDER_STATUS_TIMEOUT_SECONDS)
+    except Exception:  # noqa: BLE001
+        logger.exception("could not read the status of order %s", order_id)
+        return "unknown"
+    if result.status == OrderStatus.TRADED:
+        return "filled"
+    if result.status in OrderStatus.TERMINAL_STATUSES:
+        return "closed"
+    return "open"
+
+
+async def _cancel_and_confirm(symbol: str, order_id: str) -> bool:
+    """Cancel a resting SELL order before the bot's own exit and make sure it can no longer sell (1 Oct 2026,
+    with the ratcheted broker stop the stop sits right under the exit price, so a stop left live after a failed
+    cancel would fire on a flat position). True = safe to continue: cancelled, or already FILLED (the broker-
+    quantity check right after this then records the exit at its fill price instead of selling again).
+    False = it may still be live (cancel failed twice / status unreadable) - the caller must not sell."""
+    loop = asyncio.get_running_loop()
+    for attempt in (1, 2):
+        try:
+            await asyncio.wait_for(loop.run_in_executor(None, dhan_wrapper.cancel_order, order_id),
+                                   timeout=_ORDER_STATUS_TIMEOUT_SECONDS)
+            return True
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not cancel SELL order %s (attempt %d) - checking its status", symbol,
+                             order_id, attempt)
+        state = await _order_state(order_id)
+        if state in ("filled", "closed"):
+            logger.warning("%s: SELL order %s is already %s - continuing with the broker-quantity check", symbol,
+                           order_id, state)
+            return True
+        if state == "unknown":
+            return False
+    return False
+
+
 async def _exit_position(symbol: str, position: Position, exit_price: float, reason: str, store=None) -> None:
     """Caller MUST have already claimed via position_store.try_start_exit.
     Direct, deliberately unmodified port of Swing/trading_engine.py's own
@@ -855,14 +896,14 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
     if stale_order_id:
         logger.warning("%s: found an already-outstanding SELL order %s for %s - cancelling it before "
                         "placing a fresh exit order.", symbol, stale_order_id, position.trading_symbol)
-        try:
-            await asyncio.wait_for(
-                loop.run_in_executor(None, dhan_wrapper.cancel_order, stale_order_id),
-                timeout=_ORDER_STATUS_TIMEOUT_SECONDS,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("%s: could not cancel stale SELL order %s - proceeding with a new order anyway",
-                              symbol, stale_order_id)
+        if not await _cancel_and_confirm(symbol, stale_order_id):
+            # 1 Oct 2026 (ratcheted broker stop): the stop may still be LIVE at the broker - a market SELL now
+            # could sell the lot twice (the stop would fire on a flat position = a short). The stop sits at the
+            # exit level anyway; back off and try the whole exit again on a later check.
+            logger.error("%s: SELL order %s for %s could not be confirmed cancelled - NOT sending a second sell; "
+                         "retrying the exit shortly", symbol, stale_order_id, position.trading_symbol)
+            await store.record_exit_failure(symbol)
+            return
 
         try:
             broker_qty = await loop.run_in_executor(None, net_qty_fn, position.trading_symbol, position.exchange_segment)
