@@ -1,0 +1,167 @@
+{
+ "as_of": "2026-09-30",
+ "picked_at": "2026-10-01 00:30:27",
+ "fit_sessions_used": 40,
+ "seeded_from": "local research cache on 1 Oct 01:xx IST (5-min bars to 30 Sep, daily bars to 28 Sep) - the Friday 00:00 job replaces it",
+ "live": {
+  "rule": "HYBRID (20 sessions, plain fit)",
+  "symbols": [
+   "LAURUSLABS",
+   "APLAPOLLO",
+   "KALYANKJIL",
+   "PNBHOUSING",
+   "BOSCHLTD",
+   "SAIL",
+   "MOTILALOFS",
+   "TITAN",
+   "MANAPPURAM",
+   "SONACOMS",
+   "GLENMARK",
+   "MCX",
+   "TORNTPHARM",
+   "PHOENIXLTD",
+   "PAGEIND"
+  ]
+ },
+ "shadow": {
+  "rule": "HYBRID_F40 (40 sessions, fit with the 1-hour filter)",
+  "symbols": [
+   "PAYTM",
+   "LAURUSLABS",
+   "MCX",
+   "SAIL",
+   "BOSCHLTD",
+   "APLAPOLLO",
+   "GLENMARK",
+   "PNBHOUSING",
+   "NAM-INDIA",
+   "MOTILALOFS",
+   "TORNTPHARM",
+   "JSWSTEEL",
+   "APOLLOHOSP",
+   "OBEROIRLTY",
+   "PHOENIXLTD"
+  ],
+  "picks": [
+   {
+    "symbol": "PAYTM",
+    "source": "strategy_fit",
+    "fit_pct": 11.8,
+    "fit_trades": 19,
+    "ath_score": 57.7
+   },
+   {
+    "symbol": "LAURUSLABS",
+    "source": "strategy_fit",
+    "fit_pct": 9.45,
+    "fit_trades": 15,
+    "ath_score": 72.6
+   },
+   {
+    "symbol": "MCX",
+    "source": "strategy_fit",
+    "fit_pct": 7.51,
+    "fit_trades": 17,
+    "ath_score": 73.2
+   },
+   {
+    "symbol": "SAIL",
+    "source": "strategy_fit",
+    "fit_pct": 6.73,
+    "fit_trades": 14,
+    "ath_score": 54.5
+   },
+   {
+    "symbol": "BOSCHLTD",
+    "source": "strategy_fit",
+    "fit_pct": 6.06,
+    "fit_trades": 11,
+    "ath_score": 73.0
+   },
+   {
+    "symbol": "APLAPOLLO",
+    "source": "strategy_fit",
+    "fit_pct": 4.97,
+    "fit_trades": 11,
+    "ath_score": 73.3
+   },
+   {
+    "symbol": "GLENMARK",
+    "source": "strategy_fit",
+    "fit_pct": 4.68,
+    "fit_trades": 19,
+    "ath_score": 66.7
+   },
+   {
+    "symbol": "PNBHOUSING",
+    "source": "strategy_fit",
+    "fit_pct": 3.97,
+    "fit_trades": 12,
+    "ath_score": 50.7
+   },
+   {
+    "symbol": "NAM-INDIA",
+    "source": "strategy_fit",
+    "fit_pct": 3.38,
+    "fit_trades": 6,
+    "ath_score": 51.4
+   },
+   {
+    "symbol": "MOTILALOFS",
+    "source": "strategy_fit",
+    "fit_pct": 2.67,
+    "fit_trades": 13,
+    "ath_score": 68.4
+   },
+   {
+    "symbol": "TORNTPHARM",
+    "source": "strategy_fit",
+    "fit_pct": 2.57,
+    "fit_trades": 6,
+    "ath_score": 64.7
+   },
+   {
+    "symbol": "JSWSTEEL",
+    "source": "strategy_fit",
+    "fit_pct": 1.87,
+    "fit_trades": 9,
+    "ath_score": 55.2
+   },
+   {
+    "symbol": "APOLLOHOSP",
+    "source": "strategy_fit",
+    "fit_pct": 1.8,
+    "fit_trades": 11,
+    "ath_score": 76.4
+   },
+   {
+    "symbol": "OBEROIRLTY",
+    "source": "strategy_fit",
+    "fit_pct": 1.61,
+    "fit_trades": 12,
+    "ath_score": 72.4
+   },
+   {
+    "symbol": "PHOENIXLTD",
+    "source": "strategy_fit",
+    "fit_pct": 1.54,
+    "fit_trades": 11,
+    "ath_score": 69.3
+   }
+  ]
+ },
+ "only_live": [
+  "KALYANKJIL",
+  "MANAPPURAM",
+  "PAGEIND",
+  "SONACOMS",
+  "TITAN"
+ ],
+ "only_shadow": [
+  "APOLLOHOSP",
+  "JSWSTEEL",
+  "NAM-INDIA",
+  "OBEROIRLTY",
+  "PAYTM"
+ ]
+}
