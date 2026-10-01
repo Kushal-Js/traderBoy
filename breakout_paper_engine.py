@@ -138,6 +138,8 @@ class _StrategyHooks:
     underlying_move_confirms_exit: Callable
     exit_reason_for: Callable
     capture_supertrend_entry_candle: Callable
+    is_past_square_off_time: Callable = None   # 1 Oct 2026: the package's own daily / Friday cutoff
+    square_off_reason: Callable = None
 
 
 def _build_hooks() -> dict[str, _StrategyHooks]:
@@ -157,11 +159,15 @@ def _build_hooks() -> dict[str, _StrategyHooks]:
             OptionsPosition, options_cfg, options_te._get_ltp, options_te._supertrend_signal_for,
             options_te._ema_cross_signal_for, options_te._underlying_move_confirms_exit,
             options_te._exit_reason_for, options_te._capture_supertrend_entry_candle,
+            options_te.is_past_square_off_time,
+            lambda: "EOD_SQUARE_OFF_3_15PM" if options_cfg.ENABLE_SQUARE_OFF else "EOD_SQUARE_OFF_FRIDAY",
         ),
         "Luxury": _StrategyHooks(
             LuxuryPosition, luxury_cfg, luxury_te._get_ltp, luxury_te._supertrend_signal_for,
             luxury_te._ema_cross_signal_for, luxury_te._underlying_move_confirms_exit,
             luxury_te._exit_reason_for, luxury_te._capture_supertrend_entry_candle,
+            luxury_te.is_past_square_off_time,
+            lambda: "EOD_SQUARE_OFF_3_15PM" if luxury_cfg.ENABLE_SQUARE_OFF else "EOD_SQUARE_OFF_FRIDAY",
         ),
     }
 
@@ -551,6 +557,13 @@ async def _check_one(strategy: str, symbol: str, position) -> None:
         await _exit_one(strategy, symbol, position, ltp, "EXPIRY_DAY_SQUARE_OFF")
         return
 
+    # Daily / Friday square-off (1 Oct 2026): the paper book closes at the same cutoff as the package's real
+    # positions (its own is_past_square_off_time - SQUARE_OFF_TIME every day when ENABLE_SQUARE_OFF, else
+    # FRIDAY_SQUARE_OFF_TIME on Fridays), same reason names, so paper and real results stay comparable.
+    if h.is_past_square_off_time is not None and h.is_past_square_off_time():
+        await _exit_one(strategy, symbol, position, ltp, h.square_off_reason())
+        return
+
     reason = h.exit_reason_for(position, ltp, supertrend_against_position, liquidity_guard_triggered, ema_cross_against_position)
     if reason:
         await _exit_one(strategy, symbol, position, ltp, reason)
@@ -564,7 +577,8 @@ async def paper_engine_monitor_loop() -> None:
 
     Market-hours gated since 27 Sep 2026 - _check_one had NO time/weekday
     check anywhere (unlike every other monitor loop in this codebase), and
-    this engine has no EOD/Friday square-off of its own either, so a real
+    this engine had no EOD/Friday square-off of its own either (added 1 Oct
+    2026 in _check_one), so a real
     open paper position would have been polled (LTP + Supertrend/EMA-
     cross/liquidity refresh, all real Dhan calls) every MONITOR_INTERVAL_
     SECONDS continuously - nights, weekends, all of it - for however many

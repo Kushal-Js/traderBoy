@@ -3649,16 +3649,44 @@ class DhanWrapper:
             if wait:
                 time.sleep(wait)
             resp = self.client.Dhan.quote_data({"NSE_FNO": [int(sid)]})
-            try:
-                row = ((resp.get("data") or {}).get("data") or {}).get("NSE_FNO", {}).get(sid) if resp.get("status") == "success" else None
-            except AttributeError:
-                row = None
-            if row:
-                buy = [d for d in (row.get("depth") or {}).get("buy") or [] if d.get("price")]
-                sell = [d for d in (row.get("depth") or {}).get("sell") or [] if d.get("price")]
-                return {"ltp": float(row.get("last_price") or 0) or None,
-                        "bid": float(buy[0]["price"]) if buy else None, "bid_qty": int(buy[0].get("quantity") or 0) if buy else 0,
-                        "ask": float(sell[0]["price"]) if sell else None, "ask_qty": int(sell[0].get("quantity") or 0) if sell else 0}
+            quote = self._quote_from_response(resp, sid)
+            if quote:
+                return quote
+            last_error = resp.get("remarks") if isinstance(resp, dict) else resp
+        raise ValueError(f"No quote returned for {trading_symbol} after {attempts} attempts: {last_error}")
+
+    @staticmethod
+    def _quote_from_response(resp, sid: str) -> Optional[dict]:
+        try:
+            row = ((resp.get("data") or {}).get("data") or {}).get("NSE_FNO", {}).get(sid) if resp.get("status") == "success" else None
+        except AttributeError:
+            row = None
+        if not row:
+            return None
+        buy = [d for d in (row.get("depth") or {}).get("buy") or [] if d.get("price")]
+        sell = [d for d in (row.get("depth") or {}).get("sell") or [] if d.get("price")]
+        return {"ltp": float(row.get("last_price") or 0) or None,
+                "bid": float(buy[0]["price"]) if buy else None, "bid_qty": int(buy[0].get("quantity") or 0) if buy else 0,
+                "ask": float(sell[0]["price"]) if sell else None, "ask_qty": int(sell[0].get("quantity") or 0) if sell else 0}
+
+    async def get_option_quote_async(self, trading_symbol: str, attempts: int = 3) -> dict:
+        """Async counterpart of get_option_quote (1 Oct 2026, price-path audit
+        fix 4): the wait for this call's turn in the shared quote budget is an
+        asyncio.sleep (the sync version slept inside a worker thread), and only
+        the HTTP call itself runs in the executor. Same attempts, same budget,
+        same result shape and error."""
+        loop = asyncio.get_running_loop()
+        meta = await loop.run_in_executor(None, lambda: self._instrument_meta(trading_symbol, expected_exchange="NSE"))
+        sid = str(meta["security_id"])
+        last_error = None
+        for _attempt in range(attempts):
+            wait = self._reserve_quote_slot()
+            if wait:
+                await asyncio.sleep(wait)
+            resp = await loop.run_in_executor(None, self.client.Dhan.quote_data, {"NSE_FNO": [int(sid)]})
+            quote = self._quote_from_response(resp, sid)
+            if quote:
+                return quote
             last_error = resp.get("remarks") if isinstance(resp, dict) else resp
         raise ValueError(f"No quote returned for {trading_symbol} after {attempts} attempts: {last_error}")
 
@@ -4248,6 +4276,41 @@ class DhanWrapper:
                 order_id, retries, snapshot.get("order_status"),
             )
 
+        return self._order_result_from_snapshot(order_id, snapshot, is_amo)
+
+    async def wait_for_order_result_async(
+        self, order_id: str, is_amo: bool = False, retries: int = 6, delay: float = 1.0
+    ) -> OrderResult:
+        """Async counterpart of wait_for_order_result (1 Oct 2026, price-path
+        audit fix 4): the SAME polling - WebSocket order-update cache first,
+        terminal status -> one authoritative REST read for the price/quantity,
+        else a REST read per poll, AMO breaks out at once - but only each REST
+        call runs in the executor and the wait between polls is asyncio.sleep.
+        The sync version held one of the 5 shared worker threads for the whole
+        wait (up to retries x delay); a bar boundary with two entries, a hedge
+        and a re-price could park every worker and stall every package's exit
+        checks behind them. Callers keep their asyncio.wait_for timeout."""
+        loop = asyncio.get_running_loop()
+        snapshot: dict = {}
+        for _attempt in range(retries):
+            cached = self._order_snapshot_from_cache(order_id)
+            if cached and cached["order_status"] in OrderStatus.TERMINAL_STATUSES:
+                self.stats["order_status_cache_hits"] += 1
+                rest_snapshot = await loop.run_in_executor(None, self._order_snapshot_from_rest, order_id)
+                snapshot = rest_snapshot if rest_snapshot["order_status"] in OrderStatus.TERMINAL_STATUSES else cached
+                break
+            self.stats["order_status_rest_calls"] += 1
+            snapshot = await loop.run_in_executor(None, self._order_snapshot_from_rest, order_id)
+            if snapshot["order_status"] in OrderStatus.TERMINAL_STATUSES:
+                break
+            if is_amo:
+                break
+            await asyncio.sleep(delay)
+        else:
+            logger.warning(
+                "Order %s still not in a terminal status after %s retries (last status=%s)",
+                order_id, retries, snapshot.get("order_status"),
+            )
         return self._order_result_from_snapshot(order_id, snapshot, is_amo)
 
     def refresh_order_status(self, order_id: str, is_amo: bool = False) -> OrderResult:

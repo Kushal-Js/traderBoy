@@ -106,7 +106,7 @@ async def quote(trading_symbol: str, max_age: float = 0.0) -> Optional[dict]:
     _quote_inflight[trading_symbol] = fut
     q = None
     try:
-        q = await asyncio.get_running_loop().run_in_executor(None, dhan_wrapper.get_option_quote, trading_symbol)
+        q = await dhan_wrapper.get_option_quote_async(trading_symbol)
     except Exception as exc:  # noqa: BLE001
         logger.warning("no quote for %s (%r)", trading_symbol, exc)
         q = None

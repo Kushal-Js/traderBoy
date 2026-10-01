@@ -49,9 +49,8 @@ async def last_price(trading_symbol: str, fallback: float) -> float:
     """Best-effort mark price for recording a position closed outside the
     bot (its real fill price isn't known here): the cached live LTP, else
     `fallback`."""
-    loop = asyncio.get_running_loop()
     try:
-        ltp = await loop.run_in_executor(None, dhan_wrapper.get_cached_option_ltp, trading_symbol)
+        ltp = dhan_wrapper.get_cached_option_ltp(trading_symbol)  # in-memory read (memoized lookup) - no worker thread (1 Oct 2026)
     except Exception:  # noqa: BLE001
         ltp = None
     return ltp or fallback

@@ -606,7 +606,7 @@ async def _enter_single_position(symbol: str, option_type: str = config.OPTION_T
 
     try:
         result = await asyncio.wait_for(
-            loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, is_amo),
+            dhan_wrapper.wait_for_order_result_async(order_id, is_amo),
             timeout=_ORDER_RESULT_TIMEOUT_SECONDS,
         )
     except Exception:  # noqa: BLE001
@@ -892,7 +892,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
 
         try:
             result = await asyncio.wait_for(
-                loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, is_amo),
+                dhan_wrapper.wait_for_order_result_async(order_id, is_amo),
                 timeout=_ORDER_RESULT_TIMEOUT_SECONDS,
             )
         except Exception:  # noqa: BLE001
@@ -1024,7 +1024,7 @@ async def _get_ltp(trading_symbol: str) -> Optional[float]:
     one hung REST call from stalling this whole package's asyncio.gather
     over every open position)."""
     loop = asyncio.get_running_loop()
-    ltp = await loop.run_in_executor(None, dhan_wrapper.get_cached_option_ltp, trading_symbol)
+    ltp = dhan_wrapper.get_cached_option_ltp(trading_symbol)  # in-memory read (memoized lookup) - no worker thread (1 Oct 2026)
     if ltp is not None:
         return ltp
     async with dhan_wrapper.ltp_rest_fallback_semaphore:

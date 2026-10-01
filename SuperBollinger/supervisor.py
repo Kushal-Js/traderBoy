@@ -335,7 +335,7 @@ async def _open_hedge(symbol, ce: Position, ce_ltp, loss, spot, atr_v, drop, mod
                                                    quantity=qty, status=OrderStatus.TRANSIT, is_amo=is_amo,
                                                    lot_size=leg["lot_size"]))
         try:
-            result = await asyncio.wait_for(loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, is_amo),
+            result = await asyncio.wait_for(dhan_wrapper.wait_for_order_result_async(order_id, is_amo),
                                             timeout=engine._ORDER_RESULT_TIMEOUT_SECONDS)
         except Exception:  # noqa: BLE001
             result = OrderResult(order_id=order_id, status=OrderStatus.TRANSIT, remark="order_confirmation_timeout",

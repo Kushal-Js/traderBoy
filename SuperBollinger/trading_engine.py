@@ -240,7 +240,7 @@ async def retry_unfilled_buy(symbol: str, leg: dict, quantity: int, reference_pr
             reason = why
             break
         try:
-            quote = await loop.run_in_executor(None, dhan_wrapper.get_option_quote, ts)
+            quote = await dhan_wrapper.get_option_quote_async(ts)
         except Exception:  # noqa: BLE001
             logger.exception("[%s] %s: no quote for %s - cannot re-price the %s", STRATEGY, symbol, ts, what)
             reason = "no_quote"
@@ -271,7 +271,7 @@ async def retry_unfilled_buy(symbol: str, leg: dict, quantity: int, reference_pr
             polls = max(1, int(round(settings.get("entry_retry_wait_seconds"))))
             try:
                 result = await asyncio.wait_for(
-                    loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, False, polls, 1.0),
+                    dhan_wrapper.wait_for_order_result_async(order_id, False, polls, 1.0),
                     timeout=polls + engine._ORDER_RESULT_TIMEOUT_SECONDS)
             except Exception:  # noqa: BLE001
                 result = OrderResult(order_id=order_id, status=OrderStatus.TRANSIT, remark="order_confirmation_timeout",
@@ -406,7 +406,7 @@ async def _enter_real_reserved(symbol: str, trigger_price: float, stop_price: fl
             quantity=quantity, status=OrderStatus.TRANSIT, is_amo=is_amo, lot_size=leg["lot_size"]))
         try:
             result = await asyncio.wait_for(
-                loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, is_amo),
+                dhan_wrapper.wait_for_order_result_async(order_id, is_amo),
                 timeout=engine._ORDER_RESULT_TIMEOUT_SECONDS)
         except Exception:  # noqa: BLE001
             logger.exception("[%s] %s: could not confirm entry order %s - treating as failed", STRATEGY, symbol, order_id)

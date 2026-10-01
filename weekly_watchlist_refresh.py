@@ -87,10 +87,12 @@ HOW TO RUN (normally fired by the systemd timer, not by hand):
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -187,7 +189,30 @@ def restart_bot(log=print) -> str:
             3: "restarted_health_not_back"}.get(proc.returncode, f"safe_restart_exit_{proc.returncode}")
 
 
+# 1 Oct 2026 (price-path audit, section 5): this job is a second Python process with its own instrument
+# master and the whole F&O universe's candles, started while the bot sits at its end-of-day size (one
+# full-day run peaked at 420 MB and pushed 92 MB into swap on a 961 MB droplet). When memory is short, the
+# bot is restarted FIRST (safe_restart.py - every market is closed at Friday 00:00 IST) so the scoring runs
+# next to a freshly started, smaller bot. The usual restart at the end still loads the new lists.
+MIN_AVAILABLE_MB_BEFORE_SCORING = int(os.getenv("WEEKLY_REFRESH_MIN_AVAILABLE_MB", "450"))
+
+
+def available_memory_mb() -> Optional[int]:
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 def main() -> None:
+    avail = available_memory_mb()
+    if avail is not None and avail < MIN_AVAILABLE_MB_BEFORE_SCORING:
+        print(f"Only {avail} MB available (< {MIN_AVAILABLE_MB_BEFORE_SCORING}) - restarting the bot first so the "
+              f"scoring does not push it into swap")
+        print(f"  pre-scoring restart: {restart_bot()} - now {available_memory_mb()} MB available")
     dhan_wrapper.authenticate()
     now = datetime.now(IST)
     ts = now.strftime("%Y%m%d_%H%M%S")

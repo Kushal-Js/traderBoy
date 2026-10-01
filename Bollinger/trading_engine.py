@@ -570,7 +570,7 @@ async def _enter_position_for_stock(symbol: str, entry_signal: str, trigger_pric
 
         try:
             result = await asyncio.wait_for(
-                loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, is_amo),
+                dhan_wrapper.wait_for_order_result_async(order_id, is_amo),
                 timeout=_ORDER_RESULT_TIMEOUT_SECONDS,
             )
         except Exception:  # noqa: BLE001
@@ -975,7 +975,7 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
 
         try:
             result = await asyncio.wait_for(
-                loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, is_amo),
+                dhan_wrapper.wait_for_order_result_async(order_id, is_amo),
                 timeout=_ORDER_RESULT_TIMEOUT_SECONDS,
             )
         except Exception:  # noqa: BLE001
@@ -1034,7 +1034,7 @@ async def _get_ltp(position: Position) -> float:
     resolves the right segment internally), same as Swing's identical
     NSE_FNO/MCX_COMM-agnostic usage."""
     loop = asyncio.get_running_loop()
-    ltp = await loop.run_in_executor(None, dhan_wrapper.get_cached_option_ltp, position.trading_symbol)
+    ltp = dhan_wrapper.get_cached_option_ltp(position.trading_symbol)  # in-memory read (memoized lookup) - no worker thread (1 Oct 2026)
     if ltp is not None:
         return ltp
     if is_paper_position(position):

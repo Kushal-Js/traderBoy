@@ -40,7 +40,7 @@ async def cancel_unfilled(order_id: str, result: OrderResult, is_amo: bool = Fal
     final = result
     try:
         final = await asyncio.wait_for(
-            loop.run_in_executor(None, dhan_wrapper.wait_for_order_result, order_id, is_amo, polls, 1.0), timeout=polls + 16)
+            dhan_wrapper.wait_for_order_result_async(order_id, is_amo, polls, 1.0), timeout=polls + 16)
     except Exception:  # noqa: BLE001
         logger.exception("could not re-check order %s after the cancel", order_id)
     if final.status in OrderStatus.OPEN_STATUSES:
