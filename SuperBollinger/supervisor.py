@@ -509,7 +509,7 @@ async def _tick() -> None:
             await _log("HEDGE_CLOSED_BY_BROKER_SL", sym, pe=pos.trading_symbol)
             continue
         try:
-            ltp = await engine._get_ltp(pos)
+            ltp = await pricing.position_price(pos)   # one read per cycle, shared with the brake's
         except Exception:  # noqa: BLE001
             await engine._handle_ltp_staleness(sym, pos, hedge_store)
             continue

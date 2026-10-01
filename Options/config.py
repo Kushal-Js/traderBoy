@@ -1024,6 +1024,21 @@ LTP_STALE_AFTER_SECONDS = float(os.getenv("LTP_STALE_AFTER_SECONDS", "5"))
 # precise on thin contracts. 0 = off (paper behaves exactly like real).
 PAPER_LTP_MAX_AGE_SECONDS = float(os.getenv("PAPER_LTP_MAX_AGE_SECONDS", "30"))
 
+# Quiet contracts while the WS feed is alive (1 Oct 2026, price-path audit).
+# A REST LTP read returns the LAST TRADED price - for a contract that simply
+# has not traded it is the same number the WS cache already holds, so asking
+# Dhan again every LTP_STALE_AFTER_SECONDS only spends the ~1 req/s quote
+# budget (30 Sep: ~2,900 failed REST LTP calls 13:30-15:30, mostly on REAL
+# Super Bollinger contracts). get_cached_option_ltp now keeps trusting a
+# cached tick up to LTP_FEED_HEALTHY_MAX_AGE_SECONDS old when (a) the feed is
+# alive - some tick, any instrument, within FEED_ALIVE_MAX_SILENCE_SECONDS -
+# and (b) this contract has had at least one real WS tick since the last
+# (re)connect, i.e. its own subscription is known to work. Older than that,
+# or feed silent, or never ticked: the old 5s rule and REST fallback apply.
+# LTP_FEED_HEALTHY_MAX_AGE_SECONDS=0 turns this off (old behaviour).
+LTP_FEED_HEALTHY_MAX_AGE_SECONDS = float(os.getenv("LTP_FEED_HEALTHY_MAX_AGE_SECONDS", "15"))
+FEED_ALIVE_MAX_SILENCE_SECONDS = float(os.getenv("FEED_ALIVE_MAX_SILENCE_SECONDS", "5"))
+
 # ---------------------------------------------------------------------------
 # Misc
 # ---------------------------------------------------------------------------

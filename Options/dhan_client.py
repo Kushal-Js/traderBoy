@@ -331,6 +331,12 @@ class DhanWrapper:
         # get_cached_option_ltp() to force a fresh REST check instead of
         # trusting an old tick indefinitely - see config.LTP_STALE_AFTER_SECONDS.
         self._ltp_cache_ts: dict[str, datetime] = {}
+        # security_ids that have had at least one genuine WS tick since the
+        # last (re)connect, and when the last tick of ANY instrument arrived
+        # (monotonic) - get_cached_option_ltp's "quiet contract, live feed"
+        # rule (1 Oct 2026, see config.LTP_FEED_HEALTHY_MAX_AGE_SECONDS).
+        self._ws_ticked: set[str] = set()
+        self._last_feed_tick_at = 0.0
         # security_id (str) -> trading_symbol, for every symbol we've ever
         # subscribed - lets the market-feed tick callback (which only knows
         # security_id) find the trading_symbol to fire on_price_tick with.
@@ -438,6 +444,12 @@ class DhanWrapper:
             "ltp_cache_misses": 0,
             "ltp_cache_stale": 0,
             "paper_ltp_recent_cache_hits": 0,
+            # 1 Oct 2026 price-path fixes - see _instrument_meta,
+            # get_cached_option_ltp and _reserve_quote_slot.
+            "instrument_meta_cache_hits": 0,
+            "ltp_quiet_contract_trusted": 0,
+            "quote_budget_waits": 0,
+            "quote_budget_busy": 0,
             "order_status_cache_hits": 0,
             "order_status_rest_calls": 0,
             "price_ticks_received": 0,
@@ -679,8 +691,42 @@ class DhanWrapper:
         knows which exchange it actually wants (all of them do - each one
         either only ever deals with NSE_FNO, or MCX_COMM specifically) now
         passes it, so the ambiguous cross-exchange row can never win a
-        tiebreak it has no business being in."""
+        tiebreak it has no business being in.
+
+        MEMOIZED (1 Oct 2026, price-path audit): the scan below takes ~69 ms
+        on the droplet (204,649 rows, object-dtype compares that hold the
+        GIL) and ran on EVERY WS-cache price read, REST re-prime, quote and
+        (un)subscribe - roughly half of the single vCPU during market hours.
+        The instrument master is fixed for the day, so each (symbol,
+        exchange) answer is cached for as long as the same DataFrame object
+        is in use (see _meta_cache_for). Misses are not cached - a lookup
+        that raised is retried in full next time."""
         df = self.instruments()
+        cache = self._meta_cache_for(df)["symbol"]
+        key = (trading_symbol, expected_exchange)
+        hit = cache.get(key)
+        if hit is not None:
+            stats = getattr(self, "stats", None)
+            if stats is not None:
+                stats["instrument_meta_cache_hits"] += 1
+            return dict(hit)
+        meta = self._instrument_meta_uncached(df, trading_symbol, expected_exchange)
+        cache[key] = meta
+        return dict(meta)
+
+    def _meta_cache_for(self, df) -> dict[str, dict]:
+        """Lookup caches ("symbol", "security_id", "equity_sid") for this
+        exact instrument DataFrame. Keyed on object
+        identity, holding a reference to the df itself, so a re-downloaded
+        master (a new DataFrame) starts with empty caches and an id() can
+        never be reused by a different frame."""
+        store = self.__dict__.get("_meta_cache_store")
+        if store is None or store[0] is not df:
+            store = (df, {"symbol": {}, "security_id": {}, "equity_sid": {}})
+            self._meta_cache_store = store
+        return store[1]
+
+    def _instrument_meta_uncached(self, df, trading_symbol: str, expected_exchange: Optional[str]) -> dict:
         row = df[
             ((df["SEM_TRADING_SYMBOL"] == trading_symbol) | (df["SEM_CUSTOM_SYMBOL"] == trading_symbol))
             & (df["SEM_EXM_EXCH_ID"].isin(["NSE", "MCX"]))
@@ -726,17 +772,24 @@ class DhanWrapper:
         reliably match against - they force-uppercase the symbol before
         matching, which silently breaks against SEM_TRADING_SYMBOL's mixed-
         case month format ("SBIN-Aug2026-1100-CE" - confirmed live: this
-        broke get_ltp_data with a bare "Check the Tradingsymbol" failure)."""
+        broke get_ltp_data with a bare "Check the Tradingsymbol" failure).
+        Memoized like _instrument_meta (this scan is ~99 ms on the droplet)."""
         df = self.instruments()
+        cache = self._meta_cache_for(df)["security_id"]
+        hit = cache.get(str(security_id))
+        if hit is not None:
+            return dict(hit)
         row = df[df["SEM_SMST_SECURITY_ID"].astype(str) == str(security_id)]
         if row.empty:
             raise ValueError(f"No instrument found for security_id {security_id}")
         r = row.iloc[0]
-        return {
+        meta = {
             "trading_symbol": str(r["SEM_CUSTOM_SYMBOL"]),
             "lot_size": int(float(r["SEM_LOT_UNITS"])),
             "underlying_symbol": self._underlying_from_trading_symbol(str(r["SEM_TRADING_SYMBOL"])),
         }
+        cache[str(security_id)] = meta
+        return dict(meta)
 
     def _equity_security_id(self, underlying_symbol: str) -> str:
         """Resolves an underlying's own NSE cash-segment security_id (for
@@ -750,8 +803,14 @@ class DhanWrapper:
         which has its own (near-empty) intraday candle history, so a
         Supertrend/regime fetch for MOTHERSON would silently get zero bars
         instead of a clean error. "EQ" is NSE's standard cash-equity series
-        code; a bond/debenture series (D1 etc.) is never a valid answer here."""
+        code; a bond/debenture series (D1 etc.) is never a valid answer here.
+        Memoized per instrument master (1 Oct 2026) - every signal refresh of
+        every watchlist stock resolves its underlying through here."""
         df = self.instruments()
+        cache = self._meta_cache_for(df)["equity_sid"]
+        hit = cache.get(underlying_symbol)
+        if hit is not None:
+            return hit
         row = df[
             (df["SEM_EXM_EXCH_ID"] == "NSE")
             & (df["SEM_INSTRUMENT_NAME"] == "EQUITY")
@@ -760,7 +819,9 @@ class DhanWrapper:
         ]
         if row.empty:
             raise ValueError(f"No NSE equity instrument found for {underlying_symbol}")
-        return str(int(row.iloc[0]["SEM_SMST_SECURITY_ID"]))
+        sid = str(int(row.iloc[0]["SEM_SMST_SECURITY_ID"]))
+        cache[underlying_symbol] = sid
+        return sid
 
     def _equity_instrument_meta(self, underlying_symbol: str) -> dict:
         """Equity-segment counterpart to _instrument_meta (added 12 Sep 2026,
@@ -875,10 +936,14 @@ class DhanWrapper:
         # separately from "process started" is what makes a mid-session
         # reconnect actually visible instead of silently self-healed.
         self.stats["feed_connects"] += 1
+        # Every contract must prove its subscription works again (a fresh
+        # tick) before get_cached_option_ltp trusts a quiet cache for it.
+        self.__dict__.setdefault("_ws_ticked", set()).clear()
         logger.info("Dhan market-data WebSocket connected (connect #%d this run).",
                     self.stats["feed_connects"])
 
     def _on_market_close(self, _feed) -> None:
+        self.__dict__.setdefault("_ws_ticked", set()).clear()
         self.stats["feed_disconnects"] += 1
         logger.warning("Dhan market-data WebSocket disconnected (disconnect #%d this run).",
                         self.stats["feed_disconnects"])
@@ -1071,6 +1136,8 @@ class DhanWrapper:
         now = datetime.now(IST)
         self._ltp_cache[security_id] = ltp_val
         self._ltp_cache_ts[security_id] = now
+        self._last_feed_tick_at = time.monotonic()
+        self.__dict__.setdefault("_ws_ticked", set()).add(security_id)
         self.stats["price_ticks_received"] += 1
 
         if self._on_price_tick_subscribers:
@@ -1248,6 +1315,7 @@ class DhanWrapper:
         # a memory-constrained droplet.
         self._ltp_cache.pop(security_id, None)
         self._ltp_cache_ts.pop(security_id, None)
+        self.__dict__.setdefault("_ws_ticked", set()).discard(security_id)
         segment = MarketFeed.MCX if is_mcx else MarketFeed.NSE_FNO
         instrument = (segment, security_id, MarketFeed.Ticker)
         with self._market_feed_lock:
@@ -1374,7 +1442,12 @@ class DhanWrapper:
         cache via note_rest_ltp() - see its docstring for why that matters
         for rate-limit safety. A tick that's merely a little old (comfortably
         within LTP_STALE_AFTER_SECONDS) is still trusted as-is; this only
-        catches genuinely stale/silent instruments."""
+        catches genuinely stale/silent instruments.
+
+        1 Oct 2026: a tick older than LTP_STALE_AFTER_SECONDS is still
+        trusted (up to LTP_FEED_HEALTHY_MAX_AGE_SECONDS) while the feed is
+        alive and this contract's own subscription has ticked - see
+        _quiet_contract_trusted. REST would only return the same last trade."""
         if not config.ENABLE_WS_FEED:
             return None
         meta = self._instrument_meta(trading_symbol, expected_exchange=self._expected_exchange_for(trading_symbol))
@@ -1384,6 +1457,9 @@ class DhanWrapper:
             last_update = self._ltp_cache_ts.get(security_id)
             age = (datetime.now(IST) - last_update).total_seconds() if last_update else None
             if age is not None and age > config.LTP_STALE_AFTER_SECONDS:
+                if self._quiet_contract_trusted(security_id, age):
+                    self.stats["ltp_quiet_contract_trusted"] += 1
+                    return ltp
                 self.stats["ltp_cache_stale"] += 1
                 return None  # forces the caller's REST fallback
         if ltp is not None:
@@ -1391,6 +1467,24 @@ class DhanWrapper:
         else:
             self.stats["ltp_cache_misses"] += 1
         return ltp
+
+    def feed_alive(self) -> bool:
+        """Some tick (any instrument) arrived within
+        config.FEED_ALIVE_MAX_SILENCE_SECONDS."""
+        last = getattr(self, "_last_feed_tick_at", 0.0)
+        return bool(last) and time.monotonic() - last <= config.FEED_ALIVE_MAX_SILENCE_SECONDS
+
+    def _quiet_contract_trusted(self, security_id: str, age_seconds: float) -> bool:
+        """A cached tick older than LTP_STALE_AFTER_SECONDS is still the
+        right price when the contract simply has not traded: the feed is
+        alive and this contract's own subscription has delivered a tick
+        since the last (re)connect. Capped at
+        LTP_FEED_HEALTHY_MAX_AGE_SECONDS, after which one REST read checks
+        it (and note_rest_ltp re-primes the clock)."""
+        limit = config.LTP_FEED_HEALTHY_MAX_AGE_SECONDS
+        return (limit > 0 and age_seconds <= limit
+                and security_id in getattr(self, "_ws_ticked", ())
+                and self.feed_alive())
 
     def get_recent_cached_option_ltp(self, trading_symbol: str, max_age_seconds: float) -> Optional[float]:
         """PAPER positions only - see config.PAPER_LTP_MAX_AGE_SECONDS. Same
@@ -1969,6 +2063,9 @@ class DhanWrapper:
         return _retry(self._get_day_change_pct_once, symbol)
 
     def _get_day_change_pct_once(self, symbol: str) -> float:
+        wait = self._reserve_quote_slot(delay=self._TRADEHULL_OHLC_SLEEP_SECONDS)
+        if wait:
+            time.sleep(wait)
         data = self.client.get_ohlc_data(names=[symbol])
         values = data.get(symbol)
         if not values:
@@ -1978,6 +2075,9 @@ class DhanWrapper:
             raise ValueError(f"No previous close returned for {symbol}")
         ltp = float(values.get("last_price") or 0)
         if not ltp:
+            wait = self._reserve_quote_slot(delay=self._TRADEHULL_LTP_SLEEP_SECONDS)
+            if wait:
+                time.sleep(wait)
             ltp_data = self.client.get_ltp_data(names=[symbol])
             ltp = float(ltp_data.get(symbol) or 0)
         return (ltp - prev_close) / prev_close * 100
@@ -1995,6 +2095,9 @@ class DhanWrapper:
         return _retry(self._get_today_open_and_prev_close_once, symbol)
 
     def _get_today_open_and_prev_close_once(self, symbol: str) -> tuple[float, float]:
+        wait = self._reserve_quote_slot(delay=self._TRADEHULL_OHLC_SLEEP_SECONDS)
+        if wait:
+            time.sleep(wait)
         data = self.client.get_ohlc_data(names=[symbol])
         values = data.get(symbol)
         if not values:
@@ -2020,14 +2123,66 @@ class DhanWrapper:
         get_open_fno_positions, which already had one for the identical
         reason ("Dhan's market-data calls can transiently rate-limit-
         fail" - see _retry's own docstring)."""
-        return _retry(self._get_option_ltp_once, trading_symbol)
+        return _retry(self._paced_ltp_once, trading_symbol)
+
+    def _paced_ltp_once(self, trading_symbol: str) -> float:
+        """One REST LTP read, waiting (in this thread) for its turn in the
+        shared quote budget - see _reserve_quote_slot."""
+        wait = self._reserve_quote_slot(delay=self._ltp_call_delay(trading_symbol))
+        if wait:
+            time.sleep(wait)
+        return self._get_option_ltp_once(trading_symbol)
+
+    # Tradehull's get_ltp_data sleeps this long before its request.
+    _TRADEHULL_LTP_SLEEP_SECONDS = 0.4
+    _TRADEHULL_OHLC_SLEEP_SECONDS = 2.0
+
+    def _ltp_target(self, trading_symbol: str) -> Optional[tuple[str, str]]:
+        """(exchange_segment, security_id) for an option/futures contract,
+        or None when it is not one (an equity/index name) or the lookup
+        fails - the caller then uses Tradehull's own name-based path."""
+        if not any(tok in trading_symbol for tok in (" CALL", " PUT", " FUT")):
+            return None
+        try:
+            exchange = self._expected_exchange_for(trading_symbol)
+            meta = self._instrument_meta(trading_symbol, expected_exchange=exchange)
+        except Exception:  # noqa: BLE001
+            return None
+        return ("MCX_COMM" if exchange == "MCX" else "NSE_FNO"), str(meta["security_id"])
+
+    def _ltp_call_delay(self, trading_symbol: str) -> float:
+        """String check only (safe on the event loop): contracts go direct,
+        names go through Tradehull and its 0.4 s sleep."""
+        is_contract = any(tok in trading_symbol for tok in (" CALL", " PUT", " FUT"))
+        return 0.0 if is_contract else self._TRADEHULL_LTP_SLEEP_SECONDS
 
     def _get_option_ltp_once(self, trading_symbol: str) -> float:
-        data = self.client.get_ltp_data(names=[trading_symbol])
-        ltp = data.get(trading_symbol)
-        if ltp is None:
-            raise ValueError(f"No LTP returned for {trading_symbol}")
-        return float(ltp)
+        """REST LTP for one contract, straight to Dhan's /marketfeed/ltp by
+        security id (1 Oct 2026). Tradehull's get_ltp_data copied the whole
+        132 MB instrument master (~38 ms), scanned it, then slept 0.4 s -
+        on every call, inside a worker thread. Equity/index names (and any
+        contract the instrument lookup cannot resolve) still go through
+        Tradehull. No pacing here - callers reserve a quote slot first."""
+        target = self._ltp_target(trading_symbol)
+        if target is None:
+            data = self.client.get_ltp_data(names=[trading_symbol])
+            ltp = data.get(trading_symbol)
+            if ltp is None:
+                raise ValueError(f"No LTP returned for {trading_symbol}")
+            return float(ltp)
+        segment, sid = target
+        resp = self.client.Dhan.ticker_data({segment: [int(sid)]})
+        row = None
+        if isinstance(resp, dict) and resp.get("status") == "success":
+            row = (((resp.get("data") or {}).get("data") or {}).get(segment) or {}).get(sid)
+        try:
+            ltp = float((row or {}).get("last_price") or 0)
+        except (TypeError, ValueError):
+            ltp = 0.0
+        if ltp <= 0:
+            remarks = resp.get("remarks") if isinstance(resp, dict) else resp
+            raise ValueError(f"No LTP returned for {trading_symbol} ({segment} {sid}): {remarks}")
+        return ltp
 
     async def get_option_ltp_async(
         self, trading_symbol: str, *, retries: int = 2, delay: float = 1.5,
@@ -2059,6 +2214,16 @@ class DhanWrapper:
         last_exc: Optional[Exception] = None
         for attempt in range(retries + 1):
             try:
+                # 1 Oct 2026: wait for this call's turn in the shared ~1/s
+                # quote budget HERE (asyncio.sleep, no worker held), then run
+                # only the HTTP call itself in the executor.
+                wait = self._reserve_quote_slot(max_wait=self.QUOTE_MAX_WAIT_SECONDS,
+                                                delay=self._ltp_call_delay(trading_symbol))
+                if wait is None:
+                    raise ValueError(f"No LTP returned for {trading_symbol}: quote budget busy "
+                                     f"(queue longer than {self.QUOTE_MAX_WAIT_SECONDS}s)")
+                if wait > 0:
+                    await asyncio.sleep(wait)
                 return await loop.run_in_executor(None, self._get_option_ltp_once, trading_symbol)
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
@@ -3420,9 +3585,41 @@ class DhanWrapper:
                         "created": o.get("createTime")})
         return out
 
-    _quote_lock = threading.Lock()
-    _quote_last_call = [0.0]
-    QUOTE_MIN_GAP_SECONDS = 1.1   # Dhan's /marketfeed/quote allows ~1 request per second (a 2nd call 0s later fails)
+    # ONE budget for Dhan's market-quote endpoints - /marketfeed/ltp, /ohlc
+    # and /quote (1 Oct 2026). Dhan allows ~1 request/second across them
+    # (a 2nd /quote call 0s later fails); until today the quote calls were
+    # spaced only against each other and REST LTP calls not at all, so they
+    # collided - ~5,150 failed LTP calls on 30 Sep. Every caller reserves a
+    # slot first (_reserve_quote_slot): the lock covers only the arithmetic,
+    # the wait happens outside it (asyncio.sleep for async callers), and the
+    # HTTP call is never made while holding the lock. Class-level: one
+    # budget per process, which is one Dhan account.
+    _quote_budget_lock = threading.Lock()
+    _quote_budget = {"next_at": 0.0}
+    QUOTE_MIN_GAP_SECONDS = 1.1
+    QUOTE_MAX_WAIT_SECONDS = 4.0
+
+    def _reserve_quote_slot(self, max_wait: Optional[float] = None, delay: float = 0.0) -> Optional[float]:
+        """Claims the next free slot in the shared quote budget and returns
+        how long to wait before making the call, or None (nothing claimed)
+        when that wait would exceed max_wait. `delay`: the call reaches Dhan
+        this long after it is made (Tradehull sleeps before its own
+        request) - the slot is placed where the request actually lands."""
+        with self._quote_budget_lock:
+            now = time.monotonic()
+            lands = max(now + delay, self._quote_budget["next_at"])
+            wait = lands - delay - now
+            if max_wait is not None and wait > max_wait:
+                stats = getattr(self, "stats", None)
+                if stats is not None:
+                    stats["quote_budget_busy"] += 1
+                return None
+            self._quote_budget["next_at"] = lands + self.QUOTE_MIN_GAP_SECONDS
+        if wait > 0.01:
+            stats = getattr(self, "stats", None)
+            if stats is not None:
+                stats["quote_budget_waits"] += 1
+        return wait
 
     def get_option_quote(self, trading_symbol: str, attempts: int = 3) -> dict:
         """Live bid/ask for an NSE F&O contract from Dhan's quote API (added
@@ -3431,19 +3628,16 @@ class DhanWrapper:
         book is empty. Response shape verified live 30 Sep 2026:
         resp["data"]["data"]["NSE_FNO"][security_id] with "last_price" and
         "depth": {"buy": [{price, quantity, orders}, ...], "sell": [...]}.
-        Calls are spaced QUOTE_MIN_GAP_SECONDS apart process-wide."""
+        Each attempt takes a slot in the shared quote budget (shared with
+        REST LTP and OHLC - see _reserve_quote_slot)."""
         meta = self._instrument_meta(trading_symbol, expected_exchange="NSE")
         sid = str(meta["security_id"])
         last_error = None
         for attempt in range(attempts):
-            with self._quote_lock:
-                wait = self.QUOTE_MIN_GAP_SECONDS - (time.monotonic() - self._quote_last_call[0])
-                if wait > 0:
-                    time.sleep(wait)
-                try:
-                    resp = self.client.Dhan.quote_data({"NSE_FNO": [int(sid)]})
-                finally:
-                    self._quote_last_call[0] = time.monotonic()
+            wait = self._reserve_quote_slot()
+            if wait:
+                time.sleep(wait)
+            resp = self.client.Dhan.quote_data({"NSE_FNO": [int(sid)]})
             try:
                 row = ((resp.get("data") or {}).get("data") or {}).get("NSE_FNO", {}).get(sid) if resp.get("status") == "success" else None
             except AttributeError:

@@ -21,6 +21,15 @@ best bid and ask even when nothing has traded.
                      the last traded price and the live bid/ask mid.
 Quote calls are rate limited by Dhan (~1/s, enforced in dhan_client), so
 mark_for_loss re-reads a contract at most every MARK_MAX_AGE_SECONDS.
+
+  position_price()   ONE price read per position per cycle (1 Oct 2026). The
+                     monitor loop, the supervisor and the disaster brake each
+                     read every real position every 2-5 s; on 30 Sep that was
+                     2-3 REST calls per thin contract per 2 s, and the real
+                     book alone ran out Dhan's ~1/s budget (~2,900 failed
+                     LTP calls 13:30-15:30). Callers within
+                     SHARED_PRICE_MAX_AGE_SECONDS share one read, and
+                     concurrent callers wait for the same in-flight read.
 """
 from __future__ import annotations
 
@@ -37,20 +46,73 @@ logger = logging.getLogger("super_bollinger_pricing")
 
 MAX_SPREAD_PCT = 15.0          # a wider book than this says nothing useful about fair value
 MARK_MAX_AGE_SECONDS = 10.0
+SHARED_PRICE_MAX_AGE_SECONDS = 1.5
 _quotes: dict[str, tuple[float, Optional[dict]]] = {}
+# (trading_symbol, is_paper) -> (monotonic time, price or None, error or None)
+_shared: dict[tuple[str, bool], tuple[float, Optional[float], Optional[Exception]]] = {}
+_inflight: dict[tuple[str, bool], asyncio.Future] = {}
+_quote_inflight: dict[str, asyncio.Future] = {}
+
+
+class NoSharedPrice(ValueError):
+    """The shared read for this position failed (or was cancelled). A
+    ValueError like every other "no price" failure in the price path."""
+
+
+async def position_price(position: Position) -> float:
+    """engine._get_ltp(position), read at most once per
+    SHARED_PRICE_MAX_AGE_SECONDS per contract (paper and real kept apart -
+    paper accepts an older WS tick). Concurrent callers share the read in
+    flight. Raises NoSharedPrice when that read failed."""
+    key = (position.trading_symbol, engine.is_paper_position(position))
+    hit = _shared.get(key)
+    if hit is not None and time.monotonic() - hit[0] <= SHARED_PRICE_MAX_AGE_SECONDS:
+        if hit[2] is not None:
+            raise NoSharedPrice(f"no price for {key[0]}: {hit[2]!r}")
+        return hit[1]
+    pending = _inflight.get(key)
+    if pending is not None:
+        return await asyncio.shield(pending)
+    fut = asyncio.get_running_loop().create_future()
+    _inflight[key] = fut
+    try:
+        price = await engine._get_ltp(position)
+    except BaseException as exc:  # noqa: BLE001 - waiters must never hang, even if this caller is cancelled
+        error = NoSharedPrice(f"no price for {key[0]}: {exc!r}")
+        if isinstance(exc, Exception):
+            _shared[key] = (time.monotonic(), None, exc)
+        fut.set_exception(error)
+        fut.exception()   # retrieved - no "never retrieved" warning when nobody else was waiting
+        raise
+    else:
+        _shared[key] = (time.monotonic(), price, None)
+        fut.set_result(price)
+        return price
+    finally:
+        _inflight.pop(key, None)
 
 
 async def quote(trading_symbol: str, max_age: float = 0.0) -> Optional[dict]:
-    """{"ltp","bid","ask",...} or None. max_age > 0 reuses a recent read."""
+    """{"ltp","bid","ask",...} or None. max_age > 0 reuses a recent read.
+    Concurrent callers share the read in flight (one quote call, 1 Oct 2026)."""
     now = time.monotonic()
     cached = _quotes.get(trading_symbol)
     if cached and max_age > 0 and now - cached[0] <= max_age:
         return cached[1]
+    pending = _quote_inflight.get(trading_symbol)
+    if pending is not None:
+        return await asyncio.shield(pending)
+    fut = asyncio.get_running_loop().create_future()
+    _quote_inflight[trading_symbol] = fut
+    q = None
     try:
         q = await asyncio.get_running_loop().run_in_executor(None, dhan_wrapper.get_option_quote, trading_symbol)
     except Exception as exc:  # noqa: BLE001
         logger.warning("no quote for %s (%r)", trading_symbol, exc)
         q = None
+    finally:
+        _quote_inflight.pop(trading_symbol, None)
+        fut.set_result(q)          # also when this caller was cancelled - waiters get "no quote", never hang
     _quotes[trading_symbol] = (now, q)
     return q
 
@@ -85,10 +147,10 @@ async def price_for_entry(trading_symbol: str) -> tuple[Optional[float], str]:
 
 
 async def live_price(position: Position) -> float:
-    """engine._get_ltp with an order-book fallback for REAL positions. Raises
-    like _get_ltp when there is no price at all."""
+    """position_price (engine._get_ltp, shared per cycle) with an order-book
+    fallback for REAL positions. Raises when there is no price at all."""
     try:
-        return await engine._get_ltp(position)
+        return await position_price(position)
     except Exception:
         if engine.is_paper_position(position):
             raise
