@@ -1,11 +1,11 @@
 """
-Super Bollinger SUPERVISOR (30 Sep 2026, user request: "build this
+Unified Momentum SUPERVISOR (30 Sep 2026, user request: "build this
 supervisor ... deploy ... work from today ... hedging with the rules we have
 been discussing ... log everything").
 
-Watches every open Super Bollinger CE trade and:
+Watches every open Unified Momentum CE trade and:
   1. HEDGE (settings.hedge_mode: off | shadow | paper | real) - the best
-     rule from the 60-combination backtest grid (research_super_bollinger_
+     rule from the 60-combination backtest grid (research_unified_momentum_
      hedge_indicators.py, "T2000 ATR_DROP TRAIL": +Rs 10,831 on 35 hedges,
      positive in both halves, not yet validated out-of-sample):
        when the CE's open loss >= hedge_trigger_rs AND the stock is
@@ -23,7 +23,7 @@ Watches every open Super Bollinger CE trade and:
   3. SHADOW RULES - logged only, never acted on: stop-and-re-enter at
      shadow_stop_reenter_rs (would exit the CE, would re-buy at its entry
      price).
-  4. LOGS everything to history/<date>_super_bollinger_supervisor.log
+  4. LOGS everything to history/<date>_unified_momentum_supervisor.log
      (JSONL): every trigger seen, confirmation inputs (loss, ATR, stock
      drop), hedge decisions, orders/fills and slippage vs the decision
      price, exits and PnL, brake checks, shadow-rule events.
@@ -31,7 +31,7 @@ Watches every open Super Bollinger CE trade and:
 Real hedge orders reuse the incident-hardened Bollinger order/exit machinery
 (Bollinger.trading_engine: _exit_position, broker SL check, LTP staleness,
 pending-order sync) against the hedge's OWN position store (state.
-hedge_store, trade-history tag "SuperBollingerHedge").
+hedge_store, trade-history tag "UnifiedMomentumHedge").
 """
 from __future__ import annotations
 
@@ -54,13 +54,13 @@ from Swing import candle_feed
 from Swing.position_store import broker_stop_trigger_and_limit
 from SuperTrader.strategy import atr as atr_series
 
-from . import best_price_memory, live_state, pricing, scale, settings, stop_ratchet
+from . import best_price_memory, live_state, pricing, settings, stop_ratchet
 from .state import (EVENTS_LOG, HEDGE_STRATEGY, STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store,
                     paper_book, position_store)
 from .trading_engine import (NO_TRAILING, PROFILE, retry_unfilled_buy, settle_unfilled_order,
                              square_off_all as square_off_ce)
 
-logger = logging.getLogger("super_bollinger_supervisor")
+logger = logging.getLogger("unified_momentum_supervisor")
 LOOP_SECONDS = 2
 MARK_CHECK_FROM = 0.6      # from 60% of the hedge trigger on, also judge the CE's loss by the bid/ask mid
 _track: dict = {}          # (symbol, CE opened_at) -> per-CE-trade supervisor state
@@ -98,7 +98,7 @@ def _atr(symbol: str) -> Optional[float]:
 # Data for HELD symbols (30 Sep 2026 incident: GLENMARK's hedge fired 7 minutes
 # late). The entry scan is what normally subscribes a stock's candle feed and
 # loads its 5-min series - and it skips stocks that are already held (and stops
-# at the entry cutoff). After a restart a held stock that only Super Bollinger
+# at the entry cutoff). After a restart a held stock that only Unified Momentum
 # trades therefore had no spot and no ATR, and the hedge waited forever. The
 # supervisor now keeps both alive itself for everything it holds.
 # --------------------------------------------------------------------------- #
@@ -168,7 +168,7 @@ async def _check_held_data(symbol: str, real: bool) -> None:
 def _logged_entry_spot(symbol: str) -> Optional[float]:
     """Entry spot for a CE re-adopted after a restart (the in-memory _track
     is gone): the trigger price of today's last POSITION_OPENED event for
-    the symbol - Super Bollinger enters when the stock touches its trigger.
+    the symbol - Unified Momentum enters when the stock touches its trigger.
     Without this the ATR-drop check would measure from the spot at restart."""
     path = Path("history") / f"{engine._now_ist().date().isoformat()}_{EVENTS_LOG}.log"
     found = None
@@ -205,18 +205,8 @@ def _state(symbol: str, pos: Position) -> dict:
 # --------------------------------------------------------------------------- #
 # CE watch: shadow rules + hedge trigger
 # --------------------------------------------------------------------------- #
-async def _scale_safe(coro) -> None:
-    """The scale-in variant is paper-only research: a failure there must
-    never stop the supervisor's real work."""
-    try:
-        await coro
-    except Exception:  # noqa: BLE001
-        logger.exception("[supervisor] scale-in variant hook failed")
-
-
 async def check_ce(symbol: str, pos: Position, ltp: float, ce_is_real: bool) -> None:
     st = _state(symbol, pos)
-    await _scale_safe(scale.on_ce_price(symbol, pos, ltp, ce_is_real, st, _spot(symbol)))
     loss = (pos.entry_price - ltp) * pos.pnl_multiplier
     now = _now()
 
@@ -327,7 +317,7 @@ async def _open_hedge(symbol, ce: Position, ce_ltp, loss, spot, atr_v, drop, mod
         await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, leg["trading_symbol"])
         intent = live_state.intent_begin("hedge", symbol, leg, qty, ce=ce.trading_symbol)   # on file BEFORE the order
         resp = await loop.run_in_executor(None, dhan_wrapper.place_market_order, leg["trading_symbol"], qty, "BUY",
-                                          engine._gen_tag("SBH", symbol), leg["product_type"])
+                                          engine._gen_tag("UMH", symbol), leg["product_type"])
         order_id, is_amo = resp["order_id"], resp["is_amo"]
         live_state.intent_order(intent, order_id)
         await hedge_store.record_order(OrderRecord(order_id=order_id, underlying_symbol=symbol,
@@ -364,7 +354,7 @@ async def _open_hedge(symbol, ce: Position, ce_ltp, loss, spot, atr_v, drop, mod
 
             leg_q = {**leg, "quantity": qty}
             retried, retry_order_id, retry_intent, why = await retry_unfilled_buy(
-                symbol, leg_q, qty, price, still_valid, "hedge", hedge_store, "SBH")
+                symbol, leg_q, qty, price, still_valid, "hedge", hedge_store, "UMH")
             if retried is not None:
                 result, order_id, intent = retried, retry_order_id, retry_intent
         if result.status != OrderStatus.TRADED:
@@ -432,7 +422,6 @@ async def _apply_hedge_price(symbol: str, ltp: float, real: bool, square_off: bo
             await engine._exit_position(symbol, pos, ltp, reason, hedge_store)
         elif not reason:
             await stop_ratchet.maybe_ratchet("hedge", symbol, pos, ltp)    # broker stop follows the 30% trail
-            await _scale_safe(scale.on_hedge_price(symbol, pos, ltp, True))
     else:
         pos = await hedge_paper_book.update(symbol, ltp)
         if pos is None:
@@ -442,13 +431,10 @@ async def _apply_hedge_price(symbol: str, ltp: float, real: bool, square_off: bo
             record = await hedge_paper_book.close(symbol, ltp, reason)
             if record:
                 await _log("HEDGE_CLOSED", symbol, mode="paper", **record)
-        else:
-            await _scale_safe(scale.on_hedge_price(symbol, pos, ltp, False))
 
 
 async def on_price_tick(trading_symbol: str, ltp: float) -> None:
     """WS fast path: hedge exits and CE hedge triggers."""
-    await _scale_safe(scale.on_option_tick(trading_symbol, ltp))
     try:
         for sym, pos in list(hedge_store.live_positions.items()):
             if pos.trading_symbol == trading_symbol:
@@ -483,8 +469,9 @@ async def _ltp(pos: Position) -> Optional[float]:
 
 
 async def _day_real_pnl() -> float:
+    from .state import put_store
     total = 0.0
-    for store in (position_store, hedge_store):
+    for store in (position_store, hedge_store, put_store):
         for p in store.closed_positions_today:
             if p.exit_price is not None:
                 total += (p.exit_price - p.entry_price) * p.pnl_multiplier
@@ -535,8 +522,9 @@ async def _tick() -> None:
                 await check_ce(sym, pos, ltp, False)
 
     brake = settings.get("disaster_brake_rs")
-    if brake > 0 and not halted_today() and (position_store.live_positions or hedge_store.live_positions
-                                               or position_store.closed_positions_today or hedge_store.closed_positions_today):
+    from .state import put_store
+    if brake > 0 and not halted_today() and any(st.live_positions or st.closed_positions_today
+                                                for st in (position_store, hedge_store, put_store)):
         pnl = await _day_real_pnl()
         if pnl <= -brake:
             halted["day"], halted["reason"] = now.date(), f"day PnL {pnl:,.0f} <= -{brake:,.0f}"
@@ -547,11 +535,14 @@ async def _tick() -> None:
                 ltp = await _ltp(pos) or pos.entry_price
                 if await hedge_store.try_start_exit(sym):
                     await engine._exit_position(sym, pos, ltp, "DISASTER_BRAKE", hedge_store)
+            from . import engine_b
+            await engine_b.square_off_all("DISASTER_BRAKE")
 
-    await _scale_safe(scale.tick())
     try:
+        from .state import PUT_STRATEGY
         best_price_memory.record(STRATEGY, list(position_store.live_positions.values()))
         best_price_memory.record(HEDGE_STRATEGY, list(hedge_store.live_positions.values()))
+        best_price_memory.record(PUT_STRATEGY, list(put_store.live_positions.values()))
     except Exception:  # noqa: BLE001
         logger.exception("[supervisor] best-price memory write failed")
 
@@ -566,8 +557,13 @@ async def _tick() -> None:
 # positions going forward"). A last line of defence behind the write-ahead
 # intents: nothing of ours may sit at the broker unmanaged.
 # --------------------------------------------------------------------------- #
-ORDER_TAG_PREFIXES = ("SBol-", "SBH-")     # trading_engine.ORDER_TAG_PREFIX / the hedge tag
+ORDER_TAG_PREFIXES = ("UMom-", "UMH-", "UMP-")   # engine A entry / hedge / engine B entry (engine_b.ORDER_TAG_PREFIX)
 ORPHAN_MIN_AGE_SECONDS = 20
+
+
+def _put_store():
+    from .state import put_store
+    return put_store
 _sweep = {"last": 0.0, "running": False}
 _untracked_logged: dict[str, float] = {}
 
@@ -587,12 +583,10 @@ def _stops_owned_by_open_positions() -> set[str]:
     """Broker stop order ids that a live position in ANY bot book still names as its protection (1 Oct 2026
     review): even if Dhan's position list ever came back missing a held contract, its stop is never swept."""
     owned: set[str] = set()
-    stores = [position_store, hedge_store]
-    # Unified Momentum (1 Oct 2026) runs no stop sweep of its own - this one protects its three books too.
+    stores = [position_store, hedge_store, _put_store()]
     for mod, names in (("Bollinger.position_store", ("position_store",)), ("Swing.position_store", ("position_store",)),
                        ("Options.position_store", ("position_store",)), ("Luxury.position_store", ("position_store",)),
-                       ("Scalper.state", ("position_store",)),
-                       ("UnifiedMomentum.state", ("position_store", "hedge_store", "put_store"))):
+                       ("Scalper.state", ("position_store",)), ("SuperBollinger.state", ("position_store", "hedge_store"))):
         try:
             m = __import__(mod, fromlist=list(names))
             stores.extend(getattr(m, n) for n in names)
@@ -665,10 +659,8 @@ async def sweep_orphans(stops_only: bool = False) -> dict:
     stops_only: just the stop part (the MCX evening session, after NSE has closed)."""
     loop = asyncio.get_running_loop()
     out = {"cancelled": [], "adopted": [], "untracked": []}
-    try:
-        await _sweep_orphan_stops(loop, out)
-    except Exception:  # noqa: BLE001
-        logger.exception("[supervisor] stop sweep failed")
+    # The account-wide STOP sweep runs ONCE, in Super Bollinger's supervisor (it protects this strategy's books too -
+    # SuperBollinger/supervisor._stops_owned_by_open_positions): two sweepers would race to cancel the same stop.
     if stops_only:
         return out
     in_flight = {it.get("order_id") for it in live_state._intents.values() if it.get("order_id")}
@@ -685,7 +677,7 @@ async def sweep_orphans(stops_only: bool = False) -> dict:
             continue   # an order is being placed right now and has no id yet - look again next sweep
         if _order_age_seconds(o.get("created")) < ORPHAN_MIN_AGE_SECONDS:
             continue
-        kind = "hedge" if o["tag"].startswith("SBH-") else "entry"
+        kind = "hedge" if o["tag"].startswith("UMH-") else "put_entry" if o["tag"].startswith("UMP-") else "entry"
         try:
             await loop.run_in_executor(None, dhan_wrapper.cancel_order, o["order_id"])
         except Exception as exc:  # noqa: BLE001
@@ -710,7 +702,7 @@ async def sweep_orphans(stops_only: bool = False) -> dict:
                         None, lambda t=bp["trading_symbol"]: str(dhan_wrapper._instrument_meta(t, expected_exchange="NSE")["security_id"]))
                     if sid == o["security_id"] and bp["quantity"] > 0:
                         tracked = {p.trading_symbol for p in list(position_store.live_positions.values())
-                                   + list(hedge_store.live_positions.values())}
+                                   + list(hedge_store.live_positions.values()) + list(_put_store().live_positions.values())}
                         it = {"kind": kind, "symbol": bp["underlying_symbol"], "trading_symbol": bp["trading_symbol"],
                               "quantity": abs(bp["quantity"]), "lot_size": bp.get("lot_size"),
                               "product_type": bp.get("product_type"), "order_id": o["order_id"]}
@@ -724,13 +716,13 @@ async def sweep_orphans(stops_only: bool = False) -> dict:
     try:
         broker = broker if broker is not None else await loop.run_in_executor(None, dhan_wrapper.get_open_fno_positions)
         tracked = {p.trading_symbol for p in list(position_store.live_positions.values())
-                   + list(hedge_store.live_positions.values())}
+                   + list(hedge_store.live_positions.values()) + list(_put_store().live_positions.values())}
         for bp in broker:
             ts = bp["trading_symbol"]
             if bp.get("quantity", 0) <= 0 or ts in tracked:
                 continue
             owner = await loop.run_in_executor(None, attribute_open_broker_position, ts)
-            if owner not in (STRATEGY, HEDGE_STRATEGY):
+            if owner not in (STRATEGY, HEDGE_STRATEGY, "UnifiedMomentumPut"):
                 continue   # another strategy's position, or not ours by our own records
             now = time.monotonic()
             if now - _untracked_logged.get(ts, 0.0) >= 300:

@@ -49,7 +49,7 @@ from pathlib import Path
 
 logger = logging.getLogger("capacity_control")
 
-STRATEGIES = ("Swing", "Bollinger", "SuperBollinger", "Scalper")
+STRATEGIES = ("Swing", "Bollinger", "SuperBollinger", "Scalper", "UnifiedMomentum")
 
 OVERRIDE_FILE = Path("data/capacity_overrides.json")
 ENV_FILE = Path(".env")
@@ -59,6 +59,7 @@ _ENV_VAR_NAMES = {
     "Bollinger": "BOLLINGER_MAX_CONCURRENT_TRADES",
     "SuperBollinger": "SUPER_BOLLINGER_MAX_CONCURRENT_TRADES",  # added 30 Sep 2026
     "Scalper": "SCALPER_MAX_CONCURRENT_TRADES",  # added 1 Oct 2026 - one position per index; the store's reserve check
+    "UnifiedMomentum": "UNIFIED_MOMENTUM_MAX_CONCURRENT_TRADES",  # added 1 Oct 2026 - engine A's (pullback calls) slots
 }
 
 _overrides: dict[str, int] = {}
@@ -85,6 +86,9 @@ def _env_default(strategy: str) -> int:
     if strategy == "Scalper":
         import os
         return int(os.getenv("SCALPER_MAX_CONCURRENT_TRADES", "1"))
+    if strategy == "UnifiedMomentum":
+        from UnifiedMomentum import settings as cfg
+        return int(cfg.MAX_CONCURRENT_TRADES_DEFAULT)
     raise ValueError(f"unknown strategy {strategy!r} - must be one of {STRATEGIES}")
 
 

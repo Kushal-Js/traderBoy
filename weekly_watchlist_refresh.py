@@ -55,6 +55,10 @@ What it does, in order:
      sessions). Swing/Bollinger above keep plain ATH. Best-effort: a
      failure or fewer than 10 picks leaves last week's Super Bollinger list
      in place and never blocks the ATH update or the restart.
+     (1 Oct 2026, user request) the same picks are also written to Unified
+     Momentum's own list, data/unified_momentum_watchlist (the real-money
+     strategy; Super Bollinger is paper from 1 Oct) - same rules: fewer
+     than 10 picks or a failure keeps last week's list.
   7c. (added 30 Sep 2026) the SHADOW list: a second Super Bollinger pick
      (40-session fit with the 1-hour filter, stock_selection.run_shadow)
      that is only recorded and, a week later, scored against the live list
@@ -261,21 +265,28 @@ def main() -> None:
         log(f"{label} watchlist file updated ({len(protected)} protected + {len(new_equity_symbols)} equity "
             f"= {len(protected) + len(new_equity_symbols)} total).")
 
-    log("\nSuper Bollinger watchlist - HYBRID selection (ATH top 40 -> strategy fit, stock_selection.py)...")
+    log("\nSuper Bollinger + Unified Momentum watchlists - HYBRID selection (ATH top 40 -> strategy fit, "
+        "stock_selection.py)...")
     try:
         old_super = read_watchlist_file(stock_selection.SUPER_BOLLINGER_WATCHLIST_FILE)
+        old_um = read_watchlist_file(stock_selection.UNIFIED_MOMENTUM_WATCHLIST_FILE)
         picks = stock_selection.run_live(log)
         new_super = [p_["symbol"] for p_ in picks]
         if len(new_super) < 10:
-            log(f"Super Bollinger: only {len(new_super)} picks - keeping last week's list {old_super}")
+            log(f"HYBRID: only {len(new_super)} picks - keeping last week's lists: Super Bollinger {old_super}, "
+                f"Unified Momentum {old_um}")
         else:
             log(f"Super Bollinger ADDED: {sorted(set(new_super) - set(old_super))}")
             log(f"Super Bollinger REMOVED: {sorted(set(old_super) - set(new_super))}")
             stock_selection.write_watchlist(new_super)
             log(f"Super Bollinger watchlist file updated ({len(new_super)} stocks).")
+            log(f"Unified Momentum ADDED: {sorted(set(new_super) - set(old_um))}")
+            log(f"Unified Momentum REMOVED: {sorted(set(old_um) - set(new_super))}")
+            stock_selection.write_watchlist(new_super, stock_selection.UNIFIED_MOMENTUM_WATCHLIST_FILE)
+            log(f"Unified Momentum watchlist file updated ({len(new_super)} stocks).")
     except Exception as exc:  # noqa: BLE001
-        log(f"Super Bollinger HYBRID selection FAILED ({exc!r}) - keeping last week's list; the ATH "
-            f"watchlists above were already updated normally.")
+        log(f"HYBRID selection FAILED ({exc!r}) - keeping last week's Super Bollinger and Unified Momentum lists; "
+            f"the ATH watchlists above were already updated normally.")
 
     log("\nSuper Bollinger SHADOW list (recorded and scored only - never traded, never written to a watchlist)...")
     try:

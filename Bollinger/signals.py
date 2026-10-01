@@ -412,6 +412,10 @@ def _replay_pending_order_loop(
 # --------------------------------------------------------------------------- #
 _signal_cache: dict[str, tuple[datetime, Optional[BollingerSignalState]]] = {}
 _fail_streak: dict[str, int] = {}
+# One fetch per symbol at a time (1 Oct 2026): Super Bollinger (paper) and Unified Momentum both force a refresh
+# of the same stock on the first tick of every new bar - a caller that finds another one's fetch of the same symbol
+# in flight waits for it and takes its result instead of making a second, identical Dhan call.
+_fetch_locks: dict[str, asyncio.Lock] = {}
 MAX_FETCH_BACKOFF_SECONDS = 300
 
 
@@ -492,16 +496,21 @@ async def get_signal_state(symbol: str, force: bool = False) -> Optional[Bolling
     effective_refresh = min(config.SIGNAL_REFRESH_SECONDS * (2 ** streak), MAX_FETCH_BACKOFF_SECONDS)
     if cached and (_now_ist() - cached[0]).total_seconds() < effective_refresh and not (force and streak == 0):
         return cached[1]
-    loop = asyncio.get_running_loop()
-    try:
-        state = await loop.run_in_executor(None, _fetch_signal_state_once, symbol)
-        _fail_streak[cache_key] = 0
-    except Exception:  # noqa: BLE001
-        logger.exception("%s: could not fetch Bollinger signal state - keeping last cached value", symbol)
-        state = cached[1] if cached else None
-        _fail_streak[cache_key] = streak + 1
-    _signal_cache[cache_key] = (_now_ist(), state)
-    return state
+    lock = _fetch_locks.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        latest = _signal_cache.get(cache_key)
+        if latest is not None and latest is not cached:
+            return latest[1]          # another caller refreshed it while this one waited
+        loop = asyncio.get_running_loop()
+        try:
+            state = await loop.run_in_executor(None, _fetch_signal_state_once, symbol)
+            _fail_streak[cache_key] = 0
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not fetch Bollinger signal state - keeping last cached value", symbol)
+            state = cached[1] if cached else None
+            _fail_streak[cache_key] = streak + 1
+        _signal_cache[cache_key] = (_now_ist(), state)
+        return state
 
 
 def peek_signal_state(symbol: str) -> Optional[BollingerSignalState]:

@@ -24,7 +24,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import capacity_control
 import reversal_filters
@@ -150,9 +150,16 @@ class BollingerPositionStore:
     """`strategy` (added 30 Sep 2026 for Super Bollinger, which keeps its OWN
     instance of this store) is the name used for its capacity cap, its
     trade-history records and its entry cooldown - "Bollinger" for the
-    deployed strategy's own module-level instance below, unchanged."""
-    def __init__(self, strategy: str = "Bollinger", entry_retry_cooldown_seconds: Optional[float] = None) -> None:
+    deployed strategy's own module-level instance below, unchanged.
+
+    `max_trades` (added 1 Oct 2026, Unified Momentum's engine B book): a
+    callable giving this store's slot limit, for a book whose limit lives in
+    its strategy's own settings rather than in capacity_control (which only
+    knows registered strategy names). None = capacity_control, as before."""
+    def __init__(self, strategy: str = "Bollinger", entry_retry_cooldown_seconds: Optional[float] = None,
+                 max_trades: Optional[Callable[[], int]] = None) -> None:
         self.strategy = strategy
+        self._max_trades = max_trades
         self._entry_retry_cooldown_seconds = (config.ENTRY_RETRY_COOLDOWN_SECONDS
                                               if entry_retry_cooldown_seconds is None
                                               else entry_retry_cooldown_seconds)
@@ -190,7 +197,8 @@ class BollingerPositionStore:
         async with self._lock:
             if underlying_symbol in self.reserved_symbols or underlying_symbol in self.live_positions:
                 return False
-            if _cap_reached(len(self.reserved_symbols), self.strategy):
+            if (len(self.reserved_symbols) >= self._max_trades() if self._max_trades
+                    else _cap_reached(len(self.reserved_symbols), self.strategy)):
                 return False
             self.reserved_symbols.add(underlying_symbol)
             return True
@@ -211,7 +219,8 @@ class BollingerPositionStore:
 
     async def remaining_capacity(self) -> int:
         async with self._lock:
-            return max(0, capacity_control.get_max_concurrent_trades(self.strategy) - len(self.reserved_symbols))
+            cap = self._max_trades() if self._max_trades else capacity_control.get_max_concurrent_trades(self.strategy)
+            return max(0, cap - len(self.reserved_symbols))
 
     async def add_position(self, pos: Position) -> None:
         async with self._lock:

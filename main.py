@@ -78,8 +78,7 @@ from Swing import swing_paper_engine
 from Bollinger import bollinger_main
 from SuperBollinger import super_bollinger_main
 from Scalper import scalper_main
-from SwingMomentum import swing_momentum_main
-from SwingMomentum import engine as swing_momentum_engine
+from UnifiedMomentum import unified_momentum_main
 import universe_bucket
 import breakout_signal
 import breakout_paper_engine
@@ -168,10 +167,14 @@ async def lifespan(app: FastAPI):
                 # Bollinger has no breakout/CE-PE dispatch relationship
                 # with Options/Luxury, so it doesn't sit alongside the
                 # dispatcher-task block below.
-                async with bollinger_main.lifespan(app), super_bollinger_main.lifespan(app), scalper_main.lifespan(app):
+                async with bollinger_main.lifespan(app), super_bollinger_main.lifespan(app), scalper_main.lifespan(app), \
+                        unified_momentum_main.lifespan(app):
                     # Super Bollinger (30 Sep 2026) nests right after
                     # Bollinger - it reads Bollinger's own signal cache and
                     # watchlist, already loaded by the lifespan above.
+                    # Unified Momentum (1 Oct 2026, real money) comes after
+                    # both: it reads Bollinger's signal cache, Swing's signals
+                    # and the same WS candle feed.
                     dispatcher_task = None
                     if options_config.UNIVERSE_DISPATCHER_ENABLED:
                         # Started here, not inside any one package's own
@@ -233,15 +236,6 @@ async def lifespan(app: FastAPI):
                                 logger.exception("Could not re-subscribe %s for a restored Swing paper position",
                                                  pos.trading_symbol)
                     swing_paper_task = asyncio.create_task(swing_paper_engine.paper_engine_monitor_loop())
-                    # SwingMomentum (1 Oct 2026) - Swing + the momentum/choppy classifier, its OWN paper book
-                    # (separate strategy, never mixed with Swing's results). Restore + re-subscribe, then run.
-                    for pos in swing_momentum_engine.load_positions():
-                        try:
-                            dhan_wrapper.subscribe_option_price(pos.trading_symbol)
-                        except Exception:  # noqa: BLE001
-                            logger.exception("Could not re-subscribe %s for a restored SwingMomentum position",
-                                             pos.trading_symbol)
-                    swing_momentum_task = asyncio.create_task(swing_momentum_engine.monitor_loop())
                     try:
                         yield
                     finally:
@@ -249,7 +243,6 @@ async def lifespan(app: FastAPI):
                             dispatcher_task.cancel()
                         paper_engine_task.cancel()
                         swing_paper_task.cancel()
-                        swing_momentum_task.cancel()
 
 
 app = FastAPI(title="Chartink -> Dhan Algo Bot", lifespan=lifespan)
@@ -259,7 +252,7 @@ app.include_router(swing_main.router)
 app.include_router(bollinger_main.router)
 app.include_router(super_bollinger_main.router)
 app.include_router(scalper_main.router)
-app.include_router(swing_momentum_main.router)
+app.include_router(unified_momentum_main.router)
 app.include_router(universe_bucket.router)
 
 

@@ -43,7 +43,7 @@ live list.
 
 CLI (after 15:30 IST or before 09:15 - ~210 daily + ~40 intraday REST calls):
     uv run python stock_selection.py            # print today's picks
-    uv run python stock_selection.py --write    # also write data/super_bollinger_watchlist
+    uv run python stock_selection.py --write    # also write data/super_bollinger_watchlist + data/unified_momentum_watchlist
     uv run python stock_selection.py --shadow   # also score/record the shadow list (+~40 intraday calls)
 """
 from __future__ import annotations
@@ -62,6 +62,8 @@ from zoneinfo import ZoneInfo
 IST = ZoneInfo("Asia/Kolkata")
 REPO_ROOT = Path(__file__).resolve().parent
 SUPER_BOLLINGER_WATCHLIST_FILE = REPO_ROOT / "data" / "super_bollinger_watchlist"
+# Unified Momentum (1 Oct 2026, real money) trades the same HYBRID picks from its own file.
+UNIFIED_MOMENTUM_WATCHLIST_FILE = REPO_ROOT / "data" / "unified_momentum_watchlist"
 HISTORY_DIR = REPO_ROOT / "history"
 
 TOP_N = 15
@@ -513,7 +515,8 @@ def main() -> None:
             log(f"NOT writing: only {len(picks)} picks - looks like a data problem, keeping the current list")
         else:
             write_watchlist([p["symbol"] for p in picks])
-            log(f"Wrote {len(picks)} symbols to {SUPER_BOLLINGER_WATCHLIST_FILE}")
+            write_watchlist([p["symbol"] for p in picks], UNIFIED_MOMENTUM_WATCHLIST_FILE)
+            log(f"Wrote {len(picks)} symbols to {SUPER_BOLLINGER_WATCHLIST_FILE} and {UNIFIED_MOMENTUM_WATCHLIST_FILE}")
     if "--shadow" in sys.argv:
         current = [ln.strip().upper() for ln in SUPER_BOLLINGER_WATCHLIST_FILE.read_text().splitlines()
                    if ln.strip() and not ln.startswith("#")] if SUPER_BOLLINGER_WATCHLIST_FILE.exists() else []

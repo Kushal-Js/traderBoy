@@ -1,40 +1,21 @@
 """
-Super Bollinger (30 Sep 2026, user request) - the Bollinger Hold-Long paper
-strategy promoted to its own strategy with the best rules from the 29 Sep
-2026 exit-policy backtest (backtest_bollinger_hold_long_exit_variants.py,
-policy "G'" - +Rs 1.02 lakh over 31 Aug-29 Sep with 5 concurrent trades,
-NSE stocks only; see trading-skills learnings/bollinger-hold-long-30day-
-backtest-and-data-gotchas.md):
+Unified Momentum - ENGINE A, PULLBACK CALLS (1 Oct 2026, user request). The rules are Super Bollinger's live ones
+(this module began as a copy of SuperBollinger/trading_engine.py, renamed, so every incident-hardened real-order
+mechanic carries over unchanged), run against Unified Momentum's OWN books, watchlist and settings:
 
-  Universe  data/super_bollinger_watchlist - its OWN list, picked by the
-            HYBRID selection (stock_selection.py) and refreshed every Friday
-            (SuperBollinger/watchlist.py; falls back to data/bollinger_watchlist
-            if missing). NSE STOCKS
-            ONLY - index symbols (Bollinger config.INDEX_SYMBOLS) and MCX
-            commodities are always skipped, plus settings.excluded_symbols.
-  Entry     BULLISH resting trigger only (the deployed Bollinger/Vortex
-            pending order, read from the SAME shared signal cache - no extra
-            Dhan calls), buy 1 lot of the ATM CE (roll to the next expiry
-            within N trading days), min premium Rs 5, no new entries from
-            the entry cutoff (14:00), max N open trades (capacity_control
-            "SuperBollinger", default 5), signals seen while full are skipped.
-            TICK-DRIVEN (30 Sep 2026): every tick of a watchlist stock checks
-            its pending trigger and a touch goes straight to the order (see
-            "Tick-driven entries" below); the 5s scan remains as a backup.
-  Exit      MAX_LOSS_HIT at the rupee cap (4500); BREAKEVEN_STOP_HIT - once
-            the trade has been >= Rs 1500 in profit, exit if the premium
-            falls back to the entry price; otherwise DAILY_SQUARE_OFF at
-            15:15. No percentage or trailing stop. A broker-side SL-L sits at
-            the max-loss level as a disaster backstop (if the bot is down).
-  Mode      real or paper via paper_mode_control ("SuperBollinger"), every
-            rule above via settings.py - all runtime, no restart.
-
-Order placement and every exit/order-sync mechanic reuse the deployed
-Bollinger engine's incident-hardened functions (stale-order cancel, broker
-quantity reconcile, manual-exit detection, LTP-staleness forced exit), run
-against Super Bollinger's OWN position store. One REAL Bollinger-family
-position per stock: see Bollinger.trading_engine.super_bollinger_real_holds
-- the two strategies share the signal and would buy the same contract.
+  Universe  data/unified_momentum_watchlist - its OWN list, the HYBRID weekly pick (stock_selection.py), written by
+            the Friday 00:00 IST job (weekly_watchlist_refresh.py). NSE STOCKS ONLY (index and MCX always skipped),
+            minus settings.excluded_symbols.
+  Entry     BULLISH resting trigger (Bollinger/Vortex pullback, the shared signal cache), last 1-hour candle green,
+            buy 1 lot of the ATM CE (roll to the next expiry within N trading days), premium >= min_premium_rs (10),
+            no new entries from 14:00, at most capacity_control "UnifiedMomentum" (2) open, one position per stock
+            across both engines, no new entries while the market chop gate is closed (NIFTY's 2 h efficiency ratio
+            below market_chop_gate_er). TICK-DRIVEN, the 5 s scan as a backup.
+  Exit      MAX_LOSS_HIT at 4,500; BREAKEVEN_STOP_HIT once +1,500 was reached; DAILY_SQUARE_OFF 15:15. Broker SL-L at
+            the max-loss level (ratcheted to entry once +1,500 - stop_ratchet.py). The supervisor hedges a losing
+            call with a real ATM PUT (supervisor.py).
+  Engine B  momentum PUTs live in engine_b.py (own book); this module's monitor tick drives it.
+  Mode      real (default) or paper via paper_mode_control ("UnifiedMomentum") - runtime, no restart.
 """
 from __future__ import annotations
 
@@ -61,9 +42,9 @@ from Swing.position_store import broker_stop_trigger_and_limit
 from . import entry_filters, live_state, pricing, settings
 from .state import EVENTS_LOG, STRATEGY, halted, paper_book, position_store
 
-logger = logging.getLogger("super_bollinger_engine")
+logger = logging.getLogger("unified_momentum_engine")
 
-ORDER_TAG_PREFIX = "SBol"
+ORDER_TAG_PREFIX = "UMom"
 MARKET_OPEN_TIME = "09:15"
 NO_TRAILING = 1e12  # Position's trailing fields are unused here - this keeps apply_price_to_trailing from ever arming
 _scan_turn = {"i": 0}
@@ -105,30 +86,15 @@ def _position_exit_reason(pos: Position, ltp: float) -> Optional[str]:
                            settings.get("max_loss_rs"), settings.get("breakeven_after_rs"))
 
 
-INDEX_STRATEGY = "SuperBollingerIndex"   # paper_mode_control toggle for the permanent index symbols
-
-
-def index_symbols() -> list[str]:
-    """The permanent index symbols (NIFTY/BANKNIFTY) currently switched on."""
-    if not settings.get("index_enabled"):
-        return []
-    return [s for s in settings.get("index_symbols")
-            if s in bcfg.INDEX_SYMBOLS and s not in settings.get("excluded_symbols")]
-
-
 def is_paper_symbol(symbol: str) -> bool:
-    """Paper or real for a NEW entry: index symbols follow their own runtime
-    toggle, everything else the strategy's."""
-    return paper_mode_control.is_paper_mode_enabled(INDEX_STRATEGY if symbol in bcfg.INDEX_SYMBOLS else STRATEGY)
+    """Paper or real for a NEW entry - one runtime toggle for the whole strategy (both engines)."""
+    return paper_mode_control.is_paper_mode_enabled(STRATEGY)
 
 
 def is_eligible_symbol(symbol: str) -> bool:
-    """NSE stocks, plus the permanent index symbols when index_enabled; never
-    an MCX commodity."""
-    if symbol in settings.get("excluded_symbols"):
+    """NSE stocks only: never an index or an MCX commodity, never an excluded symbol."""
+    if symbol in settings.get("excluded_symbols") or symbol in bcfg.INDEX_SYMBOLS:
         return False
-    if symbol in bcfg.INDEX_SYMBOLS:
-        return symbol in index_symbols()
     try:
         return not dhan_wrapper.is_mcx_commodity(symbol)
     except Exception:  # noqa: BLE001
@@ -136,12 +102,22 @@ def is_eligible_symbol(symbol: str) -> bool:
 
 
 async def eligible_symbols() -> list[str]:
-    """The weekly HYBRID stock watchlist + the permanent index symbols. The
-    indices are added here, never stored in the watchlist file, so the Friday
-    refresh cannot drop or reshuffle them."""
+    """The strategy's own weekly HYBRID stock watchlist (data/unified_momentum_watchlist)."""
     syms, _source = await super_watchlist.symbols()
-    out = [s for s in syms if s not in bcfg.INDEX_SYMBOLS and is_eligible_symbol(s)]
-    return out + [s for s in index_symbols() if s not in out]
+    return [s for s in syms if is_eligible_symbol(s)]
+
+
+def held_by_engine_b(symbol: str) -> bool:
+    """One position per stock across both engines (engine B's puts, real or paper, or an entry in flight)."""
+    from . import engine_b
+    return engine_b.held_here(symbol)
+
+
+def market_gate_open() -> bool:
+    """The market chop gate (both engines): False while NIFTY's 2 h efficiency ratio is below
+    settings.market_chop_gate_er. Fail open when NIFTY's series is unavailable."""
+    from . import market_gate
+    return market_gate.is_open()
 
 
 def _square_off_now() -> bool:
@@ -291,18 +267,20 @@ async def retry_unfilled_buy(symbol: str, leg: dict, quantity: int, reference_pr
         finally:
             if not keep_intent:
                 await live_state.intent_finish(intent, outcome_known)
-    await _event("ENTRY_ABANDONED" if what == "entry" else "HEDGE_ABANDONED", symbol,
+    await _event({"entry": "ENTRY_ABANDONED", "put_entry": "PUT_ENTRY_ABANDONED"}.get(what, "HEDGE_ABANDONED"), symbol,
                  {"trading_symbol": ts, "reason": reason, "reference_price": reference_price, "attempts_allowed": attempts})
     return None, None, None, reason
 
 
 def _new_position(symbol: str, leg: dict, entry_price: float, order_id: str,
-                  stop_loss_order_id: Optional[str] = None, reconciled: bool = False) -> Position:
+                  stop_loss_order_id: Optional[str] = None, reconciled: bool = False,
+                  option_type: str = "CE", max_loss_rs: Optional[float] = None) -> Position:
+    loss_cap = settings.get("max_loss_rs") if max_loss_rs is None else max_loss_rs
     return Position(
-        underlying_symbol=symbol, trading_symbol=leg["trading_symbol"], resolved_option_type="CE",
+        underlying_symbol=symbol, trading_symbol=leg["trading_symbol"], resolved_option_type=option_type,
         instrument_side="LONG", exchange_segment="NSE_FNO", product_type=leg["product_type"],
         quantity=leg["quantity"], lot_size=leg["lot_size"], entry_price=entry_price, best_price=entry_price,
-        stop_pct=0.0, hard_stop_loss=max(entry_price - settings.get("max_loss_rs") / leg["quantity"], 0.05),
+        stop_pct=0.0, hard_stop_loss=max(entry_price - loss_cap / leg["quantity"], 0.05),
         trailing_stop_dist=NO_TRAILING, trailing_step=NO_TRAILING, pnl_multiplier=leg["quantity"],
         order_id=order_id, reconciled=reconciled, stop_loss_order_id=stop_loss_order_id,
     )
@@ -347,9 +325,11 @@ async def enter_real(symbol: str, trigger_price: float, stop_price: float, sourc
             logger.info("[%s] %s: skipped - Swing already holds a real option position in this underlying", STRATEGY, symbol)
             await _event("ENTRY_SKIPPED_HELD_BY_SWING", symbol, {})
             return {"symbol": symbol, "status": "skipped", "reason": "held_by_swing"}
-        if engine.unified_momentum_real_holds(symbol):    # 1 Oct 2026: Unified Momentum trades the same stocks for real
-            await _event("ENTRY_SKIPPED_HELD_BY_UNIFIED_MOMENTUM", symbol, {})
-            return {"symbol": symbol, "status": "skipped", "reason": "held_by_unified_momentum"}
+        if engine.super_bollinger_real_holds(symbol):     # Super Bollinger is paper since 1 Oct - only if flipped back
+            await _event("ENTRY_SKIPPED_HELD_BY_SUPER_BOLLINGER", symbol, {})
+            return {"symbol": symbol, "status": "skipped", "reason": "held_by_super_bollinger"}
+        if held_by_engine_b(symbol):                      # re-checked under the claim (engine B's entry holds it too)
+            return {"symbol": symbol, "status": "skipped", "reason": "held_by_engine_b"}
         if not await position_store.reserve_symbol(symbol):
             return {"symbol": symbol, "status": "skipped", "reason": "duplicate_or_capacity_full"}
         try:
@@ -549,7 +529,7 @@ async def _check_paper(square_off: bool) -> None:
 
 
 async def square_off_all(reason: str) -> None:
-    """Every open REAL Super Bollinger position (the daily square-off and
+    """Every open REAL Unified Momentum position (the daily square-off and
     the manual kill switch). Paper positions are closed by _check_paper."""
     for symbol, position in list(position_store.live_positions.items()):
         if position.pending_exit_order_id or engine._exit_on_cooldown(position):
@@ -576,6 +556,8 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
         for symbol, pos in list(paper_book.positions.items()):
             if pos.trading_symbol == trading_symbol:
                 await _apply_price_paper(symbol, ltp)
+        from . import engine_b
+        await engine_b.on_price_tick(trading_symbol, ltp)
     except Exception:  # noqa: BLE001
         logger.exception("[%s] on_price_tick failed for %s", STRATEGY, trading_symbol)
 
@@ -595,7 +577,7 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 def _halted_today() -> bool:
-    """The supervisor's disaster brake (SuperBollinger/supervisor.py)."""
+    """The supervisor's disaster brake (UnifiedMomentum/supervisor.py)."""
     return halted["day"] == _now().date()
 
 
@@ -605,8 +587,10 @@ async def _can_enter_symbol(symbol: str) -> bool:
             and _slot_free_for(symbol)
             and symbol not in position_store.live_positions and symbol not in position_store.reserved_symbols
             and symbol not in paper_book.positions
+            and not held_by_engine_b(symbol)
             and not await position_store.is_in_entry_cooldown(symbol)
-            and signals._symbol_market_open(symbol))
+            and signals._symbol_market_open(symbol)
+            and market_gate_open())
 
 
 async def _passes_entry_filters(symbol: str, trigger_price: float, source: str) -> bool:
@@ -756,7 +740,7 @@ async def _refresh_gate() -> None:
     _eligible = set(await eligible_symbols())  # swapped whole - the WS thread reads it
     cap = capacity_control.get_max_concurrent_trades(STRATEGY)
     _gate["open"] = (settings.get("strategy_enabled") and not _halted_today() and _entries_open_now() and not _square_off_now()
-                     and (open_count() < cap or paper_open_count() < cap))
+                     and (open_count() < cap or paper_open_count() < cap) and market_gate_open())
 
 
 async def _scan_for_entries() -> None:
@@ -879,6 +863,11 @@ async def _trigger_not_taken(symbol: str, state, pending_candle: datetime, trigg
 
 async def _monitor_tick() -> None:
     square_off = _square_off_now()
+    try:
+        from . import market_gate          # NIFTY's 2 h efficiency ratio, recomputed at most every 30 s
+        await market_gate.refresh()
+    except Exception:  # noqa: BLE001
+        logger.exception("[%s] market gate refresh failed - gate stays as it was", STRATEGY)
     if square_off:
         await square_off_all("DAILY_SQUARE_OFF")
     await asyncio.gather(*[_check_real(s, p) for s, p in list(position_store.live_positions.items())])
@@ -889,13 +878,13 @@ async def _monitor_tick() -> None:
             await _check_dropped_triggers()
         except Exception:  # noqa: BLE001
             logger.exception("[%s] dropped-trigger check failed", STRATEGY)
-    try:
-        from . import shadow_list   # paper-only shadow watchlist, background task (never delays this tick)
-        shadow_list.kick(square_off, bool(settings.get("strategy_enabled") and not _halted_today() and _entries_open_now()))
-    except Exception:  # noqa: BLE001
-        logger.exception("[%s] could not start the shadow-list pass", STRATEGY)
     if _gate["open"]:
         await _scan_for_entries()
+    try:
+        from . import engine_b      # momentum PUTs: exits every tick, entries on closed 5-min candles
+        await engine_b.tick(square_off)
+    except Exception:  # noqa: BLE001
+        logger.exception("[%s] engine B tick failed", STRATEGY)
 
 
 async def monitor_loop() -> None:
@@ -911,11 +900,11 @@ async def monitor_loop() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Startup reconciliation (a mid-day restart - Super Bollinger never holds
+# Startup reconciliation (a mid-day restart - Unified Momentum never holds
 # overnight, so the 08:00 IST refresh restart always finds nothing)
 # --------------------------------------------------------------------------- #
 async def reconcile_broker_positions() -> list[Position]:
-    """Broker positions whose OPEN is recorded under "SuperBollinger" in our
+    """Broker positions whose OPEN is recorded under "UnifiedMomentum" in our
     own trade history (never guessed - attribute_open_broker_position). The
     peak-profit memory (best_price) restarts from the entry price."""
     loop = asyncio.get_running_loop()

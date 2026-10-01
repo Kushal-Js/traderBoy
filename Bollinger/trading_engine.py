@@ -458,6 +458,23 @@ def super_bollinger_real_holds(symbol: str) -> bool:
     return symbol in super_store.live_positions or symbol in super_store.reserved_symbols
 
 
+def unified_momentum_real_holds(symbol: str) -> Optional[str]:
+    """Which Unified Momentum book (UnifiedMomentum/, 1 Oct 2026, real money)
+    holds - or is entering - a REAL position in `symbol`: its calls, its
+    supervisor's PUT hedges or engine B's momentum PUTs; None if none. Same
+    reason as super_bollinger_real_holds (Dhan nets one contract into one
+    position). Imported lazily: UnifiedMomentum imports this module."""
+    try:
+        from UnifiedMomentum.state import hedge_store, position_store as um_store, put_store
+    except Exception:  # noqa: BLE001
+        return None
+    for name, store in (("UnifiedMomentum", um_store), ("UnifiedMomentumHedge", hedge_store),
+                        ("UnifiedMomentumPut", put_store)):
+        if symbol in store.live_positions or symbol in store.reserved_symbols:
+            return name
+    return None
+
+
 def swing_real_holds(symbol: str) -> bool:
     """True if Swing holds - or is entering - a REAL position in `symbol`
     (30 Sep 2026 same-contract guard, see cross_strategy_registry.
@@ -488,6 +505,9 @@ async def enter_position_for_stock(symbol: str, entry_signal: str, trigger_price
         if super_bollinger_real_holds(symbol):
             logger.info("%s: skipped - Super Bollinger already holds a real position in this stock", symbol)
             return {"symbol": symbol, "status": "skipped", "reason": "held_by_super_bollinger"}
+        if unified_momentum_real_holds(symbol):
+            logger.info("%s: skipped - Unified Momentum already holds a real position in this stock", symbol)
+            return {"symbol": symbol, "status": "skipped", "reason": "held_by_unified_momentum"}
         if swing_real_holds(symbol):
             logger.info("%s: skipped - Swing already holds a real option position in this underlying", symbol)
             await _record_bollinger_event("ENTRY_SKIPPED_HELD_BY_SWING", symbol, {})
@@ -708,10 +728,20 @@ def _option_still_needed(trading_symbol: str) -> bool:
         return True
     try:  # Super Bollinger's own positions (real or paper) - lazy, see super_bollinger_real_holds
         from SuperBollinger.state import paper_book as super_paper, position_store as super_store
+        if any(p.trading_symbol == trading_symbol
+               for p in list(super_store.live_positions.values()) + list(super_paper.positions.values())):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:  # Unified Momentum's six books (1 Oct 2026): its calls, hedges and puts, real and paper - the same
+        # stocks as Super Bollinger's (paper) list, so a paper close here must not unsubscribe its real contract
+        from UnifiedMomentum import state as um
     except Exception:  # noqa: BLE001
         return False
-    return any(p.trading_symbol == trading_symbol
-               for p in list(super_store.live_positions.values()) + list(super_paper.positions.values()))
+    books = (list(um.position_store.live_positions.values()) + list(um.paper_book.positions.values())
+             + list(um.hedge_store.live_positions.values()) + list(um.hedge_paper_book.positions.values())
+             + list(um.put_store.live_positions.values()) + list(um.put_paper_book.positions.values()))
+    return any(p.trading_symbol == trading_symbol for p in books)
 
 
 async def _close_paper(profile: Profile, symbol: str, exit_price: float, reason: str) -> None:

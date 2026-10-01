@@ -751,7 +751,9 @@ def _exit_reason_for(position: Position, ltp: float) -> Optional[str]:
 def bollinger_family_real_holder(symbol: str) -> Optional[str]:
     """Name of the Bollinger-family book that holds - or is entering - a REAL
     position in `symbol`: "Bollinger", "SuperBollinger" or "SuperBollingerHedge"
-    (its supervisor's PE hedge). Imported lazily (they import Swing modules)."""
+    (its supervisor's PE hedge), or one of Unified Momentum's (1 Oct 2026):
+    "UnifiedMomentum", "UnifiedMomentumHedge", "UnifiedMomentumPut". Imported
+    lazily (they import Swing modules)."""
     try:
         from Bollinger.position_store import position_store as bollinger_store
         from SuperBollinger.state import hedge_store, position_store as super_store
@@ -760,7 +762,11 @@ def bollinger_family_real_holder(symbol: str) -> Optional[str]:
     for name, store in (("Bollinger", bollinger_store), ("SuperBollinger", super_store), ("SuperBollingerHedge", hedge_store)):
         if symbol in store.live_positions or symbol in store.reserved_symbols:
             return name
-    return None
+    try:
+        from Bollinger.trading_engine import unified_momentum_real_holds
+    except Exception:  # noqa: BLE001
+        return None
+    return unified_momentum_real_holds(symbol)
 
 
 async def enter_position_for_stock(symbol: str, regime: str) -> dict:
