@@ -656,13 +656,36 @@ class DhanWrapper:
         Used by _get_atm_option_once to tell _instrument_meta which
         exchange it actually wants (see that function's own
         expected_exchange docstring for the real incident this exists to
-        prevent)."""
+        prevent).
+
+        1 Oct 2026: answered from a set of the MCX FUTCOM underlyings built
+        in ONE pass over the instrument master and reused until Tradehull
+        reloads it (a new DataFrame object). The old per-symbol string scan
+        of ~200k rows cost ~0.1 s on the droplet, and the breakout
+        dispatcher's first check of ~150 symbols after a restart froze the
+        event loop ~18 s (every restart, market hours included). Same
+        answer: for a name without a hyphen, "a trading symbol starts with
+        NAME-" is exactly "its text before the first hyphen is NAME"; a
+        hyphenated name (BAJAJ-AUTO) keeps the original scan."""
         df = self.instruments()
-        return bool((
-            (df["SEM_EXM_EXCH_ID"] == "MCX")
-            & (df["SEM_INSTRUMENT_NAME"] == "FUTCOM")
-            & (df["SEM_TRADING_SYMBOL"].str.startswith(underlying_symbol + "-"))
-        ).any())
+        if "-" in underlying_symbol:
+            return bool((
+                (df["SEM_EXM_EXCH_ID"] == "MCX")
+                & (df["SEM_INSTRUMENT_NAME"] == "FUTCOM")
+                & (df["SEM_TRADING_SYMBOL"].str.startswith(underlying_symbol + "-"))
+            ).any())
+        return underlying_symbol in self._mcx_futcom_underlyings(df)
+
+    def _mcx_futcom_underlyings(self, df) -> frozenset:
+        """Text before the first hyphen of every MCX FUTCOM trading symbol in
+        `df`, cached against that DataFrame object."""
+        cached = self.__dict__.get("_mcx_futcom_cache")
+        if cached is None or cached[0] is not df:
+            symbols = df.loc[(df["SEM_EXM_EXCH_ID"] == "MCX") & (df["SEM_INSTRUMENT_NAME"] == "FUTCOM"),
+                             "SEM_TRADING_SYMBOL"]
+            cached = (df, frozenset(t.split("-", 1)[0] for t in symbols if isinstance(t, str) and "-" in t))
+            self.__dict__["_mcx_futcom_cache"] = cached
+        return cached[1]
 
     def _instrument_meta(self, trading_symbol: str, expected_exchange: Optional[str] = None) -> dict:
         """Looks up an instrument by trading_symbol string. NOTE: the scrip
