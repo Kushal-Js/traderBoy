@@ -1,0 +1,123 @@
+Swing trades entered 28 Sep - 1 Oct (NSE options). base = Swing's own recorded P&L (paper: modelled with slippage; real: the actual P&L); hedge / S1 / S2 = legs the Super Bollinger rules add, after modelled slippage.
+
+=== 2026-09-29 ===
+trade                              book             in          out     base |   hedge      S1      S2 | w/ hedge+S1  detail
+LAURUSLABS 27 OCT 2000 CALL        paper  29 Sep 09:16 29 Sep 09:16   +1,891 |      +0      +0      +0 |      +1,891  
+LAURUSLABS 27 OCT 2020 CALL        paper  29 Sep 09:17 29 Sep 09:17   +1,942 |      +0      +0      +0 |      +1,942  
+LAURUSLABS 27 OCT 2020 CALL        paper  29 Sep 09:18 29 Sep 09:22   -5,413 |  -2,070      +0      +0 |      -7,484  hedge 09:21 LAURUSLABS 27 OCT 2020 PUT @ 68.00 -> stop; S1 no add
+BOSCHLTD 27 OCT 47000 PUT          paper  29 Sep 09:20 29 Sep 11:19   -2,530 |      +0      +0      +0 |      -2,530  
+ZYDUSLIFE 27 OCT 1230 CALL         paper  29 Sep 09:21 29 Sep 09:38   -4,811 |    -378      +0      +0 |      -5,190  hedge 09:22 ZYDUSLIFE 27 OCT 1220 PUT @ 32.10 -> trail; S1 no add
+MOTILALOFS 27 OCT 1000 PUT         paper  29 Sep 09:22 29 Sep 10:29   +2,328 |      +0      +0      +0 |      +2,328  
+AUROPHARMA 27 OCT 1700 PUT         paper  29 Sep 09:25 29 Sep 11:17   -3,666 |    +718      +0      +0 |      -2,948  hedge 11:10 AUROPHARMA 27 OCT 1700 CALL @ 53.55 -> trail; S1 no add
+MCX 27 OCT 3250 PUT                paper  29 Sep 09:35 29 Sep 10:57   -3,996 |  -1,832      +0      +0 |      -5,827  hedge 09:42 MCX 27 OCT 3250 CALL @ 150.70 -> stop; S1 no add
+BANKNIFTY 27 OCT 53900 PUT         real   29 Sep 10:53 29 Sep 11:10   -1,880 |    +703      +0      +0 |      -1,177  hedge 11:10 BANKNIFTY 27 OCT 54000 CALL @ 1205.50 -> trail; S1 no add
+MCX 27 OCT 3300 CALL               paper  29 Sep 11:00 29 Sep 11:13   +2,566 |      +0      +0      +0 |      +2,566  
+NIFTY 06 OCT 22600 PUT             real   29 Sep 11:05 29 Sep 11:10   -1,947 |    +542      +0      +0 |      -1,405  hedge 11:10 NIFTY 06 OCT 22650 CALL @ 220.90 -> trail; S1 no add
+APLAPOLLO 27 OCT 2200 CALL         paper  29 Sep 11:15 29 Sep 11:44   +2,919 |      +0      +0      +0 |      +2,919  
+RADICO 27 OCT 4600 CALL            paper  29 Sep 11:20 29 Sep 11:58   -1,200 |      +0      +0      +0 |      -1,200  
+AUROPHARMA 27 OCT 1700 CALL        paper  29 Sep 11:20 30 Sep 09:15   -1,184 |  -1,704    -105      +0 |      -2,993  hedge 12:45 AUROPHARMA 27 OCT 1700 PUT @ 38.45 -> stop; S1 add 12:59 @ 53.95 -> 15:15
+SONACOMS 27 OCT 810 CALL           paper  29 Sep 11:25 29 Sep 13:06   +1,821 |  -1,786  +4,837      +0 |      +4,872  hedge 11:26 SONACOMS 27 OCT 800 PUT @ 24.00 -> stop; S1 add 11:38 @ 28.00 -> with original
+RADICO 27 OCT 4400 PUT             paper  29 Sep 12:05 29 Sep 14:31   -1,223 |      +0      +0      +0 |      -1,223  
+DIVISLAB 27 OCT 9500 PUT           paper  29 Sep 12:17 29 Sep 14:17   -1,652 |      +0      +0      +0 |      -1,652  
+RBLBANK 27 OCT 400 PUT             paper  29 Sep 12:31 29 Sep 13:46   -5,239 |  -2,135      +0      +0 |      -7,374  hedge 13:09 RBLBANK 27 OCT 405 CALL @ 14.75 -> stop; S1 no add
+APLAPOLLO 27 OCT 2200 CALL         paper  29 Sep 13:38 29 Sep 15:00     -980 |      +0      +0      +0 |        -980  
+LAURUSLABS 27 OCT 2000 CALL        paper  29 Sep 14:09 29 Sep 14:37   +1,111 |      +0      +0      +0 |      +1,111  
+MOTILALOFS 27 OCT 1000 PUT         paper  29 Sep 14:25 29 Sep 14:40     -252 |      +0      +0      +0 |        -252  
+RADICO 27 OCT 4400 PUT             paper  29 Sep 15:19 30 Sep 09:15     -754 |      +0      +0      +0 |        -754  
+MOTILALOFS 27 OCT 1000 PUT         paper  29 Sep 15:20 30 Sep 09:20   -2,061 |  -1,839      +0      +0 |      -3,899  hedge 09:19 MOTILALOFS 27 OCT 1000 CALL @ 44.65 -> stop; S1 no add
+LAURUSLABS 27 OCT 2000 PUT         paper  29 Sep 15:22 30 Sep 09:16   +2,780 |      +0      +0      +0 |      +2,780  
+day total                                                            -21,430 |  -9,782  +4,732      +0 |     -26,480
+
+=== 2026-09-30 ===
+trade                              book             in          out     base |   hedge      S1      S2 | w/ hedge+S1  detail
+AUROPHARMA 27 OCT 1700 PUT         paper  30 Sep 09:17 30 Sep 09:25   +2,306 |      +0      +0      +0 |      +2,306  
+DIVISLAB 27 OCT 9500 PUT           paper  30 Sep 09:17 30 Sep 09:20   +2,260 |      +0      +0      +0 |      +2,260  
+RADICO 27 OCT 4450 PUT             paper  30 Sep 09:19 30 Sep 09:20     -168 |      +0      +0      +0 |        -168  
+DIVISLAB 27 OCT 9500 PUT           paper  30 Sep 09:20 30 Sep 09:23   +3,030 |      +0      +0      +0 |      +3,030  
+ZYDUSLIFE 27 OCT 1200 PUT          paper  30 Sep 09:20 30 Sep 09:25   +3,192 |      +0      +0      +0 |      +3,192  
+RADICO 27 OCT 4450 PUT             paper  30 Sep 09:21 30 Sep 12:24   +2,772 |      +0      +0      +0 |      +2,772  
+DIVISLAB 27 OCT 9400 PUT           paper  30 Sep 09:23 30 Sep 11:29   +3,735 |  -1,805  +1,499      +0 |      +3,428  hedge 09:27 DIVISLAB 27 OCT 9400 CALL @ 313.00 -> stop; S1 add 09:43 @ 272.25 -> with original
+AUROPHARMA 27 OCT 1700 PUT         paper  30 Sep 09:26 30 Sep 09:44   +4,059 |      +0      +0      +0 |      +4,059  
+APLAPOLLO 27 OCT 2220 CALL         paper  30 Sep 09:35 30 Sep 10:55   -2,848 |    +863      +0    +124 |      -1,985  hedge 10:41 APLAPOLLO 27 OCT 2200 PUT @ 56.90 -> trail; S1 no add; S2 2nd lot
+MOTHERSON 27 OCT 162.50 CALL       paper  30 Sep 09:44 30 Sep 10:25   -6,027 |    -246      +0      +0 |      -6,273  hedge 09:50 MOTHERSON 27 OCT 162.50 PUT @ 3.86 -> trail; S1 no add
+NIFTY 06 OCT 22700 PUT             real   30 Sep 11:37 30 Sep 12:00   -1,680 |      +0      +0      +0 |      -1,680  
+MOTHERSON 27 OCT 162.50 CALL       paper  30 Sep 11:50 30 Sep 13:27   +1,968 |      +0      +0      +0 |      +1,968  
+MCX 27 OCT 3300 CALL               paper  30 Sep 12:00 30 Sep 12:02   +2,014 |      +0      +0      +0 |      +2,014  
+MCX 27 OCT 3300 CALL               paper  30 Sep 12:03 30 Sep 13:29   +2,798 |      +0      +0      +0 |      +2,798  
+ZYDUSLIFE 27 OCT 1160 CALL         paper  30 Sep 12:20 30 Sep 14:30   -2,778 |  -1,760  -1,421      +0 |      -5,959  hedge 12:33 ZYDUSLIFE 27 OCT 1160 PUT @ 29.75 -> stop; S1 add 12:50 @ 38.50 -> with original
+NIFTY 06 OCT 22750 CALL            paper  30 Sep 12:25 30 Sep 13:44   -1,007 |      +0      +0      +0 |      -1,007  
+RADICO 27 OCT 4400 PUT             paper  30 Sep 12:35 30 Sep 15:16   +2,441 |      +0      +0      +0 |      +2,441  
+NIFTY 06 OCT 22700 PUT             paper  30 Sep 13:45 30 Sep 14:29   +2,517 |      +0      +0      +0 |      +2,517  
+APLAPOLLO 27 OCT 2200 CALL         paper  30 Sep 13:55 30 Sep 14:24   -1,657 |      +0      +0      +0 |      -1,657  
+DIVISLAB 27 OCT 9300 PUT           paper  30 Sep 13:56 01 Oct 09:20   +5,186 |      +0      +0      +0 |      +5,186  
+BOSCHLTD 27 OCT 47000 PUT          paper  30 Sep 14:30 01 Oct 09:16   +6,732 |      +0      +0      +0 |      +6,732  
+OBEROIRLTY 27 OCT 1780 PUT         paper_open 30 Sep 14:35         open     open |      +0      +0      +0 |        open  
+MOTHERSON 27 OCT 162.50 PUT        paper  30 Sep 14:43 30 Sep 15:28     -123 |      +0      +0      +0 |        -123  
+day total                                                            +28,723 |  -2,949     +78    +124 |     +25,852
+
+=== 2026-10-01 ===
+trade                              book             in          out     base |   hedge      S1      S2 | w/ hedge+S1  detail
+LAURUSLABS 27 OCT 1980 PUT         paper  01 Oct 09:20 01 Oct 09:32   -5,595 |  +4,615      +0  -1,401 |        -980  hedge 09:30 LAURUSLABS 27 OCT 1980 CALL @ 69.00 -> trail; S1 no add; S2 2nd lot
+LAURUSLABS 27 OCT 2000 CALL        paper_open 01 Oct 09:40         open     open |      +0      +0      +0 |        open  
+BOSCHLTD 27 OCT 46500 PUT          paper_open 01 Oct 09:45         open     open |      +0      +0      +0 |        open  
+day total                                                             -5,595 |  +4,615      +0  -1,401 |        -980
+
+50 NSE option trades (47 closed, 22 winners; 3 still open), hedge fired on 15, S1 added on 4, S2 2nd lot on 2
+Swing as traded (closed trades):  +1,698
+  + hedge:                         -6,418   (hedge legs -8,116)
+  + hedge + S1:                    -1,608   (S1 legs +4,810)
+  + hedge + S1 + S2:               -2,885   (S2 legs -1,276)
+
+All Swing trades entered 28 Sep - 1 Oct (tested + not tested, closed): -25,577
+
+Not tested (48 trades, P&L -27,275):
+  APOLLOHOSP 29 SEP 8800 PUT         paper      28 Sep 09:20 28 Sep 09:34   +1,319  (no price data - expired contract)
+  BANKNIFTY 29 SEP 54900 PUT         paper      28 Sep 09:20 28 Sep 09:35   +2,302  (no price data - expired contract)
+  NIFTY 29 SEP 22950 PUT             paper      28 Sep 09:20 28 Sep 09:36   +2,200  (no price data - expired contract)
+  SONACOMS 29 SEP 810 PUT            paper      28 Sep 09:21 28 Sep 09:27   +2,327  (no price data - expired contract)
+  AUROPHARMA 29 SEP 1700 PUT         paper      28 Sep 09:22 28 Sep 09:28   -1,430  (no price data - expired contract)
+  LAURUSLABS 29 SEP 1980 PUT         paper      28 Sep 09:31 28 Sep 09:41   -1,997  (no price data - expired contract)
+  SONACOMS 29 SEP 820 CALL           paper      28 Sep 09:55 28 Sep 10:07   -2,144  (no price data - expired contract)
+  MCX 29 SEP 3300 CALL               paper      28 Sep 09:56 28 Sep 10:12   +2,759  (no price data - expired contract)
+  LAURUSLABS 29 SEP 2020 CALL        paper      28 Sep 09:57 28 Sep 10:10   -2,125  (no price data - expired contract)
+  MOTHERSON 29 SEP 165 CALL          paper      28 Sep 10:05 28 Sep 10:10   -2,909  (no price data - expired contract)
+  MOTILALOFS 29 SEP 1020 CALL        paper      28 Sep 10:06 28 Sep 10:18   -1,162  (no price data - expired contract)
+  COPPER 23 OCT 1400 PUT             real       28 Sep 11:12 28 Sep 12:05   +1,900  (MCX)
+  RADICO 29 SEP 4550 CALL            paper      28 Sep 11:34 28 Sep 11:57     -860  (no price data - expired contract)
+  AUROPHARMA 29 SEP 1700 CALL        paper      28 Sep 12:05 28 Sep 13:58   -1,595  (no price data - expired contract)
+  COPPER 23 OCT 1400 PUT             real       28 Sep 12:38 28 Sep 12:58   +3,225  (MCX)
+  RADICO 29 SEP 4500 PUT             paper      28 Sep 12:57 28 Sep 13:17     -798  (no price data - expired contract)
+  SONACOMS 29 SEP 820 PUT            paper      28 Sep 13:03 28 Sep 13:10   +1,041  (no price data - expired contract)
+  APOLLOHOSP 29 SEP 8900 CALL        paper      28 Sep 13:10 28 Sep 14:10   -1,183  (no price data - expired contract)
+  APLAPOLLO 29 SEP 2200 CALL         paper      28 Sep 13:12 28 Sep 13:17   -1,522  (no price data - expired contract)
+  DIVISLAB 29 SEP 9500 CALL          paper      28 Sep 13:16 28 Sep 14:25   -2,221  (no price data - expired contract)
+  MOTILALOFS 29 SEP 1020 CALL        paper      28 Sep 13:24 28 Sep 13:55   -1,162  (no price data - expired contract)
+  OBEROIRLTY 29 SEP 1860 CALL        paper      28 Sep 13:26 28 Sep 13:38     -858  (no price data - expired contract)
+  PHOENIXLTD 29 SEP 1960 CALL        paper      28 Sep 13:43 28 Sep 13:56   -1,102  (no price data - expired contract)
+  NIFTY 29 SEP 22850 PUT             real       28 Sep 13:45 28 Sep 14:18   +1,869  (no price data - expired contract)
+  BANKNIFTY 29 SEP 54600 PUT         real       28 Sep 13:45 28 Sep 15:25     +682  (no price data - expired contract)
+  APLAPOLLO 29 SEP 2200 CALL         paper      28 Sep 14:10 28 Sep 14:20     -718  (no price data - expired contract)
+  RADICO 29 SEP 4500 PUT             paper      28 Sep 14:15 28 Sep 15:03     -850  (no price data - expired contract)
+  OBEROIRLTY 29 SEP 1840 PUT         paper      28 Sep 14:16 28 Sep 14:34   +1,470  (no price data - expired contract)
+  MOTILALOFS 29 SEP 1020 PUT         paper      28 Sep 14:18 28 Sep 14:49      -78  (no price data - expired contract)
+  NIFTY 29 SEP 22800 PUT             real       28 Sep 14:20 28 Sep 15:25     -176  (no price data - expired contract)
+  APOLLOHOSP 29 SEP 8800 PUT         paper      28 Sep 14:32 28 Sep 14:50     -815  (no price data - expired contract)
+  APLAPOLLO 29 SEP 2180 PUT          paper      28 Sep 14:43 28 Sep 15:15     -840  (no price data - expired contract)
+  MOTILALOFS 29 SEP 1020 CALL        paper      28 Sep 14:49 28 Sep 15:21   -1,124  (no price data - expired contract)
+  MCX 29 SEP 3250 CALL               paper      28 Sep 14:51 29 Sep 09:21   -1,869  (no price data - expired contract)
+  PHOENIXLTD 29 SEP 1960 CALL        paper      28 Sep 14:53 28 Sep 14:56     -700  (no price data - expired contract)
+  COPPER 23 OCT 1380 PUT             real       28 Sep 14:55 28 Sep 15:21   -4,625  (MCX)
+  PHOENIXLTD 29 SEP 1960 CALL        paper      28 Sep 14:58 29 Sep 09:15     +612  (no price data - expired contract)
+  APLAPOLLO 29 SEP 2180 PUT          paper      28 Sep 15:15 29 Sep 09:15   +1,068  (no price data - expired contract)
+  LAURUSLABS 29 SEP 2020 CALL        paper      28 Sep 15:30 29 Sep 09:15   -1,700  (no price data - expired contract)
+  NATURALGAS 23 OCT 300 CALL         real       28 Sep 16:55 28 Sep 17:51     -188  (MCX)
+  COPPER 23 OCT 1380 PUT             real       28 Sep 19:17 28 Sep 19:30   -1,925  (MCX)
+  COPPER 23 OCT 1380 PUT             real       28 Sep 20:23 28 Sep 21:57   -5,275  (MCX)
+  NATURALGAS 23 OCT 300 PUT          real       28 Sep 20:45 28 Sep 22:27     -312  (MCX)
+  NATURALGAS 23 OCT 305 PUT          real       29 Sep 09:00 29 Sep 09:05     -312  (MCX)
+  COPPER 23 OCT 1400 PUT             real       29 Sep 15:24 29 Sep 17:09   -4,725  (MCX)
+  NATURALGAS 23 OCT 290 PUT          paper      30 Sep 09:05 30 Sep 10:20     -750  (MCX)
+  COPPER 23 OCT 1400 PUT             paper_open 30 Sep 15:16         open     open  (MCX)
+  NATURALGAS 23 OCT 290 PUT          paper_open 30 Sep 17:30         open     open  (MCX)
+
+NO PRICE DATA (trade left out / leg not priced): ['APLAPOLLO 29 SEP 2180 PUT', 'APLAPOLLO 29 SEP 2200 CALL', 'APOLLOHOSP 29 SEP 8800 PUT', 'APOLLOHOSP 29 SEP 8900 CALL', 'AUROPHARMA 29 SEP 1700 CALL', 'AUROPHARMA 29 SEP 1700 PUT', 'BANKNIFTY 29 SEP 54600 PUT', 'BANKNIFTY 29 SEP 54900 PUT', 'DIVISLAB 29 SEP 9500 CALL', 'LAURUSLABS 29 SEP 1980 PUT', 'LAURUSLABS 29 SEP 2020 CALL', 'MCX 29 SEP 3250 CALL', 'MCX 29 SEP 3300 CALL', 'MOTHERSON 29 SEP 165 CALL', 'MOTILALOFS 29 SEP 1020 CALL', 'MOTILALOFS 29 SEP 1020 PUT', 'NIFTY 29 SEP 22800 PUT', 'NIFTY 29 SEP 22850 PUT', 'NIFTY 29 SEP 22950 PUT', 'OBEROIRLTY 29 SEP 1840 PUT', 'OBEROIRLTY 29 SEP 1860 CALL', 'PHOENIXLTD 29 SEP 1960 CALL', 'RADICO 29 SEP 4500 PUT', 'RADICO 29 SEP 4550 CALL', 'SONACOMS 29 SEP 810 PUT', 'SONACOMS 29 SEP 820 CALL', 'SONACOMS 29 SEP 820 PUT']
