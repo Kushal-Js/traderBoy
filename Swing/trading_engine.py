@@ -474,7 +474,8 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
     possible here too: a price-based exit firing mid-candle while the
     entry-triggering candle is still cached would otherwise let the very
     next tick re-enter the same setup immediately). See signals.
-    regime_entry_signal_allowed's own docstring for why it's keyed off
+    release_regime_entry_side's own docstring (fresh Supertrend formations
+    count too since 1 Oct 2026) and the comment above it for why it's keyed off
     RegimeState.is_bullish specifically. Same "mark consumed only once a
     position is confirmed OPEN, never at signal-time" discipline as
     COPPER's branch - see enter_position_for_stock's matching call site."""
@@ -497,18 +498,37 @@ async def _evaluate_entry_signal(symbol: str) -> Optional[str]:
     regime = await signals.get_regime_state(symbol)
     if regime is None:
         return None
-    # Generalized "wait for the agreement to break and reform" gate (user
-    # request 24 Sep 2026 - see signals.regime_entry_signal_allowed's own
-    # docstring). Checked unconditionally, before any version-specific
-    # branch below, so a real break gets observed on every tick even when
-    # this tick wasn't about to return a fresh entry anyway - same
-    # reasoning as the COPPER branch's structure_break_entry_signal read
-    # above.
-    if not signals.regime_entry_signal_allowed(symbol, regime.is_bullish):
-        return None
     st = await signals.get_supertrend_state(symbol)
+    # Generalized "wait for a fresh formation" gate (user request 24 Sep
+    # 2026; fresh Supertrend formations count since 1 Oct 2026 - see
+    # signals.release_regime_entry_side). The release is observed on every
+    # tick, before any version-specific branch, so a real break is seen
+    # even when this tick wasn't about to return a fresh entry anyway; the
+    # block applies only to a signal on the side already traded.
+    freed = signals.release_regime_entry_side(symbol, regime.is_bullish, st)
+    if freed:
+        logger.info("%s: re-entry side free again (%s)", symbol, freed)
     if st is None:
         return None
+    direction = await _entry_direction(symbol, regime, st)
+    if direction and not signals.regime_entry_side_allowed(symbol, 1 if direction == "BULLISH" else -1):
+        key = (symbol, direction, st.candle_start)
+        if key not in _same_formation_logged:
+            if len(_same_formation_logged) > 5000:
+                _same_formation_logged.clear()
+            _same_formation_logged.add(key)
+            logger.info("%s: %s signal skipped - same formation as the last %s entry (no fresh Supertrend "
+                        "formation or regime flip since)", symbol, direction, direction)
+        return None
+    return direction
+
+
+_same_formation_logged: set[tuple] = set()
+
+
+async def _entry_direction(symbol: str, regime, st) -> Optional[str]:
+    """The entry direction for this tick from the regime + Supertrend
+    states (moved out of _evaluate_entry_signal unchanged, 1 Oct 2026)."""
     # Tick-based trigger (config.ENTRY_TIMING, 28 Sep 2026): the live price
     # crossing the last closed candle's Supertrend line counts as the
     # crossover, in addition to (not instead of) a candle closing across it.
@@ -1073,7 +1093,7 @@ async def _enter_position_for_stock(symbol: str, regime: str) -> dict:
             # Same "mark at confirmed-entry-time, not signal-time" rule,
             # generalized to every other SWING symbol - see
             # signals.mark_regime_entry_consumed's own docstring.
-            signals.mark_regime_entry_consumed(symbol, 1 if regime == "BULLISH" else -1)
+            signals.mark_regime_entry_consumed(symbol, 1 if regime == "BULLISH" else -1, entry_candle_start)
         return {"symbol": symbol, "status": "entered", "trading_symbol": trading_symbol, "entry_price": fill_price}
     except Exception:  # noqa: BLE001
         logger.exception("%s: unexpected error entering position", symbol)

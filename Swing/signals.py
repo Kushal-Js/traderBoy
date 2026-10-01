@@ -1062,39 +1062,67 @@ def mark_structure_break_consumed(symbol: str, side: int) -> None:
 # changes without tracking each version's filter logic separately. Same
 # +1/-1 mapping as _structure_break_consumed; no 0/neutral state here
 # since is_bullish is always one side or the other.
-_regime_entry_consumed: dict[str, int] = {}
+#
+# 1 Oct 2026 (user request, after Scalper - which copied this rule - skipped
+# BANKNIFTY's 12:44 bearish cross although its Supertrend had turned
+# bullish since the 12:06 trade): a fresh SUPERTREND formation also frees
+# the side - the regime alone can stay on one side for hours. The block
+# now applies to the SIGNAL's side only (it used to compare the regime's
+# side, which also blocked an opposite-direction signal while the regime
+# stayed on the traded side), and paper entries mark it too, so paper
+# behaves like real.
+_regime_entry_consumed: dict[str, Optional[int]] = {}
+_regime_entry_candle: dict[str, Optional[datetime]] = {}   # the entry's last closed Supertrend candle
 
 
-def regime_entry_signal_allowed(symbol: str, is_bullish: bool) -> bool:
+def release_regime_entry_side(symbol: str, is_bullish: bool, st: Optional["SupertrendState"]) -> Optional[str]:
     """Call on EVERY _evaluate_entry_signal invocation for a non-COPPER
-    symbol, regardless of whether a direction would otherwise fire this
-    tick - same reasoning as structure_break_entry_signal reading its
-    cache unconditionally: the "did the regime leave the consumed side"
-    check must run every tick so a real break gets observed even on ticks
-    where this function isn't about to return a fresh entry anyway.
-    Returns False only when `is_bullish`'s side is the SAME side a
-    position was already entered for and the regime hasn't been observed
-    on the opposite side since (i.e. still the same, already-traded
-    formation) - True otherwise, including when nothing has been consumed
-    yet for this symbol."""
-    side = 1 if is_bullish else -1
-    consumed = _regime_entry_consumed.get(symbol)
-    if consumed is not None and side != consumed:
-        _regime_entry_consumed[symbol] = None  # observed it break - next match is a fresh formation
-        consumed = None
-    return consumed is None or consumed != side
+    symbol, regardless of whether a direction would fire this tick, so a
+    fresh formation gets observed even on ticks that enter nothing. Frees
+    the consumed side when (a) the regime is on the other side (the
+    original 24 Sep rule), (b) the last closed Supertrend candle - a later
+    one than the entry's - is on the other side of the line, or (c) that
+    later candle crossed back to the consumed side (its previous candle
+    was on the other side, even if no tick looked at it). Returns the
+    reason when it frees the side, else None."""
+    side = _regime_entry_consumed.get(symbol)
+    if side is None:
+        return None
+    entry_candle = _regime_entry_candle.get(symbol)
+    later = (st is not None and st.candle_start is not None
+             and (entry_candle is None or st.candle_start > entry_candle))
+    if (1 if is_bullish else -1) != side:
+        reason = "regime on the other side"
+    elif later and (1 if st.is_above else -1) != side:
+        reason = "Supertrend on the other side"
+    elif later and (st.crossed_above if side == 1 else st.crossed_below):
+        reason = "fresh Supertrend cross"
+    else:
+        return None
+    _regime_entry_consumed[symbol] = None
+    return reason
 
 
-def mark_regime_entry_consumed(symbol: str, side: int) -> None:
-    """Called ONLY once a real position has actually been OPENED for
-    `side` (see Swing/trading_engine.py's enter_position_for_stock, its
-    non-COPPER call site) - deliberately NOT called merely when the signal
+def regime_entry_side_allowed(symbol: str, side: int) -> bool:
+    """False only when `side` (+1 BULLISH / -1 BEARISH signal) is the side
+    already traded in the current formation - see release_regime_entry_side."""
+    return _regime_entry_consumed.get(symbol) != side
+
+
+def mark_regime_entry_consumed(symbol: str, side: int, entry_candle_start: Optional[datetime] = None) -> None:
+    """Called ONLY once a position has actually been OPENED for `side` -
+    real (Swing/trading_engine.py's enter_position_for_stock, its
+    non-COPPER call site) or paper (swing_paper_engine.process_paper_entry,
+    since 1 Oct 2026) - deliberately NOT called merely when the signal
     fires, same "mark at entry-time, not signal-time" reasoning as
     mark_structure_break_consumed above (a signal can fire repeatedly
     while genuinely blocked by a downstream gate - funds/volume-floor/
     capacity - and those legitimate retries must not be treated as
-    "already used")."""
+    "already used"). `entry_candle_start` = the last closed Supertrend
+    candle at entry (the position's supertrend_entry_candle_start); only
+    later candles can show a fresh formation."""
     _regime_entry_consumed[symbol] = side
+    _regime_entry_candle[symbol] = entry_candle_start
 
 
 def _predict_structure_break_entry_signal(symbol: str) -> Optional[int]:

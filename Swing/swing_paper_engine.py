@@ -57,6 +57,10 @@ NOT REPLICATED, and cannot be by construction - places a REAL order:
     (signals.mark_structure_break_consumed) - deliberately left to the
     REAL path only, so a paper run can never consume a real agreement a
     genuine entry might still need.
+    (The non-COPPER fresh-formation mark, signals.mark_regime_entry_
+    consumed, IS applied to paper entries since 1 Oct 2026 - a symbol is
+    either paper or real at a time, and without it paper re-entered every
+    same-side signal the real rule would skip.)
 
 LOGGING: one record per closed paper trade to history/<date>_swing_
 paper_trades.log, the same field shape trade_history.record_closed_
@@ -313,6 +317,12 @@ async def process_paper_entry(symbol: str, regime: str) -> dict:
         async with _lock:
             _positions[symbol] = position
             _save_locked()
+        if not (symbol == "COPPER" and config.COPPER_STRUCTURE_BREAK_ENABLED):
+            # Same fresh-formation re-entry rule as a real entry (1 Oct 2026) -
+            # without it paper re-entered every same-side signal and could not
+            # show what the real rule does. COPPER's structure-break mark stays
+            # real-only (see the module docstring).
+            signals.mark_regime_entry_consumed(symbol, 1 if regime == "BULLISH" else -1, entry_candle_start)
 
         logger.warning(
             "%s: SWING PAPER entry - %s entry=%.2f qty=%d side=%s", symbol, trading_symbol, fill_price, quantity, side,
