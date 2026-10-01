@@ -300,14 +300,19 @@ class BollingerPositionStore:
             pos.pending_exit_order_id = EXIT_CLAIMED
             return True
 
-    async def record_exit_failure(self, underlying_symbol: str) -> None:
+    async def record_exit_failure(self, underlying_symbol: str, max_backoff_seconds: int = 300) -> None:
+        """max_backoff_seconds (1 Oct 2026): the exit guard passes
+        STOP_UNCONFIRMED_RETRY_SECONDS when the resting stop could not be
+        confirmed cancelled - nothing was sent, so there is nothing to
+        hammer, and a 300 s wait would leave the bot's exit undone for
+        minutes while the market moves."""
         async with self._lock:
             pos = self.live_positions.get(underlying_symbol)
             if not pos:
                 return
             pos.pending_exit_order_id = None
             pos.exit_failure_count += 1
-            backoff = min(5 * (2 ** pos.exit_failure_count), 300)
+            backoff = min(5 * (2 ** pos.exit_failure_count), 300, max_backoff_seconds)
             pos.next_exit_retry_at = _now_ist() + timedelta(seconds=backoff)
             logger.warning(
                 "%s: exit order placement failed (%d consecutive) - next retry in %ds",

@@ -844,6 +844,17 @@ async def _order_state(order_id: str) -> str:
     return "open"
 
 
+# Exit retry wait when the resting stop could not be confirmed cancelled (1 Oct 2026): 10 s, then every 15 s -
+# was the generic exit backoff (up to 300 s). Nothing was sent to the exchange, the stop still protects the
+# position, and each retry is only a cancel + a status read.
+STOP_UNCONFIRMED_RETRY_SECONDS = 15
+
+# Broker stop orders with a modify request in flight (Super Bollinger's stop ratchet adds/removes them). An exit
+# waits up to MODIFY_SETTLE_WAIT_SECONDS for that request to finish before cancelling: a cancel sent while Dhan is
+# still processing a modification can be refused, which would hold the exit back for a retry (1 Oct 2026).
+orders_being_modified: set[str] = set()
+MODIFY_SETTLE_WAIT_SECONDS = 3.0
+
 # Orders this process already confirmed can no longer fill (cancel accepted, or seen cancelled/rejected/expired/
 # filled). A later exit attempt for the same position (e.g. after a failed market exit) skips straight to the
 # broker-quantity check instead of re-cancelling: re-cancelling a dead order always fails, and if the status read
@@ -859,6 +870,10 @@ async def _cancel_and_confirm(symbol: str, order_id: str) -> bool:
     False = it may still be live (cancel failed twice / status unreadable) - the caller must not sell."""
     if order_id in _orders_confirmed_gone:
         return True
+    waited = 0.0
+    while str(order_id) in orders_being_modified and waited < MODIFY_SETTLE_WAIT_SECONDS:
+        await asyncio.sleep(0.1)
+        waited += 0.1
     loop = asyncio.get_running_loop()
     for attempt in (1, 2):
         try:
@@ -912,8 +927,9 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             # could sell the lot twice (the stop would fire on a flat position = a short). The stop sits at the
             # exit level anyway; back off and try the whole exit again on a later check.
             logger.error("%s: SELL order %s for %s could not be confirmed cancelled - NOT sending a second sell; "
-                         "retrying the exit shortly", symbol, stale_order_id, position.trading_symbol)
-            await store.record_exit_failure(symbol)
+                         "retrying the exit in <= %ds", symbol, stale_order_id, position.trading_symbol,
+                         STOP_UNCONFIRMED_RETRY_SECONDS)
+            await store.record_exit_failure(symbol, max_backoff_seconds=STOP_UNCONFIRMED_RETRY_SECONDS)
             return
 
         try:

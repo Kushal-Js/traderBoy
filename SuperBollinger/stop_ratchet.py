@@ -51,7 +51,7 @@ from typing import Optional
 
 from Bollinger import config as bcfg
 from Bollinger import trading_engine as engine
-from Options.dhan_client import IST, dhan_wrapper
+from Options.dhan_client import IST, OrderStatus, dhan_wrapper
 from Swing.position_store import broker_stop_trigger_and_limit
 
 from . import settings
@@ -61,6 +61,7 @@ logger = logging.getLogger("super_bollinger_stop_ratchet")
 
 STATE_FILE = Path("data/super_bollinger_stop_ratchet.json")
 MAX_FAILURES = 3
+VERIFY_AFTER_SECONDS = 2.0     # read the order back this long after Dhan accepts a move (1 Oct 2026)
 PRICE_BUFFER = 0.05            # the moved trigger stays at least one tick below the live price
 BOT_FIRST_GAP = 0.10           # broker trigger two ticks under the bot's own exit level: normally the bot sells
                                # first (its exit cancels this order, checks the broker quantity, then sells), and
@@ -69,6 +70,7 @@ BOT_FIRST_GAP = 0.10           # broker trigger two ticks under the bot's own ex
 _state: Optional[dict] = None
 _inflight: set[str] = set()
 _last_attempt: dict[str, float] = {}
+_verify_tasks: set = set()
 
 
 def _today() -> str:
@@ -177,9 +179,16 @@ async def _move(kind: str, symbol: str, pos, ltp: float, move: dict) -> None:
             _save()
             await engine._record_bollinger_event("STOP_RATCHET_WOULD_MOVE", symbol, detail, log_name)
             return
-        resp = await asyncio.get_running_loop().run_in_executor(
-            None, dhan_wrapper.modify_stop_loss_limit_order, pos.stop_loss_order_id, pos.trading_symbol,
-            move["qty"], move["trigger"], move["limit"])
+        # The order's own quantity (what it was placed with), not the P&L multiplier - a modify with a
+        # different quantity would resize the stop. An exit that starts meanwhile waits for this request
+        # to finish before cancelling (engine.orders_being_modified).
+        engine.orders_being_modified.add(str(pos.stop_loss_order_id))
+        try:
+            resp = await asyncio.get_running_loop().run_in_executor(
+                None, dhan_wrapper.modify_stop_loss_limit_order, pos.stop_loss_order_id, pos.trading_symbol,
+                int(pos.quantity), move["trigger"], move["limit"])
+        finally:
+            engine.orders_being_modified.discard(str(pos.stop_loss_order_id))
         st[move["key"]] = {"day": _today(), "trigger": resp.get("trigger_price", move["trigger"]),
                            "limit": resp.get("limit_price", move["limit"]), "moved_at": datetime.now(IST).isoformat(),
                            "failures": 0}
@@ -187,6 +196,10 @@ async def _move(kind: str, symbol: str, pos, ltp: float, move: dict) -> None:
         logger.info("[stop ratchet] %s: broker stop %s moved %.2f -> %.2f (locks %+d)", symbol, pos.stop_loss_order_id,
                     move["from_trigger"], move["trigger"], move["locks_rs"])
         await engine._record_bollinger_event("STOP_RATCHET_MOVED", symbol, detail, log_name)
+        task = asyncio.create_task(_verify(symbol, pos.stop_loss_order_id, move["key"],
+                                           resp.get("trigger_price", move["trigger"]), detail, log_name))
+        _verify_tasks.add(task)                      # keep a reference until it finishes
+        task.add_done_callback(_verify_tasks.discard)
     except Exception as exc:  # noqa: BLE001
         row = st.setdefault(move["key"], {"day": _today()})
         row["failures"] = row.get("failures", 0) + 1
@@ -199,6 +212,47 @@ async def _move(kind: str, symbol: str, pos, ltp: float, move: dict) -> None:
             await engine._record_bollinger_event("STOP_RATCHET_GAVE_UP", symbol, detail, log_name)
     finally:
         _inflight.discard(move["key"])
+
+
+async def _verify(symbol: str, order_id: str, key: str, expected_trigger: float, detail: dict, log_name: str) -> None:
+    """Read the order back VERIFY_AFTER_SECONDS after Dhan accepted the move (1 Oct 2026: the modify call had
+    never run against Dhan). Read-only; changes no order.
+      trigger matches, order still open -> STOP_RATCHET_VERIFIED
+      order filled                      -> nothing (the broker-stop-filled check closes the position)
+      order cancelled/rejected/expired  -> STOP_RATCHET_STOP_GONE (ERROR): the position has no broker stop now;
+                                           the bot's own exits still apply
+      trigger not the one sent          -> STOP_RATCHET_NOT_APPLIED: the state goes back to the broker's real
+                                           trigger and it counts as a failure (3 -> the ratchet stops for it)
+      read failed                       -> STOP_RATCHET_VERIFY_FAILED (state unchanged)"""
+    await asyncio.sleep(VERIFY_AFTER_SECONDS)
+    try:
+        got = await asyncio.get_running_loop().run_in_executor(None, dhan_wrapper.get_order_prices, order_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[stop ratchet] %s: could not read broker stop %s back (%r)", symbol, order_id, exc)
+        await engine._record_bollinger_event("STOP_RATCHET_VERIFY_FAILED", symbol,
+                                             {**detail, "error": repr(exc)[:300]}, log_name)
+        return
+    info = {**detail, "broker_status": got["status"], "broker_trigger": got["trigger_price"],
+            "broker_limit": got["limit_price"], "broker_quantity": got["quantity"], "broker_remark": got["remark"]}
+    if got["status"] == OrderStatus.TRADED or str(order_id) in engine._orders_confirmed_gone:
+        return    # filled, or the bot's own exit cancelled it meanwhile - both expected
+    if got["status"] in OrderStatus.TERMINAL_STATUSES:
+        logger.error("[stop ratchet] %s: broker stop %s is %s after the move - the position has NO broker stop "
+                     "now; the bot's own exits still apply", symbol, order_id, got["status"])
+        await engine._record_bollinger_event("STOP_RATCHET_STOP_GONE", symbol, info, log_name)
+        return
+    if abs(got["trigger_price"] - float(expected_trigger)) > 0.001:
+        row = _st().setdefault(key, {"day": _today()})
+        if got["trigger_price"] > 0:
+            row["trigger"], row["limit"] = got["trigger_price"], got["limit_price"]
+        row["failures"] = row.get("failures", 0) + 1
+        _save()
+        logger.warning("[stop ratchet] %s: broker stop %s holds trigger %.2f, not the %.2f sent", symbol, order_id,
+                       got["trigger_price"], float(expected_trigger))
+        await engine._record_bollinger_event("STOP_RATCHET_NOT_APPLIED", symbol, {**info, "failures": row["failures"]},
+                                             log_name)
+        return
+    await engine._record_bollinger_event("STOP_RATCHET_VERIFIED", symbol, info, log_name)
 
 
 def snapshot() -> dict:

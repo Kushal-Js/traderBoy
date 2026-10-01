@@ -1167,6 +1167,9 @@ async def _order_state(order_id: str) -> str:
     return "open"
 
 
+# Exit retry wait when the resting stop could not be confirmed cancelled (1 Oct 2026, same as Bollinger).
+STOP_UNCONFIRMED_RETRY_SECONDS = 15
+
 # Orders this process already confirmed can no longer fill (cancel accepted, or seen cancelled/rejected/expired/
 # filled). A later exit attempt for the same position (e.g. after a failed market exit) skips straight to the
 # broker-quantity check instead of re-cancelling: re-cancelling a dead order always fails, and if the status read
@@ -1239,8 +1242,9 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
             # flat position and open the opposite side). It protects the position meanwhile; back off and try
             # the whole exit again on a later check.
             logger.error("%s: %s order %s for %s could not be confirmed cancelled - NOT sending a second exit "
-                         "order; retrying the exit shortly", symbol, exit_side, stale_order_id, position.trading_symbol)
-            await position_store.record_exit_failure(symbol)
+                         "order; retrying the exit in <= %ds", symbol, exit_side, stale_order_id,
+                         position.trading_symbol, STOP_UNCONFIRMED_RETRY_SECONDS)
+            await position_store.record_exit_failure(symbol, max_backoff_seconds=STOP_UNCONFIRMED_RETRY_SECONDS)
             return
 
         try:

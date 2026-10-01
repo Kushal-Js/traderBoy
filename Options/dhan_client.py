@@ -450,6 +450,8 @@ class DhanWrapper:
             "ltp_quiet_contract_trusted": 0,
             "quote_budget_waits": 0,
             "quote_budget_busy": 0,
+            "ltp_batches": 0,
+            "ltp_batched_requests": 0,
             "order_status_cache_hits": 0,
             "order_status_rest_calls": 0,
             "price_ticks_received": 0,
@@ -486,7 +488,12 @@ class DhanWrapper:
         # here (module-import time, before any event loop runs) - safe in
         # Python 3.10+, where asyncio.Semaphore no longer binds to a loop
         # at construction time.
-        self.ltp_rest_fallback_semaphore = asyncio.Semaphore(2)
+        # 2 -> 12 (1 Oct 2026, live-risk fix): contract LTPs now go out as
+        # ONE batched request per quote-budget slot (_batched_ltp), so more
+        # callers in flight means a bigger batch, not more requests. At 2,
+        # paper and real positions queued here one pair at a time and real
+        # exit checks could time out behind paper ones.
+        self.ltp_rest_fallback_semaphore = asyncio.Semaphore(12)
 
         # Cross-package throttle/backoff for fetch_continuous_intraday
         # (added 24 Sep 2026, see config.MARKET_DATA_MIN_INTERVAL_SECONDS'
@@ -2212,8 +2219,14 @@ class DhanWrapper:
         change to the sync path."""
         loop = asyncio.get_running_loop()
         last_exc: Optional[Exception] = None
+        # Contracts (options/futures) ride the shared batch; names keep the
+        # per-call Tradehull path below. Memoized lookup - the WS cache read
+        # just before this already resolved the same symbol on the loop.
+        target = self._ltp_target(trading_symbol)
         for attempt in range(retries + 1):
             try:
+                if target is not None:
+                    return await self._batched_ltp(trading_symbol, *target)
                 # 1 Oct 2026: wait for this call's turn in the shared ~1/s
                 # quote budget HERE (asyncio.sleep, no worker held), then run
                 # only the HTTP call itself in the executor.
@@ -2235,6 +2248,92 @@ class DhanWrapper:
                     )
                     await asyncio.sleep(delay)
         raise last_exc
+
+    # Coalesced REST LTP (1 Oct 2026, live-risk fix). Dhan's /marketfeed/ltp
+    # takes many instruments per request (up to 1,000), so every contract LTP
+    # asked for while a request waits for its quote-budget slot rides on that
+    # ONE request. Before this, each position took its own ~1.1 s slot: with
+    # several stale contracts at once (paper and real alike) the queue passed
+    # QUOTE_MAX_WAIT_SECONDS and real exit checks came back with no price.
+    # Now the queue holds at most one LTP request at a time.
+    LTP_BATCH_MAX = 500
+
+    async def _batched_ltp(self, trading_symbol: str, segment: str, sid: str) -> float:
+        """One contract's LTP from the next batched /marketfeed/ltp request.
+        Raises ValueError (same message shape as _get_option_ltp_once) when
+        Dhan returns no price for it or the request fails."""
+        loop = asyncio.get_running_loop()
+        if self.__dict__.get("_ltp_batch_loop") is not loop:
+            # First use on this event loop (tests run several loops in turn).
+            self._ltp_batch_loop, self._ltp_batch, self._ltp_batch_task = loop, {}, None
+        fut = loop.create_future()
+        self._ltp_batch.setdefault((segment, sid), []).append((trading_symbol, fut))
+        if self._ltp_batch_task is None or self._ltp_batch_task.done():
+            self._ltp_batch_task = loop.create_task(self._ltp_batch_flusher(self._ltp_batch))
+        return await fut
+
+    async def _ltp_batch_flusher(self, batch: dict) -> None:
+        """Sends the waiting LTP requests, one batched call per quote-budget
+        slot, until none are left. Requests arriving while it waits for a
+        slot join that call. Never leaves a waiter hanging: on any error
+        every request it took (and anything still queued) gets the error."""
+        loop = asyncio.get_running_loop()
+        taken: dict = {}
+        try:
+            while batch:
+                wait = self._reserve_quote_slot()
+                if wait and wait > 0:
+                    await asyncio.sleep(wait)
+                taken = {}
+                for key in list(batch)[: self.LTP_BATCH_MAX]:
+                    live = [(s, f) for s, f in batch.pop(key) if not f.done()]   # done = caller gave up
+                    if live:
+                        taken[key] = live
+                if not taken:
+                    continue
+                payload: dict = {}
+                for segment, sid in taken:
+                    payload.setdefault(segment, []).append(int(sid))
+                stats = getattr(self, "stats", None)
+                if stats is not None:
+                    stats["ltp_batches"] = stats.get("ltp_batches", 0) + 1
+                    stats["ltp_batched_requests"] = (stats.get("ltp_batched_requests", 0)
+                                                     + sum(len(v) for v in taken.values()))
+                error = None
+                try:
+                    resp = await loop.run_in_executor(None, self.client.Dhan.ticker_data, payload)
+                except Exception as exc:  # noqa: BLE001
+                    resp, error = None, exc
+                data = {}
+                if isinstance(resp, dict) and resp.get("status") == "success":
+                    data = (resp.get("data") or {}).get("data") or {}
+                elif error is None:
+                    error = resp.get("remarks") if isinstance(resp, dict) else resp
+                for (segment, sid), waiters in taken.items():
+                    row = (data.get(segment) or {}).get(sid) or (data.get(segment) or {}).get(int(sid))
+                    try:
+                        ltp = float((row or {}).get("last_price") or 0)
+                    except (TypeError, ValueError, AttributeError):
+                        ltp = 0.0
+                    for symbol, fut in waiters:
+                        if fut.done():
+                            continue
+                        if ltp > 0:
+                            fut.set_result(ltp)
+                        else:
+                            fut.set_exception(ValueError(f"No LTP returned for {symbol} ({segment} {sid}): "
+                                                         f"{error if error is not None else 'not in the batched reply'}"))
+                taken = {}
+        except BaseException as exc:  # noqa: BLE001 - incl. cancellation: waiters must never hang
+            failure = ValueError(f"LTP batch failed: {exc!r}")
+            pending = [w for v in taken.values() for w in v] + [w for v in batch.values() for w in v]
+            batch.clear()
+            for _symbol, fut in pending:
+                if not fut.done():
+                    fut.set_exception(failure)
+            if not isinstance(exc, Exception):
+                raise
+            logger.exception("LTP batch failed - every waiting request got the error")
 
     def get_margin_required(
         self, security_id: str, exchange_segment: str, transaction_type: str,
@@ -4190,6 +4289,20 @@ class DhanWrapper:
         if not isinstance(resp, dict) or resp.get("status") != "success":
             raise RuntimeError(f"modify_order({order_id}) failed: {resp!r}"[:400])
         return {"order_id": str(order_id), "trigger_price": trigger_price, "limit_price": limit_price}
+
+    def get_order_prices(self, order_id: str) -> dict:
+        """Read-only: one order's status, trigger and limit price as Dhan's
+        order book holds them now (1 Oct 2026, read back after a ratchet
+        move - Dhan accepting the modify request does not prove the
+        exchange took it). Raises if Dhan does not answer."""
+        resp = self.client.Dhan.get_order_by_id(str(order_id))
+        if not isinstance(resp, dict) or resp.get("status") != "success":
+            raise RuntimeError(f"get_order_by_id({order_id}) failed: {resp!r}"[:300])
+        data = resp.get("data")
+        order = data[0] if isinstance(data, list) and data else (data or {})
+        return {"status": order.get("orderStatus", ""), "trigger_price": float(order.get("triggerPrice") or 0),
+                "limit_price": float(order.get("price") or 0), "quantity": int(order.get("quantity") or 0),
+                "remark": str(order.get("omsErrorDescription") or "")}
 
     def check_if_order_filled(self, order_id: str) -> Optional[OrderResult]:
         """Cheap, non-blocking check for whether `order_id` has ALREADY
