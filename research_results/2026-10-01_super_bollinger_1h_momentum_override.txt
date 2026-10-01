@@ -1,0 +1,15 @@
+# research_super_bollinger_1h_momentum_override.py - run 1 Oct 2026 ~10:30 IST (cache-only, in-sample, HYBRID walk-forward 3 Aug - 29 Sep, 5 slots)
+rule                                                   trades refused | calls only | calls + live hedge | overridden trades: n, won, PnL
+no filter                                               193    0 |   +63,495 (Aug  +17,117 Sep  +46,378) dd  -45,752 worst  -13,368 |   +79,205 (Aug  +18,901 Sep  +60,304) dd  -44,260 worst  -11,649 | 0 let through, 0 traded, 0 won, +0
+live: last 60-min candle green                          163   42 |   +94,945 (Aug  +41,287 Sep  +53,658) dd  -22,773 worst  -12,597 |   +95,242 (Aug  +37,190 Sep  +58,052) dd  -23,483 worst  -10,878 | 0 let through, 0 traded, 0 won, +0
+green OR stock up >= 1.0% on the day and above day ope  170   32 |   +93,519 (Aug  +31,552 Sep  +61,968) dd  -29,599 worst  -12,597 |   +96,079 (Aug  +29,718 Sep  +66,362) dd  -30,289 worst  -11,792 | 8 let through, 8 traded, 2 won, -6,610
+green OR stock up >= 1.5% on the day and above day ope  167   36 |   +95,403 (Aug  +33,285 Sep  +62,118) dd  -29,853 worst  -12,597 |   +96,718 (Aug  +30,205 Sep  +66,512) dd  -30,271 worst  -11,792 | 4 let through, 4 traded, 1 won, +458
+green OR volume surge: last 5m bar green, vol >= 2x 20  163   41 |   +95,200 (Aug  +41,541 Sep  +53,658) dd  -22,519 worst  -12,597 |   +96,088 (Aug  +38,036 Sep  +58,052) dd  -22,636 worst  -10,878 | 1 let through, 1 traded, 0 won, -4,929
+green OR trend: ADX(5m) >= 25 and 15m Supertrend up     172   30 |   +81,941 (Aug  +36,048 Sep  +45,893) dd  -28,674 worst  -12,597 |   +84,019 (Aug  +33,926 Sep  +50,093) dd  -29,235 worst  -10,878 | 11 let through, 11 traded, 1 won, -10,935
+green OR efficiency ratio(10) >= 0.6 (clean one-way mo  167   37 |   +86,470 (Aug  +41,090 Sep  +45,380) dd  -22,773 worst  -12,597 |   +89,375 (Aug  +36,994 Sep  +52,381) dd  -23,483 worst  -10,878 | 5 let through, 5 traded, 0 won, -8,759
+green OR forming hour up >= 0.5%                        172   30 |   +83,491 (Aug  +31,715 Sep  +51,777) dd  -29,853 worst  -12,597 |   +93,100 (Aug  +28,768 Sep  +64,332) dd  -31,239 worst  -11,792 | 10 let through, 10 traded, 1 won, -11,737
+green OR day breakout: above yesterday's high and 30-m  164   41 |   +90,116 (Aug  +36,458 Sep  +53,658) dd  -27,602 worst  -12,597 |   +91,231 (Aug  +33,178 Sep  +58,052) dd  -27,494 worst  -11,792 | 1 let through, 1 traded, 0 won, -4,829
+green OR strict: up >= 1% AND vol surge AND 15m ST up   163   42 |   +94,945 (Aug  +41,287 Sep  +53,658) dd  -22,773 worst  -12,597 |   +95,242 (Aug  +37,190 Sep  +58,052) dd  -23,483 worst  -10,878 | 0 let through, 0 traded, 0 won, +0
+green OR strict: ADX >= 25 AND ER10 >= 0.5 AND above d  168   37 |   +83,303 (Aug  +33,285 Sep  +50,018) dd  -29,853 worst  -12,597 |   +85,784 (Aug  +30,205 Sep  +55,578) dd  -30,271 worst  -11,792 | 5 let through, 5 traded, 0 won, -11,642
+
+Dhan calls made: 19 (cache-only: refused lookups, not network calls)
