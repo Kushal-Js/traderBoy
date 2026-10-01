@@ -625,6 +625,15 @@ async def _passes_entry_filters(symbol: str, trigger_price: float, source: str) 
     logger.info("[%s] %s: BULLISH trigger %.2f (%s) skipped - last 1-hour candle is red (%s -> %s)", STRATEGY, symbol,
                 trigger_price, source, detail.get("candle_open"), detail.get("candle_close"))
     await _event("ENTRY_SKIPPED_1H_RED", symbol, {"trigger_price": trigger_price, "entry_source": source, **detail})
+    if settings.get("entry_filter_1h_bypass") == "shadow":
+        threshold = settings.get("entry_filter_1h_bypass_day_up_pct")
+        if entry_filters.bypass_would_take(detail, threshold):
+            # LOG ONLY (1 Oct 2026): the momentum bypass would have taken this entry.
+            logger.info("[%s] %s: 1-hour bypass WOULD ENTER (shadow, not traded) - stock up %.2f%% on the day >= %.2f%%",
+                        STRATEGY, symbol, detail.get("day_up_pct"), threshold)
+            await _event("ENTRY_FILTER_1H_BYPASS_WOULD_ENTER", symbol, {
+                "trigger_price": trigger_price, "entry_source": source, "rule_day_up_pct": threshold,
+                "paper_symbol": is_paper_symbol(symbol), **detail})
     return False
 
 

@@ -20,6 +20,16 @@ session's last one - exactly what the backtest did.
 
 settings.entry_filter_1h: off | shadow (log what would be skipped) | on.
 A missing series never blocks an entry (the filter fails open and says so).
+
+MOMENTUM READINGS + BYPASS SHADOW (1 Oct 2026, user: "let the one hour rule
+get bypassed when there is very strong momentum"): every refused entry now
+also carries momentum readings (momentum_readings) in its event, so a bypass
+can be judged later on live data. Backtests on 9 stock lists
+(research_super_bollinger_1h_override_lists.py) found most momentum bypasses
+let through losers; the only near-neutral one was "stock up >=
+entry_filter_1h_bypass_day_up_pct (1.5%) on the day and above its open"
+(bypass_would_take). With settings.entry_filter_1h_bypass = shadow it is
+logged as ENTRY_FILTER_1H_BYPASS_WOULD_ENTER - nothing is traded.
 """
 from __future__ import annotations
 
@@ -72,8 +82,60 @@ def last_closed_candle(timestamps, opens, closes, now: datetime, minutes: int = 
     return {"start": best[1], "open": best[2], "close": best[3]}
 
 
+def momentum_readings(timestamps, opens, closes, volumes, now: datetime, minutes: int = 60,
+                      bar_minutes: int = 5) -> dict:
+    """Momentum at `now` from CLOSED 5-minute bars (bar START epochs), the same
+    readings the 1 Oct bypass backtests used. Pure; {} when there is no
+    closed bar today or no previous session.
+      spot                 last closed bar's close
+      day_up_pct           spot vs the previous session's last close, in %
+      above_day_open       spot above today's first bar open
+      forming_hour_up_pct  spot vs the open of the current 09:15-anchored
+                           `minutes` bucket (when it started today), in %
+      vol_ratio            last closed bar's volume / average of the 20 before
+      bar_green            last closed bar closed above its open"""
+    k = None
+    for i in range(len(timestamps) - 1, -1, -1):
+        if datetime.fromtimestamp(timestamps[i], IST) + timedelta(minutes=bar_minutes) <= now:
+            k = i
+            break
+    if k is None:
+        return {}
+    day = datetime.fromtimestamp(timestamps[k], IST).date()
+    if day != now.date():
+        return {}
+    first_today = k
+    while first_today > 0 and datetime.fromtimestamp(timestamps[first_today - 1], IST).date() == day:
+        first_today -= 1
+    if first_today == 0:
+        return {}
+    spot, prev_close = closes[k], closes[first_today - 1]
+    out = {"spot": spot, "day_up_pct": round((spot / prev_close - 1) * 100, 3) if prev_close else None,
+           "above_day_open": spot > opens[first_today], "bar_green": closes[k] > opens[k]}
+    bucket = (now.hour * 60 + now.minute - SESSION_START_MINUTE) // minutes
+    for i in range(first_today, k + 1):
+        dt = datetime.fromtimestamp(timestamps[i], IST)
+        if (dt.hour * 60 + dt.minute - SESSION_START_MINUTE) // minutes == bucket:
+            out["forming_hour_up_pct"] = round((spot / opens[i] - 1) * 100, 3) if opens[i] else None
+            break
+    vols = list(volumes or [])
+    if len(vols) == len(closes) and k >= 1:
+        prior = vols[max(0, k - 20):k]
+        avg = sum(prior) / len(prior) if prior else 0
+        out["vol_ratio"] = round(vols[k] / avg, 2) if avg else None
+    return out
+
+
+def bypass_would_take(detail: dict, day_up_pct_min: float) -> bool:
+    """The only bypass the 1 Oct backtests did not reject: stock up >=
+    day_up_pct_min % on the day and above its day open."""
+    up = detail.get("day_up_pct")
+    return up is not None and up >= day_up_pct_min and bool(detail.get("above_day_open"))
+
+
 async def last_hour_green(symbol: str) -> tuple[Optional[bool], dict]:
-    """(True/False, detail) - None when the series is not available."""
+    """(True/False, detail) - None when the series is not available. A red
+    result's detail also carries momentum_readings (for the bypass shadow)."""
     minutes = settings.get("entry_filter_1h_minutes")
 
     def work():
@@ -94,5 +156,13 @@ async def last_hour_green(symbol: str) -> tuple[Optional[bool], dict]:
     newest = datetime.fromtimestamp(data["timestamp"][-1], IST)
     if engine._now_ist() - newest > timedelta(days=5):
         return None, {"reason": "stale_series", "newest_bar": newest.isoformat()}
-    return candle["close"] > candle["open"], {"candle_start": candle["start"].isoformat(), "candle_open": candle["open"],
-                                              "candle_close": candle["close"], "minutes": minutes}
+    green = candle["close"] > candle["open"]
+    detail = {"candle_start": candle["start"].isoformat(), "candle_open": candle["open"],
+              "candle_close": candle["close"], "minutes": minutes}
+    if not green:
+        try:
+            detail.update(momentum_readings(data["timestamp"], data["open"], data["close"], data.get("volume"),
+                                            engine._now_ist(), minutes))
+        except Exception:  # noqa: BLE001 - readings are informational, never block the filter
+            logger.exception("%s: could not compute momentum readings", symbol)
+    return green, detail

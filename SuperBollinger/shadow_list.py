@@ -149,9 +149,11 @@ async def _entries() -> None:
         if not entry:
             continue
         trigger_price, stop_price = entry[1], entry[2]
-        if settings.get("entry_filter_1h") == "on":
-            green, detail = await entry_filters.last_hour_green(symbol)
-            if green is False:
+        apply_1h = _shadow_applies_1h_filter()
+        h1_green = None
+        if apply_1h or settings.get("entry_filter_1h") != "off":
+            h1_green, detail = await entry_filters.last_hour_green(symbol)
+            if apply_1h and h1_green is False:
                 await _event("SHADOW_ENTRY_SKIPPED_1H_RED", symbol, {"trigger_price": trigger_price, **detail})
                 continue
         try:
@@ -178,7 +180,17 @@ async def _entries() -> None:
             logger.exception("[%s] %s: could not WS-subscribe %s", SHADOW_STRATEGY, symbol, leg["trading_symbol"])
         await _event("SHADOW_PAPER_OPENED", symbol, {"trading_symbol": leg["trading_symbol"], "entry_price": price,
                                                      "quantity": leg["quantity"], "trigger_price": trigger_price,
-                                                     "stop_price": stop_price, "list_as_of": as_of})
+                                                     "stop_price": stop_price, "list_as_of": as_of,
+                                                     "entry_filter_1h_applied": apply_1h, "h1_green": h1_green})
+
+
+def _shadow_applies_1h_filter() -> bool:
+    """shadow_list_entry_filter_1h: follow (= the live entry_filter_1h being
+    "on"), on, or off (1 Oct 2026 - run the shadow list unfiltered on paper)."""
+    mode = settings.get("shadow_list_entry_filter_1h")
+    if mode == "follow":
+        return settings.get("entry_filter_1h") == "on"
+    return mode == "on"
 
 
 def load() -> list:

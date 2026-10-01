@@ -83,6 +83,20 @@ def _parse_scale_mode(v) -> str:
     return v
 
 
+def _parse_bypass_mode(v) -> str:
+    v = str(v).strip().lower()
+    if v not in ("off", "shadow"):
+        raise ValueError("must be off or shadow (a trading bypass is not built - the 1 Oct backtests did not support one)")
+    return v
+
+
+def _parse_follow_mode(v) -> str:
+    v = str(v).strip().lower()
+    if v not in ("follow", "on", "off"):
+        raise ValueError("must be follow, on or off")
+    return v
+
+
 def _parse_filter_mode_ratchet(v) -> str:
     v = str(v).strip().lower()
     if v not in ("off", "shadow", "on"):
@@ -174,6 +188,18 @@ _FIELDS = {
     "entry_filter_1h": (_parse_filter_mode, "SUPER_BOLLINGER_ENTRY_FILTER_1H", "off", None),
     "entry_filter_1h_minutes": (int, "SUPER_BOLLINGER_ENTRY_FILTER_1H_MINUTES", "60",
                                 lambda v: None if 15 <= v <= 120 and v % 5 == 0 else "must be 15-120 in steps of 5"),
+    # Momentum bypass of the 1-hour filter (1 Oct 2026) - LOG ONLY. off | shadow:
+    # a refused entry whose stock is up >= entry_filter_1h_bypass_day_up_pct on
+    # the day and above its open is logged as ENTRY_FILTER_1H_BYPASS_WOULD_ENTER
+    # (never traded). Refused entries carry momentum readings either way.
+    "entry_filter_1h_bypass": (_parse_bypass_mode, "SUPER_BOLLINGER_ENTRY_FILTER_1H_BYPASS", "off", None),
+    "entry_filter_1h_bypass_day_up_pct": (float, "SUPER_BOLLINGER_ENTRY_FILTER_1H_BYPASS_DAY_UP_PCT", "1.5",
+                                          lambda v: None if 0 < v <= 10 else "must be > 0 and <= 10"),
+    # The shadow-list PAPER runner's own 1-hour filter (1 Oct 2026): follow
+    # (= entry_filter_1h), on, or off. With off it still records what the filter
+    # would have said (h1_green on SHADOW_PAPER_OPENED), so the same list can be
+    # compared filtered vs unfiltered (the backtest favoured unfiltered there).
+    "shadow_list_entry_filter_1h": (_parse_follow_mode, "SUPER_BOLLINGER_SHADOW_LIST_ENTRY_FILTER_1H", "follow", None),
     # ---- Unfilled orders: re-price and retry (30 Sep 2026, user request) ----
     # Dhan turns an option MARKET order into a limit near the last price, so on
     # a thin contract it can sit unfilled (SONACOMS 830 CE, 30 Sep). When the
