@@ -1,0 +1,85 @@
+# research_super_bollinger_1h_override_lists.py - run 1 Oct 2026 ~10:45-11:00 IST (cache-only; 3 Aug - 29 Sep walk-forward, 5 slots; Dhan 'calls' = refused cache lookups, no network)
+SHADOW vs HYBRID overlap per decision date: 07-31 8/15, 08-07 9/15, 08-14 11/15, 08-21 9/15, 08-28 9/15, 09-04 9/15, 09-11 9/15, 09-18 9/15, 09-25 11/15 
+
+== SHADOW (HYBRID_F40) (40 distinct stocks over the window)
+  no filter                     193 tr, refused   0, no-opt  27 | calls   +88,911 (Aug   -5,526 Sep  +94,437) dd  -42,092 worst  -10,405 | +hedge   +98,545 (Aug   -3,098 Sep +101,643) dd  -41,524 worst  -10,385
+  1h green (live)               166 tr, refused  46, no-opt  23 | calls   +56,515 (Aug   +9,069 Sep  +47,446) dd  -32,055 worst  -12,585 | +hedge   +55,451 (Aug   +6,979 Sep  +48,472) dd  -31,917 worst  -12,767
+  OR day up >= 1.0%             173 tr, refused  36, no-opt  25 | calls   +60,255 (Aug   +2,055 Sep  +58,200) dd  -36,884 worst  -12,585 | +hedge   +60,663 (Aug   +1,437 Sep  +59,226) dd  -36,309 worst  -12,767 | bypass: 7 traded, 3 won, +3,740
+  OR day up >= 1.5%             170 tr, refused  40, no-opt  24 | calls   +59,705 (Aug   +4,043 Sep  +55,661) dd  -36,884 worst  -12,585 | +hedge   +59,458 (Aug   +2,771 Sep  +56,687) dd  -35,928 worst  -12,767 | bypass: 4 traded, 1 won, +3,190
+  OR volume surge               166 tr, refused  46, no-opt  23 | calls   +56,515 (Aug   +9,069 Sep  +47,446) dd  -32,055 worst  -12,585 | +hedge   +55,451 (Aug   +6,979 Sep  +48,472) dd  -31,917 worst  -12,767 | bypass: 0 traded, 0 won, +0
+  OR ADX>=25 + 15m ST up        173 tr, refused  37, no-opt  25 | calls   +44,285 (Aug     +201 Sep  +44,084) dd  -39,385 worst  -12,585 | +hedge   +46,305 (Aug     -246 Sep  +46,551) dd  -37,993 worst  -12,767 | bypass: 7 traded, 1 won, -12,229
+  OR forming hour up >= 0.5%    172 tr, refused  34, no-opt  25 | calls   +58,414 (Aug   +6,888 Sep  +51,525) dd  -36,884 worst  -12,585 | +hedge   +60,360 (Aug   +5,616 Sep  +54,744) dd  -35,928 worst  -12,767 | bypass: 9 traded, 1 won, -1,490
+
+== HYBRID (live) (47 distinct stocks over the window)
+  no filter                     193 tr, refused   0, no-opt   1 | calls   +63,495 (Aug  +17,117 Sep  +46,378) dd  -45,752 worst  -13,368 | +hedge   +79,205 (Aug  +18,901 Sep  +60,304) dd  -44,260 worst  -11,649
+  1h green (live)               163 tr, refused  42, no-opt   0 | calls   +94,945 (Aug  +41,287 Sep  +53,658) dd  -22,773 worst  -12,597 | +hedge   +95,242 (Aug  +37,190 Sep  +58,052) dd  -23,483 worst  -10,878
+  OR day up >= 1.0%             170 tr, refused  32, no-opt   0 | calls   +93,519 (Aug  +31,552 Sep  +61,968) dd  -29,599 worst  -12,597 | +hedge   +96,079 (Aug  +29,718 Sep  +66,362) dd  -30,289 worst  -11,792 | bypass: 8 traded, 2 won, -6,610
+  OR day up >= 1.5%             167 tr, refused  36, no-opt   0 | calls   +95,403 (Aug  +33,285 Sep  +62,118) dd  -29,853 worst  -12,597 | +hedge   +96,718 (Aug  +30,205 Sep  +66,512) dd  -30,271 worst  -11,792 | bypass: 4 traded, 1 won, +458
+  OR volume surge               163 tr, refused  41, no-opt   0 | calls   +95,200 (Aug  +41,541 Sep  +53,658) dd  -22,519 worst  -12,597 | +hedge   +96,088 (Aug  +38,036 Sep  +58,052) dd  -22,636 worst  -10,878 | bypass: 1 traded, 0 won, -4,929
+  OR ADX>=25 + 15m ST up        172 tr, refused  30, no-opt   0 | calls   +81,941 (Aug  +36,048 Sep  +45,893) dd  -28,674 worst  -12,597 | +hedge   +84,019 (Aug  +33,926 Sep  +50,093) dd  -29,235 worst  -10,878 | bypass: 11 traded, 1 won, -10,935
+  OR forming hour up >= 0.5%    172 tr, refused  30, no-opt   0 | calls   +83,491 (Aug  +31,715 Sep  +51,777) dd  -29,853 worst  -12,597 | +hedge   +93,100 (Aug  +28,768 Sep  +64,332) dd  -31,239 worst  -11,792 | bypass: 10 traded, 1 won, -11,737
+
+== HYBRID_TOP20 (56 distinct stocks over the window)
+  no filter                     238 tr, refused   0, no-opt   0 | calls   +77,509 (Aug  +11,942 Sep  +65,567) dd  -46,806 worst  -13,690 | +hedge   +91,966 (Aug  +13,071 Sep  +78,894) dd  -46,033 worst  -13,478
+  1h green (live)               205 tr, refused  58, no-opt   2 | calls   +77,154 (Aug  +34,685 Sep  +42,469) dd  -29,115 worst  -12,919 | +hedge   +77,452 (Aug  +30,588 Sep  +46,864) dd  -26,286 worst  -11,754
+  OR day up >= 1.0%             213 tr, refused  47, no-opt   2 | calls   +72,663 (Aug  +22,129 Sep  +50,534) dd  -30,237 worst  -12,919 | +hedge   +74,569 (Aug  +19,641 Sep  +54,928) dd  -29,351 worst  -12,222 | bypass: 9 traded, 2 won, -9,675
+  OR day up >= 1.5%             210 tr, refused  51, no-opt   2 | calls   +77,368 (Aug  +26,683 Sep  +50,684) dd  -29,115 worst  -12,919 | +hedge   +78,682 (Aug  +23,603 Sep  +55,079) dd  -30,197 worst  -12,222 | bypass: 5 traded, 1 won, +213
+  OR volume surge               205 tr, refused  57, no-opt   2 | calls   +77,409 (Aug  +34,939 Sep  +42,469) dd  -29,115 worst  -12,919 | +hedge   +78,298 (Aug  +31,434 Sep  +46,864) dd  -26,286 worst  -11,754 | bypass: 1 traded, 0 won, -4,929
+  OR ADX>=25 + 15m ST up        217 tr, refused  43, no-opt   2 | calls   +57,756 (Aug  +23,297 Sep  +34,459) dd  -29,334 worst  -12,919 | +hedge   +59,835 (Aug  +21,175 Sep  +38,660) dd  -30,971 worst  -11,754 | bypass: 14 traded, 1 won, -17,329
+  OR forming hour up >= 0.5%    216 tr, refused  42, no-opt   1 | calls   +62,441 (Aug  +21,104 Sep  +41,337) dd  -30,592 worst  -12,919 | +hedge   +72,050 (Aug  +18,157 Sep  +53,893) dd  -30,835 worst  -12,222 | bypass: 13 traded, 1 won, -16,894
+
+== TREND_ATH_GATE (old ATH list) (47 distinct stocks over the window)
+  no filter                     179 tr, refused   0, no-opt   3 | calls   -30,347 (Aug   -2,511 Sep  -27,836) dd  -43,237 worst  -10,141 | +hedge   -22,307 (Aug   -1,121 Sep  -21,186) dd  -41,945 worst  -11,801
+  1h green (live)               154 tr, refused  35, no-opt   3 | calls   -19,329 (Aug   +5,258 Sep  -24,587) dd  -30,699 worst   -9,963 | +hedge   -17,787 (Aug   +2,880 Sep  -20,667) dd  -32,079 worst  -11,622
+  OR day up >= 1.0%             160 tr, refused  27, no-opt   4 | calls    -4,128 (Aug   +9,818 Sep  -13,946) dd  -26,139 worst   -9,963 | +hedge    -2,586 (Aug   +7,440 Sep  -10,026) dd  -27,519 worst  -11,622 | bypass: 6 traded, 4 won, +15,201
+  OR day up >= 1.5%             156 tr, refused  32, no-opt   3 | calls   -11,251 (Aug   +5,258 Sep  -16,508) dd  -30,699 worst   -9,963 | +hedge    -9,708 (Aug   +2,880 Sep  -12,588) dd  -32,079 worst  -11,622 | bypass: 2 traded, 1 won, +8,079
+  OR volume surge               154 tr, refused  35, no-opt   3 | calls   -19,329 (Aug   +5,258 Sep  -24,587) dd  -30,699 worst   -9,963 | +hedge   -17,787 (Aug   +2,880 Sep  -20,667) dd  -32,079 worst  -11,622 | bypass: 0 traded, 0 won, +0
+  OR ADX>=25 + 15m ST up        158 tr, refused  27, no-opt   4 | calls   -20,469 (Aug   +5,762 Sep  -26,231) dd  -33,201 worst   -9,963 | +hedge   -18,101 (Aug   +4,209 Sep  -22,310) dd  -33,756 worst  -11,622 | bypass: 6 traded, 1 won, +4,551
+  OR forming hour up >= 0.5%    157 tr, refused  30, no-opt   4 | calls   -14,509 (Aug   +5,258 Sep  -19,767) dd  -30,699 worst   -9,963 | +hedge   -11,801 (Aug   +2,880 Sep  -14,681) dd  -32,079 worst  -11,622 | bypass: 3 traded, 1 won, +4,820
+
+== STRATEGY_FIT (51 distinct stocks over the window)
+  no filter                     184 tr, refused   0, no-opt   2 | calls   +41,790 (Aug  +17,964 Sep  +23,827) dd  -47,604 worst  -18,126 | +hedge   +39,240 (Aug  +19,593 Sep  +19,647) dd  -44,083 worst  -18,126
+  1h green (live)               151 tr, refused  51, no-opt   1 | calls   +26,234 (Aug  +13,793 Sep  +12,441) dd  -47,180 worst  -18,126 | +hedge   +17,824 (Aug  +12,002 Sep   +5,822) dd  -47,081 worst  -18,126
+  OR day up >= 1.0%             159 tr, refused  36, no-opt   1 | calls   +35,253 (Aug  +10,851 Sep  +24,402) dd  -49,812 worst  -18,126 | +hedge   +28,314 (Aug  +10,531 Sep  +17,783) dd  -48,242 worst  -18,126 | bypass: 12 traded, 5 won, +4,916
+  OR day up >= 1.5%             153 tr, refused  46, no-opt   1 | calls   +34,075 (Aug  +13,287 Sep  +20,788) dd  -47,686 worst  -18,126 | +hedge   +26,482 (Aug  +12,312 Sep  +14,169) dd  -46,770 worst  -18,126 | bypass: 3 traded, 2 won, +7,954
+  OR volume surge               152 tr, refused  50, no-opt   1 | calls   +26,077 (Aug  +13,636 Sep  +12,441) dd  -47,337 worst  -18,126 | +hedge   +17,667 (Aug  +11,845 Sep   +5,822) dd  -47,237 worst  -18,126 | bypass: 1 traded, 0 won, -157
+  OR ADX>=25 + 15m ST up        161 tr, refused  35, no-opt   1 | calls   +31,808 (Aug  +19,046 Sep  +12,762) dd  -45,082 worst  -18,126 | +hedge   +21,730 (Aug  +18,896 Sep   +2,834) dd  -43,340 worst  -18,126 | bypass: 14 traded, 5 won, +7,277
+  OR forming hour up >= 0.5%    160 tr, refused  35, no-opt   2 | calls   +29,095 (Aug   +8,282 Sep  +20,813) dd  -52,324 worst  -18,126 | +hedge   +23,695 (Aug   +7,308 Sep  +16,387) dd  -51,408 worst  -18,126 | bypass: 13 traded, 3 won, -1,379
+
+== MOMENTUM (58 distinct stocks over the window)
+  no filter                     199 tr, refused   0, no-opt   1 | calls   -67,913 (Aug  -18,432 Sep  -49,481) dd  -77,132 worst  -17,143 | +hedge   -63,750 (Aug  -21,201 Sep  -42,548) dd  -76,769 worst  -16,831
+  1h green (live)               169 tr, refused  45, no-opt   0 | calls   -25,423 (Aug  +13,686 Sep  -39,109) dd  -42,950 worst  -15,280 | +hedge   -29,589 (Aug   +8,312 Sep  -37,901) dd  -43,190 worst  -15,280
+  OR day up >= 1.0%             177 tr, refused  34, no-opt   0 | calls   -25,301 (Aug   +5,880 Sep  -31,181) dd  -43,482 worst  -15,280 | +hedge   -28,813 (Aug   +1,161 Sep  -29,973) dd  -43,722 worst  -15,280 | bypass: 9 traded, 3 won, -151
+  OR day up >= 1.5%             171 tr, refused  42, no-opt   0 | calls   -17,345 (Aug  +13,686 Sep  -31,031) dd  -43,331 worst  -15,280 | +hedge   -21,510 (Aug   +8,312 Sep  -29,823) dd  -43,571 worst  -15,280 | bypass: 2 traded, 1 won, +8,079
+  OR volume surge               169 tr, refused  45, no-opt   0 | calls   -25,423 (Aug  +13,686 Sep  -39,109) dd  -42,950 worst  -15,280 | +hedge   -29,589 (Aug   +8,312 Sep  -37,901) dd  -43,190 worst  -15,280 | bypass: 0 traded, 0 won, +0
+  OR ADX>=25 + 15m ST up        177 tr, refused  33, no-opt   0 | calls   -46,865 (Aug   +3,747 Sep  -50,612) dd  -56,085 worst  -15,280 | +hedge   -48,596 (Aug     -802 Sep  -47,794) dd  -61,616 worst  -15,280 | bypass: 10 traded, 1 won, -20,599
+  OR forming hour up >= 0.5%    179 tr, refused  29, no-opt   0 | calls   -32,711 (Aug   +2,277 Sep  -34,988) dd  -42,329 worst  -15,280 | +hedge   -34,684 (Aug   -3,097 Sep  -31,587) dd  -47,703 worst  -15,280 | bypass: 14 traded, 5 won, +6,175
+
+== RANDOM_1 (99 distinct stocks over the window)
+  no filter                     168 tr, refused   0, no-opt   1 | calls   -78,380 (Aug  -43,599 Sep  -34,781) dd  -81,758 worst  -18,215 | +hedge   -79,853 (Aug  -42,823 Sep  -37,030) dd  -83,231 worst  -16,734
+  1h green (live)               140 tr, refused  44, no-opt   2 | calls   -29,146 (Aug  -15,354 Sep  -13,792) dd  -35,165 worst  -14,955 | +hedge   -28,121 (Aug  -14,071 Sep  -14,050) dd  -34,139 worst  -13,474
+  OR day up >= 1.0%             144 tr, refused  38, no-opt   2 | calls   -46,557 (Aug  -32,514 Sep  -14,042) dd  -52,575 worst  -14,955 | +hedge   -44,940 (Aug  -30,640 Sep  -14,300) dd  -50,958 worst  -13,474 | bypass: 6 traded, 0 won, -12,322
+  OR day up >= 1.5%             142 tr, refused  42, no-opt   2 | calls   -30,508 (Aug  -16,465 Sep  -14,042) dd  -36,526 worst  -14,955 | +hedge   -29,482 (Aug  -15,182 Sep  -14,300) dd  -35,501 worst  -13,474 | bypass: 2 traded, 0 won, -1,361
+  OR volume surge               141 tr, refused  42, no-opt   2 | calls   -28,306 (Aug  -14,514 Sep  -13,792) dd  -34,325 worst  -14,955 | +hedge   -26,690 (Aug  -12,639 Sep  -14,050) dd  -32,708 worst  -13,474 | bypass: 2 traded, 1 won, -4,344
+  OR ADX>=25 + 15m ST up        148 tr, refused  30, no-opt   2 | calls   -52,936 (Aug  -30,736 Sep  -22,200) dd  -58,954 worst  -18,215 | +hedge   -51,911 (Aug  -29,453 Sep  -22,458) dd  -57,929 worst  -16,734 | bypass: 11 traded, 3 won, -7,815
+  OR forming hour up >= 0.5%    148 tr, refused  36, no-opt   1 | calls   -47,255 (Aug  -23,388 Sep  -23,867) dd  -48,346 worst  -14,955 | +hedge   -46,230 (Aug  -22,105 Sep  -24,125) dd  -47,321 worst  -13,474 | bypass: 8 traded, 0 won, -18,109
+
+== RANDOM_2 (96 distinct stocks over the window)
+  no filter                     172 tr, refused   0, no-opt   5 | calls   -33,514 (Aug  -37,712 Sep   +4,198) dd  -48,046 worst  -11,669 | +hedge   -34,465 (Aug  -37,712 Sep   +3,248) dd  -48,046 worst  -11,669
+  1h green (live)               147 tr, refused  36, no-opt   5 | calls   -20,407 (Aug  -29,012 Sep   +8,605) dd  -43,319 worst   -9,080 | +hedge   -21,357 (Aug  -29,012 Sep   +7,655) dd  -43,319 worst   -9,080
+  OR day up >= 1.0%             150 tr, refused  32, no-opt   5 | calls   -23,266 (Aug  -29,012 Sep   +5,746) dd  -43,319 worst  -11,604 | +hedge   -24,216 (Aug  -29,012 Sep   +4,796) dd  -43,319 worst  -11,604 | bypass: 4 traded, 1 won, -2,930
+  OR day up >= 1.5%             148 tr, refused  35, no-opt   5 | calls   -21,117 (Aug  -29,012 Sep   +7,895) dd  -43,319 worst   -9,080 | +hedge   -22,067 (Aug  -29,012 Sep   +6,945) dd  -43,319 worst   -9,080 | bypass: 1 traded, 0 won, -710
+  OR volume surge               147 tr, refused  36, no-opt   5 | calls   -20,407 (Aug  -29,012 Sep   +8,605) dd  -43,319 worst   -9,080 | +hedge   -21,357 (Aug  -29,012 Sep   +7,655) dd  -43,319 worst   -9,080 | bypass: 0 traded, 0 won, +0
+  OR ADX>=25 + 15m ST up        153 tr, refused  29, no-opt   5 | calls   -10,314 (Aug  -16,369 Sep   +6,055) dd  -40,349 worst  -11,604 | +hedge   -11,265 (Aug  -16,369 Sep   +5,105) dd  -40,349 worst  -11,604 | bypass: 6 traded, 3 won, +10,093
+  OR forming hour up >= 0.5%    150 tr, refused  30, no-opt   6 | calls   -19,288 (Aug  -25,679 Sep   +6,391) dd  -43,319 worst  -11,669 | +hedge   -20,238 (Aug  -25,679 Sep   +5,441) dd  -43,319 worst  -11,669 | bypass: 5 traded, 2 won, -227
+
+== RANDOM_3 (95 distinct stocks over the window)
+  no filter                     167 tr, refused   0, no-opt   4 | calls   -30,235 (Aug  -44,889 Sep  +14,654) dd  -80,284 worst  -18,621 | +hedge   -29,746 (Aug  -44,514 Sep  +14,768) dd  -80,491 worst  -18,621
+  1h green (live)               135 tr, refused  40, no-opt   2 | calls    +7,495 (Aug   -6,570 Sep  +14,065) dd  -48,224 worst  -12,963 | +hedge    +7,984 (Aug   -6,195 Sep  +14,179) dd  -48,431 worst  -12,963
+  OR day up >= 1.0%             149 tr, refused  23, no-opt   2 | calls   -12,929 (Aug  -26,553 Sep  +13,624) dd  -65,504 worst  -12,963 | +hedge   -12,440 (Aug  -26,178 Sep  +13,738) dd  -65,711 worst  -12,963 | bypass: 15 traded, 1 won, -19,558
+  OR day up >= 1.5%             144 tr, refused  29, no-opt   2 | calls    +2,572 (Aug  -11,052 Sep  +13,624) dd  -53,719 worst  -12,963 | +hedge    +3,060 (Aug  -10,677 Sep  +13,738) dd  -53,926 worst  -12,963 | bypass: 10 traded, 1 won, -4,057
+  OR volume surge               136 tr, refused  39, no-opt   2 | calls    +7,248 (Aug   -6,570 Sep  +13,817) dd  -48,472 worst  -12,963 | +hedge    +7,736 (Aug   -6,195 Sep  +13,931) dd  -48,679 worst  -12,963 | bypass: 1 traded, 0 won, -248
+  OR ADX>=25 + 15m ST up        152 tr, refused  19, no-opt   2 | calls   -20,396 (Aug  -33,689 Sep  +13,293) dd  -67,640 worst  -18,621 | +hedge   -19,907 (Aug  -33,314 Sep  +13,407) dd  -67,847 worst  -18,621 | bypass: 18 traded, 2 won, -27,025
+  OR forming hour up >= 0.5%    148 tr, refused  23, no-opt   4 | calls   -17,891 (Aug  -26,691 Sep   +8,800) dd  -61,184 worst  -12,963 | +hedge   -17,403 (Aug  -26,317 Sep   +8,914) dd  -61,391 worst  -12,963 | bypass: 14 traded, 1 won, -24,520
+
+Dhan calls made: 2380 (cache-only: refused lookups, not network calls)
