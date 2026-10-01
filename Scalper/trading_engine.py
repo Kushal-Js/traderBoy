@@ -577,16 +577,24 @@ async def _evaluate_new_bar(symbol: str) -> None:
 
 
 _setup_tasks: dict[str, asyncio.Task] = {}
+_setup_retry_at: dict[str, float] = {}    # symbol -> monotonic time the next setup attempt may start
+
+
+def _hold_setup_retry(symbol: str) -> None:
+    _setup_retry_at[symbol] = time.monotonic() + signals.REST_RETRY_SECONDS
 
 
 def _ensure_symbol(symbol: str) -> bool:
     """True when the symbol's candles are ready; otherwise starts (once at a time) its setup in the background -
-    a symbol added at runtime starts trading on its own, no restart."""
+    a symbol added at runtime starts trading on its own, no restart. A failed setup is retried
+    signals.REST_RETRY_SECONDS after it ended, not on the next 1 s tick: ensure_ready forces both REST fetches, so
+    a per-tick retry sent ~2 Dhan calls a second while history was refused (DH-902, 1-2 Oct 2026)."""
     if signals.book(symbol).ready:
         return True
     task = _setup_tasks.get(symbol)
-    if task is None or task.done():
-        _setup_tasks[symbol] = asyncio.create_task(signals.ensure_ready(symbol))
+    if (task is None or task.done()) and time.monotonic() >= _setup_retry_at.get(symbol, 0.0):
+        task = _setup_tasks[symbol] = asyncio.create_task(signals.ensure_ready(symbol))
+        task.add_done_callback(lambda _t: _hold_setup_retry(symbol))
     return False
 
 
@@ -621,6 +629,7 @@ async def monitor_loop() -> None:
             await signals.ensure_ready(symbol)
         except Exception:  # noqa: BLE001
             logger.exception("[%s] %s: candle setup failed - retried by the monitor loop", STRATEGY, symbol)
+        _hold_setup_retry(symbol)
     asyncio.create_task(_refresh_loop())
     while True:
         try:

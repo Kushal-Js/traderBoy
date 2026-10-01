@@ -86,18 +86,41 @@ abort BEFORE touching any file, log why, and leave both watchlists
 exactly as they were. An unrelated API failure should never silently
 produce an empty/garbage watchlist.
 
-Read-only Dhan calls only; the only writes this script performs are its
-own log file and the two watchlist text files.
+FAILED RUN -> SAFE RETRY (2 Oct 2026, user: "fix this so that watchlist
+function can resume safely"). The first scheduled run (Fri 2 Oct 00:00
+IST) met Dhan refusing every data call (DH-902 "not subscribed to Data
+APIs"): it restarted the bot for memory first, scored 0 of 213, aborted
+and exited 0 - systemd showed success and nothing would have retried for
+a week. Now:
+  - Before any restart or file change, one small NIFTY daily-history call
+    (data_probe) checks that Dhan returns candles. No data (or the login
+    fails) -> abort with NO bot restart.
+  - Every abort for missing data (probe, login, or the scored-count net
+    above) writes data/weekly_watchlist_refresh_pending.json and exits
+    EXIT_RETRY_LATER (75), so systemd records the run as failed.
+  - `--retry` (droplet-side dhanboy-weekly-watchlist-retry.timer/.service,
+    not in git; the unit only starts while the pending file exists) re-runs
+    the whole job, but only weekdays 00:00-07:00 IST or at weekends - never
+    while a market can be open, finished well before the 08:00 IST morning
+    refresh. A completed run deletes the pending file; the Friday schedule
+    is unchanged. Runs never overlap (lock file in history/).
+  - The day's log file is appended to, so every attempt stays on record.
 
-HOW TO RUN (normally fired by the systemd timer, not by hand):
-    uv run python weekly_watchlist_refresh.py
+Read-only Dhan calls only; the only writes this script performs are its
+own log file, the pending-retry file and the watchlist text files.
+
+HOW TO RUN (normally fired by the systemd timers, not by hand):
+    uv run python weekly_watchlist_refresh.py            # the Friday run
+    uv run python weekly_watchlist_refresh.py --retry    # only if a run is pending, only in the retry window
 """
 from __future__ import annotations
 
+import fcntl
+import json
 import os
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -121,6 +144,10 @@ DATA_DIR = REPO_ROOT / "data"
 SWING_WATCHLIST_FILE = DATA_DIR / "watchlist"
 BOLLINGER_WATCHLIST_FILE = DATA_DIR / "bollinger_watchlist"
 MIN_SUCCESSFUL_SCORES = 50  # abort (no file changes) if the scan can't score at least this many stocks
+PENDING_FILE = DATA_DIR / "weekly_watchlist_refresh_pending.json"   # a run that found no Dhan data, to retry
+LOCK_FILE = HISTORY_DIR / ".weekly_watchlist_refresh.lock"
+EXIT_RETRY_LATER = 75       # EX_TEMPFAIL: systemd shows the run as failed; the retry timer runs it again
+RETRY_WEEKDAY_BEFORE_HOUR = 7   # IST: weekday retries start 00:00-06:59 only (markets shut, before 08:00 restart)
 
 POSITION_ENDPOINTS = [
     ("options", "/positions"), ("swing", "/swing/positions"),
@@ -214,22 +241,115 @@ def available_memory_mb() -> Optional[int]:
     return None
 
 
-def main() -> None:
-    avail = available_memory_mb()
-    if avail is not None and avail < MIN_AVAILABLE_MB_BEFORE_SCORING:
-        print(f"Only {avail} MB available (< {MIN_AVAILABLE_MB_BEFORE_SCORING}) - restarting the bot first so the "
-              f"scoring does not push it into swap")
-        print(f"  pre-scoring restart: {restart_bot()} - now {available_memory_mb()} MB available")
-    dhan_wrapper.authenticate()
-    now = datetime.now(IST)
-    ts = now.strftime("%Y%m%d_%H%M%S")
+def data_probe() -> Optional[str]:
+    """One small daily-history call (the endpoint the scoring uses) for NIFTY. None when Dhan returns candles,
+    otherwise why not - e.g. DH-902 'User has not subscribed to Data APIs' (1-2 Oct 2026)."""
+    today = datetime.now(IST)
+    try:
+        resp = dhan_wrapper.client.Dhan.historical_daily_data(
+            security_id=dhan_wrapper.NIFTY_SECURITY_ID, exchange_segment="IDX_I", instrument_type="INDEX",
+            from_date=(today - timedelta(days=10)).strftime("%Y-%m-%d"), to_date=today.strftime("%Y-%m-%d"))
+    except Exception as exc:  # noqa: BLE001
+        return f"the NIFTY history call raised {exc!r}"
+    data = resp.get("data") if isinstance(resp, dict) else None
+    if isinstance(data, dict) and data.get("close"):
+        return None
+    detail = resp.get("remarks") if isinstance(resp, dict) else resp
+    return f"no NIFTY daily candles - Dhan said: {str(detail)[:300]}"
+
+
+def retry_blocked_reason(now: datetime) -> Optional[str]:
+    """--retry runs only while a failed run is pending, and only when no market can be open."""
+    if not PENDING_FILE.exists():
+        return "no failed run is pending"
+    if now.weekday() >= 5 or now.hour < RETRY_WEEKDAY_BEFORE_HOUR:
+        return None
+    return (f"outside the retry window (weekdays 00:00-{RETRY_WEEKDAY_BEFORE_HOUR:02d}:00 IST, weekends any time) - "
+            f"a market can be open")
+
+
+def record_pending(reason: str, now: datetime) -> dict:
+    try:
+        prev = json.loads(PENDING_FILE.read_text())
+    except (OSError, ValueError):
+        prev = {}
+    rec = {"since": prev.get("since") or now.isoformat(timespec="seconds"),
+           "attempts": int(prev.get("attempts") or 0) + 1,
+           "last_attempt": now.isoformat(timespec="seconds"), "last_reason": reason}
+    PENDING_FILE.parent.mkdir(exist_ok=True)
+    PENDING_FILE.write_text(json.dumps(rec, indent=2) + "\n")
+    return rec
+
+
+def clear_pending() -> Optional[dict]:
+    """Deletes the pending-retry file; returns what it held (None if nothing was pending)."""
+    try:
+        rec = json.loads(PENDING_FILE.read_text())
+    except (OSError, ValueError):
+        rec = None
+    PENDING_FILE.unlink(missing_ok=True)
+    return rec
+
+
+def acquire_run_lock():
+    """An open, exclusively locked file (keep it open for the whole run), or None if another run holds it."""
     HISTORY_DIR.mkdir(exist_ok=True)
+    fh = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        return None
+    return fh
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    retry = "--retry" in (sys.argv[1:] if argv is None else argv)
+    now = datetime.now(IST)
+    if retry:
+        blocked = retry_blocked_reason(now)
+        if blocked:
+            print(f"Retry not started: {blocked}.")
+            return 0
+    lock = acquire_run_lock()
+    if lock is None:
+        print("Another weekly watchlist refresh is running - not starting a second one.")
+        return 0
+    ts = now.strftime("%Y%m%d_%H%M%S")
     log_path = HISTORY_DIR / f"{now.strftime('%Y-%m-%d')}_weekly_watchlist_refresh.log"
-    log_lines = [f"=== Weekly watchlist refresh - {now.strftime('%Y-%m-%d %H:%M:%S')} IST ==="]
+    log_lines = [f"=== Weekly watchlist refresh{' - RETRY of a failed run' if retry else ''} - "
+                 f"{now.strftime('%Y-%m-%d %H:%M:%S')} IST ==="]
 
     def log(msg: str) -> None:
         print(msg)
         log_lines.append(msg)
+
+    def write_log() -> None:
+        with open(log_path, "a") as fh:     # append: a retry on the same day keeps the earlier attempt's record
+            fh.write("\n".join(log_lines) + "\n\n")
+
+    def give_up_for_now(reason: str) -> int:
+        rec = record_pending(reason, now)
+        log(f"\nABORTING: {reason}. Leaving every watchlist untouched, NOT restarting. Marked for retry "
+            f"({PENDING_FILE.name}, attempt {rec['attempts']}, pending since {rec['since']}): the retry timer re-runs "
+            f"this job hourly on weekdays 00:20-06:20 IST and at weekends until a run completes.")
+        write_log()
+        return EXIT_RETRY_LATER
+
+    try:
+        dhan_wrapper.authenticate()
+    except Exception as exc:  # noqa: BLE001
+        return give_up_for_now(f"Dhan login failed ({exc!r})")
+    problem = data_probe()
+    if problem:
+        return give_up_for_now(f"Dhan market data is not available - {problem}")
+    log("Dhan data probe OK (NIFTY daily candles returned).")
+
+    avail = available_memory_mb()
+    if avail is not None and avail < MIN_AVAILABLE_MB_BEFORE_SCORING:
+        log(f"Only {avail} MB available (< {MIN_AVAILABLE_MB_BEFORE_SCORING}) - restarting the bot first so the "
+            f"scoring does not push it into swap")
+        log(f"  pre-scoring restart: {restart_bot()} - now {available_memory_mb()} MB available")
 
     log("Checking live positions across all packages (audit trail only - NOT a gate on this run)...")
     for pkg, pos in snapshot_live_positions().items():
@@ -241,11 +361,8 @@ def main() -> None:
     log(f"Scored {len(top_n)} top candidates ({len(failed)} symbols failed/skipped out of the full universe).")
 
     if len(top_n) < min(DEFAULT_TOP_N, MIN_SUCCESSFUL_SCORES):
-        log(f"\nABORTING: only {len(top_n)} candidates scored (need >= {MIN_SUCCESSFUL_SCORES}) - "
-            f"this looks like a broad data/API failure, not a normal day. Leaving both watchlists "
-            f"untouched, NOT restarting.")
-        log_path.write_text("\n".join(log_lines) + "\n")
-        return
+        return give_up_for_now(f"only {len(top_n)} candidates scored (need >= {MIN_SUCCESSFUL_SCORES}) - this looks "
+                               f"like a broad data/API failure, not a normal day")
 
     new_equity_symbols = [r["symbol"] for r in top_n]
     log(f"\nNew equity watchlist (top {len(new_equity_symbols)} by composite score): {new_equity_symbols}")
@@ -298,6 +415,11 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         log(f"Shadow list step FAILED ({exc!r}) - nothing else is affected.")
 
+    cleared = clear_pending()
+    if cleared:
+        log(f"\nCompleted the run pending since {cleared.get('since')} ({cleared.get('attempts')} failed attempt(s), "
+            f"last: {cleared.get('last_reason')}) - retry marker removed.")
+
     log("\nRestarting dhanboy.service through safe_restart.py (snapshot, checks, restart, /health, restart report)...")
     try:
         outcome = restart_bot(log)
@@ -315,9 +437,10 @@ def main() -> None:
             f"the file on every monitor tick regardless, so the new watchlist is live even without "
             f"a restart; a manual restart is only needed for anything that specifically requires one.")
 
-    log_path.write_text("\n".join(log_lines) + "\n")
+    write_log()
     print(f"\nFull report written to {log_path}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
