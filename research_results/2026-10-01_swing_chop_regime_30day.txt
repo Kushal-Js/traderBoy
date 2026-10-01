@@ -1,0 +1,90 @@
+SWING REGIME FILTERS, 1 Sep - 1 Oct 2026 (15-stock list of 1 Oct; modelled P&L after slippage; H1 = 1-15 Sep, H2 = 16 Sep - 1 Oct)
+Swing as live: 328 trades, 127 won, modelled -109,536 (raw -13,535), H1 -40,771, H2 -68,765, max drawdown -156,377, winning days 7/22
+
+A. HINDSIGHT - Swing's trades by how their stock's whole day behaved (not tradable; the ceiling)
+  day efficiency ratio (|close-open| / path)
+    choppy  ER < 0.15            trades  182  won  60 ( 33%)  modelled  -133,474  raw   -74,250  per trade    -733
+    mixed   0.15-0.30            trades  116  won  48 ( 41%)  modelled    -2,129  raw   +26,245  per trade     -18
+    trend   0.30-0.50            trades   29  won  18 ( 62%)  modelled   +23,303  raw   +31,582  per trade    +804
+    strong  >= 0.50              trades    1  won   1 (100%)  modelled    +2,765  raw    +2,888  per trade  +2,765
+  5-min Supertrend flips that day
+    0-2 flips                    trades  197  won  93 ( 47%)  modelled   +43,093  raw  +101,426  per trade    +219
+    3-5 flips                    trades  131  won  34 ( 26%)  modelled  -152,628  raw  -114,961  per trade  -1,165
+
+   ... and by the regime AT ENTRY (tradable features, same trades, no re-simulation)
+  CHOP(14) 15-min
+    < 38.2 trending              trades   42  won  15 ( 36%)  modelled   -36,689  raw   -21,411  per trade    -874
+    38.2-50                      trades  126  won  49 ( 39%)  modelled   -12,212  raw   +23,564  per trade     -97
+    50-61.8                      trades  133  won  55 ( 41%)  modelled   -23,144  raw   +13,422  per trade    -174
+    > 61.8 choppy                trades   27  won   8 ( 30%)  modelled   -37,490  raw   -29,110  per trade  -1,389
+  ADX(14) 15-min
+    < 20 sideways                trades  109  won  43 ( 39%)  modelled   -33,061  raw      +208  per trade    -303
+    20-25                        trades   70  won  29 ( 41%)  modelled   -18,155  raw    +1,928  per trade    -259
+    25-35                        trades   85  won  35 ( 41%)  modelled   +15,135  raw   +38,917  per trade    +178
+    >= 35 strong                 trades   64  won  20 ( 31%)  modelled   -73,454  raw   -54,589  per trade  -1,148
+  efficiency ratio, last 1 h (5-min)
+    < 0.15                       trades   55  won  15 ( 27%)  modelled   -59,121  raw   -45,359  per trade  -1,075
+    0.15-0.30                    trades   72  won  33 ( 46%)  modelled   -16,655  raw    +5,286  per trade    -231
+    0.30-0.50                    trades  116  won  40 ( 34%)  modelled   -35,106  raw      -855  per trade    -303
+    >= 0.50                      trades   85  won  39 ( 46%)  modelled    +1,346  raw   +27,393  per trade     +16
+  Supertrend flips in the 2 h before entry
+    0                            trades  167  won  57 ( 34%)  modelled   -74,022  raw   -29,196  per trade    -443
+    1                            trades  139  won  61 ( 44%)  modelled   -22,453  raw   +22,254  per trade    -162
+    2                            trades   20  won   8 ( 40%)  modelled   -14,263  raw    -8,222  per trade    -713
+    3+                           trades    2  won   1 ( 50%)  modelled    +1,202  raw    +1,629  per trade    +601
+  today's efficiency ratio so far
+    < 0.15                       trades  112  won  36 ( 32%)  modelled   -93,010  raw   -62,932  per trade    -830
+    0.15-0.30                    trades   95  won  41 ( 43%)  modelled   +21,980  raw   +50,109  per trade    +231
+    0.30-0.50                    trades   40  won  15 ( 38%)  modelled   -12,935  raw    +1,000  per trade    -323
+    >= 0.50                      trades    6  won   3 ( 50%)  modelled    -2,348  raw      -110  per trade    -391
+  yesterday's whole-day efficiency ratio
+    < 0.15                       trades  176  won  66 ( 38%)  modelled   -77,762  raw   -21,981  per trade    -442
+    0.15-0.30                    trades  114  won  49 ( 43%)  modelled    +6,574  raw   +35,925  per trade     +58
+    0.30-0.50                    trades   33  won  10 ( 30%)  modelled   -41,567  raw   -31,502  per trade  -1,260
+    >= 0.50                      trades    5  won   2 ( 40%)  modelled    +3,219  raw    +4,023  per trade    +644
+
+B. ENTRY GATES (re-simulated: a skipped signal frees the slot for another stock)
+  gate                                                           trades  won%   modelled       raw        H1        H2    max dd win days
+  (none) Swing as live                                              328   39%   -109,536   -13,535   -40,771   -68,765  -156,377   7/22
+  CHOP15 < 61.8 (skip choppy)                                       305   40%    -74,609   +13,090   -21,340   -53,269  -128,432   7/22  <- helps both halves
+  CHOP15 < 50 (trending only)                                       195   37%    -72,862   -11,876   -25,137   -47,725  -101,708   7/22  <- helps both halves
+  ADX15 >= 20                                                       241   39%    -93,019   -23,675   -38,907   -54,112  -116,175   7/22  <- helps both halves
+  ADX15 >= 25                                                       181   38%    -66,802   -16,214    -8,764   -58,038   -81,671   8/22  <- helps both halves
+  ER last 1h >= 0.3                                                 235   42%    -28,090   +41,083      +927   -29,017   -88,365  10/22  <- helps both halves
+  ER last 2h >= 0.25                                                128   46%    +16,323   +53,666    +6,570    +9,753   -33,509  11/22  <- helps both halves
+  ST flips in last 2h <= 2                                          326   39%   -110,738   -15,164   -40,771   -69,967  -157,579   7/22
+  ST flips in last 2h <= 1                                          307   39%   -106,369   -16,343   -39,176   -67,193  -147,650   7/22  <- helps both halves
+  today's ER so far >= 0.3                                          143   43%    -35,811    +7,299   -49,097   +13,286   -53,258   9/21
+  today's ST flips so far <= 3                                      326   39%   -106,823   -11,133   -40,771   -66,052  -153,665   7/22
+  yesterday's day ER >= 0.3                                          45   31%    -50,804   -37,555   -15,470   -35,334   -71,190   5/18  <- helps both halves
+  daily ADX >= 20                                                   276   38%   -106,739   -21,980   -44,911   -61,828  -136,071   7/22
+  MOMENTUM: (ADX15>=20 or CHOP15<50) & flips2h<=2 & ER1h>=0.3       185   40%    -32,010   +21,882    -3,212   -28,798   -81,230   7/22  <- helps both halves
+  NOT CHOPPY: not (CHOP15>61.8 or flips2h>=3 or today ER<0.15)      225   45%     +2,622   +71,339   -12,159   +14,781   -33,906  12/22  <- helps both halves
+
+Day-wise, Swing as live vs the three best gates (modelled):
+  day            Swing      ER last 2h >= 0.25  NOT CHOPPY: not (CHOP1       ER last 1h >= 0.3
+  2026-09-01    -8,082                  +2,599                 -12,498                  -3,799
+  2026-09-02   +12,572                 +18,848                  -4,719                  +3,774
+  2026-09-03    -4,613                    +108                  -9,630                  +2,744
+  2026-09-04    +1,908                  +2,200                 +14,217                  +3,226
+  2026-09-07    +8,614                    -655                 +11,183                  +4,185
+  2026-09-08    -3,741                  +3,161                  +2,486                  +9,320
+  2026-09-09    -9,079                  -2,149                  +2,233                  -5,225
+  2026-09-10   -16,797                  -6,462                 -18,584                 -11,899
+  2026-09-11   -21,283                 -15,482                  -2,912                  -9,672
+  2026-09-15      -270                  +4,402                  +6,065                  +8,273
+  2026-09-16    -8,741                  -9,278                  +3,554                  -8,189
+  2026-09-17    -6,417                  -1,919                  +2,068                 -13,066
+  2026-09-18   -17,474                  +2,025                 -11,726                  -6,340
+  2026-09-21    +9,515                  +3,426                  +8,977                  +1,688
+  2026-09-22   -26,611                    -698                  -7,164                 -24,200
+  2026-09-23    +6,006                 +18,445                  +8,072                  +8,358
+  2026-09-24   -12,457                  -2,736                  -7,444                  -2,770
+  2026-09-25   -15,087                  -5,924                  +1,347                 -12,634
+  2026-09-28   -13,600                  -7,931                  -4,296                  -4,154
+  2026-09-29   -20,340                  -9,228                 -11,864                  -8,534
+  2026-09-30    +1,630                  +4,126                  +1,249                  +5,115
+  2026-10-01   +34,812                 +19,445                 +32,006                 +35,710
+
+Dhan calls this run: 65; signals left unpriced: 115
+Caveats: one month, 15 hindsight-picked stocks, simulated (about half the live entries match on 30 Sep/1 Oct); thresholds are textbook values, not tuned - a gate counts only if it helps BOTH halves.

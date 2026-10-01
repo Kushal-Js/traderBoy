@@ -63,6 +63,7 @@ OLD_ROLLING = Path("history/bt_super_trader_30day/options")
 OLD_LISTED = [Path("history/bt_swing_actual_hedge_3d/option"), Path("history/bt_swing_actual_hedge_1oct/option")]
 OUTFILE = Path("research_results/2026-10-01_swing_hedge_variants_30day.txt")
 CALLS, MISSING = {"n": 0}, []
+ENTRY_GATE = None      # research hook: callable(sym, side, k, now) -> bool; None = Swing as live
 RULES = {"SB rule": R.LIVE_RULE,
          "1.5 ATR": {"name": "1.5 ATR (1-min)", "loss": R.HEDGE_TRIGGER, "atr": 1.5, "atr_on": "minute", "st": False},
          "reverse": {"reverse": True}}
@@ -397,6 +398,8 @@ def simulate(data: dict) -> list[dict]:
                     continue
                 vr = volume_ratio(fast["v"], k)
                 if vr is not None and vr < VOL_MIN:
+                    continue
+                if ENTRY_GATE is not None and not ENTRY_GATE(sym, side, k, now):
                     continue
                 candidates.append((sym, side, k))
             for sym, side, k in candidates:
