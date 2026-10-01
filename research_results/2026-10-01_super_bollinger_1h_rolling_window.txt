@@ -1,0 +1,29 @@
+filter                    trades  skipped(filter / no option data) | plain | + hedge + S1 | entries before 10:15
+no filter                  193     0 /   1
+      plain          +63,495 (Aug  +17,117 Sep  +46,378) dd  -45,752 worst day  -13,368 wins 55/193
+      +hedge +S1    +124,150 (Aug  +42,845 Sep  +81,305) dd  -41,531 worst day  -11,649 wins 56/193
+      before 10:15 36 trades +6,189
+session (live now)         163    42 /   0
+      plain          +94,945 (Aug  +41,287 Sep  +53,658) dd  -22,773 worst day  -12,597 wins 50/163
+      +hedge +S1    +145,997 (Aug  +62,393 Sep  +83,603) dd  -28,655 worst day  -10,878 wins 50/163
+      before 10:15 24 trades +19,873
+rolling last 60 min        184    13 /   1
+      plain          +61,621 (Aug  +34,529 Sep  +27,092) dd  -28,341 worst day  -13,368 wins 52/184
+      +hedge +S1    +118,897 (Aug  +56,696 Sep  +62,201) dd  -32,724 worst day  -11,649 wins 53/184
+      before 10:15 36 trades +6,189
+overnight 15:00->09:45     175    26 /   1
+      plain          +53,374 (Aug   +8,780 Sep  +44,594) dd  -50,346 worst day  -12,483 wins 50/175
+      +hedge +S1    +122,930 (Aug  +39,595 Sep  +83,335) dd  -45,418 worst day  -10,958 wins 51/175
+      before 10:15 34 trades -2,666
+overnight 14:45->09:30     185    17 /   0
+      plain          +52,836 (Aug  +19,454 Sep  +33,382) dd  -48,796 worst day  -13,368 wins 56/185
+      +hedge +S1    +116,978 (Aug  +50,328 Sep  +66,650) dd  -48,470 worst day  -11,649 wins 56/185
+      before 10:15 36 trades +6,189
+
+session vs rolling: 195 signals judged by both, disagree on 43 (12 before 10:15): session-only green 8, rolling-only green 35
+
+session vs g0945: 200 signals judged by both, disagree on 52 (12 before 10:15): session-only green 18, g0945-only green 34
+
+session vs g0930: 197 signals judged by both, disagree on 44 (12 before 10:15): session-only green 11, g0930-only green 33
+Dhan calls made: 3 (cache-only: these are refused lookups, not network calls)
+exit 0
