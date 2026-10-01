@@ -1,0 +1,136 @@
+SCALPER BANKNIFTY 2 lots (qty 60) - parameter sweep, 01 Sep .. 01 Oct 2026; 262 runs; est. real = raw - Dhan charges - 1 pt slippage per fill; limits in option POINTS (x60 = Rs on 2 lots)
+signals that could not be priced in any run: 2
+
+REFERENCE (first test: live limits doubled, live re-entry rule)
+combination                                                                                                            trades wins split |      raw est. real  1-15 Sep 16 Sep-1 Oct   max DD  +days |    paper
+A ml 50pt  arm 100pt  gb 2%  tgt  35%  run -       | fresh  conf 0 stx tick  start 09:15                                  116   36     0 |  +15,882   -10,682   -19,432       +8,750  -36,211   8/22 |  -22,639
+B ml 50pt  arm 100pt  gb 2%  tgt  35%  run st      | fresh  conf 0 stx tick  start 09:15                                  116   36    15 |  +26,061      -871   -15,312      +14,441  -34,967   9/22 |  -12,511
+
+1. LIMITS for the split (B), live entries - top 15 by est. real, then the worst 3
+combination                                                                                                            trades wins split |      raw est. real  1-15 Sep 16 Sep-1 Oct   max DD  +days |    paper
+B ml 75pt  arm 150pt  gb 4%  tgt none  run st      | fresh  conf 0 stx tick  start 09:15                                  119   39    11 |  +44,105   +16,533   -12,864      +29,397  -33,256   9/22 |   +4,331
+B ml 75pt  arm 150pt  gb 4%  tgt none  run be      | fresh  conf 0 stx tick  start 09:15                                  119   39    11 |  +44,105   +16,533   -12,864      +29,397  -33,256   9/22 |   +4,331
+B ml 75pt  arm 150pt  gb 4%  tgt none  run trail20 | fresh  conf 0 stx tick  start 09:15                                  119   39    11 |  +44,055   +16,483   -12,864      +29,348  -33,306   9/22 |   +4,282
+B ml 75pt  arm 150pt  gb 4%  tgt none  run trail10 | fresh  conf 0 stx tick  start 09:15                                  119   39    11 |  +43,976   +16,404   -12,864      +29,268  -31,822   9/22 |   +4,202
+B ml 50pt  arm 150pt  gb 4%  tgt none  run st      | fresh  conf 0 stx tick  start 09:15                                  116   36    11 |  +42,359   +15,498   -11,608      +27,105  -29,394   9/22 |   +3,705
+B ml 50pt  arm 150pt  gb 4%  tgt none  run be      | fresh  conf 0 stx tick  start 09:15                                  116   36    11 |  +42,359   +15,498   -11,608      +27,105  -29,394   9/22 |   +3,705
+B ml 50pt  arm 150pt  gb 4%  tgt none  run trail20 | fresh  conf 0 stx tick  start 09:15                                  116   36    11 |  +42,309   +15,448   -11,608      +27,056  -29,443   9/22 |   +3,656
+B ml 40pt  arm 150pt  gb 4%  tgt none  run st      | fresh  conf 0 stx tick  start 09:15                                  112   35    11 |  +41,312   +15,397   -11,991      +27,388  -29,821   9/22 |   +4,148
+B ml 40pt  arm 150pt  gb 4%  tgt none  run be      | fresh  conf 0 stx tick  start 09:15                                  112   35    11 |  +41,312   +15,397   -11,991      +27,388  -29,821   9/22 |   +4,148
+B ml 50pt  arm 150pt  gb 4%  tgt none  run trail10 | fresh  conf 0 stx tick  start 09:15                                  116   36    11 |  +42,230   +15,368   -11,608      +26,976  -27,959   9/22 |   +3,577
+B ml 40pt  arm 150pt  gb 4%  tgt none  run trail20 | fresh  conf 0 stx tick  start 09:15                                  112   35    11 |  +41,262   +15,347   -11,991      +27,339  -29,870   9/22 |   +4,099
+B ml 40pt  arm 150pt  gb 4%  tgt none  run trail10 | fresh  conf 0 stx tick  start 09:15                                  112   35    11 |  +41,183   +15,268   -11,991      +27,259  -28,386   9/22 |   +4,019
+B ml 75pt  arm 150pt  gb 2%  tgt none  run trail10 | fresh  conf 0 stx tick  start 09:15                                  119   39    11 |  +41,881   +14,312   -11,620      +25,932  -29,818   9/22 |   +2,118
+B ml 75pt  arm 150pt  gb 2%  tgt none  run st      | fresh  conf 0 stx tick  start 09:15                                  119   39    11 |  +41,716   +14,147   -11,620      +25,767  -31,239   9/22 |   +1,954
+B ml 75pt  arm 150pt  gb 2%  tgt none  run be      | fresh  conf 0 stx tick  start 09:15                                  119   39    11 |  +41,716   +14,147   -11,620      +25,767  -31,239   9/22 |   +1,954
+  ...
+B ml 50pt  arm 60pt  gb 2%  tgt  25%  run trail10 | fresh  conf 0 stx tick  start 09:15                                   117   37    24 |  +14,329   -13,025   -20,128       +7,102  -43,190   7/22 |  -24,501
+B ml 40pt  arm 60pt  gb 2%  tgt  35%  run trail10 | fresh  conf 0 stx tick  start 09:15                                   113   36    23 |  +12,619   -13,765   -20,511       +6,746  -44,550   8/22 |  -24,719
+B ml 40pt  arm 60pt  gb 2%  tgt  25%  run trail10 | fresh  conf 0 stx tick  start 09:15                                   113   36    23 |  +11,539   -14,843   -20,511       +5,668  -45,334   8/22 |  -25,793
+
+   average est. real over the grid by one setting (all other settings mixed):
+   ml      40: +794   50: +1,582   75: +3,791
+   arm     60: -6,191   100: +2,461   150: +9,897
+   gb      0.02: -93   0.04: +4,204
+   tgt     0.25: +93   0.35: +1,957   None: +4,117
+   runner  st: +2,913   be: +3,093   trail10: -583   trail20: +2,800
+
+2. OWN IDEAS (entries/exits) - on the live limits and on the best limits of step 1, B and A
+combination                                                                                                            trades wins split |      raw est. real  1-15 Sep 16 Sep-1 Oct   max DD  +days |    paper
+A ml 75pt  arm 150pt  gb 4%  tgt none  run -       | fresh  conf 0 stx close start 09:15                                  117   40     0 |  +51,445   +24,600    -9,688      +34,288  -31,121  10/22 |  +12,404
+A ml 75pt  arm 150pt  gb 4%  tgt none  run -       | regime conf 0 stx close start 09:15                                   45   20     0 |  +28,769   +17,889   +11,646       +6,242  -12,366   7/14 |  +10,793
+B ml 75pt  arm 150pt  gb 4%  tgt none  run st      | fresh  conf 0 stx close start 09:15                                  117   40    13 |  +43,835   +16,694    -9,330      +26,024  -34,360  10/22 |   +4,833
+B ml 75pt  arm 150pt  gb 4%  tgt none  run st      | regime conf 0 stx close start 09:15                                   45   20     6 |  +26,477   +15,459   +12,797       +2,662  -12,366   7/14 |   +8,513
+A ml 75pt  arm 150pt  gb 4%  tgt none  run -       | fresh  conf 0 stx tick  start 09:15 cool 5m                          107   33     0 |  +36,899   +12,557   -12,151      +24,708  -30,073   8/22 |   +2,292
+A ml 50pt  arm 100pt  gb 2%  tgt  35%  run -       | regime conf 1 stx close start 09:15                                   43   16     0 |  +21,530   +11,201    +8,003       +3,198  -10,510   7/14 |   +4,699
+A ml 50pt  arm 100pt  gb 2%  tgt  35%  run -       | regime conf 1 stx tick  start 09:15                                   43   15     0 |  +19,667    +9,341      -673      +10,014   -8,186   6/14 |   +2,845
+B ml 75pt  arm 150pt  gb 4%  tgt none  run st      | fresh  conf 0 stx tick  start 09:15 cool 5m                          107   33     9 |  +33,647    +9,098   -11,735      +20,833  -31,872   8/22 |     -944
+A ml 75pt  arm 150pt  gb 4%  tgt none  run -       | regime conf 1 stx close start 09:15                                   43   16     0 |  +18,391    +8,067    +8,810         -743  -15,206   6/14 |   +1,576
+A ml 75pt  arm 150pt  gb 4%  tgt none  run -       | regime conf 0 stx tick  start 09:15                                   45   17     0 |  +18,148    +7,284    +2,859       +4,425   -7,960   5/14 |     +226
+A ml 75pt  arm 150pt  gb 4%  tgt none  run -       | fresh  conf 1 stx close start 09:15                                  112   35     0 |  +32,487    +6,892    -9,771      +16,664  -28,630  10/22 |   -4,373
+A ml 50pt  arm 100pt  gb 2%  tgt  35%  run -       | regime conf 0 stx close start 09:15                                   45   18     0 |  +17,336    +6,472    +7,829       -1,356   -8,964   8/14 |     -583
+B ml 75pt  arm 150pt  gb 4%  tgt none  run st      | regime conf 0 stx tick  start 09:15                                   45   17     4 |  +16,403    +5,447    +5,061         +385   -7,960   5/14 |   -1,511
+B ml 75pt  arm 150pt  gb 4%  tgt none  run st      | regime conf 1 stx close start 09:15                                   43   16     5 |  +14,839    +4,401    +9,900       -5,499  -15,206   6/14 |   -1,959
+B ml 50pt  arm 100pt  gb 2%  tgt  35%  run st      | regime conf 0 stx close start 09:15                                   45   18     9 |  +15,368    +4,295   +11,153       -6,858  -11,508   7/14 |   -2,540
+B ml 50pt  arm 100pt  gb 2%  tgt  35%  run st      | regime conf 1 stx tick  start 09:15                                   43   15     8 |  +14,467    +3,959    +2,566       +1,394   -8,186   5/14 |   -2,329
+B ml 50pt  arm 100pt  gb 2%  tgt  35%  run st      | fresh  conf 1 stx tick  start 09:15                                  112   34    15 |  +29,239    +3,295   -13,612      +16,908  -26,425   9/22 |   -7,604
+A ml 75pt  arm 150pt  gb 4%  tgt none  run -       | fresh  conf 1 stx tick  start 09:15                                  115   34     0 |  +29,440    +3,172   -17,781      +20,953  -32,502  10/22 |   -8,353
+B ml 75pt  arm 150pt  gb 4%  tgt none  run st      | fresh  conf 1 stx close start 09:15                                  112   35    10 |  +28,725    +2,900    -9,289      +12,189  -28,952  10/22 |   -8,116
+B ml 50pt  arm 100pt  gb 2%  tgt  35%  run st      | regime conf 1 stx close start 09:15                                   43   16     9 |  +12,897    +2,367   +10,246       -7,878  -11,717   6/14 |   -3,891
+A ml 50pt  arm 100pt  gb 2%  tgt  35%  run -       | fresh  conf 1 stx tick  start 09:15                                  112   34     0 |  +26,993    +1,407   -16,649      +18,056  -25,831   9/22 |   -9,839
+B ml 75pt  arm 150pt  gb 4%  tgt none  run st      | fresh  conf 1 stx tick  start 09:15                                  115   34     8 |  +27,466    +1,011   -17,242      +18,253  -32,824  10/22 |  -10,318
+B ml 50pt  arm 100pt  gb 2%  tgt  35%  run st      | regime conf 0 stx tick  start 09:15                                   45   16     7 |  +11,341      +321    +3,473       -3,153   -7,430   6/14 |   -6,548
+A ml 50pt  arm 100pt  gb 2%  tgt  35%  run -       | regime conf 0 stx tick  start 09:15                                   45   16     0 |  +10,916       +61      -847         +909   -7,430   7/14 |   -6,971
+A ml 75pt  arm 150pt  gb 4%  tgt none  run -       | regime conf 1 stx tick  start 09:15                                   43   15     0 |   +8,670    -1,641       +22       -1,664  -10,227   5/14 |   -8,097
+A ml 50pt  arm 100pt  gb 2%  tgt  35%  run -       | fresh  conf 1 stx close start 09:15                                  110   35     0 |  +22,944    -2,199   -10,703       +8,503  -29,514  10/22 |  -13,310
+B ml 50pt  arm 100pt  gb 2%  tgt  35%  run st      | fresh  conf 0 stx close start 09:15                                  114   38    17 |  +24,233    -2,290    -7,375       +5,085  -39,658   9/22 |  -13,682
+B ml 75pt  arm 150pt  gb 4%  tgt none  run st      | regime conf 1 stx tick  start 09:15                                   43   15     3 |   +7,900    -2,480    +2,164       -4,645  -10,227   5/14 |   -8,863
+B ml 50pt  arm 100pt  gb 2%  tgt  35%  run st      | fresh  conf 1 stx close start 09:15                                  110   35    16 |  +21,981    -3,538    -7,667       +4,129  -31,166  10/22 |  -14,268
+A ml 50pt  arm 100pt  gb 2%  tgt  35%  run -       | regime conf 0 stx tick  start 09:30                                   40   13     0 |   +5,028    -4,608   -10,647       +6,039  -11,029   7/14 |  -10,816
+A ml 50pt  arm 100pt  gb 2%  tgt  35%  run -       | regime conf 1 stx close start 09:30                                   38   13     0 |   +4,063    -5,039    -2,217       -2,823   -9,558   6/14 |  -10,711
+A ml 75pt  arm 150pt  gb 4%  tgt none  run -       | regime conf 0 stx tick  start 09:30                                   40   13     0 |   +2,090    -7,542   -10,920       +3,378  -14,481   5/14 |  -13,740
+B ml 50pt  arm 100pt  gb 2%  tgt  35%  run st      | regime conf 0 stx tick  start 09:30                                   40   13     5 |   +2,082    -7,668   -10,647       +2,979  -13,156   6/14 |  -13,748
+A ml 50pt  arm 100pt  gb 2%  tgt  35%  run -       | fresh  conf 0 stx close start 09:15                                  114   38     0 |  +17,391    -8,720   -11,494       +2,773  -41,232   9/22 |  -20,490
+B ml 75pt  arm 150pt  gb 4%  tgt none  run st      | regime conf 0 stx tick  start 09:30                                   40   13     2 |     +531    -9,146   -10,920       +1,773  -15,610   5/14 |  -15,291
+B ml 50pt  arm 100pt  gb 2%  tgt  35%  run st      | regime conf 1 stx close start 09:30                                   38   13     6 |   -2,749   -11,983    -3,212       -8,771  -13,702   4/14 |  -17,489
+B ml 50pt  arm 100pt  gb 2%  tgt  35%  run st      | fresh  conf 0 stx tick  start 09:15 cool 5m                          100   28    11 |  +10,749   -12,220   -13,237       +1,016  -38,729   7/22 |  -21,442
+A ml 75pt  arm 150pt  gb 4%  tgt none  run -       | fresh  conf 0 stx tick  start 09:30                                  110   34     0 |  +10,890   -14,192   -23,310       +9,118  -39,463   7/22 |  -25,069
+A ml 75pt  arm 150pt  gb 4%  tgt none  run -       | regime conf 1 stx close start 09:30                                   38   12     0 |   -5,522   -14,611    -2,285      -12,326  -19,241   5/14 |  -20,248
+B ml 75pt  arm 150pt  gb 4%  tgt none  run st      | regime conf 1 stx close start 09:30                                   38   12     2 |   -7,632   -16,764    -3,336      -13,428  -19,241   5/14 |  -22,347
+B ml 75pt  arm 150pt  gb 4%  tgt none  run st      | fresh  conf 0 stx tick  start 09:30                                  110   34     7 |   +3,358   -21,878   -25,097       +3,219  -43,464   7/22 |  -32,563
+A ml 50pt  arm 100pt  gb 2%  tgt  35%  run -       | fresh  conf 0 stx tick  start 09:15 cool 5m                          100   28     0 |      +58   -22,637   -17,356       -5,281  -41,337   8/22 |  -32,081
+A ml 50pt  arm 100pt  gb 2%  tgt  35%  run -       | fresh  conf 0 stx tick  start 09:30                                  101   30     0 |   -1,056   -24,037   -25,484       +1,447  -45,342   9/22 |  -33,838
+B ml 50pt  arm 100pt  gb 2%  tgt  35%  run st      | fresh  conf 0 stx tick  start 09:30                                  101   30    10 |   -4,616   -27,828   -25,685       -2,143  -47,054   9/22 |  -37,379
+
+3. EDGE CHECK - is the best of step 1 a peak or a trend? (ml 75, no target, runner st where B)
+combination                                                                                                            trades wins split |      raw est. real  1-15 Sep 16 Sep-1 Oct   max DD  +days |    paper
+A ml 75pt  arm 100pt  gb 4%  tgt none  run -       | fresh  conf 0 stx tick  start 09:15                                  119   39     0 |  +35,882    +8,581   -22,416      +30,998  -38,883   9/22 |   -3,851
+A ml 75pt  arm 100pt  gb 6%  tgt none  run -       | fresh  conf 0 stx tick  start 09:15                                  119   39     0 |  +28,213      +923   -24,436      +25,359  -42,594   9/22 |  -11,481
+A ml 75pt  arm 150pt  gb 4%  tgt none  run -       | fresh  conf 0 stx tick  start 09:15                                  119   39     0 |  +50,224   +22,903   -13,280      +36,182  -29,022   9/22 |  +10,419
+A ml 75pt  arm 150pt  gb 6%  tgt none  run -       | fresh  conf 0 stx tick  start 09:15                                  119   39     0 |  +43,899   +16,587   -15,121      +31,708  -32,638   9/22 |   +4,126
+A ml 75pt  arm 200pt  gb 4%  tgt none  run -       | fresh  conf 0 stx tick  start 09:15                                  119   39     0 |  +36,676    +9,374   -16,331      +25,705  -41,231   8/22 |   -3,061
+A ml 75pt  arm 200pt  gb 6%  tgt none  run -       | fresh  conf 0 stx tick  start 09:15                                  119   39     0 |  +35,455    +8,155   -16,984      +25,138  -41,884   8/22 |   -4,276
+A ml 75pt  arm 250pt  gb 4%  tgt none  run -       | fresh  conf 0 stx tick  start 09:15                                  119   39     0 |  +42,173   +14,863   -11,465      +26,328  -36,365   8/22 |   +2,408
+A ml 75pt  arm 250pt  gb 6%  tgt none  run -       | fresh  conf 0 stx tick  start 09:15                                  119   39     0 |  +40,138   +12,831   -12,307      +25,138  -37,207   8/22 |     +384
+A ml 75pt  arm 100pt  gb 4%  tgt none  run -       | fresh  conf 0 stx close start 09:15                                  117   40     0 |  +43,029   +16,196   -18,825      +35,021  -37,398  10/22 |   +4,031
+A ml 75pt  arm 100pt  gb 6%  tgt none  run -       | fresh  conf 0 stx close start 09:15                                  117   40     0 |  +35,081    +8,258   -22,181      +30,439  -41,897  10/22 |   -3,878
+A ml 75pt  arm 150pt  gb 4%  tgt none  run -       | fresh  conf 0 stx close start 09:15                                  117   40     0 |  +51,445   +24,600    -9,688      +34,288  -31,121  10/22 |  +12,404
+A ml 75pt  arm 150pt  gb 6%  tgt none  run -       | fresh  conf 0 stx close start 09:15                                  117   40     0 |  +45,629   +18,792   -12,865      +31,658  -34,736  10/22 |   +6,618
+A ml 75pt  arm 200pt  gb 4%  tgt none  run -       | fresh  conf 0 stx close start 09:15                                  117   40     0 |  +38,540   +11,713   -12,807      +24,520  -41,340  10/22 |     -436
+A ml 75pt  arm 200pt  gb 6%  tgt none  run -       | fresh  conf 0 stx close start 09:15                                  117   40     0 |  +35,768    +8,945   -13,459      +22,404  -41,993  10/22 |   -3,194
+A ml 75pt  arm 250pt  gb 4%  tgt none  run -       | fresh  conf 0 stx close start 09:15                                  117   40     0 |  +42,752   +15,919    -7,941      +23,859  -36,474  10/22 |   +3,755
+A ml 75pt  arm 250pt  gb 6%  tgt none  run -       | fresh  conf 0 stx close start 09:15                                  117   40     0 |  +40,717   +13,887    -8,783      +22,670  -37,317  10/22 |   +1,730
+A ml 75pt  arm 100pt  gb 4%  tgt none  run -       | regime conf 0 stx close start 09:15                                   45   20     0 |  +33,071   +22,185    +6,642      +15,543   -9,674   8/14 |  +15,074
+A ml 75pt  arm 100pt  gb 6%  tgt none  run -       | regime conf 0 stx close start 09:15                                   45   20     0 |  +29,557   +18,676    +4,539      +14,137   -9,720   7/14 |  +11,577
+A ml 75pt  arm 150pt  gb 4%  tgt none  run -       | regime conf 0 stx close start 09:15                                   45   20     0 |  +28,769   +17,889   +11,646       +6,242  -12,366   7/14 |  +10,793
+A ml 75pt  arm 150pt  gb 6%  tgt none  run -       | regime conf 0 stx close start 09:15                                   45   20     0 |  +26,194   +15,318   +10,086       +5,232  -12,366   7/14 |   +8,231
+A ml 75pt  arm 200pt  gb 4%  tgt none  run -       | regime conf 0 stx close start 09:15                                   45   20     0 |  +21,442   +10,573   +10,019         +554  -12,366   7/14 |   +3,503
+A ml 75pt  arm 200pt  gb 6%  tgt none  run -       | regime conf 0 stx close start 09:15                                   45   20     0 |  +19,237    +8,370    +9,366         -996  -12,366   7/14 |   +1,309
+A ml 75pt  arm 250pt  gb 4%  tgt none  run -       | regime conf 0 stx close start 09:15                                   45   20     0 |  +25,030   +14,155   +14,885         -730  -12,366   7/14 |   +7,072
+A ml 75pt  arm 250pt  gb 6%  tgt none  run -       | regime conf 0 stx close start 09:15                                   45   20     0 |  +24,186   +13,313   +14,043         -730  -12,366   7/14 |   +6,233
+B ml 75pt  arm 100pt  gb 4%  tgt none  run st      | fresh  conf 0 stx tick  start 09:15                                  119   39    16 |  +36,934    +9,254   -17,433      +26,687  -38,234   9/22 |   -2,804
+B ml 75pt  arm 100pt  gb 6%  tgt none  run st      | fresh  conf 0 stx tick  start 09:15                                  119   39    16 |  +33,100    +5,425   -18,442      +23,868  -40,090   9/22 |   -6,619
+B ml 75pt  arm 150pt  gb 4%  tgt none  run st      | fresh  conf 0 stx tick  start 09:15                                  119   39    11 |  +44,105   +16,533   -12,864      +29,397  -33,256   9/22 |   +4,331
+B ml 75pt  arm 150pt  gb 6%  tgt none  run st      | fresh  conf 0 stx tick  start 09:15                                  119   39    11 |  +40,943   +13,375   -13,785      +27,160  -35,064   9/22 |   +1,184
+B ml 75pt  arm 200pt  gb 4%  tgt none  run st      | fresh  conf 0 stx tick  start 09:15                                  119   39     4 |  +37,331    +9,934   -14,343      +24,276  -39,243   8/22 |   -2,409
+B ml 75pt  arm 200pt  gb 6%  tgt none  run st      | fresh  conf 0 stx tick  start 09:15                                  119   39     4 |  +36,720    +9,324   -14,669      +23,993  -39,569   8/22 |   -3,017
+B ml 75pt  arm 250pt  gb 4%  tgt none  run st      | fresh  conf 0 stx tick  start 09:15                                  119   39     4 |  +40,079   +12,678   -11,910      +24,588  -36,810   8/22 |     +326
+B ml 75pt  arm 250pt  gb 6%  tgt none  run st      | fresh  conf 0 stx tick  start 09:15                                  119   39     3 |  +39,062   +11,686   -12,307      +23,993  -37,207   8/22 |     -687
+B ml 75pt  arm 100pt  gb 4%  tgt none  run st      | fresh  conf 0 stx close start 09:15                                  117   40    19 |  +39,627   +12,350   -13,899      +26,249  -37,570  10/22 |     +646
+B ml 75pt  arm 100pt  gb 6%  tgt none  run st      | fresh  conf 0 stx close start 09:15                                  117   40    19 |  +35,653    +8,381   -15,576      +23,958  -39,819  10/22 |   -3,309
+B ml 75pt  arm 150pt  gb 4%  tgt none  run st      | fresh  conf 0 stx close start 09:15                                  117   40    13 |  +43,835   +16,694    -9,330      +26,024  -34,360  10/22 |   +4,833
+B ml 75pt  arm 150pt  gb 6%  tgt none  run st      | fresh  conf 0 stx close start 09:15                                  117   40    13 |  +40,927   +13,790   -10,918      +24,708  -36,168  10/22 |   +1,939
+B ml 75pt  arm 200pt  gb 4%  tgt none  run st      | fresh  conf 0 stx close start 09:15                                  117   40     5 |  +37,383   +10,439   -10,818      +21,258  -39,352  10/22 |   -1,587
+B ml 75pt  arm 200pt  gb 6%  tgt none  run st      | fresh  conf 0 stx close start 09:15                                  117   40     5 |  +35,996    +9,055   -11,145      +20,200  -39,679  10/22 |   -2,967
+B ml 75pt  arm 250pt  gb 4%  tgt none  run st      | fresh  conf 0 stx close start 09:15                                  117   40     4 |  +39,488   +12,566    -8,385      +20,951  -36,919  10/22 |     +508
+B ml 75pt  arm 250pt  gb 6%  tgt none  run st      | fresh  conf 0 stx close start 09:15                                  117   40     3 |  +38,471   +11,573    -8,783      +20,356  -37,317  10/22 |     -505
+B ml 75pt  arm 100pt  gb 4%  tgt none  run st      | regime conf 0 stx close start 09:15                                   45   20    11 |  +28,629   +17,489   +10,295       +7,194  -10,694   7/14 |  +10,653
+B ml 75pt  arm 100pt  gb 6%  tgt none  run st      | regime conf 0 stx close start 09:15                                   45   20    11 |  +26,872   +15,735    +9,243       +6,491  -11,067   7/14 |   +8,905
+B ml 75pt  arm 150pt  gb 4%  tgt none  run st      | regime conf 0 stx close start 09:15                                   45   20     6 |  +26,477   +15,459   +12,797       +2,662  -12,366   7/14 |   +8,513
+B ml 75pt  arm 150pt  gb 6%  tgt none  run st      | regime conf 0 stx close start 09:15                                   45   20     6 |  +25,190   +14,174   +12,017       +2,156  -12,366   7/14 |   +7,232
+B ml 75pt  arm 200pt  gb 4%  tgt none  run st      | regime conf 0 stx close start 09:15                                   45   20     2 |  +22,814   +11,896   +12,007         -112  -12,366   7/14 |   +4,868
+B ml 75pt  arm 200pt  gb 6%  tgt none  run st      | regime conf 0 stx close start 09:15                                   45   20     2 |  +21,711   +10,794   +11,681         -886  -12,366   7/14 |   +3,771
+B ml 75pt  arm 250pt  gb 4%  tgt none  run st      | regime conf 0 stx close start 09:15                                   45   20     1 |  +24,608   +13,710   +14,440         -730  -12,366   7/14 |   +6,653
+B ml 75pt  arm 250pt  gb 6%  tgt none  run st      | regime conf 0 stx close start 09:15                                   45   20     0 |  +24,186   +13,313   +14,043         -730  -12,366   7/14 |   +6,233
+
+Signals without option data (skipped where they occurred): 01 Oct 12:46 PE, 30 Sep 11:03 CE
