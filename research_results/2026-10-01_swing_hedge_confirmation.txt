@@ -1,0 +1,102 @@
+
+HEDGE TRIGGER CONFIRMATION - 50 Swing NSE option trades entered 29 Sep - 1 Oct with price data (47 closed, Swing as traded +1,698). Hedge exits unchanged (stop 1,500, 30% trail from +1,000, 15:15).
+
+trigger                                hedges stops trails other | hedge legs  S1 legs | Swing + hedge      + S1
+current: -1,800 + 1 ATR (1-min)            15     8      7     0 |     -8,116   +4,810 |        -6,418    -1,608
++ Supertrend against                        0     0      0     0 |         +0       +0 |        +1,698    +1,698
+Supertrend against only (any loss)          4     3      1     0 |     -4,958      -92 |        -3,260    -3,352
+1 ATR on a CLOSED 5-min bar                12     5      7     0 |     -2,643   +4,810 |          -945    +3,865
+1.5 ATR (1-min)                            15     6      9     0 |     -4,408   +6,336 |        -2,710    +3,626
+2 ATR (1-min)                              12     6      5     1 |     -8,214   +1,499 |        -6,516    -5,017
+closed-bar 1 ATR + Supertrend               0     0      0     0 |         +0       +0 |        +1,698    +1,698
+reverse at Swing's losing Supertrend exit     16     3     10     3 |     +1,681       +0 |        +3,379    +3,379
+
+--- current: -1,800 + 1 ATR (1-min): hedges ---
+  LAURUSLABS 27 OCT 2020 CALL      base  -5,413 | hedge 29 Sep 09:21 (+  2 min) LAURUSLABS 27 OCT 2020 PUT     @    68.00 -> stop      -2,070
+  ZYDUSLIFE 27 OCT 1230 CALL       base  -4,811 | hedge 29 Sep 09:22 (+  0 min) ZYDUSLIFE 27 OCT 1220 PUT      @    32.10 -> trail       -378
+  MCX 27 OCT 3250 PUT              base  -3,996 | hedge 29 Sep 09:42 (+  6 min) MCX 27 OCT 3250 CALL           @   150.70 -> stop      -1,832
+  AUROPHARMA 27 OCT 1700 PUT       base  -3,666 | hedge 29 Sep 11:10 (+104 min) AUROPHARMA 27 OCT 1700 CALL    @    53.55 -> trail       +718
+  NIFTY 06 OCT 22600 PUT           base  -1,947 | hedge 29 Sep 11:10 (+  4 min) NIFTY 06 OCT 22650 CALL        @   220.90 -> trail       +542
+  BANKNIFTY 27 OCT 53900 PUT       base  -1,880 | hedge 29 Sep 11:10 (+ 16 min) BANKNIFTY 27 OCT 54000 CALL    @  1205.50 -> trail       +703
+  SONACOMS 27 OCT 810 CALL         base  +1,821 | hedge 29 Sep 11:26 (+  0 min) SONACOMS 27 OCT 800 PUT        @    24.00 -> stop      -1,786 | S1 +4,837
+  AUROPHARMA 27 OCT 1700 CALL      base  -1,184 | hedge 29 Sep 12:45 (+ 84 min) AUROPHARMA 27 OCT 1700 PUT     @    38.45 -> stop      -1,704 | S1 -105
+  RBLBANK 27 OCT 400 PUT           base  -5,239 | hedge 29 Sep 13:09 (+ 37 min) RBLBANK 27 OCT 405 CALL        @    14.75 -> stop      -2,135
+  MOTILALOFS 27 OCT 1000 PUT       base  -2,061 | hedge 30 Sep 09:19 (+1078 min) MOTILALOFS 27 OCT 1000 CALL    @    44.65 -> stop      -1,839
+  DIVISLAB 27 OCT 9400 PUT         base  +3,735 | hedge 30 Sep 09:27 (+  3 min) DIVISLAB 27 OCT 9400 CALL      @   313.00 -> stop      -1,805 | S1 +1,499
+  MOTHERSON 27 OCT 162.50 CALL     base  -6,027 | hedge 30 Sep 09:50 (+  5 min) MOTHERSON 27 OCT 162.50 PUT    @     3.86 -> trail       -246
+  APLAPOLLO 27 OCT 2220 CALL       base  -2,848 | hedge 30 Sep 10:41 (+ 65 min) APLAPOLLO 27 OCT 2200 PUT      @    56.90 -> trail       +863
+  ZYDUSLIFE 27 OCT 1160 CALL       base  -2,778 | hedge 30 Sep 12:33 (+ 12 min) ZYDUSLIFE 27 OCT 1160 PUT      @    29.75 -> stop      -1,760 | S1 -1,421
+  LAURUSLABS 27 OCT 1980 PUT       base  -5,595 | hedge 01 Oct 09:30 (+  9 min) LAURUSLABS 27 OCT 1980 CALL    @    69.00 -> trail     +4,615
+
+--- + Supertrend against: hedges ---
+
+--- Supertrend against only (any loss): hedges ---
+  MOTILALOFS 27 OCT 1000 PUT       base    -252 | hedge 29 Sep 14:40 (+ 14 min) MOTILALOFS 27 OCT 1000 CALL    @    41.50 -> stop      -1,814
+  DIVISLAB 27 OCT 9500 PUT         base  +2,260 | hedge 30 Sep 09:18 (+  0 min) DIVISLAB 27 OCT 9400 CALL      @   303.00 -> trail       +394 | S1 +145
+  AUROPHARMA 27 OCT 1700 PUT       base  +2,306 | hedge 30 Sep 09:18 (+  0 min) AUROPHARMA 27 OCT 1700 CALL    @    53.05 -> stop      -1,784 | S1 -236
+  RADICO 27 OCT 4450 PUT           base  +2,772 | hedge 30 Sep 09:35 (+ 14 min) RADICO 27 OCT 4500 CALL        @   173.60 -> stop      -1,753
+
+--- 1 ATR on a CLOSED 5-min bar: hedges ---
+  ZYDUSLIFE 27 OCT 1230 CALL       base  -4,811 | hedge 29 Sep 09:25 (+  3 min) ZYDUSLIFE 27 OCT 1230 PUT      @    37.15 -> trail     +1,233
+  MCX 27 OCT 3250 PUT              base  -3,996 | hedge 29 Sep 09:51 (+ 15 min) MCX 27 OCT 3250 CALL           @   150.15 -> trail       +524
+  AUROPHARMA 27 OCT 1700 PUT       base  -3,666 | hedge 29 Sep 11:15 (+109 min) AUROPHARMA 27 OCT 1700 CALL    @    54.00 -> trail       +469
+  SONACOMS 27 OCT 810 CALL         base  +1,821 | hedge 29 Sep 11:30 (+  4 min) SONACOMS 27 OCT 800 PUT        @    24.00 -> stop      -1,786 | S1 +4,837
+  AUROPHARMA 27 OCT 1700 CALL      base  -1,184 | hedge 29 Sep 12:55 (+ 94 min) AUROPHARMA 27 OCT 1700 PUT     @    38.90 -> stop      -1,706 | S1 -105
+  RBLBANK 27 OCT 400 PUT           base  -5,239 | hedge 29 Sep 13:10 (+ 38 min) RBLBANK 27 OCT 405 CALL        @    14.75 -> stop      -2,135
+  MOTILALOFS 27 OCT 1000 PUT       base  -2,061 | hedge 30 Sep 09:20 (+1079 min) MOTILALOFS 27 OCT 1000 CALL    @    42.75 -> trail       -370
+  DIVISLAB 27 OCT 9400 PUT         base  +3,735 | hedge 30 Sep 09:30 (+  6 min) DIVISLAB 27 OCT 9400 CALL      @   311.45 -> stop      -1,804 | S1 +1,499
+  MOTHERSON 27 OCT 162.50 CALL     base  -6,027 | hedge 30 Sep 09:55 (+ 10 min) MOTHERSON 27 OCT 162.50 PUT    @     4.10 -> trail       -676
+  APLAPOLLO 27 OCT 2220 CALL       base  -2,848 | hedge 30 Sep 10:45 (+ 69 min) APLAPOLLO 27 OCT 2200 PUT      @    57.20 -> trail       +757
+  ZYDUSLIFE 27 OCT 1160 CALL       base  -2,778 | hedge 30 Sep 12:40 (+ 19 min) ZYDUSLIFE 27 OCT 1160 PUT      @    30.10 -> stop      -1,763 | S1 -1,421
+  LAURUSLABS 27 OCT 1980 PUT       base  -5,595 | hedge 01 Oct 09:30 (+  9 min) LAURUSLABS 27 OCT 1980 CALL    @    69.00 -> trail     +4,615
+
+--- 1.5 ATR (1-min): hedges ---
+  LAURUSLABS 27 OCT 2020 CALL      base  -5,413 | hedge 29 Sep 09:22 (+  3 min) LAURUSLABS 27 OCT 2020 PUT     @    69.00 -> stop      -2,079
+  ZYDUSLIFE 27 OCT 1230 CALL       base  -4,811 | hedge 29 Sep 09:22 (+  0 min) ZYDUSLIFE 27 OCT 1220 PUT      @    32.10 -> trail       -378
+  MCX 27 OCT 3250 PUT              base  -3,996 | hedge 29 Sep 09:51 (+ 15 min) MCX 27 OCT 3250 CALL           @   150.15 -> trail       +524
+  NIFTY 06 OCT 22600 PUT           base  -1,947 | hedge 29 Sep 11:10 (+  4 min) NIFTY 06 OCT 22650 CALL        @   220.90 -> trail       +542
+  BANKNIFTY 27 OCT 53900 PUT       base  -1,880 | hedge 29 Sep 11:10 (+ 16 min) BANKNIFTY 27 OCT 54000 CALL    @  1205.50 -> trail       +703
+  AUROPHARMA 27 OCT 1700 PUT       base  -3,666 | hedge 29 Sep 11:15 (+109 min) AUROPHARMA 27 OCT 1700 CALL    @    54.00 -> trail       +469
+  SONACOMS 27 OCT 810 CALL         base  +1,821 | hedge 29 Sep 11:26 (+  0 min) SONACOMS 27 OCT 800 PUT        @    24.00 -> stop      -1,786 | S1 +4,837
+  RBLBANK 27 OCT 400 PUT           base  -5,239 | hedge 29 Sep 13:09 (+ 37 min) RBLBANK 27 OCT 405 CALL        @    14.75 -> stop      -2,135
+  AUROPHARMA 27 OCT 1700 CALL      base  -1,184 | hedge 30 Sep 09:15 (+1314 min) AUROPHARMA 27 OCT 1700 PUT     @    40.65 -> stop      -1,716
+  MOTILALOFS 27 OCT 1000 PUT       base  -2,061 | hedge 30 Sep 09:19 (+1078 min) MOTILALOFS 27 OCT 1000 CALL    @    44.65 -> stop      -1,839
+  DIVISLAB 27 OCT 9400 PUT         base  +3,735 | hedge 30 Sep 09:27 (+  3 min) DIVISLAB 27 OCT 9400 CALL      @   313.00 -> stop      -1,805 | S1 +1,499
+  MOTHERSON 27 OCT 162.50 CALL     base  -6,027 | hedge 30 Sep 09:52 (+  7 min) MOTHERSON 27 OCT 162.50 PUT    @     3.86 -> trail       -246
+  APLAPOLLO 27 OCT 2220 CALL       base  -2,848 | hedge 30 Sep 10:41 (+ 65 min) APLAPOLLO 27 OCT 2200 PUT      @    56.90 -> trail       +863
+  ZYDUSLIFE 27 OCT 1160 CALL       base  -2,778 | hedge 30 Sep 14:25 (+124 min) ZYDUSLIFE 27 OCT 1160 PUT      @    30.35 -> trail       -139
+  LAURUSLABS 27 OCT 1980 PUT       base  -5,595 | hedge 01 Oct 09:30 (+  9 min) LAURUSLABS 27 OCT 1980 CALL    @    69.00 -> trail     +4,615
+
+--- 2 ATR (1-min): hedges ---
+  LAURUSLABS 27 OCT 2020 CALL      base  -5,413 | hedge 29 Sep 09:22 (+  3 min) LAURUSLABS 27 OCT 2020 PUT     @    69.00 -> stop      -2,079
+  ZYDUSLIFE 27 OCT 1230 CALL       base  -4,811 | hedge 29 Sep 09:33 (+ 11 min) ZYDUSLIFE 27 OCT 1220 PUT      @    33.15 -> trail        +15
+  MCX 27 OCT 3250 PUT              base  -3,996 | hedge 29 Sep 09:55 (+ 19 min) MCX 27 OCT 3300 CALL           @   130.40 -> stop      -1,786
+  NIFTY 06 OCT 22600 PUT           base  -1,947 | hedge 29 Sep 11:10 (+  4 min) NIFTY 06 OCT 22650 CALL        @   220.90 -> trail       +542
+  RBLBANK 27 OCT 400 PUT           base  -5,239 | hedge 29 Sep 13:11 (+ 39 min) RBLBANK 27 OCT 405 CALL        @    14.75 -> stop      -2,135
+  AUROPHARMA 27 OCT 1700 CALL      base  -1,184 | hedge 30 Sep 09:15 (+1314 min) AUROPHARMA 27 OCT 1700 PUT     @    40.65 -> stop      -1,716
+  MOTILALOFS 27 OCT 1000 PUT       base  -2,061 | hedge 30 Sep 09:19 (+1078 min) MOTILALOFS 27 OCT 1000 CALL    @    44.65 -> stop      -1,839
+  DIVISLAB 27 OCT 9400 PUT         base  +3,735 | hedge 30 Sep 09:36 (+ 12 min) DIVISLAB 27 OCT 9400 CALL      @   310.70 -> stop      -1,803 | S1 +1,499
+  MOTHERSON 27 OCT 162.50 CALL     base  -6,027 | hedge 30 Sep 10:15 (+ 30 min) MOTHERSON 27 OCT 162.50 PUT    @     4.15 -> trail       +984
+  APLAPOLLO 27 OCT 2220 CALL       base  -2,848 | hedge 30 Sep 10:45 (+ 69 min) APLAPOLLO 27 OCT 2200 PUT      @    57.20 -> trail       +757
+  ZYDUSLIFE 27 OCT 1160 CALL       base  -2,778 | hedge 30 Sep 14:30 (+129 min) ZYDUSLIFE 27 OCT 1160 PUT      @    31.50 -> 15:15       -821
+  LAURUSLABS 27 OCT 1980 PUT       base  -5,595 | hedge 01 Oct 09:31 (+ 10 min) LAURUSLABS 27 OCT 1980 CALL    @    72.65 -> trail     +1,666
+
+--- closed-bar 1 ATR + Supertrend: hedges ---
+
+--- reverse at Swing's losing Supertrend exit: hedges ---
+  MCX 27 OCT 3250 PUT              base  -3,996 | hedge 29 Sep 10:57 (+ 82 min) MCX 27 OCT 3300 CALL           @   137.40 -> trail       +721
+  BANKNIFTY 27 OCT 53900 PUT       base  -1,880 | hedge 29 Sep 11:10 (+ 17 min) BANKNIFTY 27 OCT 54000 CALL    @  1205.50 -> trail       +703
+  AUROPHARMA 27 OCT 1700 PUT       base  -3,666 | hedge 29 Sep 11:17 (+111 min) AUROPHARMA 27 OCT 1700 CALL    @    55.80 -> stop      -1,799
+  BOSCHLTD 27 OCT 47000 PUT        base  -2,530 | hedge 29 Sep 11:19 (+118 min) BOSCHLTD 27 OCT 47000 CALL     @  1190.50 -> trail       +878
+  RADICO 27 OCT 4600 CALL          base  -1,200 | hedge 29 Sep 11:58 (+ 37 min) RADICO 27 OCT 4400 PUT         @   121.30 -> 15:15       -585
+  DIVISLAB 27 OCT 9500 PUT         base  -1,652 | hedge 29 Sep 14:17 (+120 min) DIVISLAB 27 OCT 9500 CALL      @   308.80 -> trail       +636
+  RADICO 27 OCT 4400 PUT           base  -1,223 | hedge 29 Sep 14:31 (+145 min) RADICO 27 OCT 4400 CALL        @   162.10 -> trail       -273
+  MOTILALOFS 27 OCT 1000 PUT       base    -252 | hedge 29 Sep 14:40 (+ 14 min) MOTILALOFS 27 OCT 1000 CALL    @    41.50 -> stop      -1,814
+  APLAPOLLO 27 OCT 2200 CALL       base    -980 | hedge 29 Sep 15:00 (+ 81 min) APLAPOLLO 27 OCT 2200 PUT      @    56.80 -> 15:15       -147
+  AUROPHARMA 27 OCT 1700 CALL      base  -1,184 | hedge 30 Sep 09:15 (+1314 min) AUROPHARMA 27 OCT 1700 PUT     @    40.65 -> stop      -1,716
+  RADICO 27 OCT 4450 PUT           base    -168 | hedge 30 Sep 09:20 (+  0 min) RADICO 27 OCT 4450 CALL        @   166.00 -> trail     +1,841
+  MOTILALOFS 27 OCT 1000 PUT       base  -2,061 | hedge 30 Sep 09:20 (+1080 min) MOTILALOFS 27 OCT 1000 CALL    @    42.75 -> trail       -370
+  APLAPOLLO 27 OCT 2220 CALL       base  -2,848 | hedge 30 Sep 10:55 (+ 79 min) APLAPOLLO 27 OCT 2200 PUT      @    57.90 -> trail       +511
+  NIFTY 06 OCT 22750 CALL          base  -1,007 | hedge 30 Sep 13:44 (+ 78 min) NIFTY 06 OCT 22750 PUT         @   130.65 -> trail     +3,676
+  APLAPOLLO 27 OCT 2200 CALL       base  -1,657 | hedge 30 Sep 14:24 (+ 29 min) APLAPOLLO 27 OCT 2200 PUT      @    60.70 -> trail       +240
+  ZYDUSLIFE 27 OCT 1160 CALL       base  -2,778 | hedge 30 Sep 14:30 (+130 min) ZYDUSLIFE 27 OCT 1160 PUT      @    31.50 -> 15:15       -821

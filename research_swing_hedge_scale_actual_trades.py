@@ -260,8 +260,17 @@ def at(day: str, hm: dtime) -> int:
 # --------------------------------------------------------------------------- #
 # Overlays
 # --------------------------------------------------------------------------- #
-def hedge_point(tr: dict, opt: Series, und: Series, b5: dict) -> dict | None:
-    """First minute the hedge rule fires (only on days in scope, 09:15-15:15, while the trade is open)."""
+LIVE_RULE = {"name": "current: -1,800 + 1 ATR (1-min)", "loss": HEDGE_TRIGGER, "atr": 1.0, "atr_on": "minute", "st": False}
+
+
+def hedge_point(tr: dict, opt: Series, und: Series, b5: dict, rule: dict | None = None) -> dict | None:
+    """First minute the hedge rule fires (only on days in scope, 09:15-15:15, while the trade is open).
+    rule (1 Oct 2026, user: "take a hedge based on if there is a confirmation using super trend or ATR for
+    prices to start falling"): loss = minimum open loss in Rs (option low; 0 = any loss), atr = how many
+    ATR(14, 5-min) the stock must be against the entry spot (0 = no ATR check), atr_on = "minute" (1-min
+    close) or "bar" (a CLOSED 5-min bar's close), st = also require Supertrend(10,3) on the last closed
+    5-min bar to point against the trade."""
+    rule = rule or LIVE_RULE
     p0, qty, sign = tr["p0"], tr["qty"], (1 if tr["typ"] == "CALL" else -1)
     i_spot0 = und.idx(tr["t0"])
     if i_spot0 < 0:
@@ -274,13 +283,19 @@ def hedge_point(tr: dict, opt: Series, und: Series, b5: dict) -> dict | None:
         day = datetime.fromtimestamp(t, IST).date().isoformat()
         if day not in DAYS or t >= at(day, SQUARE_OFF):
             continue
-        if (p0 - opt.l[i]) * qty < HEDGE_TRIGGER:
+        loss = (p0 - opt.l[i]) * qty
+        if loss < rule["loss"] or loss <= 0:
             continue
         k, j = closed_bar(b5, t), und.idx(t)
         if k is None or b5["atr"][k] is None or j < 0:
             continue
-        if sign * (spot0 - und.c[j]) >= b5["atr"][k]:
-            return {"t": t, "day": day, "spot": und.c[j], "spot0": spot0, "atr": b5["atr"][k]}
+        if rule["atr"] > 0:
+            px = und.c[j] if rule["atr_on"] == "minute" else b5["c"][k]
+            if sign * (spot0 - px) < rule["atr"] * b5["atr"][k]:
+                continue
+        if rule["st"] and b5["st"][k] != -sign:
+            continue
+        return {"t": t, "day": day, "spot": und.c[j], "spot0": spot0, "atr": b5["atr"][k]}
     return None
 
 
@@ -465,8 +480,100 @@ def do_run() -> None:
         print(f"\nNO PRICE DATA (trade left out / leg not priced): {sorted(set(missing))}")
 
 
+CONFIRM_RULES = [
+    LIVE_RULE,
+    {"name": "+ Supertrend against", "loss": HEDGE_TRIGGER, "atr": 1.0, "atr_on": "minute", "st": True},
+    {"name": "Supertrend against only (any loss)", "loss": 0, "atr": 0, "atr_on": "minute", "st": True},
+    {"name": "1 ATR on a CLOSED 5-min bar", "loss": HEDGE_TRIGGER, "atr": 1.0, "atr_on": "bar", "st": False},
+    {"name": "1.5 ATR (1-min)", "loss": HEDGE_TRIGGER, "atr": 1.5, "atr_on": "minute", "st": False},
+    {"name": "2 ATR (1-min)", "loss": HEDGE_TRIGGER, "atr": 2.0, "atr_on": "minute", "st": False},
+    {"name": "closed-bar 1 ATR + Supertrend", "loss": HEDGE_TRIGGER, "atr": 1.0, "atr_on": "bar", "st": True},
+    # Swing itself exits on a Supertrend flip (on the tick), so a hedge that waits for Supertrend almost never
+    # fires while the trade is open. Closest workable form: buy the opposite ATM option AT Swing's own losing
+    # Supertrend exit (a stop-and-reverse leg), same exits as the hedge.
+    {"name": "reverse at Swing's losing Supertrend exit", "reverse": True},
+]
+
+
+def reverse_point(tr: dict, und: Series, b5: dict) -> dict | None:
+    if tr["t1"] is None or tr["base"] is None or tr["base"] >= 0 or not str(tr.get("reason") or "").startswith(
+            "SUPERTREND_REVERSAL"):
+        return None
+    day = datetime.fromtimestamp(tr["t1"], IST).date().isoformat()
+    j, k = und.idx(tr["t1"]), closed_bar(b5, tr["t1"])
+    if day not in DAYS or tr["t1"] >= at(day, SQUARE_OFF) or j < 0 or k is None:
+        return None
+    i0 = und.idx(tr["t0"])
+    return {"t": tr["t1"], "day": day, "spot": und.c[j], "spot0": und.c[i0], "atr": b5["atr"][k]}
+
+
+def do_confirm(fetch_missing: bool) -> None:
+    """Hedge-trigger confirmation variants (1 Oct 2026, user request) on the same trades; hedge exits and S1
+    unchanged. With fetch_missing, downloads any hedge contract a variant needs that is not cached."""
+    trs = trades()
+    prepared = []
+    for tr in trs:
+        u, o = load("underlying", tr["symbol"]), load("option", tr["contract"]["symbol"])
+        if u and o:
+            und = Series(u)
+            prepared.append((tr, Series(o), und, five_min(und)))
+    hhmm = lambda t: datetime.fromtimestamp(t, IST).strftime("%d %b %H:%M")
+    closed = [x for x in prepared if x[0]["base"] is not None]
+    base_total = sum(x[0]["base"] for x in closed)
+    print(f"\nHEDGE TRIGGER CONFIRMATION - {len(prepared)} Swing NSE option trades entered 29 Sep - 1 Oct with price "
+          f"data ({len(closed)} closed, Swing as traded {base_total:+,.0f}). Hedge exits unchanged (stop 1,500, 30% "
+          f"trail from +1,000, 15:15).\n")
+    print(f"{'trigger':38s} {'hedges':>6s} {'stops':>5s} {'trails':>6s} {'other':>5s} | {'hedge legs':>10s} "
+          f"{'S1 legs':>8s} | {'Swing + hedge':>13s} {'+ S1':>9s}")
+    details = {}
+    for rule in CONFIRM_RULES:
+        h_tot = s1_tot = 0.0
+        n = stops = trails = other = 0
+        rows = []
+        for tr, opt, und, b5 in prepared:
+            hp = reverse_point(tr, und, b5) if rule.get("reverse") else hedge_point(tr, opt, und, b5, rule)
+            if not hp:
+                continue
+            hc = atm_opposite(tr["contract"]["symbol"], hp["spot"])
+            hd = load("option", hc["symbol"])
+            if hd is None and fetch_missing:
+                hd = fetch("option", hc, DAYS[0])
+            if hd is None:
+                rows.append((tr, hp, hc["symbol"], None, None, None, None))
+                continue
+            against = -1 if tr["typ"] == "CALL" else 1
+            pnl, info = hedge_leg(hp, Series(hd), tr["qty"], b5, against, add=False)
+            s1, s1i = s1_leg(tr, hp, opt, und, b5)
+            n += 1
+            stops += info.get("exit") == "stop"
+            trails += info.get("exit") == "trail"
+            other += info.get("exit") not in ("stop", "trail")
+            h_tot += pnl
+            s1_tot += s1
+            rows.append((tr, hp, hc["symbol"], pnl, info, s1, s1i))
+        details[rule["name"]] = rows
+        unpriced = sum(1 for r in rows if r[3] is None)
+        print(f"{rule['name']:38s} {n:>6d} {stops:>5d} {trails:>6d} {other:>5d} | {h_tot:>+10,.0f} {s1_tot:>+8,.0f} | "
+              f"{base_total + h_tot:>+13,.0f} {base_total + h_tot + s1_tot:>+9,.0f}"
+              + (f"   ({unpriced} hedges not priced)" if unpriced else ""))
+    for name, rows in details.items():
+        print(f"\n--- {name}: hedges ---")
+        for tr, hp, hsym, pnl, info, s1, s1i in sorted(rows, key=lambda r: r[1]["t"]):
+            mins = (hp["t"] - tr["t0"]) // 60
+            base = "open" if tr["base"] is None else f"{tr['base']:+,.0f}"
+            if pnl is None:
+                print(f"  {tr['contract']['symbol']:32s} base {base:>7s} | hedge {hhmm(hp['t'])} (+{mins} min) {hsym} NO DATA")
+                continue
+            print(f"  {tr['contract']['symbol']:32s} base {base:>7s} | hedge {hhmm(hp['t'])} (+{mins:>3d} min) "
+                  f"{hsym:30s} @ {info.get('q0', 0):>8.2f} -> {info.get('exit', '?'):8s} {pnl:>+7,.0f}"
+                  + (f" | S1 {s1:+,.0f}" if s1i else ""))
+
+
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "run"
+    if mode in ("confirm", "confirm-fetch"):
+        do_confirm(fetch_missing=mode == "confirm-fetch")
+        sys.exit(0)
     if mode == "fetch":
         do_fetch()
     do_run()
