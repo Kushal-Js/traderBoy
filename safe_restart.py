@@ -31,7 +31,7 @@ STATE_FILE = Path("data/super_bollinger_live_state.json")
 SNAP_DIR = Path("history/restart_snapshots")
 ENDPOINTS = ["scalper/positions", "super-bollinger/positions", "super-bollinger/supervisor", "super-bollinger/scale",
              "super-bollinger/live-state", "positions", "luxury/positions", "swing/positions", "bollinger/positions",
-             "paper-mode"]
+             "paper-mode", "swing-momentum/status"]
 # Swing and Bollinger remember their real positions' trailing state themselves (position_memory.py)
 MEMORY_FILES = {"swing/positions": Path("data/swing_position_memory.json"),
                 "bollinger/positions": Path("data/bollinger_position_memory.json"),
