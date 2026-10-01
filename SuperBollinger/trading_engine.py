@@ -707,12 +707,25 @@ _refresh_lock = asyncio.Semaphore(1)
 _refresh_pending: set[str] = set()
 
 
+def _signal_is_current(symbol: str) -> bool:
+    """The SHARED Bollinger signal cache already describes the bar that just closed (the forming bar's previous
+    one). Unified Momentum and Super Bollinger (paper) refresh the same stocks at every bar start; whichever gets
+    there second finds the state current and makes no Dhan call (1 Oct 2026, DH-904 pressure at bar starts)."""
+    forming = candle_feed.forming_bar(symbol)
+    state = signals.peek_signal_state(symbol)
+    if forming is None or state is None or state.candle_start is None:
+        return False
+    return state.candle_start == forming["candle_start"] - timedelta(minutes=bcfg.SIGNAL_INTERVAL_MINUTES)
+
+
 async def _refresh_signal(symbol: str) -> None:
     if symbol in _refresh_pending:
         return
     _refresh_pending.add(symbol)
     try:
         async with _refresh_lock:
+            if _signal_is_current(symbol):
+                return
             await signals.get_signal_state(symbol, force=True)
     except Exception:  # noqa: BLE001
         logger.exception("[%s] %s: forced signal refresh failed", STRATEGY, symbol)
