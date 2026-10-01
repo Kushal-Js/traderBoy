@@ -23,7 +23,10 @@ Watches every open Unified Momentum CE trade and:
   3. SHADOW RULES - logged only, never acted on: stop-and-re-enter at
      shadow_stop_reenter_rs (would exit the CE, would re-buy at its entry
      price).
-  4. LOGS everything to history/<date>_unified_momentum_supervisor.log
+  4. ORPHAN SWEEPS (every orphan_sweep_seconds in NSE hours, stops also in MCX hours): this strategy's own
+     unowned BUY orders, and - for EVERY bot book, the only sweeper since 1 Oct 2026 - bot stop orders ("SL-")
+     resting on contracts the account no longer holds.
+  5. LOGS everything to history/<date>_unified_momentum_supervisor.log
      (JSONL): every trigger seen, confirmation inputs (loss, ATR, stock
      drop), hedge decisions, orders/fills and slippage vs the decision
      price, exits and PnL, brake checks, shadow-rule events.
@@ -590,6 +593,8 @@ def _stops_owned_by_open_positions() -> set[str]:
         try:
             m = __import__(mod, fromlist=list(names))
             stores.extend(getattr(m, n) for n in names)
+        except ModuleNotFoundError:
+            continue        # that strategy no longer exists (e.g. Super Bollinger removed) - nothing of its to protect
         except Exception:  # noqa: BLE001
             logger.exception("[supervisor] stop sweep: could not read %s", mod)
     for store in stores:
@@ -659,8 +664,12 @@ async def sweep_orphans(stops_only: bool = False) -> dict:
     stops_only: just the stop part (the MCX evening session, after NSE has closed)."""
     loop = asyncio.get_running_loop()
     out = {"cancelled": [], "adopted": [], "untracked": []}
-    # The account-wide STOP sweep runs ONCE, in Super Bollinger's supervisor (it protects this strategy's books too -
-    # SuperBollinger/supervisor._stops_owned_by_open_positions): two sweepers would race to cancel the same stop.
+    # The account-wide STOP sweep runs ONCE, here (moved from Super Bollinger's supervisor 1 Oct 2026, so removing
+    # Super Bollinger can never lose it): _stops_owned_by_open_positions covers every bot book, not just this one's.
+    try:
+        await _sweep_orphan_stops(loop, out)
+    except Exception:  # noqa: BLE001
+        logger.exception("[supervisor] stop sweep failed")
     if stops_only:
         return out
     in_flight = {it.get("order_id") for it in live_state._intents.values() if it.get("order_id")}

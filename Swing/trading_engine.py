@@ -753,13 +753,20 @@ def bollinger_family_real_holder(symbol: str) -> Optional[str]:
     position in `symbol`: "Bollinger", "SuperBollinger" or "SuperBollingerHedge"
     (its supervisor's PE hedge), or one of Unified Momentum's (1 Oct 2026):
     "UnifiedMomentum", "UnifiedMomentumHedge", "UnifiedMomentumPut". Imported
-    lazily (they import Swing modules)."""
+    lazily (they import Swing modules), each package on its own: a missing one
+    (e.g. Super Bollinger removed) must never blind the check for the others."""
+    books = []
     try:
         from Bollinger.position_store import position_store as bollinger_store
-        from SuperBollinger.state import hedge_store, position_store as super_store
+        books.append(("Bollinger", bollinger_store))
     except Exception:  # noqa: BLE001
-        return None
-    for name, store in (("Bollinger", bollinger_store), ("SuperBollinger", super_store), ("SuperBollingerHedge", hedge_store)):
+        pass
+    try:
+        from SuperBollinger.state import hedge_store, position_store as super_store
+        books += [("SuperBollinger", super_store), ("SuperBollingerHedge", hedge_store)]
+    except Exception:  # noqa: BLE001
+        pass
+    for name, store in books:
         if symbol in store.live_positions or symbol in store.reserved_symbols:
             return name
     try:

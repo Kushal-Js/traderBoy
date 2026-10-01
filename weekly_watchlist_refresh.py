@@ -58,10 +58,13 @@ What it does, in order:
      (1 Oct 2026, user request) the same picks are also written to Unified
      Momentum's own list, data/unified_momentum_watchlist (the real-money
      strategy; Super Bollinger is paper from 1 Oct) - same rules: fewer
-     than 10 picks or a failure keeps last week's list.
+     than 10 picks or a failure keeps last week's list. The pipeline does
+     not import Super Bollinger: removing that strategy later only means
+     dropping its write (UnifiedMomentum keeps working unchanged).
   7c. (added 30 Sep 2026) the SHADOW list: a second Super Bollinger pick
      (40-session fit with the 1-hour filter, stock_selection.run_shadow)
      that is only recorded and, a week later, scored against the live list
+     (Unified Momentum's since 1 Oct - identical picks)
      (data/super_bollinger_shadow_watchlist.json / _shadow_scores.jsonl).
      Never traded; best-effort, time-boxed, cannot change any watchlist.
   8. Restarts dhanboy.service THROUGH safe_restart.py (user request 30 Sep
@@ -278,11 +281,11 @@ def main() -> None:
         else:
             log(f"Super Bollinger ADDED: {sorted(set(new_super) - set(old_super))}")
             log(f"Super Bollinger REMOVED: {sorted(set(old_super) - set(new_super))}")
-            stock_selection.write_watchlist(new_super)
+            stock_selection.write_watchlist(new_super, stock_selection.SUPER_BOLLINGER_WATCHLIST_FILE)
             log(f"Super Bollinger watchlist file updated ({len(new_super)} stocks).")
             log(f"Unified Momentum ADDED: {sorted(set(new_super) - set(old_um))}")
             log(f"Unified Momentum REMOVED: {sorted(set(old_um) - set(new_super))}")
-            stock_selection.write_watchlist(new_super, stock_selection.UNIFIED_MOMENTUM_WATCHLIST_FILE)
+            stock_selection.write_watchlist(new_super, stock_selection.UNIFIED_MOMENTUM_WATCHLIST_FILE)  # the real one
             log(f"Unified Momentum watchlist file updated ({len(new_super)} stocks).")
     except Exception as exc:  # noqa: BLE001
         log(f"HYBRID selection FAILED ({exc!r}) - keeping last week's Super Bollinger and Unified Momentum lists; "
@@ -290,7 +293,8 @@ def main() -> None:
 
     log("\nSuper Bollinger SHADOW list (recorded and scored only - never traded, never written to a watchlist)...")
     try:
-        stock_selection.run_shadow(log, read_watchlist_file(stock_selection.SUPER_BOLLINGER_WATCHLIST_FILE))
+        # scored against the live list Unified Momentum trades (the same picks Super Bollinger's file gets)
+        stock_selection.run_shadow(log, read_watchlist_file(stock_selection.UNIFIED_MOMENTUM_WATCHLIST_FILE))
     except Exception as exc:  # noqa: BLE001
         log(f"Shadow list step FAILED ({exc!r}) - nothing else is affected.")
 

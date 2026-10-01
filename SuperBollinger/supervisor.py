@@ -580,95 +580,15 @@ def _order_age_seconds(created: Optional[str]) -> float:
         return 1e9   # unknown age = old
 
 
-_stop_orphan_seen: dict[str, float] = {}   # bot stop order id -> when it was first seen on a flat contract
-
-
-def _stops_owned_by_open_positions() -> set[str]:
-    """Broker stop order ids that a live position in ANY bot book still names as its protection (1 Oct 2026
-    review): even if Dhan's position list ever came back missing a held contract, its stop is never swept."""
-    owned: set[str] = set()
-    stores = [position_store, hedge_store]
-    # Unified Momentum (1 Oct 2026) runs no stop sweep of its own - this one protects its three books too.
-    for mod, names in (("Bollinger.position_store", ("position_store",)), ("Swing.position_store", ("position_store",)),
-                       ("Options.position_store", ("position_store",)), ("Luxury.position_store", ("position_store",)),
-                       ("Scalper.state", ("position_store",)),
-                       ("UnifiedMomentum.state", ("position_store", "hedge_store", "put_store"))):
-        try:
-            m = __import__(mod, fromlist=list(names))
-            stores.extend(getattr(m, n) for n in names)
-        except Exception:  # noqa: BLE001
-            logger.exception("[supervisor] stop sweep: could not read %s", mod)
-    for store in stores:
-        for pos in list(getattr(store, "live_positions", {}).values()):
-            if getattr(pos, "stop_loss_order_id", None):
-                owned.add(str(pos.stop_loss_order_id))
-    return owned
-
-
-async def _sweep_orphan_stops(loop, out: dict) -> None:
-    """1 Oct 2026 (ratcheted broker stop): cancel any bot stop-loss order resting on a contract the account
-    holds NONE of - it can only ever open a new position (e.g. a stop left live after a failed cancel during
-    a bot exit). Both sides: a SELL stop protects a long (every options strategy), a BUY stop protects a
-    Swing SHORT (futures / MCX / equity) - on a flat contract either one would open the opposite side. Only
-    the bots' own stops (tag "SL-...", which every strategy uses for its protective exit stop and for nothing
-    else; a manual order has no tag), checked against Dhan's raw position list in every segment. Cancelled
-    only when seen on a flat contract in two sweeps in a row (a stop placed right after a fill never races
-    the position list)."""
-    try:
-        stops = [o for o in await loop.run_in_executor(None, dhan_wrapper.list_open_orders, None)
-                 if o.get("transaction_type") in ("SELL", "BUY")
-                 and str(o.get("order_type") or "").startswith("STOP_LOSS") and str(o.get("tag") or "").startswith("SL-")]
-    except Exception:  # noqa: BLE001
-        logger.exception("[supervisor] stop sweep: could not read the order book")
-        return
-    if not stops:
-        _stop_orphan_seen.clear()
-        return
-    try:
-        held = await loop.run_in_executor(None, dhan_wrapper.held_security_ids)
-    except Exception:  # noqa: BLE001
-        logger.exception("[supervisor] stop sweep: could not read the broker positions - nothing cancelled")
-        return
-    protected = _stops_owned_by_open_positions()
-    now, seen_now = time.monotonic(), set()
-    for o in stops:
-        if not o.get("security_id") or o["security_id"] in held or o["order_id"] in protected:
-            continue
-        seen_now.add(o["order_id"])
-        if o["order_id"] not in _stop_orphan_seen:
-            _stop_orphan_seen[o["order_id"]] = now
-            continue
-        try:
-            await loop.run_in_executor(None, dhan_wrapper.cancel_order, o["order_id"])
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[supervisor] stop sweep: cancel of %s failed (%r)", o["order_id"], exc)
-        try:
-            final = await loop.run_in_executor(None, dhan_wrapper.refresh_order_status, o["order_id"])
-            status = final.status
-        except Exception:  # noqa: BLE001
-            status = "UNKNOWN"
-        await _log("ORPHAN_STOP_CANCELLED" if status == OrderStatus.CANCELLED else "ORPHAN_STOP_FOUND", "*",
-                   order_id=o["order_id"], side=o["transaction_type"], broker_symbol=o["trading_symbol"],
-                   tag=o.get("tag"), status_before=o["status"], status_after=status, price=o.get("price"))
-        logger.error("[supervisor] ORPHAN %s STOP order %s (%s) on a contract the account does not hold - now %s",
-                     o["transaction_type"], o["order_id"], o["trading_symbol"], status)
-        out.setdefault("stops_cancelled", []).append(o["order_id"])
-    for oid in [k for k in _stop_orphan_seen if k not in seen_now]:
-        _stop_orphan_seen.pop(oid, None)
-
-
 async def sweep_orphans(stops_only: bool = False) -> dict:
     """Cancel open BUY orders carrying this strategy's tags that no order in
-    flight owns (adopting a fill that raced the cancel), flag broker
-    positions in our books' contracts that nothing tracks, and (1 Oct 2026)
-    cancel bot stop orders (SELL or BUY) resting on contracts the account no longer holds.
-    stops_only: just the stop part (the MCX evening session, after NSE has closed)."""
+    flight owns (adopting a fill that raced the cancel) and flag broker
+    positions in our books' contracts that nothing tracks. stops_only (the MCX
+    evening session): nothing to do here since the stop sweep moved out."""
     loop = asyncio.get_running_loop()
     out = {"cancelled": [], "adopted": [], "untracked": []}
-    try:
-        await _sweep_orphan_stops(loop, out)
-    except Exception:  # noqa: BLE001
-        logger.exception("[supervisor] stop sweep failed")
+    # The account-wide STOP sweep (bot stops on contracts the account no longer holds) moved to Unified Momentum's
+    # supervisor on 1 Oct 2026 - it protects this strategy's books too, and two sweepers would race.
     if stops_only:
         return out
     in_flight = {it.get("order_id") for it in live_state._intents.values() if it.get("order_id")}

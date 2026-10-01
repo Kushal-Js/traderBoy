@@ -259,16 +259,18 @@ async def enter_paper(symbol: str, signal: str, ev: dict) -> dict:
 
 async def enter_real(symbol: str, signal: str, ev: dict) -> dict:
     """REAL-money entry. Claims the index (and its same-contract key) in the shared cross-strategy registry
-    for the whole attempt and refuses it if Bollinger or Swing holds a real position in this index."""
+    for the whole attempt and refuses it if Bollinger, Super Bollinger, Unified Momentum or Swing holds a real
+    position in this index."""
     if not await cross_strategy_registry.try_claim(symbol, STRATEGY):
         return {"status": "skipped", "reason": "entry_in_progress_by_other_strategy"}
     key = cross_strategy_registry.same_contract_key(symbol)
     try:
         if not await cross_strategy_registry.try_claim(key, STRATEGY):
             return {"status": "skipped", "reason": "entry_in_progress_by_other_strategy"}
-        from SuperBollinger.state import position_store as super_bollinger_store
+        # Guarded helpers (1 Oct 2026): they import Super Bollinger / Unified Momentum lazily and answer "not held"
+        # if a package is missing - a direct import here would crash every real entry once Super Bollinger is removed.
         if (symbol in bollinger_store.live_positions or symbol in bollinger_store.reserved_symbols
-                or symbol in super_bollinger_store.live_positions or symbol in super_bollinger_store.reserved_symbols
+                or engine.super_bollinger_real_holds(symbol) or engine.unified_momentum_real_holds(symbol)
                 or engine.swing_real_holds(symbol)):
             await _event("ENTRY_SKIPPED_HELD_BY_OTHER_STRATEGY", symbol, {})
             return {"status": "skipped", "reason": "held_by_other_strategy"}
