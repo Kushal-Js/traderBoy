@@ -1,0 +1,36 @@
+SWING + HEDGE VARIANTS, 1 Sep - 1 Oct 2026 (15-stock watchlist of 1 Oct; modelled P&L after slippage)
+Dhan calls this run: 11; option data downloaded as needed
+Not priced (21): RADICO 01 Sep 11:20 PE; RADICO 04 Sep 12:30 PE; RADICO 04 Sep 15:05 PE; RADICO 07 Sep 11:50 PE; RADICO 07 Sep 13:40 PE; RADICO 08 Sep 09:35 PE; RADICO 08 Sep 10:35 PE; APLAPOLLO 15 Sep 09:20 PE; PHOENIXLTD 15 Sep 09:20 PE; RBLBANK 29 Sep 09:20 PE; BOSCHLTD 29 Sep 12:30 PE; PHOENIXLTD 01 Oct 10:05 CE; hedge reverse BOSCHLTD 29 SEP 47000 PUT 04 Sep 09:16; hedge SB rule ZYDUSLIFE 29 SEP 1140 CALL 04 Sep 09:18; hedge reverse ZYDUSLIFE 29 SEP 1140 CALL 04 Sep 09:19; hedge 1.5 ATR MOTILALOFS 29 SEP 1060 CALL 08 Sep 09:15; hedge reverse RADICO 29 SEP 4400 PUT 10 Sep 09:22; hedge SB rule DIVISLAB 29 SEP 9400 CALL 11 Sep 09:15; hedge 1.5 ATR DIVISLAB 29 SEP 9400 CALL 11 Sep 09:15; hedge SB rule ZYDUSLIFE 29 SEP 1170 CALL 24 Sep 09:15; hedge 1.5 ATR ZYDUSLIFE 29 SEP 1170 CALL 24 Sep 09:15
+
+day        trades  won     Swing |  +SB rule   (legs) |  +1.5 ATR   (legs) |  +reverse   (legs)
+2026-09-01     11    5    -8,082 |    -4,607 +3,475/5 |    -8,123    -42/4 |    -4,620 +3,462/5
+2026-09-02     16    8   +12,572 |   +15,152 +2,580/9 |   +10,164 -2,408/9 |   +17,181 +4,609/5
+2026-09-03     13    5    -4,613 |    -4,341   +272/3 |    -4,341   +272/3 |    -8,796 -4,183/7
+2026-09-04     19   10    +1,908 |    +3,143 +1,234/6 |      +444 -1,464/5 |      -944 -2,853/6
+2026-09-07      5    3    +8,614 |    +5,925 -2,689/4 |    +8,230   -384/3 |    +9,377   +763/1
+2026-09-08     13    5    -3,741 |    -9,182 -5,441/6 |    -7,018 -3,277/5 |    -6,360 -2,619/7
+2026-09-09     14    4    -9,079 |    -8,629   +451/4 |    -9,305   -226/3 |    -7,652 +1,427/8
+2026-09-10     17    5   -16,797 |   -24,900 -8,103/8 |   -22,224 -5,427/6 |   -25,209 -8,412/11
+2026-09-11     16    3   -21,283 |   -28,005 -6,723/6 |   -28,190 -6,908/6 |   -21,209    +73/7
+2026-09-15     14    7      -270 |    +1,485 +1,755/7 |      +220   +490/7 |    -4,944 -4,674/6
+2026-09-16     11    5    -8,741 |      -174 +8,567/7 |    -2,754 +5,987/5 |   -10,341 -1,600/2
+2026-09-17     12    5    -6,417 |      -829 +5,588/5 |      +823 +7,240/4 |    -8,151 -1,734/3
+2026-09-18     21    5   -17,474 |   -17,772  -297/10 |   -22,743 -5,269/9 |   -21,781 -4,307/6
+2026-09-21      9    6    +9,515 |   +13,909 +4,394/2 |   +13,909 +4,394/2 |   +12,270 +2,755/2
+2026-09-22     18    4   -26,611 |   -27,036  -425/11 |   -26,400   +211/8 |   -23,942 +2,669/7
+2026-09-23     16    9    +6,006 |    +2,890 -3,115/6 |    +6,169   +163/3 |    +4,396 -1,610/1
+2026-09-24     10    2   -12,457 |   -13,560 -1,103/4 |   -13,447   -989/2 |   -14,065 -1,608/1
+2026-09-25     18    5   -15,087 |   -18,506 -3,419/5 |   -14,423   +663/3 |   -14,097   +990/1
+2026-09-28     26    7   -13,600 |   -15,450 -1,850/5 |   -14,158   -558/3 |   -15,266 -1,666/1
+2026-09-29     15    5   -20,340 |   -26,859 -6,519/6 |   -23,967 -3,627/5 |   -22,703 -2,364/6
+2026-09-30     17    9    +1,630 |    -1,246 -2,876/7 |    -1,734 -3,364/6 |    +4,139 +2,509/5
+2026-10-01     17   10   +34,812 |   +45,005 +10,193/4 |   +45,243 +10,431/3 |   +39,209 +4,396/4
+
+variant           total  hedge legs hedges stopped  win days          worst day  max drawdown
+Swing alone    -109,536          +0      0       0    7/22      -26,611   09-22      -156,377
+SB rule        -113,587      -4,052    130      49    7/22      -28,005   09-11      -173,865
+1.5 ATR        -113,626      -4,090    104      37    8/22      -28,190   09-11      -165,243
+reverse        -123,509     -13,973    102      34    6/22      -25,209   09-10      -179,417
+
+Swing: 328 trades (328 closed, 127 won), raw -13,535, modelled -109,536; exits: FRIDAY_SQUARE_OFF 11, MAX_LOSS_HIT 13, PROFIT_PROTECTION_HIT 92, STOP_LOSS_HIT 67, SUPERTREND_REVERSAL_TICK 122, TARGET_HIT 23
+Hindsight caveat: the 15 stocks are 1 Oct's list (picked partly on this window's data) - Swing's own total is flattered; compare the variants with each other.
