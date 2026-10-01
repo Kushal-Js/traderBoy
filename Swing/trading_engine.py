@@ -1151,6 +1151,47 @@ async def _close_as_manual_exit(symbol: str, position: Position) -> None:
         await loop.run_in_executor(None, dhan_wrapper.unsubscribe_option_price, position.trading_symbol)
 
 
+async def _order_state(order_id: str) -> str:
+    """"filled" | "closed" (cancelled/rejected/expired) | "open" | "unknown" - one REST status read."""
+    loop = asyncio.get_running_loop()
+    try:
+        result = await asyncio.wait_for(loop.run_in_executor(None, dhan_wrapper.refresh_order_status, order_id),
+                                        timeout=_ORDER_STATUS_TIMEOUT_SECONDS)
+    except Exception:  # noqa: BLE001
+        logger.exception("could not read the status of order %s", order_id)
+        return "unknown"
+    if result.status == OrderStatus.TRADED:
+        return "filled"
+    if result.status in OrderStatus.TERMINAL_STATUSES:
+        return "closed"
+    return "open"
+
+
+async def _cancel_and_confirm(symbol: str, exit_side: str, order_id: str) -> bool:
+    """Cancel a resting exit-side order (stale order / this position's broker SL-L) before the bot's own exit
+    and make sure it can no longer fill (1 Oct 2026, same as Bollinger/trading_engine._cancel_and_confirm).
+    True = safe to continue: cancelled, or already FILLED (the broker-quantity check right after this then
+    records the exit at its fill price instead of exiting again). False = it may still be live (cancel failed
+    twice / status unreadable) - the caller must not place another exit order."""
+    loop = asyncio.get_running_loop()
+    for attempt in (1, 2):
+        try:
+            await asyncio.wait_for(loop.run_in_executor(None, dhan_wrapper.cancel_order, order_id),
+                                   timeout=_ORDER_STATUS_TIMEOUT_SECONDS)
+            return True
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not cancel %s order %s (attempt %d) - checking its status", symbol,
+                             exit_side, order_id, attempt)
+        state = await _order_state(order_id)
+        if state in ("filled", "closed"):
+            logger.warning("%s: %s order %s is already %s - continuing with the broker-quantity check", symbol,
+                           exit_side, order_id, state)
+            return True
+        if state == "unknown":
+            return False
+    return False
+
+
 async def _exit_position(symbol: str, position: Position, exit_price: float, reason: str) -> None:
     """Caller MUST have already claimed via position_store.try_start_exit.
     Direct, deliberately unmodified port of Options/trading_engine.py's
@@ -1181,14 +1222,15 @@ async def _exit_position(symbol: str, position: Position, exit_price: float, rea
         logger.warning("%s: found an already-outstanding %s order %s for %s (a stale order surviving a "
                         "restart, or this position's own broker-side SL-L) - cancelling it before placing "
                         "a fresh exit order.", symbol, exit_side, stale_order_id, position.trading_symbol)
-        try:
-            await asyncio.wait_for(
-                loop.run_in_executor(None, dhan_wrapper.cancel_order, stale_order_id),
-                timeout=_ORDER_STATUS_TIMEOUT_SECONDS,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("%s: could not cancel stale %s order %s - proceeding with a new order anyway",
-                              symbol, exit_side, stale_order_id)
+        if not await _cancel_and_confirm(symbol, exit_side, stale_order_id):
+            # 1 Oct 2026 (same guard as Bollinger/trading_engine.py, d49abe4): the resting order may still be
+            # LIVE at the broker - a market exit now could exit the lot twice (the stop would then fire on a
+            # flat position and open the opposite side). It protects the position meanwhile; back off and try
+            # the whole exit again on a later check.
+            logger.error("%s: %s order %s for %s could not be confirmed cancelled - NOT sending a second exit "
+                         "order; retrying the exit shortly", symbol, exit_side, stale_order_id, position.trading_symbol)
+            await position_store.record_exit_failure(symbol)
+            return
 
         try:
             broker_qty = await loop.run_in_executor(None, net_qty_fn, position.trading_symbol, position.exchange_segment)
