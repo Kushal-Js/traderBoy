@@ -1,0 +1,66 @@
+PARABOLIC SAR for Unified Momentum and the Scalper - run 2026-10-01 23:11, cache only
+PSAR params: std = AF 0.02 step 0.02 max 0.2, slow = AF 0.01 step 0.01 max 0.1
+PSAR self-test OK: uptrend bars 2-6, flip down at bar 9 (low 12 <= SAR 12.08), flip up at bar 16
+
+PSAR cross-check on BANKNIFTY 1-min (16,338 bars after the first common reversal): trend vs TA-Lib port mismatches 0; vs QuantInsti close-vs-SAR signal mismatches 0 (close == SAR ties: 0); SAR value differences on non-reversal bars 11
+
+======================================================================================================================
+SCALPER - BANKNIFTY 1-min, 1 Sep - 1 Oct 2026, live settings, 1 lot (30). est. real = after Dhan charges + 1 pt slippage/fill
+======================================================================================================================
+variant                                                        trades  wins       raw  est.real  1-15 Sep  16S-1Oct   max DD    worst  +days
+BASELINE - live Scalper (Supertrend entries + exits)              114    37    +9,915    -5,833    -6,476      +643  -22,455   -3,817   8/22
+[std] filter: take a Supertrend entry only if PSAR agrees         103    31    +3,604   -10,615   -10,489      -126  -25,961   -3,817   8/22
+[std] exit: + PSAR reversal exit (first wins)                     119    32      +203   -16,231   -10,013    -6,218  -29,144   -4,195   4/22  [98 PSAR exits]
+[std] exit: PSAR reversal REPLACES the Supertrend exit            111    31      -611   -15,932   -10,374    -5,558  -28,845   -3,809   4/22  [94 PSAR exits]
+[std] entry: + PSAR flips with the EMA200 regime                  261    65    +9,901   -25,897   -15,969    -9,928  -38,765   -4,543   7/22  [160 PSAR entries]
+[std] entry: PSAR flips (regime) only, Supertrend exit            249    51   -11,148   -45,060   -21,263   -23,797  -46,208   -4,917   4/22  [249 PSAR entries]
+[std] PSAR system: regime PSAR flips in, PSAR flip out            314    88    -9,949   -52,592   -26,207   -26,385  -58,144   -5,294   3/22  [314 PSAR entries]  [297 PSAR exits]
+[std] FOLLOW-UP: + PSAR exit only while the trade is LOSING       117    21    -3,971   -20,121   -17,418    -2,703  -31,845   -4,061   4/22  [81 PSAR exits]
+[slow] filter: take a Supertrend entry only if PSAR agrees        102    31      +372   -13,686    -7,972    -5,713  -23,723   -4,377   7/22
+[slow] exit: + PSAR reversal exit (first wins)                    113    37      +502   -15,039   -14,648      -392  -24,554   -4,924   5/22  [71 PSAR exits]
+[slow] exit: PSAR reversal REPLACES the Supertrend exit           103    33    -4,735   -18,865   -15,037    -3,828  -28,380   -4,617   5/22  [83 PSAR exits]
+[slow] entry: + PSAR flips with the EMA200 regime                 208    56    +9,738   -18,743   -13,446    -5,297  -33,259   -4,524   9/22  [102 PSAR entries]
+[slow] entry: PSAR flips (regime) only, Supertrend exit           174    38    -8,212   -31,852   -14,519   -17,332  -39,174   -4,312   5/22  [174 PSAR entries]
+[slow] PSAR system: regime PSAR flips in, PSAR flip out           194    53   -12,240   -38,499   -24,813   -13,686  -43,760   -4,657   4/22  [194 PSAR entries]  [171 PSAR exits]
+[slow] FOLLOW-UP: + PSAR exit only while the trade is LOSING      111    24      +702   -14,563   -15,230      +666  -23,768   -3,943   6/22  [52 PSAR exits]
+(signals without cached option prices, skipped: 14)
+
+Lead/lag on the Scalper's own Supertrend ENTRY signals (1-min, trading hours, 1 Sep - 1 Oct):
+  [std] 190 signals: PSAR already on that side 170 (89%), median 4 min since its flip | PSAR flipped LATER in 20 (11%), median 4 min later | not within 60 min 0
+  [slow] 190 signals: PSAR already on that side 166 (87%), median 4 min since its flip | PSAR flipped LATER in 24 (13%), median 3 min later | not within 60 min 0
+  [std] Supertrend-close exits 79: PSAR turned against the trade EARLIER in 74 (median 25 min earlier); exiting there instead would have changed raw P&L by +18,462 (57 better / 17 worse)
+  [slow] Supertrend-close exits 79: PSAR turned against the trade EARLIER in 56 (median 20 min earlier); exiting there instead would have changed raw P&L by +10,155 (46 better / 10 worse)
+
+======================================================================================================================
+UNIFIED MOMENTUM - deployed config, Rs 1.2L, 3 Aug - 29 Sep 2026 (41 days), modelled P&L (portfolio: slots, chop gate, cash)
+======================================================================================================================
+variant                                                              total      Aug      Sep   max DD   worst   +days     A/B
+(a variant counts as robust only if BOTH PSAR settings beat the baseline in BOTH months)
+BASELINE - deployed (A: SB pullback calls + hedge, B: Supertrend puts)  +146,038  +57,927  +88,111  -13,712  -5,964  21/41   88/37   [0 PSAR exits, 0 PSAR entries]
+[std] A exit: + PSAR flip on a closed 5-min candle                 +42,058     +702  +41,356  -23,531  -8,808  20/41  106/37   [81 PSAR exits, 0 PSAR entries]
+[std] A exit: + PSAR trailing stop (1-min touch)                   +46,839   +3,362  +43,477  -22,479  -8,106  20/41  107/37   [83 PSAR exits, 0 PSAR entries]
+[std] A filter: call only if the 5-min PSAR is bullish            +138,271  +60,485  +77,786  -14,940  -6,342  21/41   82/37   [0 PSAR exits, 0 PSAR entries]
+[std] A FOLLOW-UP: + PSAR flip exit only while LOSING              +86,323  +28,825  +57,498  -24,466  -9,482  16/41  101/37   [44 PSAR exits, 0 PSAR entries]
+[std] B filter: put only if the 5-min PSAR is bearish             +141,939  +56,947  +84,992  -13,712  -6,851  21/41   88/33   [0 PSAR exits, 0 PSAR entries]
+[std] B exit: + PSAR flip on a closed 5-min candle                +148,852  +59,639  +89,212  -15,499  -5,964  22/41   89/37   [14 PSAR exits, 0 PSAR entries]
+[std] B exit: + PSAR trailing stop (1-min touch)                  +150,581  +60,874  +89,706  -15,005  -5,964  22/41   89/37   [16 PSAR exits, 0 PSAR entries]
+[std] B entry: + PSAR flips with the EMA200 regime                +132,948  +43,305  +89,642  -18,732  -6,879  20/41   88/57   [0 PSAR exits, 21 PSAR entries]
+[std] B entry: PSAR flips (regime) only                           +132,877  +42,366  +90,511  -19,944  -7,815  19/41   88/41   [0 PSAR exits, 41 PSAR entries]
+[std] B PSAR system: PSAR flips in, PSAR flip out                 +142,430  +51,024  +91,406  -14,395  -5,964  19/41   88/42   [24 PSAR exits, 42 PSAR entries]
+[std] B FOLLOW-UP: + PSAR flip exit only while LOSING             +145,343  +58,066  +87,277  -16,218  -6,308  21/41   89/37   [10 PSAR exits, 0 PSAR entries]
+[slow] A exit: + PSAR flip on a closed 5-min candle               +127,277  +33,132  +94,145  -14,829  -9,121  22/41   98/37   [56 PSAR exits, 0 PSAR entries]
+[slow] A exit: + PSAR trailing stop (1-min touch)                 +136,662  +32,970 +103,692  -12,797  -9,628  23/41   98/37   [58 PSAR exits, 0 PSAR entries]
+[slow] A filter: call only if the 5-min PSAR is bullish           +157,378  +65,213  +92,165  -17,502  -8,905  23/41   78/37   [0 PSAR exits, 0 PSAR entries]
+[slow] A FOLLOW-UP: + PSAR flip exit only while LOSING            +143,520  +55,314  +88,206  -15,178  -9,121  20/41   97/37   [29 PSAR exits, 0 PSAR entries]
+[slow] B filter: put only if the 5-min PSAR is bearish            +146,009  +56,947  +89,062  -13,584  -5,964  21/41   88/33   [0 PSAR exits, 0 PSAR entries]
+[slow] B exit: + PSAR flip on a closed 5-min candle               +141,603  +59,500  +82,103  -15,801  -7,933  22/41   88/37   [8 PSAR exits, 0 PSAR entries]
+[slow] B exit: + PSAR trailing stop (1-min touch)                 +144,436  +59,500  +84,936  -14,883  -8,042  22/41   88/37   [13 PSAR exits, 0 PSAR entries]
+[slow] B entry: + PSAR flips with the EMA200 regime               +154,747  +64,804  +89,943  -13,712  -5,964  20/41   88/45   [0 PSAR exits, 8 PSAR entries]
+[slow] B entry: PSAR flips (regime) only                          +160,414  +61,561  +98,852  -12,861  -6,851  20/41   88/21   [0 PSAR exits, 21 PSAR entries]
+[slow] B PSAR system: PSAR flips in, PSAR flip out                +162,766  +64,328  +98,438  -11,163  -6,851  20/41   88/21   [3 PSAR exits, 21 PSAR entries]
+[slow] B FOLLOW-UP: + PSAR flip exit only while LOSING            +139,629  +57,927  +81,703  -16,201  -7,933  21/41   88/37   [6 PSAR exits, 0 PSAR entries]
+
+Lead/lag on engine B's Supertrend signals (5-min candles, every signal in the trading window - before slots/gates):
+  [std] 310 bearish signals: PSAR already bearish 274 (88%), median 20 min since its flip | PSAR flipped LATER 28 (9%), median 10 min | not within 60 min 8
+  [slow] 310 bearish signals: PSAR already bearish 246 (79%), median 25 min since its flip | PSAR flipped LATER 45 (15%), median 15 min | not within 60 min 19
+  Engine A pullback-call candidates at entry (std PSAR on the last closed 5-min candle): bullish 150 (90%), bearish 16 - the pullback trigger mostly fires while the PSAR is still bullish, so a PSAR filter can only remove the few others
