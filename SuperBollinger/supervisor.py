@@ -583,6 +583,23 @@ def _order_age_seconds(created: Optional[str]) -> float:
 _stop_orphan_seen: dict[str, float] = {}   # bot stop order id -> when it was first seen on a flat contract
 
 
+def _stops_owned_by_open_positions() -> set[str]:
+    """Broker stop order ids that a live position in ANY bot book still names as its protection (1 Oct 2026
+    review): even if Dhan's position list ever came back missing a held contract, its stop is never swept."""
+    owned: set[str] = set()
+    stores = [position_store, hedge_store]
+    for mod in ("Bollinger.position_store", "Swing.position_store", "Options.position_store", "Luxury.position_store"):
+        try:
+            stores.append(__import__(mod, fromlist=["position_store"]).position_store)
+        except Exception:  # noqa: BLE001
+            logger.exception("[supervisor] stop sweep: could not read %s", mod)
+    for store in stores:
+        for pos in list(getattr(store, "live_positions", {}).values()):
+            if getattr(pos, "stop_loss_order_id", None):
+                owned.add(str(pos.stop_loss_order_id))
+    return owned
+
+
 async def _sweep_orphan_stops(loop, out: dict) -> None:
     """1 Oct 2026 (ratcheted broker stop): cancel any bot stop-loss order resting on a contract the account
     holds NONE of - it can only ever open a new position (e.g. a stop left live after a failed cancel during
@@ -607,9 +624,10 @@ async def _sweep_orphan_stops(loop, out: dict) -> None:
     except Exception:  # noqa: BLE001
         logger.exception("[supervisor] stop sweep: could not read the broker positions - nothing cancelled")
         return
+    protected = _stops_owned_by_open_positions()
     now, seen_now = time.monotonic(), set()
     for o in stops:
-        if not o.get("security_id") or o["security_id"] in held:
+        if not o.get("security_id") or o["security_id"] in held or o["order_id"] in protected:
             continue
         seen_now.add(o["order_id"])
         if o["order_id"] not in _stop_orphan_seen:

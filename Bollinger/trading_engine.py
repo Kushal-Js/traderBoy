@@ -844,23 +844,34 @@ async def _order_state(order_id: str) -> str:
     return "open"
 
 
+# Orders this process already confirmed can no longer fill (cancel accepted, or seen cancelled/rejected/expired/
+# filled). A later exit attempt for the same position (e.g. after a failed market exit) skips straight to the
+# broker-quantity check instead of re-cancelling: re-cancelling a dead order always fails, and if the status read
+# then fails too the guard would hold back an exit for a position whose stop is already gone (1 Oct 2026 review).
+_orders_confirmed_gone: set[str] = set()
+
+
 async def _cancel_and_confirm(symbol: str, order_id: str) -> bool:
     """Cancel a resting SELL order before the bot's own exit and make sure it can no longer sell (1 Oct 2026,
     with the ratcheted broker stop the stop sits right under the exit price, so a stop left live after a failed
     cancel would fire on a flat position). True = safe to continue: cancelled, or already FILLED (the broker-
     quantity check right after this then records the exit at its fill price instead of selling again).
     False = it may still be live (cancel failed twice / status unreadable) - the caller must not sell."""
+    if order_id in _orders_confirmed_gone:
+        return True
     loop = asyncio.get_running_loop()
     for attempt in (1, 2):
         try:
             await asyncio.wait_for(loop.run_in_executor(None, dhan_wrapper.cancel_order, order_id),
                                    timeout=_ORDER_STATUS_TIMEOUT_SECONDS)
+            _orders_confirmed_gone.add(order_id)
             return True
         except Exception:  # noqa: BLE001
             logger.exception("%s: could not cancel SELL order %s (attempt %d) - checking its status", symbol,
                              order_id, attempt)
         state = await _order_state(order_id)
         if state in ("filled", "closed"):
+            _orders_confirmed_gone.add(order_id)
             logger.warning("%s: SELL order %s is already %s - continuing with the broker-quantity check", symbol,
                            order_id, state)
             return True
