@@ -16,10 +16,12 @@ SWING rules for entry and exit with 1 min candle timeframe as we saw right now i
             stays on one side for hours. No new entries from square_off_time, nor for the rest of the day once
             today's realised loss reaches daily_loss_limit_rs (DAILY_LOSS_STOP).
   Exit      Swing's options ladder, checked every MONITOR_INTERVAL_SECONDS and on every option tick:
-            MAX_LOSS_HIT (Rs max_loss_rs) -> TARGET_HIT (+target_pct) -> PROFIT_PROTECTION_HIT (peak profit >
-            profit_protection_rs, then giveback_pct off the best price) -> STOP_LOSS_HIT (-hard_stop_pct) ->
-            SUPERTREND_REVERSAL_TICK (the live index price crossing the last closed 1-min candle's Supertrend
-            line against the trade, never on the entry candle) -> DAILY_SQUARE_OFF at square_off_time.
+            MAX_LOSS_HIT (Rs max_loss_rs) -> TARGET_HIT (+target_pct; 0 = off, the default since 1 Oct 2026)
+            -> PROFIT_PROTECTION_HIT (peak profit > profit_protection_rs, then giveback_pct off the best price)
+            -> STOP_LOSS_HIT (-hard_stop_pct) -> SUPERTREND_REVERSAL_CLOSE (supertrend_exit_mode=close, the
+            default since 1 Oct 2026: a CLOSED 1-min candle beyond its own Supertrend line; mode tick =
+            SUPERTREND_REVERSAL_TICK, the live index price crossing the last closed candle's line) - against the
+            trade, never on the entry candle -> DAILY_SQUARE_OFF at square_off_time.
             REAL positions also get a broker SL-L at the max-loss level (disaster backstop).
   Mode      paper_mode_control "Scalper" (runtime, no restart). Every rule above in settings.py (runtime).
 
@@ -84,20 +86,27 @@ def is_paper() -> bool:
 # Rules (pure)
 # --------------------------------------------------------------------------- #
 def exit_reason_for(entry: float, best: float, ltp: float, multiplier: float, side: int,
-                    spot: Optional[float], st_line: Optional[float], st_check_allowed: bool) -> Optional[str]:
-    """Swing's options exit ladder, in Swing's order. best must already include ltp. side +1 = CE, -1 = PE."""
+                    spot: Optional[float], st_line: Optional[float], st_check_allowed: bool,
+                    candle_close: Optional[float] = None) -> Optional[str]:
+    """Swing's options exit ladder, in Swing's order. best must already include ltp. side +1 = CE, -1 = PE.
+    st_line / candle_close = the last CLOSED 1-min candle's Supertrend line and close; spot = the live index
+    price. target_pct 0 = no target; supertrend_exit_mode close = only that closed candle beyond its line (1 Oct
+    2026), tick = the live price across it."""
     if (entry - ltp) * multiplier >= settings.get("max_loss_rs"):
         return "MAX_LOSS_HIT"
-    if ltp >= entry * (1 + settings.get("target_pct")):
+    target = settings.get("target_pct")
+    if target > 0 and ltp >= entry * (1 + target):
         return "TARGET_HIT"
     if (best - entry) * multiplier > settings.get("profit_protection_rs") and \
             ltp <= best * (1 - settings.get("profit_protection_giveback_pct")):
         return "PROFIT_PROTECTION_HIT"
     if ltp <= entry * (1 - settings.get("hard_stop_pct")):
         return "STOP_LOSS_HIT"
-    if settings.get("supertrend_exit_enabled") and st_check_allowed and spot is not None and st_line is not None:
-        if (side == 1 and spot < st_line) or (side == -1 and spot > st_line):
-            return "SUPERTREND_REVERSAL_TICK"
+    if settings.get("supertrend_exit_enabled") and st_check_allowed and st_line is not None:
+        on_close = settings.get("supertrend_exit_mode") == "close"
+        price = candle_close if on_close else spot
+        if price is not None and ((side == 1 and price < st_line) or (side == -1 and price > st_line)):
+            return "SUPERTREND_REVERSAL_CLOSE" if on_close else "SUPERTREND_REVERSAL_TICK"
     return None
 
 
@@ -110,7 +119,7 @@ def _position_exit_reason(pos: Position, ltp: float) -> Optional[str]:
     entry_bar = _entry_candle.get(pos.trading_symbol)
     st_ok = ev.get("bar_start") is not None and (entry_bar is None or ev["bar_start"] > entry_bar)
     return exit_reason_for(pos.entry_price, max(pos.best_price, ltp), ltp, pos.pnl_multiplier, _side(pos),
-                           signals.live_spot(pos.underlying_symbol), ev.get("st_line"), st_ok)
+                           signals.live_spot(pos.underlying_symbol), ev.get("st_line"), st_ok, ev.get("close"))
 
 
 def _square_off_now() -> bool:

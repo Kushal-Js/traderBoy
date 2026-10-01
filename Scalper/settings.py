@@ -57,6 +57,8 @@ def _to_env(v) -> str:
 
 _positive = lambda v: None if v > 0 else "must be > 0"            # noqa: E731
 _fraction = lambda v: None if 0 < v < 1 else "must be between 0 and 1"  # noqa: E731
+_fraction_or_off = lambda v: None if 0 <= v < 1 else "must be 0 (off) or between 0 and 1"  # noqa: E731
+_st_exit_mode = lambda v: None if v in ("tick", "close") else "must be 'tick' or 'close'"  # noqa: E731
 
 # name: (parser, env var, default, validator)
 _FIELDS = {
@@ -68,11 +70,16 @@ _FIELDS = {
     "quantity_lots": (int, "SCALPER_QUANTITY_LOTS", "1", lambda v: None if 1 <= v <= 5 else "must be 1-5"),
     # Swing's options exit ladder (MAX_LOSS -> TARGET -> PROFIT_PROTECTION -> STOP_LOSS -> SUPERTREND_REVERSAL)
     "max_loss_rs": (float, "SCALPER_MAX_LOSS_RS", "4500", _positive),
-    "target_pct": (float, "SCALPER_TARGET_PCT", "0.35", _fraction),
+    # 0 = no target (user, 1 Oct 2026: "Target 35% to Off" - the 2-lot backtests did better without it)
+    "target_pct": (float, "SCALPER_TARGET_PCT", "0", _fraction_or_off),
     "hard_stop_pct": (float, "SCALPER_HARD_STOP_PCT", "0.20", _fraction),
     "profit_protection_rs": (float, "SCALPER_PROFIT_PROTECTION_RS", "3000", _positive),
     "profit_protection_giveback_pct": (float, "SCALPER_PROFIT_PROTECTION_GIVEBACK_PCT", "0.02", _fraction),
     "supertrend_exit_enabled": (_parse_bool, "SCALPER_SUPERTREND_EXIT_ENABLED", "true", None),
+    # close = exit only when a CLOSED 1-min candle is beyond its Supertrend line; tick = the live index price
+    # crossing the last closed candle's line (Swing's rule). User, 1 Oct 2026: "only when a 1-min candle closes
+    # beyond the line" - fewer whipsaw exits in the 1 Sep - 1 Oct backtest.
+    "supertrend_exit_mode": (lambda v: str(v).strip().lower(), "SCALPER_SUPERTREND_EXIT_MODE", "close", _st_exit_mode),
     # User, 1 Oct 2026: "Stop at 3000 max loss for rest of the day with no new entries in this strategy."
     "daily_loss_limit_rs": (float, "SCALPER_DAILY_LOSS_LIMIT_RS", "3000", _positive),
     "square_off_time": (_parse_hhmm, "SCALPER_SQUARE_OFF_TIME", "15:25", None),
