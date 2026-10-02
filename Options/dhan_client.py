@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -525,6 +526,8 @@ class DhanWrapper:
             "market_data_skipped_cooldown": 0,
             "market_data_pacing_wait_s": 0.0,
             "market_data_calls_by_minute": {},
+            "market_data_calls_by_caller": {},
+            "market_data_calls_by_instrument": {},
             # Default-executor queue lag (2 Oct 2026) - see executor_lag_probe_forever: order placement runs on
             # the same small pool as every blocking Dhan call, so this is how long an order could wait for a worker.
             "executor_lag_ms_last": None,
@@ -3125,6 +3128,7 @@ class DhanWrapper:
                 self._market_data_cooldown_until - time.monotonic(),
             )
             return {}
+        self._count_market_data_caller(interval_minutes, f"{exchange_segment}:{security_id}")
         resp = _retry(
             self.client.Dhan.intraday_minute_data,
             security_id=security_id,
@@ -3198,6 +3202,23 @@ class DhanWrapper:
             self.stats["market_data_calls"] += 1
             self.stats["market_data_calls_by_minute"] = _bump_minute(self.stats["market_data_calls_by_minute"], 1)
             return True
+
+    def _count_market_data_caller(self, interval_minutes: int, instrument: str) -> None:
+        """/feed-stats market_data_calls_by_caller ("Package/module.function 5m" -> calls since start) and
+        _by_instrument ("NSE_EQ:2181" -> calls) - 2 Oct 2026, to see what fills the shared REST queue at bar starts."""
+        try:
+            frame = sys._getframe(2)
+            path = frame.f_code.co_filename.replace("\\", "/").split("/")
+            key = f"{'/'.join(path[-2:])[:-3]}.{frame.f_code.co_name} {interval_minutes}m"
+        except Exception:  # noqa: BLE001
+            key = f"unknown {interval_minutes}m"
+        with self._market_data_lock:
+            calls = dict(self.stats["market_data_calls_by_caller"])
+            calls[key] = calls.get(key, 0) + 1
+            self.stats["market_data_calls_by_caller"] = calls
+            per = dict(self.stats["market_data_calls_by_instrument"])
+            per[instrument] = per.get(instrument, 0) + 1
+            self.stats["market_data_calls_by_instrument"] = per
 
     async def executor_lag_probe_forever(self, interval_seconds: float = 1.0, warn_after_seconds: float = 2.0) -> None:
         """How long a job waits for a default-executor worker, measured once a second (2 Oct 2026, Unified Momentum
