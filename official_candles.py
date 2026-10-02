@@ -256,6 +256,7 @@ PREWARM_END = dtime(9, 14)         # never start later than this - the loops tak
 BASES_FILE = Path("data/official_candles_bases.json")
 SEEN_SAVE_SECONDS = 30
 _loaders: dict[str, Callable[[str, dict], None]] = {}
+_hooks: dict[str, Callable[[], object]] = {}     # name -> fn(): other warm-ups (e.g. the Scalper's own candle books)
 _seen = {"date": None, "bases": {}, "dirty": False, "saved_at": 0.0}
 _prewarm = {"done_date": None, "last": None, "ident": None}   # ident: the thread running prewarm(), while it runs
 
@@ -264,6 +265,13 @@ def add_prewarm_loader(owner: str, fn: Callable[[str, dict], None]) -> None:
     """fn(symbol, entry) loads one base of `owner` ("bollinger", "swing") exactly as its signal path would, WS
     subscription included. Blocking - runs on this module's thread."""
     _loaders[owner] = fn
+
+
+def add_prewarm_hook(name: str, fn: Callable[[], object]) -> None:
+    """fn() warms something that is not a registered base (2 Oct 2026: the Scalper's 1-min / 15-min books) at
+    PREWARM_START, before the bases. Blocking - runs on this module's thread; its return value is shown in the
+    warm-up result (GET /official-candles -> prewarm.hooks)."""
+    _hooks[name] = fn
 
 
 def _note_seen(key: tuple, symbol: str, interval: int, lookback_days: Optional[int]) -> None:
@@ -371,7 +379,14 @@ def prewarm(now: Optional[datetime] = None) -> dict:
 
     _prewarm["ident"] = threading.get_ident()
     added: list = []
+    hooks: dict = {}
     try:
+        for name, fn in list(_hooks.items()):          # real-money Scalper first: a few calls, ~1-2 s
+            try:
+                hooks[name] = fn()
+            except Exception as exc:  # noqa: BLE001
+                hooks[name] = f"failed: {exc}"
+                logger.exception("official candles: warm-up hook %s failed - it readies itself as before", name)
         for entry in entries:
             load(entry)
         added = _missing_priority_entries(entries, priority)
@@ -381,7 +396,7 @@ def prewarm(now: Optional[datetime] = None) -> dict:
         _prewarm["ident"] = None
     result = {"date": now.date().isoformat(), "listed": len(entries), **counts,
               "seconds": round(time.monotonic() - started, 1), "symbols": len({e.get("symbol") for e in entries}),
-              "added_um_stocks": sorted({e["symbol"] for e in added}), "added_bases": len(added)}
+              "added_um_stocks": sorted({e["symbol"] for e in added}), "added_bases": len(added), "hooks": hooks}
     _prewarm["last"] = result
     logger.info("official candles: pre-open warm-up done - %s", result)
     return result

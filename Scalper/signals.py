@@ -36,6 +36,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
+import official_candles
 from Options.dhan_client import IST, _compute_ema, _compute_rsi, _compute_supertrend, dhan_wrapper
 from Swing import candle_feed
 
@@ -189,6 +190,44 @@ async def refresh(symbol: str, force: bool = False) -> None:
         except Exception:  # noqa: BLE001
             logger.exception("[Scalper] %s: 15-min history fetch failed", symbol)
             b.rest15_at = now + REST_RETRY_SECONDS
+
+
+def prewarm_symbols() -> dict:
+    """Pre-open warm-up (official_candles.prewarm, 09:05 IST on weekdays - 2 Oct 2026, user: "Scalper stocks should
+    also be warmed up at 09:05"). For every Scalper symbol: subscribe its ticks and load fresh 1-min / 15-min REST
+    history into its book, so the open never waits for them. The bot's startup (08:00 restart) already readies the
+    books once; this reloads them right before the open and readies any symbol whose startup setup failed. Same
+    steps as ensure_ready + refresh(force=True), blocking (official-candles thread, not the event loop). Returns
+    {symbol: what it loaded} for the warm-up result."""
+    from . import settings
+    out = {}
+    for symbol in settings.get("symbols"):
+        b = book(symbol)
+        try:
+            sid, seg, _inst = reference(symbol)
+            try:
+                candle_feed.ensure_subscribed(symbol, sid, seg)
+            except Exception:  # noqa: BLE001
+                logger.exception("[Scalper] %s: warm-up could not subscribe its ticks - REST only", symbol)
+            now = time.time()
+            bars = _rest_bars(symbol, 1, REST_1M_LOOKBACK_DAYS)
+            if bars:
+                b.rest1, b.rest1_at = bars, now + REST_1M_REFRESH_SECONDS
+            bars = _rest_bars(symbol, 15, REST_15M_LOOKBACK_DAYS)
+            if bars:
+                b.rest15, b.rest15_at = bars, now + REST_15M_REFRESH_SECONDS
+            if b.rest1 and b.rest15:
+                b.ready = True
+            out[symbol] = {"segment": seg, "rest_1m_bars": len(b.rest1), "rest_15m_bars": len(b.rest15),
+                           "ready": b.ready}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[Scalper] %s: warm-up failed - the monitor loop readies it as before", symbol)
+            out[symbol] = f"failed: {exc}"
+    logger.info("[Scalper] pre-open warm-up: %s", out)
+    return out
+
+
+official_candles.add_prewarm_hook("scalper", prewarm_symbols)
 
 
 async def fill_gap(symbol: str, minute_start: int) -> bool:
