@@ -813,6 +813,16 @@ async def _check_broker_stop_already_filled(symbol: str, position: Position, sto
     store = store or position_store
     if not config.BROKER_STOP_LOSS_ENABLED or not position.stop_loss_order_id:
         return False
+    # The order-update feed already shows the stop RESTING (2 Oct 2026): check_if_order_filled would return None
+    # from that same in-memory cache, so answer here instead of sending one executor job per option tick - those
+    # queued behind history downloads in the 5-worker pool at bar starts and delayed every tick exit with them.
+    # No update yet, a terminal status, or any doubt -> the call below exactly as before.
+    try:
+        cached = dhan_wrapper._order_snapshot_from_cache(position.stop_loss_order_id)
+        if cached and cached.get("order_status") and cached["order_status"] not in OrderStatus.TERMINAL_STATUSES:
+            return False
+    except Exception:  # noqa: BLE001
+        pass
     loop = asyncio.get_running_loop()
     try:
         result = await asyncio.wait_for(

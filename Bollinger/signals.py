@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -179,7 +180,9 @@ def _series_with_ws_count(symbol: str, security_id: str, exchange_segment: str,
     interval = config.SIGNAL_INTERVAL_MINUTES
     now = _now_ist()
     bar_start = now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % interval)
-    newest_closed_start = bar_start - timedelta(minutes=interval)
+    # Capped at the session's last bar (2 Oct 2026): after 15:15 a stock's newest bar stays 15:10 (closing auction).
+    newest_closed_start = official_candles.session_capped(bar_start - timedelta(minutes=interval), interval,
+                                                          exchange_segment)
 
     base = _rest_series_cache.get(symbol)
     base_ts = (base or {}).get("timestamp") or []
@@ -210,6 +213,16 @@ def _series_with_ws_count(symbol: str, security_id: str, exchange_segment: str,
                     data[key].append(ws_data[key][i])
                 appended += 1
     return data, appended
+
+
+def _prewarm_base(symbol: str, entry: dict) -> None:
+    """Pre-open warm-up (official_candles.prewarm, ~09:05): WS-subscribe `symbol` and download its base now, so the
+    09:15 WS bar is watched whole and nothing downloads at the open. Blocking."""
+    security_id, exchange_segment, instrument_type = _underlying_reference(symbol)
+    _series_with_ws_count(symbol, security_id, exchange_segment, instrument_type)
+
+
+official_candles.add_prewarm_loader("bollinger", _prewarm_base)
 
 
 def is_symbol_ws_fresh(symbol: str) -> bool:
@@ -548,29 +561,41 @@ async def get_signal_state(symbol: str, force: bool = False) -> Optional[Bolling
     lock = _fetch_locks.setdefault(cache_key, asyncio.Lock())
     async with lock:
         latest = _signal_cache.get(cache_key)
-        if latest is not None and latest is not cached:
+        if latest is not None and latest is not cached and latest[0] != _EXPIRED:
             return latest[1]          # another caller refreshed it while this one waited
         loop = asyncio.get_running_loop()
+        started = time.monotonic()
         try:
             state = await loop.run_in_executor(dhan_wrapper.history_executor(), _fetch_signal_state_once, symbol)
             _fail_streak[cache_key] = 0
+            stamp = _stamp_after(symbol, started)
         except Exception:  # noqa: BLE001
             logger.exception("%s: could not fetch Bollinger signal state - keeping last cached value", symbol)
             state = cached[1] if cached else None
             _fail_streak[cache_key] = streak + 1
-        _signal_cache[cache_key] = (_now_ist(), state)
+            stamp = _now_ist()
+        _signal_cache[cache_key] = (stamp, state)
         return state
 
 
 _EXPIRED = datetime(2000, 1, 1, tzinfo=IST)
+_expired_at: dict[str, float] = {}     # symbol -> time.monotonic() of the last expire_signal
 
 
 def expire_signal(symbol: str) -> None:
     """Dhan's official candle replaced WS bars in `symbol`'s base (official_candles) - the next get_signal_state
     recomputes; peek still returns the last state meanwhile. Thread-safe (one dict assignment)."""
+    _expired_at[symbol] = time.monotonic()
     cached = _signal_cache.get(symbol)
     if cached is not None:
         _signal_cache[symbol] = (_EXPIRED, cached[1])
+
+
+def _stamp_after(symbol: str, started: float) -> datetime:
+    """Cache stamp for a state computed from data read at `started` (2 Oct 2026): if official candles expired the
+    cache meanwhile, that state was built before Dhan's candle went in - store it as already expired, so the next
+    read recomputes instead of trusting it for SIGNAL_REFRESH_SECONDS."""
+    return _EXPIRED if _expired_at.get(symbol, 0.0) >= started else _now_ist()
 
 
 def _confirm_once(symbol: str) -> Optional[BollingerSignalState]:

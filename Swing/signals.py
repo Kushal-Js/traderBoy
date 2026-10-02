@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -247,7 +248,10 @@ def _rest_base(cache_key: tuple, interval_minutes: int, symbol: Optional[str] = 
         if symbol is not None:
             _register_base(cache_key, symbol)
         bar_start = now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % interval_minutes)
-        newest_closed_start = bar_start - timedelta(minutes=interval_minutes)
+        # Capped at the session's last bar (2 Oct 2026): after 15:15 a stock's newest bar stays 15:10 (15:00 for
+        # 15 min) - the closing auction prints no bars, so the base is current and needs no download.
+        newest_closed_start = official_candles.session_capped(bar_start - timedelta(minutes=interval_minutes),
+                                                              interval_minutes, cache_key[1])
         up_to_date = datetime.fromtimestamp(base["timestamp"][-1], tz=IST) >= newest_closed_start
         if up_to_date:
             return base
@@ -290,12 +294,31 @@ def _register_base(cache_key: tuple, symbol: str) -> None:
                               lambda: (_raw_series_cache.get(cache_key) or (None, None))[1], put, expire_symbol)
 
 
+def _prewarm_base(symbol: str, entry: dict) -> None:
+    """Pre-open warm-up (official_candles.prewarm, ~09:05): WS-subscribe `symbol` and download one of its bases now
+    (the interval / lookback it used on the last trading day), so nothing downloads at 09:15. Blocking."""
+    security_id, exchange_segment, instrument_type = _underlying_reference(symbol)
+    interval = int(entry["interval"])
+    _rest_base((security_id, exchange_segment, instrument_type, interval, entry.get("lookback_days")), interval, symbol)
+
+
+official_candles.add_prewarm_loader("swing", _prewarm_base)
+
+
 _EXPIRED = datetime(2000, 1, 1, tzinfo=IST)
+_expired_at: dict[str, float] = {}     # symbol -> time.monotonic() of the last expire_symbol
+
+
+def _stamp_after(symbol: str, started: float) -> datetime:
+    """Cache stamp for a state computed from data read at `started` (2 Oct 2026): official candles expired the
+    symbol meanwhile -> the state predates Dhan's candle, store it as already expired so the next read recomputes."""
+    return _EXPIRED if _expired_at.get(symbol, 0.0) >= started else _now_ist()
 
 
 def expire_symbol(symbol: str) -> None:
     """Dhan's official candles replaced WS bars in one of `symbol`'s bases (official_candles, 2 Oct 2026): the
     next regime / Supertrend / Day Range read recomputes. Thread-safe (dict assignments only)."""
+    _expired_at[symbol] = time.monotonic()
     for cache, key in ([(_regime_cache, symbol), (_day_range_cache, symbol)]
                        + [(_supertrend_cache, k) for k in list(_supertrend_cache) if k[0] == symbol]):
         cached = cache.get(key)
@@ -596,9 +619,12 @@ async def get_regime_state(symbol: str) -> Optional[RegimeState]:
                                        cached[1].fast_candle_start))):
         return cached[1]
     loop = asyncio.get_running_loop()
+    started = time.monotonic()
+    stamp = None
     try:
         state = await loop.run_in_executor(dhan_wrapper.history_executor(), _fetch_regime_state_once, symbol)
         _regime_fail_streak[symbol] = 0
+        stamp = _stamp_after(symbol, started)
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not fetch regime state - keeping last cached value", symbol)
         state = cached[1] if cached else None
@@ -609,7 +635,7 @@ async def get_regime_state(symbol: str) -> Optional[RegimeState]:
     # turning one bad fetch into a continuous full-speed hammering of
     # Dhan's REST endpoint (confirmed live 21 Sep 2026: ~22k failed calls
     # across market hours after one early failure never got throttled).
-    _regime_cache[symbol] = (_now_ist(), state)
+    _regime_cache[symbol] = (stamp or _now_ist(), state)
     return state
 
 
@@ -784,10 +810,13 @@ async def get_supertrend_state(symbol: str, interval_minutes: Optional[int] = No
                                        cached[1].candle_start))):
         return cached[1]
     loop = asyncio.get_running_loop()
+    started = time.monotonic()
+    stamp = None
     try:
         state = await loop.run_in_executor(dhan_wrapper.history_executor(), _fetch_supertrend_state_once, symbol,
                                            interval_minutes)
         _supertrend_fail_streak[cache_key] = 0
+        stamp = _stamp_after(symbol, started)
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not fetch Supertrend state (%smin) - keeping last cached value",
                           symbol, interval_minutes)
@@ -795,7 +824,7 @@ async def get_supertrend_state(symbol: str, interval_minutes: Optional[int] = No
         _supertrend_fail_streak[cache_key] = streak + 1
     # Stamp the cache even on failure - see the matching comment in
     # get_regime_state above; same bug, same fix, same live incident.
-    _supertrend_cache[cache_key] = (_now_ist(), state)
+    _supertrend_cache[cache_key] = (stamp or _now_ist(), state)
     return state
 
 
@@ -951,14 +980,17 @@ async def get_day_range_state(symbol: str) -> Optional[DayRangeState]:
     if cached and (_now_ist() - cached[0]).total_seconds() < effective_refresh:
         return cached[1]
     loop = asyncio.get_running_loop()
+    started = time.monotonic()
+    stamp = None
     try:
         state = await loop.run_in_executor(dhan_wrapper.history_executor(), _fetch_day_range_state_once, symbol)
         _day_range_fail_streak[symbol] = 0
+        stamp = _stamp_after(symbol, started)
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not fetch Day Range state - keeping last cached value", symbol)
         state = cached[1] if cached else None
         _day_range_fail_streak[symbol] = streak + 1
-    _day_range_cache[symbol] = (_now_ist(), state)
+    _day_range_cache[symbol] = (stamp or _now_ist(), state)
     return state
 
 

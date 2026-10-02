@@ -113,16 +113,32 @@ DISK_RESTORE_LOOKBACK_DAYS = 55
 # the REST history (and every backtest) has 09:15-15:25 bars only - e.g. Unified Momentum's NIFTY chop gate read
 # 0.0 from Thursday's flat bars. Now NSE equities and indices keep session ticks only (bar starts 09:15 ... 15:25),
 # for live bars, for the tick listeners and for bars restored from disk. MCX keeps its own long session (unchanged).
+#
+# Stocks end at 15:15 (2 Oct 2026, found in the pre-Monday load audit): since Mon 3 Aug 2026 NSE runs a Closing
+# Auction Session in the cash market of F&O stocks - continuous trading stops at 15:15 and one auction print follows
+# (~15:28-15:30, the whole auction volume at one price). Dhan's REST history has no stock bar after 15:14 since that
+# day (every backtest included), so a stock's last 5-min bar is 15:10 and its last 15-min bar 15:00. The auction print
+# used to form a flat "15:25" WS bar that REST never has. Indices keep 15:30 (their REST bars run to 15:29, frozen
+# from 15:15 until the auction). F&O contracts trade until 15:40 - see Options/config.FNO_MARKET_CLOSE_TIME.
 NSE_SESSION_START = dtime(9, 15)
-NSE_SESSION_END = dtime(15, 30)
+NSE_SESSION_END = dtime(15, 30)          # indices (IDX_I)
+NSE_EQ_SESSION_END = dtime(15, 15)       # F&O stocks' continuous session (closing auction after it)
+
+
+def session_end(exchange_segment: Optional[str]) -> Optional[dtime]:
+    """End of the regular session for this segment's bars: NSE_EQ 15:15, other NSE (indices) 15:30, MCX None."""
+    if exchange_segment == "MCX_COMM":
+        return None
+    return NSE_EQ_SESSION_END if exchange_segment == "NSE_EQ" else NSE_SESSION_END
 
 
 def in_session(exchange_segment: Optional[str], t: datetime) -> bool:
-    """True for MCX at any time; for everything else only inside the NSE regular session."""
-    if exchange_segment == "MCX_COMM":
+    """True for MCX at any time; for everything else only inside its NSE regular session (see session_end)."""
+    end = session_end(exchange_segment)
+    if end is None:
         return True
     local = t.astimezone(IST).time() if t.tzinfo is not None else t.time()
-    return NSE_SESSION_START <= local < NSE_SESSION_END
+    return NSE_SESSION_START <= local < end
 
 
 # A completed bar is "complete" (trusted to stand in for Dhan's official candle - official_candles.py) only when
@@ -331,6 +347,68 @@ def _track_completeness(st: _SymbolState, prev_bar_start: Optional[datetime], t:
     st.bar_last_trade_at = t
 
 
+def _store_completed(st: _SymbolState, completed: Optional[dict], prev_complete: bool,
+                     prev_trade_at: Optional[datetime]) -> Optional[dict]:
+    """Called under _lock with a bar that just completed (or None): appends it once and marks it complete when this
+    process watched it whole (see WS_COMPLETE_* above). Returns the bar to persist, or None."""
+    if completed is None:
+        return None
+    bar_end = completed["candle_start"] + timedelta(minutes=BASE_INTERVAL_MINUTES)
+    completed_whole = (prev_complete and prev_trade_at is not None
+                       and (bar_end - prev_trade_at).total_seconds() <= WS_COMPLETE_MAX_GAP_SECONDS)
+    # Guard against re-completing a candle_start this process (or a
+    # prior instance, restored via ensure_subscribed) already
+    # persisted - see last_persisted_candle_start's own docstring.
+    # current_bar_start's fresh-None bootstrap after a restart is
+    # deliberately left alone (it's what makes the FIRST tick after
+    # subscribe start a bar at all) - this check is what stops that
+    # bootstrap from ever re-writing a bar that's already on disk.
+    if st.last_persisted_candle_start is not None and completed["candle_start"] <= st.last_persisted_candle_start:
+        return None
+    st.bars.append(completed)
+    if len(st.bars) > MAX_BARS_KEPT:
+        del st.bars[: len(st.bars) - MAX_BARS_KEPT]
+    st.last_persisted_candle_start = completed["candle_start"]
+    if completed_whole:
+        st.complete_starts.add(completed["candle_start"])
+        if len(st.complete_starts) > MAX_BARS_KEPT:
+            oldest = st.bars[0]["candle_start"]
+            st.complete_starts = {c for c in st.complete_starts if c >= oldest}
+    return completed
+
+
+# A session's last bar has no "next trade" to complete it: stocks stop trading at 15:15 and the next print is the
+# closing auction (~15:28-15:30). close_session_bars() completes it on the clock instead, this long after the
+# session end (a trade from 15:14:59 can reach us a moment after 15:15:00) - same completeness rule as above.
+SESSION_CLOSE_GRACE_SECONDS = 2
+
+
+def close_session_bars(now: Optional[datetime] = None) -> int:
+    """Completes the forming bar of every NSE symbol whose regular session has ended (official_candles' background
+    thread calls this every pass). Without it a stock's 15:10 bar would only complete with the auction print ~15
+    minutes later, and every signal would wait for it. Returns how many bars it closed."""
+    now = now or datetime.now(IST)
+    closed = []
+    with _lock:
+        for symbol, st in _state.items():
+            ref = _subscribed_ref.get(symbol)
+            end = session_end(ref[1] if ref else None)
+            start = st.current_bar_start
+            if end is None or start is None:
+                continue
+            session_close = start.replace(hour=end.hour, minute=end.minute, second=0, microsecond=0)
+            if (start + timedelta(minutes=BASE_INTERVAL_MINUTES) > session_close
+                    or now < session_close + timedelta(seconds=SESSION_CLOSE_GRACE_SECONDS)):
+                continue
+            prev_complete, prev_trade_at = st.bar_complete_so_far, st.bar_last_trade_at
+            completed = _store_completed(st, _complete_forming(st), prev_complete, prev_trade_at)
+            if completed is not None:
+                closed.append((symbol, st.security_id, start.date(), completed))
+    for symbol, security_id, day, completed in closed:
+        _persist_bar(symbol, security_id, day, completed)
+    return len(closed)
+
+
 def _on_tick(underlying_symbol: str, ltp: float, cum_volume: float, t: datetime) -> None:
     today = t.date()
     completed = None
@@ -360,29 +438,7 @@ def _on_tick(underlying_symbol: str, ltp: float, cum_volume: float, t: datetime)
         elif (st.current_bar_start is not None
               and t >= st.current_bar_start + timedelta(minutes=BASE_INTERVAL_MINUTES)):
             completed = _complete_forming(st)
-        if completed is not None:
-            bar_end = completed["candle_start"] + timedelta(minutes=BASE_INTERVAL_MINUTES)
-            completed_whole = (prev_complete and prev_trade_at is not None
-                               and (bar_end - prev_trade_at).total_seconds() <= WS_COMPLETE_MAX_GAP_SECONDS)
-            # Guard against re-completing a candle_start this process (or a
-            # prior instance, restored via ensure_subscribed) already
-            # persisted - see last_persisted_candle_start's own docstring.
-            # current_bar_start's fresh-None bootstrap after a restart is
-            # deliberately left alone (it's what makes the FIRST tick after
-            # subscribe start a bar at all) - this check is what stops that
-            # bootstrap from ever re-writing a bar that's already on disk.
-            if st.last_persisted_candle_start is not None and completed["candle_start"] <= st.last_persisted_candle_start:
-                completed = None
-            else:
-                st.bars.append(completed)
-                if len(st.bars) > MAX_BARS_KEPT:
-                    del st.bars[: len(st.bars) - MAX_BARS_KEPT]
-                st.last_persisted_candle_start = completed["candle_start"]
-                if completed_whole:
-                    st.complete_starts.add(completed["candle_start"])
-                    if len(st.complete_starts) > MAX_BARS_KEPT:
-                        oldest = st.bars[0]["candle_start"]
-                        st.complete_starts = {c for c in st.complete_starts if c >= oldest}
+        completed = _store_completed(st, completed, prev_complete, prev_trade_at)
         if session:
             st.last_tick_at = t
         security_id = st.security_id

@@ -34,11 +34,14 @@ the old behaviour exactly.
 from __future__ import annotations
 
 import bisect
+import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, time as dtime, timedelta
+from pathlib import Path
 from typing import Callable, Optional
 
 from Options import config as oconfig
@@ -49,7 +52,7 @@ logger = logging.getLogger("official_candles")
 
 NSE_SEGMENTS = ("NSE_EQ", "IDX_I")
 SESSION_OPEN = dtime(9, 15)
-SESSION_CLOSE = dtime(15, 30)
+SESSION_CLOSE = dtime(15, 30)   # indices; stocks end at candle_feed.NSE_EQ_SESSION_END (15:15, closing auction after)
 SUPPORTED_INTERVALS = (5, 15)
 MAX_WS_BARS = 12              # never more than an hour of unconfirmed WS bars on top of a base
 SHORT_DAYS = 4                # calendar days per official fetch: reaches back over a weekend + a holiday to the base
@@ -98,29 +101,51 @@ def _init_stats() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# NSE session arithmetic (bars start 09:15, 09:20 ... 15:25 for 5 min; 09:15 ... 15:15 for 15 min)
+# NSE session arithmetic, per segment (2 Oct 2026): stocks (NSE_EQ) trade 09:15-15:15 since NSE's closing auction
+# (3 Aug 2026) - bars 09:15 ... 15:10 for 5 min, 09:15 ... 15:00 for 15 min, exactly what Dhan's REST history has;
+# indices (IDX_I) keep 09:15-15:30 - bars to 15:25 / 15:15. Before this every stock base looked "behind" from 15:15
+# to the close (and at the next open, the previous day's 15:10 never "followed" into 09:15), so the signal modules
+# re-downloaded every base every 60 s in the first bar of the day and in the last 15 minutes.
 # --------------------------------------------------------------------------- #
-def newest_closed_bar_start(now: datetime, interval: int) -> Optional[datetime]:
-    """Start of the newest bar of today's session that has closed by `now`, or None before the first one closes."""
+def session_close(exchange_segment: Optional[str] = None) -> dtime:
+    """End of the regular session: 15:15 for stocks (NSE_EQ), 15:30 for indices (and anything unspecified)."""
+    return candle_feed.session_end(exchange_segment) or SESSION_CLOSE
+
+
+def newest_closed_bar_start(now: datetime, interval: int, exchange_segment: Optional[str] = None) -> Optional[datetime]:
+    """Start of the newest bar of today's session that has closed by `now`, or None before the first one closes.
+    After the session it stays the session's last bar (15:10 / 15:00 for stocks)."""
+    close = session_close(exchange_segment)
     open_t = now.replace(hour=SESSION_OPEN.hour, minute=SESSION_OPEN.minute, second=0, microsecond=0)
-    end = min(now, now.replace(hour=SESSION_CLOSE.hour, minute=SESSION_CLOSE.minute, second=0, microsecond=0))
+    end = min(now, now.replace(hour=close.hour, minute=close.minute, second=0, microsecond=0))
     closed = int((end - open_t).total_seconds() // (interval * 60))
     if closed < 1:
         return None
     return open_t + timedelta(minutes=interval * (closed - 1))
 
 
-def _last_bar_time(interval: int) -> dtime:
-    t = datetime.combine(datetime(2000, 1, 3).date(), SESSION_CLOSE) - timedelta(minutes=interval)
+def _last_bar_time(interval: int, exchange_segment: Optional[str] = None) -> dtime:
+    t = datetime.combine(datetime(2000, 1, 3).date(), session_close(exchange_segment)) - timedelta(minutes=interval)
     return t.time()
 
 
-def _follows(prev: datetime, nxt: datetime, interval: int) -> bool:
+def _follows(prev: datetime, nxt: datetime, interval: int, exchange_segment: Optional[str] = None) -> bool:
     """`nxt` is the bar right after `prev` in the session series (a session's last bar is followed by the first
     bar of a later date - weekends and holidays have no bars)."""
-    if prev.time() >= _last_bar_time(interval):
+    if prev.time() >= _last_bar_time(interval, exchange_segment):
         return nxt.date() > prev.date() and nxt.time() == SESSION_OPEN
     return nxt == prev + timedelta(minutes=interval)
+
+
+def session_capped(bar_start: datetime, interval: int, exchange_segment: Optional[str]) -> datetime:
+    """A clock-based "newest closed bar" (the signal modules' own arithmetic) capped at the session's last bar for
+    NSE segments: after 15:15 a stock's newest closed bar stays 15:10 (15:00 for 15 min) - no newer one will come."""
+    if exchange_segment not in NSE_SEGMENTS or interval not in SUPPORTED_INTERVALS:
+        return bar_start
+    last = _last_bar_time(interval, exchange_segment)
+    if bar_start.time() > last:
+        return bar_start.replace(hour=last.hour, minute=last.minute, second=0, microsecond=0)
+    return bar_start
 
 
 def ws_cover(symbol: str, exchange_segment: str, base_last_ts: Optional[float], interval: int,
@@ -140,18 +165,23 @@ def ws_cover(symbol: str, exchange_segment: str, base_last_ts: Optional[float], 
 def _ws_cover(symbol: str, exchange_segment: str, base_last_ts: Optional[float], interval: int,
               now: Optional[datetime]) -> str:
     if (not running() or base_last_ts is None or exchange_segment not in NSE_SEGMENTS
-            or interval not in SUPPORTED_INTERVALS or not candle_feed.is_fresh(symbol, WS_STALE_SECONDS)):
+            or interval not in SUPPORTED_INTERVALS):
         return "no"
     now = now or _now()
-    required = newest_closed_bar_start(now, interval)
+    required = newest_closed_bar_start(now, interval, exchange_segment)
     prev = datetime.fromtimestamp(base_last_ts, tz=IST)
-    if required is not None and prev >= required:
+    last_bar = _last_bar_time(interval, exchange_segment)
+    # Nothing missing -> no WS bar is needed (so no WS freshness either): e.g. 09:15:00 before the first tick, with
+    # the base ending at the previous session's last bar, or after 15:15 with a stock base at 15:10.
+    if (prev >= required) if required is not None else (prev.date() < now.date() and prev.time() >= last_bar):
         return "covered"
+    if not candle_feed.is_fresh(symbol, WS_STALE_SECONDS):
+        return "no"
     used = 0
     for start, complete in candle_feed.complete_bars_after(symbol, interval, prev):
         if required is not None and start > required:
             break
-        if not complete or not _follows(prev, start, interval):
+        if not complete or not _follows(prev, start, interval, exchange_segment):
             return "no"
         used += 1
         if used > MAX_WS_BARS:
@@ -159,11 +189,11 @@ def _ws_cover(symbol: str, exchange_segment: str, base_last_ts: Optional[float],
         prev = start
     if required is None:
         # No bar of today has closed: fine when the series ends at an earlier session's close.
-        return "covered" if prev.date() < now.date() and prev.time() >= _last_bar_time(interval) else "no"
+        return "covered" if prev.date() < now.date() and prev.time() >= last_bar else "no"
     if prev >= required:
         return "covered"
     forming = candle_feed.forming_bar(symbol)
-    if (forming is not None and _follows(prev, required, interval)
+    if (forming is not None and _follows(prev, required, interval, exchange_segment)
             and candle_feed._candle_start_for(forming["candle_start"], interval) == required
             and (now - required - timedelta(minutes=interval)).total_seconds() <= PENDING_GRACE_SECONDS):
         return "pending"
@@ -203,12 +233,112 @@ def register(key: tuple, symbol: str, security_id: str, exchange_segment: str, i
     if not enabled() or exchange_segment not in NSE_SEGMENTS or interval not in SUPPORTED_INTERVALS:
         return
     with _lock:
+        _note_seen(key, symbol, interval, lookback_days)
         known = _bases.get(key)
         if known is not None and known.security_id == security_id:
             return
         _bases[key] = _Base(key, symbol, security_id, exchange_segment, instrument_type, interval, lookback_days,
                             get, put, expire)
         _group_locks.setdefault((security_id, exchange_segment, instrument_type, interval), threading.Lock())
+
+
+# --------------------------------------------------------------------------- #
+# Pre-open warm-up (2 Oct 2026, pre-Monday load audit). The 08:00 restart leaves every base empty and every stock
+# unsubscribed until the loops first touch them at 09:15:00 (1 Oct journal: subscriptions 09:15:01 onwards). So the
+# 09:15 WS bar could never count as complete, ~110 bases downloaded at once (~55 s through the 2 calls/s pacing) and
+# the 09:20 bar - UM's first entries and engine B's first signals - fell back to downloads again. Now this thread
+# loads, at PREWARM_START on weekdays, every base the signal modules used on the last day they ran (BASES_FILE,
+# rewritten by register() as bases are used) through each owner's loader: the stock is WS-subscribed (watched from
+# before 09:15) and its REST base is downloaded exactly as its signal path would, so at 09:15 nothing is missing.
+# --------------------------------------------------------------------------- #
+PREWARM_START = dtime(9, 5)        # pre-open order entry is over; the last session's history is final
+PREWARM_END = dtime(9, 14)         # never start later than this - the loops take over at 09:15
+BASES_FILE = Path("data/official_candles_bases.json")
+SEEN_SAVE_SECONDS = 30
+_loaders: dict[str, Callable[[str, dict], None]] = {}
+_seen = {"date": None, "bases": {}, "dirty": False, "saved_at": 0.0}
+_prewarm = {"done_date": None, "last": None}
+
+
+def add_prewarm_loader(owner: str, fn: Callable[[str, dict], None]) -> None:
+    """fn(symbol, entry) loads one base of `owner` ("bollinger", "swing") exactly as its signal path would, WS
+    subscription included. Blocking - runs on this module's thread."""
+    _loaders[owner] = fn
+
+
+def _note_seen(key: tuple, symbol: str, interval: int, lookback_days: Optional[int]) -> None:
+    """Under _lock: remembers today's bases for tomorrow's warm-up (saved by the background thread)."""
+    today = _now().date().isoformat()
+    if _seen["date"] != today:
+        _seen.update(date=today, bases={}, dirty=True)
+    k = repr(key)
+    if k not in _seen["bases"]:
+        _seen["bases"][k] = {"owner": str(key[0]), "symbol": symbol, "interval": interval,
+                             "lookback_days": lookback_days}
+        _seen["dirty"] = True
+
+
+def _maybe_save_seen() -> None:
+    with _lock:
+        if not _seen["dirty"] or time.monotonic() - _seen["saved_at"] < SEEN_SAVE_SECONDS:
+            return
+        payload = {"date": _seen["date"], "bases": sorted(_seen["bases"].values(), key=lambda e: (
+            e["owner"], e["symbol"], e["interval"], e["lookback_days"] or 0))}
+        _seen["dirty"], _seen["saved_at"] = False, time.monotonic()
+    try:
+        BASES_FILE.parent.mkdir(exist_ok=True)
+        tmp = BASES_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=1))
+        os.replace(tmp, BASES_FILE)
+    except Exception:  # noqa: BLE001
+        logger.exception("official candles: could not save %s", BASES_FILE)
+
+
+def _prewarm_due(now: datetime) -> bool:
+    return (now.weekday() < 5 and PREWARM_START <= now.time() < PREWARM_END
+            and _prewarm["done_date"] != now.date())
+
+
+def prewarm(now: Optional[datetime] = None) -> dict:
+    """Loads every base listed in BASES_FILE (Unified Momentum's stocks and NIFTY first). Blocking - the background
+    thread runs it once per weekday at PREWARM_START. Each load goes through the shared pacing like any download."""
+    now = now or _now()
+    _prewarm["done_date"] = now.date()
+    try:
+        entries = json.loads(BASES_FILE.read_text()).get("bases") or []
+    except FileNotFoundError:
+        entries = []
+    except Exception:  # noqa: BLE001
+        logger.exception("official candles: could not read %s - no warm-up", BASES_FILE)
+        entries = []
+    priority = _priority_symbols()
+    entries.sort(key=lambda e: (0 if e.get("symbol") in priority else 1, e.get("symbol") or "", e.get("interval") or 0))
+    started = time.monotonic()
+    loaded = failed = skipped = 0
+    for entry in entries:
+        loader = _loaders.get(entry.get("owner"))
+        if loader is None or not entry.get("symbol"):
+            skipped += 1
+            continue
+        try:
+            loader(entry["symbol"], entry)
+            loaded += 1
+        except Exception:  # noqa: BLE001
+            failed += 1
+            logger.exception("official candles: warm-up of %s %s %sm failed - its loop downloads it at 09:15",
+                             entry.get("owner"), entry.get("symbol"), entry.get("interval"))
+    result = {"date": now.date().isoformat(), "listed": len(entries), "loaded": loaded, "failed": failed,
+              "skipped": skipped, "seconds": round(time.monotonic() - started, 1),
+              "symbols": len({e.get("symbol") for e in entries})}
+    _prewarm["last"] = result
+    logger.info("official candles: pre-open warm-up done - %s", result)
+    return result
+
+
+def _maybe_prewarm() -> None:
+    now = _now()
+    if _prewarm_due(now):
+        prewarm(now)
 
 
 def start() -> None:
@@ -331,7 +461,7 @@ def _refresh_group(key: tuple, members: list, now: datetime) -> bool:
             except Exception:  # noqa: BLE001
                 logger.exception("official candles: update listener failed for %s", m.symbol)
     if advanced and any(m.symbol in _priority_symbols() for m in members):
-        required = newest_closed_bar_start(now, interval)
+        required = newest_closed_bar_start(now, interval, exchange_segment)
         if required is not None:
             delay = round((_now() - required - timedelta(minutes=interval)).total_seconds(), 1)
             dhan_wrapper.stats["official_candle_priority_delay_s_max_by_minute"] = _bump_minute(
@@ -341,7 +471,7 @@ def _refresh_group(key: tuple, members: list, now: datetime) -> bool:
 
 def _behind(m: _Base, now: datetime) -> Optional[datetime]:
     """The newest closed bar start when `m`'s base does not reach it yet, else None."""
-    required = newest_closed_bar_start(now, m.interval)
+    required = newest_closed_bar_start(now, m.interval, m.exchange_segment)
     base = m.get() or {}
     ts = base.get("timestamp") or []
     if required is None or not ts or datetime.fromtimestamp(ts[-1], tz=IST) >= required:
@@ -387,6 +517,9 @@ def _work_once() -> bool:
 def _run() -> None:
     while True:
         try:
+            candle_feed.close_session_bars()      # a stock's 15:10 bar completes at 15:15 (no trade comes after it)
+            _maybe_prewarm()
+            _maybe_save_seen()
             worked = _work_once()
         except Exception:  # noqa: BLE001
             logger.exception("official candles: background pass failed")
@@ -433,7 +566,8 @@ def refresh_now(symbol: str, intervals: Optional[tuple] = None) -> bool:
 def snapshot() -> dict:
     """GET /official-candles - registered bases and how far behind each is (read-only)."""
     now = _now()
-    out = {"enabled": enabled(), "running": running(), "priority": sorted(_priority_symbols()), "bases": []}
+    out = {"enabled": enabled(), "running": running(), "priority": sorted(_priority_symbols()),
+           "prewarm": _prewarm["last"], "bases": []}
     with _lock:
         bases = list(_bases.values())
     for m in bases:

@@ -677,7 +677,7 @@ def _maybe_sweep() -> None:
     now = time.monotonic()
     if every <= 0 or _sweep["running"] or now - _sweep["last"] < every:
         return
-    nse_open = dhan_wrapper.is_market_open()
+    nse_open = dhan_wrapper.is_market_open() or dhan_wrapper.is_fno_open()   # F&O stops rest until 15:40
     if not nse_open and not dhan_wrapper.is_market_open("MCX_COMM"):   # MCX evening: Swing MCX stops still swept
         return
     _sweep["last"], _sweep["running"] = now, True

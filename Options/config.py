@@ -939,6 +939,12 @@ ALLOWED_TRADING_TIME = os.getenv("ALLOWED_TRADING_TIME", "11:30")
 ENABLE_TRADING_WINDOWS = os.getenv("ENABLE_TRADING_WINDOWS", "false").lower() == "true"
 TRADING_WINDOWS = os.getenv("TRADING_WINDOWS", "09:15-11:00,14:00-15:28")
 MARKET_CLOSE_TIME = "15:30"
+# NSE equity derivatives (stock + index futures/options) trade until 15:40 since Mon 3 Aug 2026 (NSE extended F&O
+# by 10 minutes when it introduced the cash-market closing auction). MARKET_CLOSE_TIME stays 15:30 for everything
+# that reads NSE cash/index hours; this one is used only where an F&O ORDER or an F&O stop is concerned: a market
+# order placed 15:30-15:40 is a normal order, not an AMO (an AMO exit would only fill at the next open), and the
+# orphan-stop sweeps keep running until the F&O close (dhan_client.is_fno_open). Added 2 Oct 2026.
+FNO_MARKET_CLOSE_TIME = os.getenv("FNO_MARKET_CLOSE_TIME", "15:40")
 
 # MCX (commodity) segment trades a materially longer session than NSE F&O -
 # Copper and other non-agri commodities run into the evening (23:30 most of

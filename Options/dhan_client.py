@@ -47,6 +47,14 @@ def _noop() -> None:
     return None
 
 
+# /feed-stats history counters (market_data_calls_by_caller/_by_instrument) - their OWN lock (2 Oct 2026). They used
+# to share _market_data_lock, which _throttle_market_data_call holds while it SLEEPS for the pacing slot: a call that
+# already had its slot then waited for the next caller's sleep and went out together with it - bursts of up to 6
+# calls within 50 ms instead of one per 0.5 s (simulated with the real code), and DH-904 at bar starts on 2 Oct
+# (0 hits before the counters were added at 11:41, 3 after).
+_MARKET_DATA_STATS_LOCK = threading.Lock()
+
+
 def _bump_minute(by_minute: dict, value: float, keep: int = 30, how: str = "sum") -> dict:
     """Per-IST-minute counter for /feed-stats ("HH:MM" -> value), only the newest `keep` minutes kept. Returns a
     NEW dict: GET /feed-stats may be iterating the old one on another thread."""
@@ -534,6 +542,11 @@ class DhanWrapper:
             "executor_lag_ms_last": None,
             "executor_lag_ms_max": 0.0,
             "executor_lag_ms_max_by_minute": {},
+            # Event-loop lag (2 Oct 2026) - same probe: how late its 1 s sleep woke up. Every tick handler, order
+            # wait and exit check runs on that one loop, so this is how long any of them could have been held up.
+            "loop_lag_ms_last": None,
+            "loop_lag_ms_max": 0.0,
+            "loop_lag_ms_max_by_minute": {},
         }
         # Bounds how many REST LTP-fallback calls can be in flight at once
         # across ALL strategies sharing this connection (Options + Futures,
@@ -1533,6 +1546,17 @@ class DhanWrapper:
             open_t = datetime.strptime(config.MARKET_OPEN_TIME, "%H:%M").time()
             close_t = datetime.strptime(config.MARKET_CLOSE_TIME, "%H:%M").time()
         return open_t <= now <= close_t
+
+    def is_fno_open(self) -> bool:
+        """NSE F&O is trading: weekday, MARKET_OPEN_TIME to FNO_MARKET_CLOSE_TIME (15:40 since 3 Aug 2026 - see
+        config.FNO_MARKET_CLOSE_TIME). For F&O orders and stops only; is_market_open() keeps the 15:30 cash/index
+        hours every other caller relies on."""
+        now_dt = datetime.now(IST)
+        if now_dt.weekday() >= 5:
+            return False
+        open_t = datetime.strptime(config.MARKET_OPEN_TIME, "%H:%M").time()
+        close_t = datetime.strptime(config.FNO_MARKET_CLOSE_TIME, "%H:%M").time()
+        return open_t <= now_dt.time() <= close_t
 
     # ------------------------------------------------------------------ #
     # Live feed (WebSocket)
@@ -3227,7 +3251,7 @@ class DhanWrapper:
             key = f"{'/'.join(path[-2:])[:-3]}.{frame.f_code.co_name} {interval_minutes}m"
         except Exception:  # noqa: BLE001
             key = f"unknown {interval_minutes}m"
-        with self._market_data_lock:
+        with _MARKET_DATA_STATS_LOCK:     # never the pacing lock - see _MARKET_DATA_STATS_LOCK
             calls = dict(self.stats["market_data_calls_by_caller"])
             calls[key] = calls.get(key, 0) + 1
             self.stats["market_data_calls_by_caller"] = calls
@@ -3243,6 +3267,7 @@ class DhanWrapper:
         minute) when a job waited warn_after_seconds or longer. Shown in GET /feed-stats (executor_lag_*)."""
         loop = asyncio.get_running_loop()
         warned_minute = None
+        loop_warned_minute = None
         while True:
             started = time.monotonic()
             await loop.run_in_executor(None, _noop)
@@ -3257,7 +3282,18 @@ class DhanWrapper:
                 logger.warning("executor lag %.1f s - a blocking Dhan call (an order too) waited that long for a "
                                "worker; history-data calls this minute: %s", lag_ms / 1000,
                                self.stats["market_data_calls_by_minute"].get(minute, 0))
+            slept_from = time.monotonic()
             await asyncio.sleep(interval_seconds)
+            loop_ms = round(max(0.0, time.monotonic() - slept_from - interval_seconds) * 1000, 1)
+            self.stats["loop_lag_ms_last"] = loop_ms
+            self.stats["loop_lag_ms_max"] = max(self.stats.get("loop_lag_ms_max") or 0.0, loop_ms)
+            self.stats["loop_lag_ms_max_by_minute"] = _bump_minute(
+                self.stats.get("loop_lag_ms_max_by_minute") or {}, loop_ms, how="max")
+            minute = datetime.now(IST).strftime("%H:%M")
+            if loop_ms >= 1000 and minute != loop_warned_minute:
+                loop_warned_minute = minute
+                logger.warning("event loop lag %.1f s - every tick handler, exit check and order wait was held up "
+                               "that long", loop_ms / 1000)
 
     def _note_market_data_rate_limit_outcome(self, resp: object) -> None:
         """Arms/clears the shared backoff cooldown based on what Dhan
@@ -4576,8 +4612,11 @@ class DhanWrapper:
         product_type MUST match whatever the position was actually opened
         under when this is an exit (SELL) - defaults to
         config.OPTIONS_PRODUCT, which is only correct for entries we placed
-        ourselves. See Position.product_type's docstring."""
-        is_amo = not self.is_market_open()
+        ourselves. See Position.product_type's docstring.
+
+        2 Oct 2026: F&O trades until 15:40 (config.FNO_MARKET_CLOSE_TIME) - an exit sent 15:30-15:40 is a normal
+        order, not an AMO that would only fill at the next open."""
+        is_amo = not (self.is_market_open() or self.is_fno_open())
         product_type = product_type or config.OPTIONS_PRODUCT
 
         logger.info("Placing %s order: %s x%s (product=%s)%s", transaction_type, trading_symbol,
