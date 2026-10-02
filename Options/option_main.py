@@ -491,6 +491,14 @@ async def feed_stats():
     return dhan_wrapper.stats
 
 
+@router.get("/official-candles")
+async def official_candles_status():
+    """WS candles first, Dhan's candles behind them (2 Oct 2026) - each registered REST base, its newest official
+    bar and whether it is still behind; counters are in /feed-stats (ws_candle_*, official_candle_*)."""
+    import official_candles
+    return official_candles.snapshot()
+
+
 @router.get("/breakout-signal")
 async def get_breakout_signal_status():
     """Today's CE/PE breakout-signal watchlists - which symbols are being

@@ -702,6 +702,12 @@ MARKET_DATA_RATE_LIMIT_COOLDOWN_MAX_SECONDS = float(os.getenv("MARKET_DATA_RATE_
 # Turn on (e.g. 3) only during market hours with a before/after look at executor_lag (13 Sep executor incident).
 HISTORY_EXECUTOR_WORKERS = int(os.getenv("HISTORY_EXECUTOR_WORKERS", "0"))
 
+# WS candles first, Dhan's REST candles behind them (2 Oct 2026, user request) - see official_candles.py. true: the
+# signal modules compute a new bar from complete WS bars the moment it closes (no download on the signal path),
+# Dhan's official candles arrive in the background and correct it, Unified Momentum confirms with Dhan before a
+# real entry on a WS-only candle; stale/incomplete WS -> download and wait as before. false = the old behaviour.
+WS_CONTINUOUS_CANDLES = os.getenv("WS_CONTINUOUS_CANDLES", "true").lower() == "true"
+
 # Per-package on/off for the EMA-cross exit above. Kept in all three option
 # packages so the Options/Futures trading_engine.py copies stay byte-
 # identical; default off, only FUTURES_ENABLE_EMA_CROSS_EXIT is turned on

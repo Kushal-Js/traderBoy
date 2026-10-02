@@ -125,13 +125,28 @@ def in_session(exchange_segment: Optional[str], t: datetime) -> bool:
     return NSE_SESSION_START <= local < NSE_SESSION_END
 
 
+# A completed bar is "complete" (trusted to stand in for Dhan's official candle - official_candles.py) only when
+# this process watched the whole bar: the feed was subscribed before the bar started, the bar's first trade came
+# within WS_COMPLETE_FIRST_TICK_SECONDS of its start, and no two trades in it (nor its last trade and the bar's end)
+# were more than WS_COMPLETE_MAX_GAP_SECONDS apart (2 Oct 2026). The bar a restart lands in, bars restored from
+# disk and bars around a feed drop are never complete - callers then wait for Dhan's candle exactly as before.
+# Trade times (LTT) are exchange times, so a quiet stock with no trade for 30 s also counts as incomplete (safe).
+WS_COMPLETE_FIRST_TICK_SECONDS = 10
+WS_COMPLETE_MAX_GAP_SECONDS = 30
+
+
 class _SymbolState:
     __slots__ = ("security_id", "day", "current_bar_start", "bar_open", "bar_high", "bar_low",
                  "bar_close", "cum_volume_at_bar_start", "cum_volume_now", "last_tick_at", "bars",
-                 "last_persisted_candle_start")
+                 "last_persisted_candle_start", "subscribed_at", "bar_complete_so_far", "bar_last_trade_at",
+                 "complete_starts")
 
     def __init__(self, security_id: str) -> None:
         self.security_id = security_id
+        self.subscribed_at = datetime.now(IST)
+        self.bar_complete_so_far = False
+        self.bar_last_trade_at: Optional[datetime] = None
+        self.complete_starts: set = set()     # candle_starts of completed bars watched whole (see above)
         self.day: Optional[date] = None
         self.current_bar_start: Optional[datetime] = None
         self.bar_open: Optional[float] = None
@@ -306,6 +321,16 @@ def _complete_forming(st: _SymbolState) -> Optional[dict]:
     return completed
 
 
+def _track_completeness(st: _SymbolState, prev_bar_start: Optional[datetime], t: datetime) -> None:
+    """Called under _lock after a session tick updated the bar (see WS_COMPLETE_* above)."""
+    if st.current_bar_start != prev_bar_start:          # this trade opened a new bar
+        st.bar_complete_so_far = (st.subscribed_at <= st.current_bar_start
+                                  and (t - st.current_bar_start).total_seconds() <= WS_COMPLETE_FIRST_TICK_SECONDS)
+    elif st.bar_last_trade_at is None or (t - st.bar_last_trade_at).total_seconds() > WS_COMPLETE_MAX_GAP_SECONDS:
+        st.bar_complete_so_far = False
+    st.bar_last_trade_at = t
+
+
 def _on_tick(underlying_symbol: str, ltp: float, cum_volume: float, t: datetime) -> None:
     today = t.date()
     completed = None
@@ -325,12 +350,20 @@ def _on_tick(underlying_symbol: str, ltp: float, cum_volume: float, t: datetime)
             st.current_bar_start = None
             st.cum_volume_at_bar_start = 0.0
             st.cum_volume_now = 0.0
+        prev_bar_start = st.current_bar_start
+        prev_complete = st.bar_complete_so_far
+        prev_trade_at = st.bar_last_trade_at
         if session:
             completed = _update_bar(st, ltp, cum_volume, t)
+            if ltp > 0:
+                _track_completeness(st, prev_bar_start, t)
         elif (st.current_bar_start is not None
               and t >= st.current_bar_start + timedelta(minutes=BASE_INTERVAL_MINUTES)):
             completed = _complete_forming(st)
         if completed is not None:
+            bar_end = completed["candle_start"] + timedelta(minutes=BASE_INTERVAL_MINUTES)
+            completed_whole = (prev_complete and prev_trade_at is not None
+                               and (bar_end - prev_trade_at).total_seconds() <= WS_COMPLETE_MAX_GAP_SECONDS)
             # Guard against re-completing a candle_start this process (or a
             # prior instance, restored via ensure_subscribed) already
             # persisted - see last_persisted_candle_start's own docstring.
@@ -345,6 +378,11 @@ def _on_tick(underlying_symbol: str, ltp: float, cum_volume: float, t: datetime)
                 if len(st.bars) > MAX_BARS_KEPT:
                     del st.bars[: len(st.bars) - MAX_BARS_KEPT]
                 st.last_persisted_candle_start = completed["candle_start"]
+                if completed_whole:
+                    st.complete_starts.add(completed["candle_start"])
+                    if len(st.complete_starts) > MAX_BARS_KEPT:
+                        oldest = st.bars[0]["candle_start"]
+                        st.complete_starts = {c for c in st.complete_starts if c >= oldest}
         if session:
             st.last_tick_at = t
         security_id = st.security_id
@@ -525,6 +563,40 @@ def get_candles_dict(symbol: str, interval_minutes: int) -> dict:
         "low": [b["low"] for b in resampled], "close": [b["close"] for b in resampled],
         "volume": [b["volume"] for b in resampled],
     }
+
+
+def complete_bars_after(symbol: str, interval_minutes: int, after: datetime) -> list[tuple[datetime, bool]]:
+    """(candle_start, complete) for every completed `interval_minutes` bar of `symbol` newer than `after`, oldest
+    first (2 Oct 2026, official_candles.ws_cover). A 15-min bar is complete only when all three of its 5-min bars
+    exist and are complete (see WS_COMPLETE_* above)."""
+    floor = after - timedelta(minutes=interval_minutes)
+    with _lock:
+        st = _state.get(symbol)
+        if st is None:
+            return []
+        bars = []
+        for b in reversed(st.bars):                       # newest first - only the few bars after `after` are read
+            if b["candle_start"] <= floor:
+                break
+            bars.append(b["candle_start"])
+        bars.reverse()
+        complete = {c for c in bars if c in st.complete_starts}
+    if interval_minutes == BASE_INTERVAL_MINUTES:
+        return [(c, c in complete) for c in bars if c > after]
+    if interval_minutes % BASE_INTERVAL_MINUTES != 0:
+        return []
+    expected = interval_minutes // BASE_INTERVAL_MINUTES
+    groups: dict[datetime, list[datetime]] = {}
+    for c in bars:
+        groups.setdefault(_candle_start_for(c, interval_minutes), []).append(c)
+    out = []
+    keys = sorted(groups)
+    for i, key in enumerate(keys):
+        members = groups[key]
+        if key <= after or (len(members) < expected and i == len(keys) - 1):
+            continue                                      # older, or still forming (same rule as _resample)
+        out.append((key, len(members) == expected and all(m in complete for m in members)))
+    return out
 
 
 def snapshot() -> dict:

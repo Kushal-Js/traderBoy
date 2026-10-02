@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Optional
 
+import official_candles
 from Options.dhan_client import dhan_wrapper, _compute_ema, _compute_rsi, _compute_supertrend, IST
 from . import candle_feed, config
 
@@ -208,7 +209,7 @@ def _get_intraday_series(
     # require_prior_day/min_bars no longer gate anything here - the REST
     # base always spans prior days; callers still check bar counts.
     cache_key = (security_id, exchange_segment, instrument_type, interval_minutes, lookback_days_override)
-    base = _rest_base(cache_key, interval_minutes)
+    base = _rest_base(cache_key, interval_minutes, symbol)
     if not base.get("close"):
         return base
     data = {key: list(base.get(key) or []) for key in _SERIES_KEYS}
@@ -228,21 +229,34 @@ _SERIES_KEYS = ("timestamp", "open", "high", "low", "close", "volume")
 REST_BASE_MIN_REFETCH_SECONDS = 60
 
 
-def _rest_base(cache_key: tuple, interval_minutes: int) -> dict:
+def _rest_base(cache_key: tuple, interval_minutes: int, symbol: Optional[str] = None) -> dict:
     """The full-history REST series for `cache_key`, forming trailing bar
     trimmed (a partial bar cached here would otherwise sit mid-series once
     newer WS bars are appended after it). Reused until a newer closed bar
     should exist, then refetched at most every REST_BASE_MIN_REFETCH_
-    SECONDS; a failed refetch keeps the last good base (WS extends it)."""
+    SECONDS; a failed refetch keeps the last good base (WS extends it).
+
+    WS first (2 Oct 2026, official_candles.py): a base behind only by bars
+    the WS feed of `symbol` watched whole is not downloaded here - the
+    caller appends the WS bars and official_candles brings Dhan's candles
+    in the background. Stale or incomplete WS -> the old path."""
     now = _now_ist()
     cached = _raw_series_cache.get(cache_key)
     if cached and cached[1].get("timestamp"):
         fetched_at, base = cached
+        if symbol is not None:
+            _register_base(cache_key, symbol)
         bar_start = now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % interval_minutes)
         newest_closed_start = bar_start - timedelta(minutes=interval_minutes)
         up_to_date = datetime.fromtimestamp(base["timestamp"][-1], tz=IST) >= newest_closed_start
+        if up_to_date:
+            return base
+        if (symbol is not None and config.USE_WS_CANDLES
+                and official_candles.ws_cover(symbol, cache_key[1], base["timestamp"][-1], interval_minutes, now,
+                                              count=True) != "no"):
+            return base
         age = (now - fetched_at).total_seconds()
-        if up_to_date or age < REST_BASE_MIN_REFETCH_SECONDS:
+        if age < REST_BASE_MIN_REFETCH_SECONDS:
             return base
     elif cached and (now - cached[0]).total_seconds() < RAW_SERIES_DEDUP_SECONDS:
         return cached[1]   # a recent failure - don't hammer the API
@@ -256,12 +270,75 @@ def _rest_base(cache_key: tuple, interval_minutes: int) -> dict:
         data = {key: (data.get(key) or [])[:-1] for key in _SERIES_KEYS}
     if data.get("close"):
         _raw_series_cache[cache_key] = (now, data)
+        if symbol is not None:
+            _register_base(cache_key, symbol)
         return data
     if cached and cached[1].get("close"):
         _raw_series_cache[cache_key] = (now, cached[1])   # keep the last good base
         return cached[1]
     _raw_series_cache[cache_key] = (now, {})
     return {}
+
+
+def _register_base(cache_key: tuple, symbol: str) -> None:
+    def put(new: dict) -> None:
+        _raw_series_cache[cache_key] = (_now_ist(), new)
+
+    security_id, exchange_segment, instrument_type, interval_minutes, lookback_days_override = cache_key
+    official_candles.register(("swing",) + cache_key, symbol, security_id, exchange_segment, instrument_type,
+                              interval_minutes, lookback_days_override,
+                              lambda: (_raw_series_cache.get(cache_key) or (None, None))[1], put, expire_symbol)
+
+
+_EXPIRED = datetime(2000, 1, 1, tzinfo=IST)
+
+
+def expire_symbol(symbol: str) -> None:
+    """Dhan's official candles replaced WS bars in one of `symbol`'s bases (official_candles, 2 Oct 2026): the
+    next regime / Supertrend / Day Range read recomputes. Thread-safe (dict assignments only)."""
+    for cache, key in ([(_regime_cache, symbol), (_day_range_cache, symbol)]
+                       + [(_supertrend_cache, k) for k in list(_supertrend_cache) if k[0] == symbol]):
+        cached = cache.get(key)
+        if cached is not None:
+            cache[key] = (_EXPIRED, cached[1])
+
+
+async def confirm_official(symbol: str, intervals: Optional[tuple] = None) -> bool:
+    """Brings `symbol`'s bases (all intervals, or only `intervals`) up to the newest closed bar with Dhan's candles -
+    one short call per interval ahead of the background queue, none when they are already in - and expires its
+    cached states so the next reads use them (2 Oct 2026; Unified Momentum engine B, before a real entry or a
+    Supertrend exit). True when Dhan had them."""
+    try:
+        ok = await asyncio.get_running_loop().run_in_executor(dhan_wrapper.history_executor(),
+                                                              official_candles.refresh_now, symbol, intervals)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not fetch Dhan's candles for a confirmation", symbol)
+        ok = False
+    expire_symbol(symbol)
+    return ok
+
+
+_early_refresh: dict[tuple, datetime] = {}
+
+
+def _newer_ws_bar(key: tuple, symbol: str, interval_minutes: int, candle_start: Optional[datetime]) -> bool:
+    """A cached state is fresh by its timer, but the WS feed already closed a newer bar (its forming bar is in a
+    later bucket) - refresh now instead of up to the refresh interval later, once per bar (2 Oct 2026). Costs no
+    Dhan call when the WS bars cover the base (official_candles.ws_cover)."""
+    if (not (official_candles.enabled() and config.USE_WS_CANDLES and candle_start is not None)
+            or interval_minutes not in official_candles.SUPPORTED_INTERVALS):
+        return False
+    if not candle_feed.is_fresh(symbol, config.WS_STALE_AFTER_SECONDS):
+        return False
+    forming = candle_feed.forming_bar(symbol)
+    if forming is None:
+        return False
+    newest_closed = candle_feed._candle_start_for(forming["candle_start"], interval_minutes) - timedelta(
+        minutes=interval_minutes)
+    if candle_start >= newest_closed or _early_refresh.get(key) == newest_closed:
+        return False
+    _early_refresh[key] = newest_closed
+    return True
 
 
 def is_symbol_ws_fresh(symbol: str) -> bool:
@@ -513,7 +590,10 @@ async def get_regime_state(symbol: str) -> Optional[RegimeState]:
     cached = _regime_cache.get(symbol)
     streak = _regime_fail_streak.get(symbol, 0)
     effective_refresh = min(config.REGIME_REFRESH_SECONDS * (2 ** streak), MAX_FETCH_BACKOFF_SECONDS)
-    if cached and (_now_ist() - cached[0]).total_seconds() < effective_refresh:
+    if (cached and (_now_ist() - cached[0]).total_seconds() < effective_refresh
+            and not (streak == 0 and cached[1] is not None
+                     and _newer_ws_bar(("regime", symbol), symbol, config.REGIME_FAST_INTERVAL_MINUTES,
+                                       cached[1].fast_candle_start))):
         return cached[1]
     loop = asyncio.get_running_loop()
     try:
@@ -698,7 +778,10 @@ async def get_supertrend_state(symbol: str, interval_minutes: Optional[int] = No
     cached = _supertrend_cache.get(cache_key)
     streak = _supertrend_fail_streak.get(cache_key, 0)
     effective_refresh = min(config.SUPERTREND_REFRESH_SECONDS * (2 ** streak), MAX_FETCH_BACKOFF_SECONDS)
-    if cached and (_now_ist() - cached[0]).total_seconds() < effective_refresh:
+    if (cached and (_now_ist() - cached[0]).total_seconds() < effective_refresh
+            and not (streak == 0 and cached[1] is not None
+                     and _newer_ws_bar(("supertrend",) + cache_key, symbol, interval_minutes,
+                                       cached[1].candle_start))):
         return cached[1]
     loop = asyncio.get_running_loop()
     try:

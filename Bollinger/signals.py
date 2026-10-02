@@ -34,11 +34,13 @@ not-enough-data condition returns None and callers must treat that as
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 
+import official_candles
 from Options.dhan_client import dhan_wrapper, IST
 from Swing import candle_feed
 from . import config
@@ -137,7 +139,23 @@ def _fetch_rest_series(security_id: str, exchange_segment: str, instrument_type:
 
 
 def _get_intraday_series(symbol: str, security_id: str, exchange_segment: str, instrument_type: str) -> dict:
-    """Full-history REST series (REST_LOOKBACK_DAYS, the same continuous
+    return _series_with_ws_count(symbol, security_id, exchange_segment, instrument_type)[0]
+
+
+def _register_base(symbol: str, security_id: str, exchange_segment: str, instrument_type: str) -> None:
+    def put(new: dict) -> None:
+        _rest_series_cache[symbol] = new
+
+    official_candles.register(("bollinger", symbol), symbol, security_id, exchange_segment, instrument_type,
+                              config.SIGNAL_INTERVAL_MINUTES, config.REST_LOOKBACK_DAYS,
+                              lambda: _rest_series_cache.get(symbol), put, expire_signal)
+
+
+def _series_with_ws_count(symbol: str, security_id: str, exchange_segment: str,
+                          instrument_type: str) -> tuple[dict, int]:
+    """(series, number of WS bars appended after the REST base).
+
+    Full-history REST series (REST_LOOKBACK_DAYS, the same continuous
     multi-day window the backtest replays), with any NEWER completed WS
     bars appended on top.
 
@@ -150,7 +168,14 @@ def _get_intraday_series(symbol: str, security_id: str, exchange_segment: str, i
     above explains diverges from the backtest with no error. WS is now
     only ever an extension of the REST base, never a replacement; an empty
     REST base returns {} (a fetch failure) rather than falling back to a
-    today-only WS series."""
+    today-only WS series.
+
+    WS first (2 Oct 2026, official_candles.py): a base that is behind only
+    by bars the WS feed watched whole is NOT downloaded here any more - the
+    new bar's pending order is computed from the WS bar the moment it closes
+    and official_candles brings Dhan's candle in the background (the state
+    is marked provisional until then). Stale or incomplete WS -> download
+    and wait exactly as before."""
     interval = config.SIGNAL_INTERVAL_MINUTES
     now = _now_ist()
     bar_start = now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % interval)
@@ -158,7 +183,10 @@ def _get_intraday_series(symbol: str, security_id: str, exchange_segment: str, i
 
     base = _rest_series_cache.get(symbol)
     base_ts = (base or {}).get("timestamp") or []
-    if not base_ts or datetime.fromtimestamp(base_ts[-1], tz=IST) < newest_closed_start:
+    if (config.USE_WS_CANDLES and base_ts and datetime.fromtimestamp(base_ts[-1], tz=IST) < newest_closed_start
+            and official_candles.ws_cover(symbol, exchange_segment, base_ts[-1], interval, now, count=True) != "no"):
+        pass                                   # WS has the missing bar(s) - official_candles fetches Dhan's behind
+    elif not base_ts or datetime.fromtimestamp(base_ts[-1], tz=IST) < newest_closed_start:
         requested = _rest_requested_at.get(symbol)
         if (not base_ts or requested is None or requested < bar_start
                 or (now - requested).total_seconds() >= REST_BASE_MIN_REFETCH_SECONDS):
@@ -168,9 +196,11 @@ def _get_intraday_series(symbol: str, security_id: str, exchange_segment: str, i
                 _rest_series_cache[symbol] = fetched
                 base = fetched
     if not base or not base.get("close"):
-        return {}
+        return {}, 0
+    _register_base(symbol, security_id, exchange_segment, instrument_type)
 
     data = {key: list(base.get(key) or []) for key in _SERIES_KEYS}
+    appended = 0
     if config.USE_WS_CANDLES and candle_feed.is_fresh(symbol, config.WS_STALE_AFTER_SECONDS):
         ws_data = candle_feed.get_candles_dict(symbol, interval)
         last_ts = data["timestamp"][-1] if data["timestamp"] else None
@@ -178,7 +208,8 @@ def _get_intraday_series(symbol: str, security_id: str, exchange_segment: str, i
             if last_ts is None or ts > last_ts:
                 for key in _SERIES_KEYS:
                     data[key].append(ws_data[key][i])
-    return data
+                appended += 1
+    return data, appended
 
 
 def is_symbol_ws_fresh(symbol: str) -> bool:
@@ -274,6 +305,9 @@ class BollingerSignalState:
     fired_stop_price: Optional[float]
     last_close: float                   # the underlying's own most recent closed-candle price - used to normalize stop_pct at entry
     candle_start: Optional[datetime]
+    # True when the newest bar(s) came from the WS feed and Dhan's official candle has not replaced them yet
+    # (2 Oct 2026, official_candles.py) - Unified Momentum confirms with Dhan before a real entry on such a state.
+    provisional: bool = False
 
 
 def _replay(highs: list[float], lows: list[float], closes: list[float],
@@ -477,7 +511,7 @@ def resting_trigger_hit(state: Optional[BollingerSignalState], forming: Optional
 def _fetch_signal_state_once(symbol: str) -> Optional[BollingerSignalState]:
     """Blocking - always call via run_in_executor."""
     security_id, exchange_segment, instrument_type = _underlying_reference(symbol)
-    data = _get_intraday_series(symbol, security_id, exchange_segment, instrument_type)
+    data, ws_bars = _series_with_ws_count(symbol, security_id, exchange_segment, instrument_type)
     closes = data.get("close") or []
     if not closes:
         raise RuntimeError(
@@ -485,7 +519,10 @@ def _fetch_signal_state_once(symbol: str) -> Optional[BollingerSignalState]:
             f"{config.SIGNAL_INTERVAL_MINUTES}-min Bollinger series - treating as a fetch failure, "
             f"not genuinely insufficient history"
         )
-    return _replay(data.get("high") or [], data.get("low") or [], closes, data.get("timestamp") or [])
+    state = _replay(data.get("high") or [], data.get("low") or [], closes, data.get("timestamp") or [])
+    if state is not None and ws_bars:
+        state = dataclasses.replace(state, provisional=True)
+    return state
 
 
 async def get_signal_state(symbol: str, force: bool = False) -> Optional[BollingerSignalState]:
@@ -522,6 +559,41 @@ async def get_signal_state(symbol: str, force: bool = False) -> Optional[Bolling
             state = cached[1] if cached else None
             _fail_streak[cache_key] = streak + 1
         _signal_cache[cache_key] = (_now_ist(), state)
+        return state
+
+
+_EXPIRED = datetime(2000, 1, 1, tzinfo=IST)
+
+
+def expire_signal(symbol: str) -> None:
+    """Dhan's official candle replaced WS bars in `symbol`'s base (official_candles) - the next get_signal_state
+    recomputes; peek still returns the last state meanwhile. Thread-safe (one dict assignment)."""
+    cached = _signal_cache.get(symbol)
+    if cached is not None:
+        _signal_cache[symbol] = (_EXPIRED, cached[1])
+
+
+def _confirm_once(symbol: str) -> Optional[BollingerSignalState]:
+    """Blocking. Dhan's candles for `symbol` first (no call when the base already has them), then a fresh replay."""
+    official_candles.refresh_now(symbol, (config.SIGNAL_INTERVAL_MINUTES,))
+    return _fetch_signal_state_once(symbol)
+
+
+async def confirm_signal_state(symbol: str) -> Optional[BollingerSignalState]:
+    """The signal state on Dhan's official candles (2 Oct 2026): called before a real entry whose state is
+    provisional (built on WS bars). One short Dhan call ahead of the background queue (~0.5-1.5 s), none when the
+    official candle is already in. A failure keeps the provisional state - the same data the old path used when its
+    download failed - so the caller can carry on as before."""
+    lock = _fetch_locks.setdefault(symbol, asyncio.Lock())
+    async with lock:
+        cached = _signal_cache.get(symbol)
+        try:
+            state = await asyncio.get_running_loop().run_in_executor(dhan_wrapper.history_executor(), _confirm_once,
+                                                                     symbol)
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: could not confirm the signal on Dhan's candle - keeping the WS-based state", symbol)
+            return cached[1] if cached else None
+        _signal_cache[symbol] = (_now_ist(), state)
         return state
 
 

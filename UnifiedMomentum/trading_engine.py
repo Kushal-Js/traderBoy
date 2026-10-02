@@ -27,6 +27,7 @@ from typing import Optional
 
 import capacity_control
 import cross_strategy_registry
+import official_candles
 import order_safety
 import fund_allocation
 import paper_mode_control
@@ -659,6 +660,50 @@ def install_tick_entries(loop: asyncio.AbstractEventLoop) -> None:
     global _loop
     _loop = loop
     candle_feed.add_tick_listener(_on_underlying_tick)
+    official_candles.add_update_listener(_on_official_candles)
+
+
+def _on_official_candles(symbol: str, interval: int) -> None:
+    """official_candles thread (2 Oct 2026): Dhan's candle replaced WS bars of a stock - recompute its pending
+    order now rather than at the next scan, so an order only Dhan's candle shows is taken on the next tick."""
+    if _loop is None or symbol not in _eligible or interval != bcfg.SIGNAL_INTERVAL_MINUTES:
+        return
+    asyncio.run_coroutine_threadsafe(_recompute_signal(symbol), _loop)
+
+
+async def _recompute_signal(symbol: str) -> None:
+    try:
+        await signals.get_signal_state(symbol)        # its cache was expired by official_candles -> recomputed
+    except Exception:  # noqa: BLE001
+        logger.exception("[%s] %s: recompute after Dhan's candle failed", STRATEGY, symbol)
+
+
+async def _confirm_if_provisional(symbol: str, source: str) -> None:
+    """An entry is about to rest on a pending order computed from a WS-built candle that Dhan's official candle has
+    not replaced yet (signals state.provisional - official_candles.py, 2 Oct 2026). Fetch Dhan's candle for this
+    stock first (one short call ahead of the background queue, ~0.5-1.5 s) and re-read the signal, so an order only
+    the WS candle shows is never traded. The old path waited ~up to 30 s for the same download before any state
+    existed. If Dhan cannot answer, the WS-based state stays - the same data the old path used when its download
+    failed."""
+    state = signals.peek_signal_state(symbol)
+    if state is None or not state.provisional or not official_candles.enabled():
+        return
+    started = time.monotonic()
+    confirmed = await signals.confirm_signal_state(symbol)
+    same = (confirmed is not None and confirmed.candle_start == state.candle_start
+            and confirmed.pending_side == state.pending_side
+            and confirmed.pending_trigger_price == state.pending_trigger_price
+            and confirmed.pending_stop_price == state.pending_stop_price)
+    detail = {"source": source, "candle": state.candle_start.isoformat() if state.candle_start else None,
+              "confirm_ms": round((time.monotonic() - started) * 1000, 1),
+              "still_provisional": bool(confirmed is not None and confirmed.provisional),
+              "ws": [state.pending_side, state.pending_trigger_price, state.pending_stop_price],
+              "official": ([confirmed.pending_side, confirmed.pending_trigger_price, confirmed.pending_stop_price]
+                           if confirmed is not None else None)}
+    await _event("WS_SIGNAL_CONFIRMED" if same else "WS_SIGNAL_CHANGED", symbol, detail)
+    if not same:
+        logger.info("[%s] %s: Dhan's candle changed the pending order %s -> %s (%s)", STRATEGY, symbol, detail["ws"],
+                    detail["official"], source)
 
 
 def _on_underlying_tick(symbol: str, ltp: float, tick_time: datetime) -> None:
@@ -738,10 +783,19 @@ def _peek_entry_signal(symbol: str) -> Optional[tuple]:
     return engine._direction_allowed(entry, PROFILE)
 
 
+def _would_enter(symbol: str, state) -> bool:
+    """The scan's entry check without consuming anything (engine._evaluate_entry_signal's resting branch)."""
+    forming = (candle_feed.forming_bar(symbol)
+               if candle_feed.is_fresh(symbol, bcfg.WS_STALE_AFTER_SECONDS) else None)
+    return (signals.resting_trigger_hit(state, forming, bcfg.SIGNAL_INTERVAL_MINUTES, _now().date()) is not None
+            and PROFILE.consumed.get(symbol) != state.candle_start)
+
+
 async def _tick_entry(symbol: str) -> None:
     try:
         if not await _can_enter_symbol(symbol):
             return
+        await _confirm_if_provisional(symbol, "tick")
         entry = _peek_entry_signal(symbol)
         if entry:
             await _enter(symbol, entry[1], entry[2], "tick")
@@ -757,6 +811,7 @@ async def _tick_entry(symbol: str) -> None:
 async def _refresh_gate() -> None:
     global _eligible
     _eligible = set(await eligible_symbols())  # swapped whole - the WS thread reads it
+    official_candles.set_priority(STRATEGY, _eligible | {"NIFTY"})   # Dhan's candles for these come first
     cap = capacity_control.get_max_concurrent_trades(STRATEGY)
     _gate["open"] = (settings.get("strategy_enabled") and not _halted_today() and _entries_open_now() and not _square_off_now()
                      and (open_count() < cap or paper_open_count() < cap) and market_gate_open())
@@ -779,6 +834,9 @@ async def _scan_for_entries() -> None:
             continue
         _entry_inflight.add(symbol)
         try:
+            state = await signals.get_signal_state(symbol)
+            if state is not None and state.provisional and _would_enter(symbol, state):
+                await _confirm_if_provisional(symbol, "scan")
             entry = await engine._evaluate_entry_signal(symbol, PROFILE)
             if entry and await _can_enter_symbol(symbol):
                 await _enter(symbol, entry[1], entry[2], "scan")

@@ -28,12 +28,14 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import cross_strategy_registry
 import fund_allocation
+import official_candles
 from trade_history import attribute_open_broker_position
 from Bollinger import config as bcfg
 from Bollinger import trading_engine as engine
@@ -193,6 +195,37 @@ async def _refresh_release(symbol: str) -> None:
         _release(symbol, reg.is_bullish, await swing_signals.get_supertrend_state(symbol))
 
 
+async def _confirm_on_dhan_candles(symbol: str, st) -> Optional[tuple]:
+    """A new PUT signal may rest on WS-built candles that Dhan's official ones have not replaced yet
+    (official_candles.py, 2 Oct 2026; on 30 Sep the newest WS candle flipped the entry flag on 0.29% of candles).
+    Before the first decision on it: Dhan's 5/15-min candles for this stock (one short call per interval ahead of
+    the background queue, ~0.5-1.5 s; no call when they are already in), then the signal again. Returns
+    (regime, supertrend, dhan_candle, confirm_ms) to use, or None when Dhan's candles do not give the same BEARISH
+    signal on the same candle (B_SIGNAL_NOT_CONFIRMED). Dhan not answering keeps the WS-based signal - what the
+    old path used when its download failed."""
+    if not official_candles.enabled():
+        return await swing_signals.get_regime_state(symbol), st, "off", None
+    started = time.monotonic()
+    official = await swing_signals.confirm_official(symbol)
+    reg = await swing_signals.get_regime_state(symbol)
+    st2 = await swing_signals.get_supertrend_state(symbol)
+    direction = None
+    if reg is not None and st2 is not None and st2.candle_start == st.candle_start:
+        direction = await swing_te._entry_direction(symbol, reg, st2)
+    confirm_ms = round((time.monotonic() - started) * 1000, 1)
+    if direction == "BEARISH":
+        return reg, st2, "confirmed" if official else "not_available", confirm_ms
+    if not official:
+        return None                    # re-read on the same data no longer gives it (e.g. a newer candle closed)
+    await _event("B_SIGNAL_NOT_CONFIRMED", symbol, {"signal_candle": st.candle_start.isoformat(),
+                                                    "official_candle": st2.candle_start.isoformat()
+                                                    if st2 is not None and st2.candle_start else None,
+                                                    "official_direction": direction, "confirm_ms": confirm_ms})
+    logger.info("[%s] %s: PUT signal on the %s WS candle not on Dhan's candle (%s) - not taken", PUT_STRATEGY, symbol,
+                st.candle_start.strftime("%H:%M"), direction)
+    return None
+
+
 async def _signal(symbol: str) -> Optional[tuple]:
     reg = await swing_signals.get_regime_state(symbol)
     if reg is None:
@@ -211,6 +244,11 @@ async def _signal(symbol: str) -> Optional[tuple]:
     key = (symbol, direction, st.candle_start)
     reading = _seen.get(key)
     if reading is None:
+        confirmation = await _confirm_on_dhan_candles(symbol, st)
+        if confirmation is None:
+            return None
+        reg, st, dhan_candle, confirm_ms = confirmation
+        key = (symbol, direction, st.candle_start)
         try:
             reading = await asyncio.get_running_loop().run_in_executor(dhan_wrapper.history_executor(), regime.read,
                                                                        symbol)
@@ -220,7 +258,8 @@ async def _signal(symbol: str) -> Optional[tuple]:
                                            reasons=("read failed",))
         _remember(key, reading)
         await _event("B_SIGNAL", symbol, {"direction": direction, "signal_candle": st.candle_start.isoformat(),
-                                          "taken_if_possible": reading.allows_entry, **reading.as_dict()})
+                                          "taken_if_possible": reading.allows_entry, "dhan_candle": dhan_candle,
+                                          "confirm_ms": confirm_ms, **reading.as_dict()})
     if not reading.allows_entry:
         return None
     return st, reading
@@ -462,6 +501,36 @@ def exit_reason(entry: float, best: float, ltp: float, qty: float) -> Optional[s
     return None
 
 
+_reversal_checked: dict[tuple, bool] = {}   # (symbol, candle_start) -> Dhan's candle shows the bullish cross
+
+
+async def _reversal_on_dhan_candle(symbol: str, st) -> bool:
+    """The candle-close reversal exit on Dhan's official 5-min candle (2 Oct 2026, official_candles.py): the cross
+    may rest on a WS-built candle. Fetches Dhan's candle when it is not in yet (one short call, ~0.5-1.5 s - the old
+    path waited for the same download before it saw the candle at all), then re-reads. Dhan not answering -> exit
+    as before (fail open: an exit never waits on Dhan)."""
+    if not official_candles.enabled():
+        return True
+    key = (symbol, st.candle_start)
+    if key in _reversal_checked:
+        return _reversal_checked[key]
+    official = await swing_signals.confirm_official(symbol, (swing_config.SUPERTREND_INTERVAL_MINUTES,))
+    if not official:
+        return True
+    st2 = await swing_signals.get_supertrend_state(symbol)
+    confirmed = bool(st2 is not None and st2.candle_start == st.candle_start and st2.crossed_above)
+    if len(_reversal_checked) > 500:
+        _reversal_checked.clear()
+    _reversal_checked[key] = confirmed
+    if not confirmed:
+        await _event("B_EXIT_NOT_CONFIRMED", symbol, {"candle": st.candle_start.isoformat(),
+                                                      "official_candle": st2.candle_start.isoformat()
+                                                      if st2 is not None and st2.candle_start else None})
+        logger.info("[%s] %s: Supertrend reversal on the %s WS candle not on Dhan's candle - position kept",
+                    PUT_STRATEGY, symbol, st.candle_start.strftime("%H:%M"))
+    return confirmed
+
+
 async def _supertrend_reversal(symbol: str, pos: Position) -> Optional[str]:
     """A PUT is bearish exposure: a BULLISH cross is against it (Swing's _evaluate_exit_signal), never on the entry
     candle; with Swing's tick exit timing also the live price crossing the last closed candle's line, once the
@@ -472,7 +541,8 @@ async def _supertrend_reversal(symbol: str, pos: Position) -> Optional[str]:
     if st is None or st.candle_start is None:
         return None
     entry_candle = pos.entry_candle_start
-    if (entry_candle is None or st.candle_start > entry_candle) and st.crossed_above:
+    if ((entry_candle is None or st.candle_start > entry_candle) and st.crossed_above
+            and await _reversal_on_dhan_candle(symbol, st)):
         return "SUPERTREND_REVERSAL"
     if (swing_config.EXIT_TIMING == "tick" and pos.opened_at is not None
             and swing_te._as_ist(st.candle_start) >= swing_te._candle_start_of(pos.opened_at)):

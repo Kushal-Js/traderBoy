@@ -63,6 +63,7 @@ from trade_history import HISTORY_DIR, read_all_jsonl, read_all_trades, read_all
 import choppy_stocks
 import cross_strategy_registry
 import fund_allocation
+import official_candles
 from Options import option_main
 from Options import config as options_config
 from Luxury import luxury_main
@@ -153,6 +154,8 @@ async def lifespan(app: FastAPI):
         ThreadPoolExecutor(max_workers=EXECUTOR_MAX_WORKERS)
     )
     logger.info("Default executor sized to max_workers=%d", EXECUTOR_MAX_WORKERS)
+    # WS candles first, Dhan's candles fetched behind them on this thread (2 Oct 2026) - see official_candles.py.
+    official_candles.start()
     async with option_main.lifespan(app):
         async with luxury_main.lifespan(app):
             async with swing_main.lifespan(app):
