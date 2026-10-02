@@ -257,7 +257,7 @@ BASES_FILE = Path("data/official_candles_bases.json")
 SEEN_SAVE_SECONDS = 30
 _loaders: dict[str, Callable[[str, dict], None]] = {}
 _seen = {"date": None, "bases": {}, "dirty": False, "saved_at": 0.0}
-_prewarm = {"done_date": None, "last": None}
+_prewarm = {"done_date": None, "last": None, "ident": None}   # ident: the thread running prewarm(), while it runs
 
 
 def add_prewarm_loader(owner: str, fn: Callable[[str, dict], None]) -> None:
@@ -267,7 +267,11 @@ def add_prewarm_loader(owner: str, fn: Callable[[str, dict], None]) -> None:
 
 
 def _note_seen(key: tuple, symbol: str, interval: int, lookback_days: Optional[int]) -> None:
-    """Under _lock: remembers today's bases for tomorrow's warm-up (saved by the background thread)."""
+    """Under _lock: remembers today's bases for tomorrow's warm-up (saved by the background thread). The warm-up's
+    own loads do not count (2 Oct 2026): only a signal path using a base keeps it on tomorrow's list, so a stock
+    the weekly refresh removed drops off after one day instead of being warmed (and kept fresh) forever."""
+    if _prewarm.get("ident") == threading.get_ident():
+        return
     today = _now().date().isoformat()
     if _seen["date"] != today:
         _seen.update(date=today, bases={}, dirty=True)
@@ -299,9 +303,45 @@ def _prewarm_due(now: datetime) -> bool:
             and _prewarm["done_date"] != now.date())
 
 
+def _series(entry: dict) -> tuple:
+    return entry.get("owner"), entry.get("interval"), entry.get("lookback_days")
+
+
+TEMPLATE_SHARE = 0.8   # a candle series counts as "what a UM stock uses" when >= 80% of UM's listed stocks have it
+
+
+def _missing_priority_entries(entries: list, priority: set) -> list:
+    """Bases for Unified Momentum's stocks that BASES_FILE does not list (2 Oct 2026): a stock the weekly refresh
+    (Fri 00:00) just added was not used on the last trading day, so it gets the candle series (nearly) every UM stock
+    already in the file uses - today Bollinger 5 min / 60 days + Swing 5 min / 45 days, 15 min / 45 days, 5 min /
+    7 days (all 15 stocks); Swing's 15 min / 7 days is only on the stocks Swing paper also trades (8 of 15) and is
+    left out. A stock is told apart from an index (NIFTY is a priority symbol with fewer series) by the segment it
+    was just WS-subscribed under. Call after the file's entries were loaded."""
+    by_symbol: dict[str, set] = {}
+    for e in entries:
+        by_symbol.setdefault(e.get("symbol"), set()).add(_series(e))
+    stocks = [s for s in priority if s in by_symbol and (candle_feed._subscribed_ref.get(s) or (None, None))[1] == "NSE_EQ"]
+    if not stocks:
+        return []
+    counts: dict[tuple, int] = {}
+    for s in stocks:
+        for series in by_symbol[s]:
+            counts[series] = counts.get(series, 0) + 1
+    template = {series for series, n in counts.items() if n >= TEMPLATE_SHARE * len(stocks)}
+    out = []
+    for symbol in sorted(priority):
+        if symbol in by_symbol and symbol not in stocks:
+            continue                       # an index (or a symbol whose loads failed)
+        for owner, interval, lookback in sorted(template - by_symbol.get(symbol, set()), key=str):
+            out.append({"owner": owner, "symbol": symbol, "interval": interval, "lookback_days": lookback})
+    return out
+
+
 def prewarm(now: Optional[datetime] = None) -> dict:
-    """Loads every base listed in BASES_FILE (Unified Momentum's stocks and NIFTY first). Blocking - the background
-    thread runs it once per weekday at PREWARM_START. Each load goes through the shared pacing like any download."""
+    """Loads every base listed in BASES_FILE (Unified Momentum's stocks and NIFTY first), then the bases of any UM
+    stock the file does not list yet (_missing_priority_entries - e.g. added by Friday's weekly refresh). Blocking -
+    the background thread runs it once per weekday at PREWARM_START. Each load goes through the shared pacing like
+    any download. These loads are not "use" (_note_seen ignores them)."""
     now = now or _now()
     _prewarm["done_date"] = now.date()
     try:
@@ -314,22 +354,34 @@ def prewarm(now: Optional[datetime] = None) -> dict:
     priority = _priority_symbols()
     entries.sort(key=lambda e: (0 if e.get("symbol") in priority else 1, e.get("symbol") or "", e.get("interval") or 0))
     started = time.monotonic()
-    loaded = failed = skipped = 0
-    for entry in entries:
+    counts = {"loaded": 0, "failed": 0, "skipped": 0}
+
+    def load(entry: dict) -> None:
         loader = _loaders.get(entry.get("owner"))
         if loader is None or not entry.get("symbol"):
-            skipped += 1
-            continue
+            counts["skipped"] += 1
+            return
         try:
             loader(entry["symbol"], entry)
-            loaded += 1
+            counts["loaded"] += 1
         except Exception:  # noqa: BLE001
-            failed += 1
+            counts["failed"] += 1
             logger.exception("official candles: warm-up of %s %s %sm failed - its loop downloads it at 09:15",
                              entry.get("owner"), entry.get("symbol"), entry.get("interval"))
-    result = {"date": now.date().isoformat(), "listed": len(entries), "loaded": loaded, "failed": failed,
-              "skipped": skipped, "seconds": round(time.monotonic() - started, 1),
-              "symbols": len({e.get("symbol") for e in entries})}
+
+    _prewarm["ident"] = threading.get_ident()
+    added: list = []
+    try:
+        for entry in entries:
+            load(entry)
+        added = _missing_priority_entries(entries, priority)
+        for entry in added:
+            load(entry)
+    finally:
+        _prewarm["ident"] = None
+    result = {"date": now.date().isoformat(), "listed": len(entries), **counts,
+              "seconds": round(time.monotonic() - started, 1), "symbols": len({e.get("symbol") for e in entries}),
+              "added_um_stocks": sorted({e["symbol"] for e in added}), "added_bases": len(added)}
     _prewarm["last"] = result
     logger.info("official candles: pre-open warm-up done - %s", result)
     return result
