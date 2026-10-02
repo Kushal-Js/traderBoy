@@ -1,0 +1,166 @@
+{
+ "as_of": "2026-10-01",
+ "picked_at": "2026-10-02 09:14:21",
+ "fit_sessions_used": 40,
+ "live": {
+  "rule": "HYBRID (20 sessions, plain fit)",
+  "symbols": [
+   "LAURUSLABS",
+   "PNBHOUSING",
+   "BOSCHLTD",
+   "SONACOMS",
+   "MOTILALOFS",
+   "TITAN",
+   "OBEROIRLTY",
+   "APLAPOLLO",
+   "MCX",
+   "TORNTPHARM",
+   "PHOENIXLTD",
+   "TVSMOTOR",
+   "ABCAPITAL",
+   "ETERNAL",
+   "PAYTM"
+  ]
+ },
+ "shadow": {
+  "rule": "HYBRID_F40 (40 sessions, fit with the 1-hour filter)",
+  "symbols": [
+   "PAYTM",
+   "LAURUSLABS",
+   "MCX",
+   "BOSCHLTD",
+   "GLENMARK",
+   "APLAPOLLO",
+   "PNBHOUSING",
+   "KALYANKJIL",
+   "MOTILALOFS",
+   "TORNTPHARM",
+   "OBEROIRLTY",
+   "PHOENIXLTD",
+   "INDHOTEL",
+   "RADICO",
+   "RBLBANK"
+  ],
+  "picks": [
+   {
+    "symbol": "PAYTM",
+    "source": "strategy_fit",
+    "fit_pct": 11.28,
+    "fit_trades": 18,
+    "ath_score": 59.3
+   },
+   {
+    "symbol": "LAURUSLABS",
+    "source": "strategy_fit",
+    "fit_pct": 9.77,
+    "fit_trades": 14,
+    "ath_score": 73.9
+   },
+   {
+    "symbol": "MCX",
+    "source": "strategy_fit",
+    "fit_pct": 7.51,
+    "fit_trades": 17,
+    "ath_score": 59.3
+   },
+   {
+    "symbol": "BOSCHLTD",
+    "source": "strategy_fit",
+    "fit_pct": 6.06,
+    "fit_trades": 11,
+    "ath_score": 57.7
+   },
+   {
+    "symbol": "GLENMARK",
+    "source": "strategy_fit",
+    "fit_pct": 4.68,
+    "fit_trades": 19,
+    "ath_score": 57.2
+   },
+   {
+    "symbol": "APLAPOLLO",
+    "source": "strategy_fit",
+    "fit_pct": 4.46,
+    "fit_trades": 10,
+    "ath_score": 60.7
+   },
+   {
+    "symbol": "PNBHOUSING",
+    "source": "strategy_fit",
+    "fit_pct": 3.97,
+    "fit_trades": 11,
+    "ath_score": 52.1
+   },
+   {
+    "symbol": "KALYANKJIL",
+    "source": "strategy_fit",
+    "fit_pct": 3.35,
+    "fit_trades": 9,
+    "ath_score": 51.6
+   },
+   {
+    "symbol": "MOTILALOFS",
+    "source": "strategy_fit",
+    "fit_pct": 2.67,
+    "fit_trades": 13,
+    "ath_score": 61.5
+   },
+   {
+    "symbol": "TORNTPHARM",
+    "source": "strategy_fit",
+    "fit_pct": 2.57,
+    "fit_trades": 6,
+    "ath_score": 47.1
+   },
+   {
+    "symbol": "OBEROIRLTY",
+    "source": "strategy_fit",
+    "fit_pct": 1.61,
+    "fit_trades": 12,
+    "ath_score": 50.3
+   },
+   {
+    "symbol": "PHOENIXLTD",
+    "source": "strategy_fit",
+    "fit_pct": 1.54,
+    "fit_trades": 11,
+    "ath_score": 67.5
+   },
+   {
+    "symbol": "INDHOTEL",
+    "source": "strategy_fit",
+    "fit_pct": 1.2,
+    "fit_trades": 10,
+    "ath_score": 49.4
+   },
+   {
+    "symbol": "RADICO",
+    "source": "strategy_fit",
+    "fit_pct": 0.91,
+    "fit_trades": 11,
+    "ath_score": 53.6
+   },
+   {
+    "symbol": "RBLBANK",
+    "source": "strategy_fit",
+    "fit_pct": 0.9,
+    "fit_trades": 11,
+    "ath_score": 73.8
+   }
+  ]
+ },
+ "only_live": [
+  "ABCAPITAL",
+  "ETERNAL",
+  "SONACOMS",
+  "TITAN",
+  "TVSMOTOR"
+ ],
+ "only_shadow": [
+  "GLENMARK",
+  "INDHOTEL",
+  "KALYANKJIL",
+  "RADICO",
+  "RBLBANK"
+ ]
+}
