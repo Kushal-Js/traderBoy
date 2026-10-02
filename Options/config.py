@@ -3,6 +3,7 @@ Central configuration for the Chartink -> Dhan algo trading bot.
 All values can be overridden via environment variables.
 """
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -71,6 +72,16 @@ DHAN_HTTP_TIMEOUT_SECONDS = float(os.getenv("DHAN_HTTP_TIMEOUT_SECONDS", "12"))
 DHAN_LOGIN_BACKOFF_SECONDS = (30, 60, 120, 240, 300)
 DHAN_SESSION_CHECK_SECONDS = float(os.getenv("DHAN_SESSION_CHECK_SECONDS", "60"))
 DHAN_RELOGIN_MAX_PER_HOUR = int(os.getenv("DHAN_RELOGIN_MAX_PER_HOUR", "3"))
+
+# Fallback access token (2 Oct 2026, user request) - Options/fallback_token.py + DhanWrapper's fallback methods.
+# PRIMARY = PIN+TOTP, always preferred. The fallback - a ~24 h access token the user generates on web.dhan.co and
+# stores with `python3 dhan_fallback_token.py set` - is used only while the primary cannot serve (PIN+TOTP login
+# failing, or market data refused on the primary but not on the fallback); the bot tries the primary again every
+# DHAN_FALLBACK_RETRY_PRIMARY_SECONDS and every restart starts on the primary.
+DHAN_FALLBACK_TOKEN_FILE = os.getenv("DHAN_FALLBACK_TOKEN_FILE",
+                                     str(Path(__file__).resolve().parents[1] / "data" / "dhan_fallback_token.json"))
+DHAN_FALLBACK_RETRY_PRIMARY_SECONDS = float(os.getenv("DHAN_FALLBACK_RETRY_PRIMARY_SECONDS", "900"))
+DHAN_FALLBACK_DATA_PROBE_SECONDS = float(os.getenv("DHAN_FALLBACK_DATA_PROBE_SECONDS", "300"))
 
 # Shared secret the webhook caller must send back to us, since Chartink
 # webhooks are unauthenticated by default. Optional but recommended.

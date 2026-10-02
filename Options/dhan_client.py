@@ -34,7 +34,7 @@ from Dhan_Tradehull import Tradehull
 from dhanhq import DhanContext, DhanLogin, MarketFeed, OrderUpdate, dhanhq
 
 import nifty_market_guard
-from . import config
+from . import config, fallback_token
 
 logger = logging.getLogger("dhan_client")
 
@@ -494,6 +494,12 @@ class DhanWrapper:
             "data_plan": None,
             "data_validity": None,
             "token_validity": None,
+            # Primary (PIN+TOTP) vs fallback access token (2 Oct 2026) - see _mark_fallback().
+            "token_source": "primary",
+            "fallback_reason": None,
+            "fallback_token_expires": None,
+            "fallback_switches": 0,
+            "data_refused": 0,
         }
         # Bounds how many REST LTP-fallback calls can be in flight at once
         # across ALL strategies sharing this connection (Options + Futures,
@@ -536,6 +542,14 @@ class DhanWrapper:
         self._session_guard_started = False
         self._order_update_running: Optional[tuple] = None   # (event loop, task) of the live order-update connection
         self._data_plan_warned_at: Optional[float] = None    # monotonic time of the last data-plan warning
+        # Fallback access token (2 Oct 2026) - see _mark_fallback().
+        self.token_source = "primary"                         # "primary" (PIN+TOTP) or "fallback"
+        self._fallback_reason: Optional[str] = None           # "login" or "data" while on the fallback
+        self._primary_token: Optional[str] = None             # last primary token (re-checked while on the fallback)
+        self._last_primary_retry = 0.0                        # monotonic, while on the fallback
+        self._data_refused_at: Optional[float] = None         # monotonic time of the last DH-902 on a data call
+        self._last_fallback_data_probe = 0.0
+        self._fallback_warned_at: Optional[float] = None
 
     # ------------------------------------------------------------------ #
     # Auth
@@ -590,8 +604,8 @@ class DhanWrapper:
             )
         self._client = tsl
         self._apply_http_timeout(tsl)
-        logger.info("Authenticated with Dhan (Tradehull, mode=%s, http_timeout=%.1fs)",
-                    mode, config.DHAN_HTTP_TIMEOUT_SECONDS)
+        logger.info("Authenticated with Dhan (Tradehull, mode=%s, token=%s, http_timeout=%.1fs)",
+                    mode, self.token_source, config.DHAN_HTTP_TIMEOUT_SECONDS)
 
     @staticmethod
     def _tradehull_ready(tsl) -> bool:
@@ -633,27 +647,36 @@ class DhanWrapper:
         codes (on 2 Oct 00:00 IST Dhan answered "Invalid TOTP" four times in a row and the bot's startup crashed
         twice before systemd's third start got in). Each round: today's cached token if Dhan still accepts it,
         else one PIN+TOTP mint of our own (_mint_token_once); then Tradehull starts in access_token mode with that
-        token (it re-validates it, caches it for the other processes and loads the instrument file). Raises
-        after the last round."""
+        token (it re-validates it, caches it for the other processes and loads the instrument file). If the
+        PIN+TOTP login itself fails and a usable fallback access token is stored, the bot starts on that instead
+        (_start_on_fallback) and the session guard keeps retrying the primary. Raises after the last round."""
         probe = Tradehull.__new__(Tradehull)   # only for Tradehull's token-file / PIN / TOTP helpers - no login
         probe.ClientCode = str(config.DHAN_CLIENT_ID).strip().replace(".0", "")
         rounds = len(config.DHAN_LOGIN_BACKOFF_SECONDS) + 1
         error = ""
         for rnd in range(1, rounds + 1):
+            login_failed = False
             try:
                 cached = probe._read_token_today()
                 if cached and self._token_state(cached) is True:
                     token = cached
                 else:
+                    login_failed = True
                     token, _expiry = self._mint_token_once(probe)
+                    login_failed = False
                 tsl = Tradehull(config.DHAN_CLIENT_ID, token, mode="access_token")
                 if self._tradehull_ready(tsl):
                     if rnd > 1:
                         logger.warning("Dhan PIN+TOTP login succeeded on round %d/%d", rnd, rounds)
+                    self._mark_primary(token)
                     return tsl
                 error = "Tradehull did not initialize its REST client (its output is above)"
             except Exception as exc:  # noqa: BLE001 - _mint_token_once never puts the PIN in its error text
                 error = str(exc)
+            if login_failed:
+                tsl = self._start_on_fallback(probe, error)
+                if tsl is not None:
+                    return tsl
             if rnd == rounds:
                 break
             wait = config.DHAN_LOGIN_BACKOFF_SECONDS[rnd - 1]
@@ -763,22 +786,30 @@ class DhanWrapper:
         profile = tsl._validate_access_token_profile(token)
         return token, str(body.get("expiryTime") or profile.get("tokenValidity") or "")
 
-    def _mint_token_pin_totp(self, tsl) -> tuple[str, str]:
-        """_mint_token_once, retried with config.DHAN_LOGIN_BACKOFF_SECONDS between failed tries. Raises after the
-        last try."""
+    def _mint_token_pin_totp(self, tsl, failed_first: Optional[str] = None) -> tuple[str, str]:
+        """_mint_token_once, retried with config.DHAN_LOGIN_BACKOFF_SECONDS between failed tries. `failed_first` =
+        the error of a first try the caller already made (the series continues from try 2). Raises after the last
+        try."""
         tries = len(config.DHAN_LOGIN_BACKOFF_SECONDS) + 1
-        for n in range(1, tries + 1):
+        start, error = 1, ""
+        if failed_first is not None:
+            start, error = 2, failed_first
+            self._wait_after_failed_mint(1, tries, error)
+        for n in range(start, tries + 1):
             try:
                 return self._mint_token_once(tsl)
             except Exception as exc:  # noqa: BLE001 - _mint_token_once never puts the PIN in its error text
                 error = str(exc)
             if n == tries:
                 raise RuntimeError(f"Dhan PIN+TOTP re-login failed after {tries} tries - last error: {error}")
-            wait = config.DHAN_LOGIN_BACKOFF_SECONDS[n - 1]
-            logger.error("Dhan PIN+TOTP re-login failed (try %d/%d): %s - retrying in %ds + the next TOTP window",
-                         n, tries, error, wait)
-            self._sleep_into_fresh_totp_window(wait)
+            self._wait_after_failed_mint(n, tries, error)
         raise AssertionError("unreachable")
+
+    def _wait_after_failed_mint(self, n: int, tries: int, error: str) -> None:
+        wait = config.DHAN_LOGIN_BACKOFF_SECONDS[n - 1]
+        logger.error("Dhan PIN+TOTP re-login failed (try %d/%d): %s - retrying in %ds + the next TOTP window",
+                     n, tries, error, wait)
+        self._sleep_into_fresh_totp_window(wait)
 
     def relogin(self, reason: str) -> bool:
         """Replaces a token Dhan no longer accepts IN PLACE on the existing Tradehull client - no new client, no
@@ -808,17 +839,206 @@ class DhanWrapper:
             if cached and cached != tsl.token_id and self._token_state(cached) is True:
                 token, source = cached, "adopted the newer token already saved on this machine"
             else:
-                token, expiry = self._mint_token_pin_totp(tsl)
-                tsl._save_token_today_force(token, expiry)
-                source = "new PIN+TOTP login"
-            tsl.token_id = token
-            tsl.dhan_context = DhanContext(tsl.ClientCode, token)
-            tsl.Dhan = dhanhq(tsl.dhan_context)
-            self._apply_http_timeout(tsl)
-            self.stats["session_relogins"] += 1
-            logger.warning("Dhan session replaced (%s) - reason: %s", source, reason)
+                try:
+                    token, expiry = self._mint_token_once(tsl)
+                except Exception as exc:  # noqa: BLE001 - _mint_token_once never puts the PIN in its error text
+                    fallback = self._usable_fallback(exclude=tsl.token_id)
+                    if fallback is not None:
+                        self._swap_token(tsl, fallback["token"])
+                        self._mark_fallback("login")
+                        self.stats["session_relogins"] += 1
+                        logger.error("Dhan PIN+TOTP re-login failed (%s) - SWITCHED TO THE FALLBACK ACCESS TOKEN "
+                                     "(expires %s); the primary is retried every %.0f min - reason: %s", exc,
+                                     fallback_token.describe(fallback, IST)["expires"],
+                                     config.DHAN_FALLBACK_RETRY_PRIMARY_SECONDS / 60, reason)
+                        source = None
+                    else:
+                        token, expiry = self._mint_token_pin_totp(tsl, failed_first=str(exc))
+                        source = "new PIN+TOTP login"
+                else:
+                    source = "new PIN+TOTP login"
+                if source is not None:
+                    tsl._save_token_today_force(token, expiry)
+            if source is not None:
+                self._swap_token(tsl, token)
+                self._mark_primary(token)
+                self.stats["session_relogins"] += 1
+                logger.warning("Dhan session replaced (%s) - reason: %s", source, reason)
         self._reconnect_feeds_after_relogin()
         return True
+
+    # ------------------------------------------------------------------ #
+    # Fallback access token (2 Oct 2026, user request: "build a fallback
+    # system which can use access token and continue as usual. However,
+    # the main system, which is TOTP based, would always and should be
+    # used as a primary"). The fallback is a ~24 h token the user makes on
+    # web.dhan.co and stores with `python3 dhan_fallback_token.py set`
+    # (Options/fallback_token.py). Used only while the primary cannot
+    # serve: the PIN+TOTP login fails (startup or re-login), or Dhan
+    # refuses market data on the primary but not on the fallback. The
+    # guard goes back to the primary as soon as it serves again, and every
+    # restart starts on the primary. The token cache Tradehull shares with
+    # the other processes only ever holds PRIMARY tokens.
+    # ------------------------------------------------------------------ #
+    HISTORICAL_URL = "https://api.dhan.co/v2/charts/historical"
+
+    def _swap_token(self, tsl, token: str) -> None:
+        """In place on the existing Tradehull client (no new client, no instrument-file reload)."""
+        tsl.token_id = token
+        tsl.dhan_context = DhanContext(tsl.ClientCode, token)
+        tsl.Dhan = dhanhq(tsl.dhan_context)
+        self._apply_http_timeout(tsl)
+
+    def _mark_primary(self, token: str) -> None:
+        self.token_source, self._fallback_reason, self._primary_token = "primary", None, token
+        self.stats["token_source"], self.stats["fallback_reason"] = "primary", None
+
+    def _mark_fallback(self, reason: str) -> None:
+        self.token_source, self._fallback_reason = "fallback", reason
+        self._last_primary_retry = time.monotonic()
+        self.stats["token_source"], self.stats["fallback_reason"] = "fallback", reason
+        self.stats["fallback_switches"] += 1
+
+    def _usable_fallback(self, exclude: Optional[str] = None) -> Optional[dict]:
+        """The stored fallback record if it is unexpired, is not `exclude` and Dhan accepts it; else None."""
+        rec = fallback_token.usable()
+        if rec is None or rec["token"] == exclude:
+            return None
+        return rec if self._token_state(rec["token"]) is True else None
+
+    def _data_state(self, token: str) -> Optional[bool]:
+        """Does Dhan serve market data on this token? One NIFTY daily-candle request: True = candles, False =
+        refused (DH-902), None = undecided (network error, rate limit, 5xx ...)."""
+        today = datetime.now(IST).date()
+        try:
+            resp = requests.post(self.HISTORICAL_URL, timeout=10, headers={
+                "access-token": str(token), "client-id": str(config.DHAN_CLIENT_ID),
+                "Content-Type": "application/json", "Accept": "application/json",
+            }, json={"securityId": self.NIFTY_SECURITY_ID, "exchangeSegment": "IDX_I", "instrument": "INDEX",
+                     "expiryCode": 0, "oi": False, "fromDate": str(today - timedelta(days=10)), "toDate": str(today)})
+        except requests.RequestException:
+            return None
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {}
+        if isinstance(body, dict) and body.get("close"):
+            return True
+        return False if "DH-902" in str(body) else None
+
+    def note_data_refused(self) -> None:
+        """A data call came back DH-902 ("not subscribed to Data APIs") - read by the session guard."""
+        self.stats["data_refused"] += 1
+        self._data_refused_at = time.monotonic()
+
+    def _warn_fallback(self, message: str) -> None:
+        now = time.monotonic()
+        if self._fallback_warned_at is None or now - self._fallback_warned_at >= 1800:
+            self._fallback_warned_at = now
+            logger.warning(message)
+
+    def _start_on_fallback(self, probe, primary_error: str):
+        """Startup, after a failed PIN+TOTP login: a Tradehull client on the stored fallback token, or None when
+        there is no usable one. Tradehull (access_token mode) saves the token into the shared token cache - it is
+        emptied again right away, so the cache only ever holds PRIMARY tokens."""
+        rec = self._usable_fallback()
+        if rec is None:
+            return None
+        tsl = Tradehull(config.DHAN_CLIENT_ID, rec["token"], mode="access_token")
+        if not self._tradehull_ready(tsl):
+            return None
+        probe._delete_all_token_files()
+        self._primary_token = None
+        self._mark_fallback("login")
+        logger.error("Dhan PIN+TOTP login failed (%s) - STARTED ON THE FALLBACK ACCESS TOKEN (expires %s); the "
+                     "primary is retried every %.0f min", primary_error, fallback_token.describe(rec, IST)["expires"],
+                     config.DHAN_FALLBACK_RETRY_PRIMARY_SECONDS / 60)
+        return tsl
+
+    def use_fallback_for_data(self) -> bool:
+        """Switches this process to the stored fallback token if Dhan serves market data on it (callers have seen
+        the current token refused - the session guard, or a one-off job like the weekly watchlist refresh). True
+        when switched. An account-wide refusal (every token refused, as on 1-2 Oct 2026) changes nothing."""
+        tsl = self._client
+        rec = fallback_token.usable()
+        if tsl is None or rec is None or rec["token"] == tsl.token_id or self._data_state(rec["token"]) is not True:
+            return False
+        with self._relogin_lock:
+            self._swap_token(tsl, rec["token"])
+            self._mark_fallback("data")
+        logger.error("Dhan refuses market data on the primary token but not on the fallback - SWITCHED TO THE "
+                     "FALLBACK ACCESS TOKEN (expires %s)", fallback_token.describe(rec, IST)["expires"])
+        return True
+
+    def _maybe_fallback_for_data(self) -> None:
+        """On the primary: if a data call was refused in the last 3 min, at most every
+        DHAN_FALLBACK_DATA_PROBE_SECONDS check whether the primary still gets no data and the fallback does - then
+        switch (use_fallback_for_data)."""
+        if self._data_refused_at is None or time.monotonic() - self._data_refused_at > 180:
+            return
+        now = time.monotonic()
+        if now - self._last_fallback_data_probe < config.DHAN_FALLBACK_DATA_PROBE_SECONDS:
+            return
+        self._last_fallback_data_probe = now
+        tsl = self._client
+        if tsl is None or self._data_state(tsl.token_id) is not False:
+            return                       # the primary serves data again (or undecided) - stay
+        if fallback_token.usable() is None:
+            self._warn_fallback("Dhan refuses market data (DH-902) and no usable fallback access token is stored - "
+                                "`python3 dhan_fallback_token.py set` stores one")
+        elif self.use_fallback_for_data():
+            self._reconnect_feeds_after_relogin()
+        else:
+            self._warn_fallback("Dhan refuses market data (DH-902) on the primary AND on the fallback access token - "
+                                "account-wide, switching would not help; staying on the primary")
+
+    def _maybe_return_to_primary(self) -> None:
+        """On the fallback: every DHAN_FALLBACK_RETRY_PRIMARY_SECONDS try to get back to a PRIMARY token - a valid
+        PIN+TOTP token another process saved, the bot's own last primary token, or (when the fallback was for a
+        failed login) one new PIN+TOTP login. After a data switch the primary must get data again too."""
+        now = time.monotonic()
+        if now - self._last_primary_retry < config.DHAN_FALLBACK_RETRY_PRIMARY_SECONDS:
+            return
+        self._last_primary_retry = now
+        tsl = self._client
+        if tsl is None:
+            return
+        with self._relogin_lock:
+            candidate, expiry, minted = None, "", False
+            cached = tsl._read_token_today()
+            if cached and cached != tsl.token_id and self._token_state(cached) is True:
+                candidate = cached
+            elif (self._primary_token and self._primary_token != tsl.token_id
+                  and self._token_state(self._primary_token) is True):
+                candidate = self._primary_token
+            elif self._fallback_reason == "login":
+                try:
+                    candidate, expiry = self._mint_token_once(tsl)
+                    minted = True
+                except Exception as exc:  # noqa: BLE001 - _mint_token_once never puts the PIN in its error text
+                    logger.warning("Primary PIN+TOTP login still failing (%s) - staying on the fallback access token",
+                                   exc)
+                    return
+            if candidate is None:
+                return
+            if self._fallback_reason == "data" and self._data_state(candidate) is not True:
+                logger.info("The primary token still gets no market data - staying on the fallback access token")
+                return
+            if minted:
+                tsl._save_token_today_force(candidate, expiry)
+            self._swap_token(tsl, candidate)
+            self._mark_primary(candidate)
+            logger.warning("Back on the PRIMARY (PIN+TOTP) Dhan token - the fallback access token is no longer used")
+        self._reconnect_feeds_after_relogin()
+
+    def _note_fallback_token(self) -> None:
+        """/feed-stats: when the stored fallback token expires; warns while the bot runs on it and it is close to
+        expiry (the user must store a fresh one)."""
+        d = fallback_token.describe(fallback_token.load(), IST)
+        self.stats["fallback_token_expires"] = d.get("expires") if d.get("present") else None
+        if self.token_source == "fallback" and (d.get("hours_left") is None or d["hours_left"] < 2):
+            self._warn_fallback(f"The bot runs on the FALLBACK access token and it expires {d.get('expires')} - store "
+                                f"a fresh one (`python3 dhan_fallback_token.py set`) unless the primary is back")
 
     def _reconnect_feeds_after_relogin(self) -> None:
         """Both WebSockets logged in with the old token. Market feed: closing it hands control back to
@@ -857,8 +1077,15 @@ class DhanWrapper:
                 state = self.session_state()
                 self.stats["session_checks"] += 1
                 if state is False:
-                    logger.error("Dhan no longer accepts this bot's access token - logging in again")
+                    logger.error("Dhan no longer accepts this bot's access token (%s) - logging in again",
+                                 self.token_source)
                     self.relogin("profile check: token invalid or expired")
+                elif state is True:
+                    if self.token_source == "fallback":
+                        self._maybe_return_to_primary()
+                    else:
+                        self._maybe_fallback_for_data()
+                self._note_fallback_token()
             except Exception:  # noqa: BLE001
                 logger.exception("Dhan session guard: check / re-login failed - next check in %.0fs",
                                  config.DHAN_SESSION_CHECK_SECONDS)
@@ -2812,6 +3039,8 @@ class DhanWrapper:
             interval=interval_minutes,
         )
         self._note_market_data_rate_limit_outcome(resp)
+        if isinstance(resp, dict) and "DH-902" in str(resp.get("remarks")):
+            self.note_data_refused()
         data = (resp.get("data") or {}) if isinstance(resp, dict) else {}
         if not data.get("close"):
             # Diagnostic only (added 22 Sep 2026) - callers already treat an

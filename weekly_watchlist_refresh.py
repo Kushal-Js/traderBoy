@@ -348,6 +348,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     except Exception as exc:  # noqa: BLE001
         return give_up_for_now(f"Dhan login failed ({exc!r})")
     problem = data_probe()
+    if problem and dhan_wrapper.use_fallback_for_data():
+        # 2 Oct 2026: the primary (PIN+TOTP) token gets no data but the stored fallback access token does
+        log(f"Market data refused on the primary Dhan token ({problem}) - this run uses the stored fallback token.")
+        problem = data_probe()
     if problem:
         return give_up_for_now(f"Dhan market data is not available - {problem}")
     log("Dhan data probe OK (NIFTY daily candles returned).")
