@@ -27,8 +27,9 @@ from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
 from Dhan_Tradehull import Tradehull
-from dhanhq import MarketFeed, OrderUpdate
+from dhanhq import DhanContext, DhanLogin, MarketFeed, OrderUpdate, dhanhq
 
 import nifty_market_guard
 from . import config
@@ -471,6 +472,9 @@ class DhanWrapper:
             "feed_connects": 0,
             "feed_disconnects": 0,
             "feed_errors": 0,
+            # Session guard (2 Oct 2026) - see relogin().
+            "session_checks": 0,
+            "session_relogins": 0,
         }
         # Bounds how many REST LTP-fallback calls can be in flight at once
         # across ALL strategies sharing this connection (Options + Futures,
@@ -507,6 +511,11 @@ class DhanWrapper:
         self._market_data_next_allowed_at = 0.0
         self._market_data_cooldown_until = 0.0
         self._market_data_consecutive_rate_limit_hits = 0
+        # Session guard + in-place re-login (2 Oct 2026) - see relogin().
+        self._relogin_lock = threading.Lock()
+        self._relogins: list[float] = []          # monotonic times of this hour's re-logins
+        self._session_guard_started = False
+        self._order_update_running: Optional[tuple] = None   # (event loop, task) of the live order-update connection
 
     # ------------------------------------------------------------------ #
     # Auth
@@ -548,22 +557,30 @@ class DhanWrapper:
                 )
             if not config.DHAN_CLIENT_ID or not config.DHAN_PIN or not config.DHAN_TOTP_SECRET:
                 raise ValueError("DHAN_CLIENT_ID / DHAN_PIN / DHAN_TOTP_SECRET are not set")
-            tsl = Tradehull(config.DHAN_CLIENT_ID, mode="pin_totp",
-                             pin=config.DHAN_PIN, totp_secret=config.DHAN_TOTP_SECRET)
+            tsl = self._tradehull_pin_totp_with_retries()
         else:
             if not config.DHAN_CLIENT_ID or not config.DHAN_ACCESS_TOKEN:
                 raise ValueError("DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN are not set")
             tsl = Tradehull(config.DHAN_CLIENT_ID, config.DHAN_ACCESS_TOKEN, mode="access_token")
 
-        # Tradehull's __init__ swallows login failures internally (prints
-        # and returns a half-initialized object instead of raising), so we
-        # have to verify the attributes it only sets on success ourselves.
-        if not getattr(tsl, "Dhan", None) or not getattr(tsl, "dhan_context", None):
+        if not self._tradehull_ready(tsl):
             raise RuntimeError(
                 f"Dhan login failed (mode={mode}) - Tradehull did not initialize its REST client. "
                 "Check the relevant DHAN_* env vars and Tradehull's own console output above."
             )
         self._client = tsl
+        self._apply_http_timeout(tsl)
+        logger.info("Authenticated with Dhan (Tradehull, mode=%s, http_timeout=%.1fs)",
+                    mode, config.DHAN_HTTP_TIMEOUT_SECONDS)
+
+    @staticmethod
+    def _tradehull_ready(tsl) -> bool:
+        # Tradehull's __init__ swallows login failures internally (prints
+        # and returns a half-initialized object instead of raising), so we
+        # have to verify the attributes it only sets on success ourselves.
+        return bool(getattr(tsl, "Dhan", None) and getattr(tsl, "dhan_context", None))
+
+    def _apply_http_timeout(self, tsl) -> None:
         # Shrink the per-request HTTP timeout from the SDK's own 60s
         # default (see config.DHAN_HTTP_TIMEOUT_SECONDS's own docstring
         # for the full audit finding this closes). dhan_http is a single
@@ -581,8 +598,183 @@ class DhanWrapper:
                 "whatever the SDK's own default is (login itself succeeded)",
                 config.DHAN_HTTP_TIMEOUT_SECONDS,
             )
-        logger.info("Authenticated with Dhan (Tradehull, mode=%s, http_timeout=%.1fs)",
-                    mode, config.DHAN_HTTP_TIMEOUT_SECONDS)
+
+    @staticmethod
+    def _sleep_into_fresh_totp_window(base_seconds: float) -> None:
+        """Waits base_seconds, then on to just past the next 30-s TOTP boundary, so the next try sends a code
+        Dhan has not seen yet."""
+        time.sleep(base_seconds)
+        time.sleep(31 - (int(time.time()) % 30))
+
+    def _tradehull_pin_totp_with_retries(self) -> Tradehull:
+        """Tradehull's PIN+TOTP login, retried (config.DHAN_LOGIN_BACKOFF_SECONDS). Tradehull tries two TOTP codes
+        per construction and then gives up; on 2 Oct 2026 00:00 IST Dhan answered "Invalid TOTP" four times in a
+        row and the bot's startup crashed twice (systemd restarts got it in on the third start). Each round reuses
+        a still-valid cached token first, exactly as before. Raises after the last round."""
+        rounds = len(config.DHAN_LOGIN_BACKOFF_SECONDS) + 1
+        for rnd in range(1, rounds + 1):
+            tsl = Tradehull(config.DHAN_CLIENT_ID, mode="pin_totp",
+                             pin=config.DHAN_PIN, totp_secret=config.DHAN_TOTP_SECRET)
+            if self._tradehull_ready(tsl):
+                if rnd > 1:
+                    logger.warning("Dhan PIN+TOTP login succeeded on round %d/%d", rnd, rounds)
+                return tsl
+            if rnd == rounds:
+                break
+            wait = config.DHAN_LOGIN_BACKOFF_SECONDS[rnd - 1]
+            logger.error("Dhan PIN+TOTP login failed (round %d/%d - Tradehull tried 2 TOTP codes, its output is "
+                         "above) - retrying in %ds + the next TOTP window", rnd, rounds, wait)
+            self._sleep_into_fresh_totp_window(wait)
+        raise RuntimeError(
+            f"Dhan login failed (mode=pin_totp) after {rounds} rounds - Tradehull did not initialize its REST "
+            "client. Check the relevant DHAN_* env vars and Tradehull's own console output above."
+        )
+
+    # ------------------------------------------------------------------ #
+    # Session guard + in-place re-login (2 Oct 2026, real incident: from
+    # 1 Oct 22:47 IST Dhan rejected the bot's token - DH-906 "Invalid
+    # Token", ~74 minutes before anything logged in again - and the bot
+    # kept running blind: no prices, no order book, no exits possible).
+    # ------------------------------------------------------------------ #
+    PROFILE_URL = "https://api.dhan.co/v2/profile"
+
+    def _token_state(self, token: str) -> Optional[bool]:
+        """Dhan's verdict on a token, from GET /v2/profile (the check Tradehull itself uses): True = accepted;
+        False = Dhan says it is invalid or expired (HTTP 401, DH-901, or an error naming the token - on 1 Oct it was
+        HTTP 400 'DH-906 Invalid Token'); None = undecided (network error, rate limit, 5xx ...) - never acted on."""
+        try:
+            resp = requests.get(self.PROFILE_URL, headers={"Accept": "application/json", "access-token": str(token)},
+                                timeout=10)
+        except requests.RequestException:
+            return None
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        code = str(body.get("errorCode") or "")
+        message = str(body.get("errorMessage") or body.get("message") or "")
+        if resp.ok and not code and body.get("status") != "failure":
+            return True
+        if resp.status_code == 401 or code == "DH-901" or "token" in message.lower():
+            return False
+        return None
+
+    def session_state(self) -> Optional[bool]:
+        """_token_state of the token the bot is using right now (None before the first login)."""
+        token = getattr(self._client, "token_id", None) if self._client is not None else None
+        return self._token_state(token) if token else None
+
+    def _mint_token_pin_totp(self, tsl) -> tuple[str, str]:
+        """PIN+TOTP -> a new, profile-validated access token: the steps of Tradehull.get_login's pin_totp branch,
+        plus a request timeout (the SDK's DhanLogin.generate_token has none) and config.DHAN_LOGIN_BACKOFF_SECONDS
+        between failed tries. Returns (token, expiry). Raises after the last try."""
+        pin = tsl._clean_pin(config.DHAN_PIN)
+        tries = len(config.DHAN_LOGIN_BACKOFF_SECONDS) + 1
+        for n in range(1, tries + 1):
+            try:
+                resp = requests.post(f"{DhanLogin.AUTH_BASE_URL}/app/generateAccessToken", timeout=15,
+                                     params={"dhanClientId": tsl.ClientCode, "pin": pin,
+                                             "totp": tsl._get_totp(config.DHAN_TOTP_SECRET)})
+                body = resp.json()
+                token = tsl.extract_access_token(body)
+                profile = tsl._validate_access_token_profile(token)
+                return token, str(body.get("expiryTime") or profile.get("tokenValidity") or "")
+            except requests.RequestException as exc:
+                error = f"{type(exc).__name__} (network)"   # never str(exc): it carries the URL, PIN included
+            except Exception as exc:  # noqa: BLE001
+                error = str(exc)
+            if n == tries:
+                raise RuntimeError(f"Dhan PIN+TOTP re-login failed after {tries} tries - last error: {error}")
+            wait = config.DHAN_LOGIN_BACKOFF_SECONDS[n - 1]
+            logger.error("Dhan PIN+TOTP re-login failed (try %d/%d): %s - retrying in %ds + the next TOTP window",
+                         n, tries, error, wait)
+            self._sleep_into_fresh_totp_window(wait)
+        raise AssertionError("unreachable")
+
+    def relogin(self, reason: str) -> bool:
+        """Replaces a token Dhan no longer accepts IN PLACE on the existing Tradehull client - no new client, no
+        second instrument-file download (~200k rows on a droplet with ~450 MB free). First adopts a newer valid
+        token another process on this machine already saved in Tradehull's token file (the weekly job, a fresh
+        restart), so two processes never fight over the account's single session; otherwise mints one via
+        PIN+TOTP and saves it there for the others. Then reconnects both WebSockets with the new token. pin_totp
+        mode only; at most config.DHAN_RELOGIN_MAX_PER_HOUR an hour. True when the token was replaced."""
+        if config.DHAN_AUTH_MODE != "pin_totp":
+            logger.error("Dhan rejects the access token (%s) and DHAN_AUTH_MODE=%s cannot log in by itself - a new "
+                         "DHAN_ACCESS_TOKEN and a restart are needed", reason, config.DHAN_AUTH_MODE)
+            return False
+        tsl = self._client
+        if tsl is None:
+            return False
+        with self._relogin_lock:
+            now = time.monotonic()
+            self._relogins = [t for t in self._relogins if now - t < 3600]
+            if len(self._relogins) >= config.DHAN_RELOGIN_MAX_PER_HOUR:
+                logger.error("Dhan rejects the access token again (%s) - NOT logging in again: %d re-logins in the "
+                             "last hour already. Another login is probably competing for the account's single "
+                             "session (a token made on Dhan web/app or another machine) - check that, then restart "
+                             "the bot.", reason, len(self._relogins))
+                return False
+            self._relogins.append(now)
+            cached = tsl._read_token_today()
+            if cached and cached != tsl.token_id and self._token_state(cached) is True:
+                token, source = cached, "adopted the newer token already saved on this machine"
+            else:
+                token, expiry = self._mint_token_pin_totp(tsl)
+                tsl._save_token_today_force(token, expiry)
+                source = "new PIN+TOTP login"
+            tsl.token_id = token
+            tsl.dhan_context = DhanContext(tsl.ClientCode, token)
+            tsl.Dhan = dhanhq(tsl.dhan_context)
+            self._apply_http_timeout(tsl)
+            self.stats["session_relogins"] += 1
+            logger.warning("Dhan session replaced (%s) - reason: %s", source, reason)
+        self._reconnect_feeds_after_relogin()
+        return True
+
+    def _reconnect_feeds_after_relogin(self) -> None:
+        """Both WebSockets logged in with the old token. Market feed: closing it hands control back to
+        _run_market_feed_forever, which builds the next MarketFeed from self.client.dhan_context (the new token).
+        Order-update feed: _run_order_update_forever re-reads the token before every connect; cancelling the
+        running connection makes it reconnect now."""
+        with self._market_feed_lock:
+            feed = self._market_feed
+        if feed is not None:
+            try:
+                feed.close_connection()
+            except Exception:  # noqa: BLE001
+                logger.exception("Could not close the market-data WebSocket after the re-login - it picks up the "
+                                 "new token on its next reconnect")
+        running = self._order_update_running
+        if running is not None:
+            loop, task = running
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:  # that connection's loop already closed - the next connect uses the new token
+                pass
+
+    def start_session_guard(self) -> None:
+        """Starts (once) the background token check - the live bot only (option_main's lifespan); one-off scripts
+        never start it."""
+        if self._session_guard_started:
+            return
+        self._session_guard_started = True
+        threading.Thread(target=self._session_guard_forever, daemon=True, name="dhan-session-guard").start()
+        logger.info("Dhan session guard started (token checked every %.0fs)", config.DHAN_SESSION_CHECK_SECONDS)
+
+    def _session_guard_forever(self) -> None:
+        while True:
+            time.sleep(config.DHAN_SESSION_CHECK_SECONDS)
+            try:
+                state = self.session_state()
+                self.stats["session_checks"] += 1
+                if state is False:
+                    logger.error("Dhan no longer accepts this bot's access token - logging in again")
+                    self.relogin("profile check: token invalid or expired")
+            except Exception:  # noqa: BLE001
+                logger.exception("Dhan session guard: check / re-login failed - next check in %.0fs",
+                                 config.DHAN_SESSION_CHECK_SECONDS)
 
     @property
     def client(self) -> Tradehull:
@@ -941,14 +1133,40 @@ class DhanWrapper:
         return self._order_update
 
     def _run_order_update_forever(self) -> None:
-        # connect_to_dhan_websocket_sync() is blocking and does not
-        # auto-reconnect on its own (confirmed from dhanhq's orderupdate.py
-        # source), so we own the retry loop here.
+        # The SDK's connection does not auto-reconnect on its own (confirmed
+        # from dhanhq's orderupdate.py source), so we own the retry loop here.
+        # 2 Oct 2026: runs the SDK's connect_order_update() on our own event
+        # loop instead of its connect_to_dhan_websocket_sync() wrapper (which
+        # swallows every error and keeps the token the feed was built with):
+        # the token is re-read from the live client before every connect, so
+        # a re-login reaches this feed, and relogin() can cancel the running
+        # connection to make it reconnect at once.
         while True:
+            feed = self._order_update
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             try:
-                self._order_update.connect_to_dhan_websocket_sync()
-            except Exception:  # noqa: BLE001
-                logger.exception("Order-update WebSocket dropped; reconnecting in 5s")
+                ctx = self.client.dhan_context
+                feed.client_id, feed.access_token = ctx.get_client_id(), ctx.get_access_token()
+                task = loop.create_task(feed.connect_order_update())
+                self._order_update_running = (loop, task)
+                loop.run_until_complete(task)
+                logger.warning("Order-update WebSocket closed; reconnecting in 5s")
+            except asyncio.CancelledError:
+                logger.info("Order-update WebSocket reconnecting with the new Dhan token")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Order-update WebSocket dropped (%s); reconnecting in 5s", exc)
+            finally:
+                self._order_update_running = None
+                try:
+                    leftover = asyncio.all_tasks(loop)
+                    for t in leftover:
+                        t.cancel()
+                    if leftover:
+                        loop.run_until_complete(asyncio.gather(*leftover, return_exceptions=True))
+                except Exception:  # noqa: BLE001
+                    pass
+                loop.close()
             time.sleep(5)
 
     def _on_order_update(self, message: dict) -> None:

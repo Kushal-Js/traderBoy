@@ -57,6 +57,20 @@ DHAN_TOTP_SECRET = os.getenv("DHAN_TOTP_SECRET", "")
 # gets applied.
 DHAN_HTTP_TIMEOUT_SECONDS = float(os.getenv("DHAN_HTTP_TIMEOUT_SECONDS", "12"))
 
+# Login resilience (2 Oct 2026, real incident - trading-skills' incidents/2026-10-01-token-invalidated-then-data-
+# api-refused.md). (1) At 00:00 IST Dhan answered "Invalid TOTP" 4 times in a row; Tradehull tries a PIN+TOTP
+# login only twice per construction, so the bot's startup failed and systemd restarted it twice. Now a failed
+# round is retried in-process after DHAN_LOGIN_BACKOFF_SECONDS (one entry per extra round, always moved to a
+# fresh 30-s TOTP window) - 6 rounds = 12 TOTP tries over ~14 min before startup gives up (the old crash loop
+# made ~180 tries an hour). (2) From 22:47 IST the bot's token was invalid (DH-906) and the bot never logged in
+# again - every call failed for ~74 minutes. Now a session guard checks the token on Dhan's profile endpoint every
+# DHAN_SESSION_CHECK_SECONDS and replaces it in place when Dhan says it is invalid; at most
+# DHAN_RELOGIN_MAX_PER_HOUR replacements an hour (beyond that another login is fighting over the account's one
+# session - stop and say so instead of ping-ponging).
+DHAN_LOGIN_BACKOFF_SECONDS = (30, 60, 120, 240, 300)
+DHAN_SESSION_CHECK_SECONDS = float(os.getenv("DHAN_SESSION_CHECK_SECONDS", "60"))
+DHAN_RELOGIN_MAX_PER_HOUR = int(os.getenv("DHAN_RELOGIN_MAX_PER_HOUR", "3"))
+
 # Shared secret the webhook caller must send back to us, since Chartink
 # webhooks are unauthenticated by default. Optional but recommended.
 WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "")

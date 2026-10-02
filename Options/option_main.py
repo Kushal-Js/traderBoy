@@ -130,6 +130,8 @@ async def lifespan(app: FastAPI):
     # internally can't happen on a thread that already has uvicorn's event
     # loop running).
     await loop.run_in_executor(None, dhan_wrapper.authenticate)
+    # Replaces the token in place if Dhan stops accepting it mid-run (2 Oct 2026 - see DhanWrapper.relogin).
+    dhan_wrapper.start_session_guard()
 
     try:
         # A bad/misscoped token could otherwise hang startup on the socket

@@ -100,10 +100,15 @@ a week. Now:
     EXIT_RETRY_LATER (75), so systemd records the run as failed.
   - `--retry` (droplet-side dhanboy-weekly-watchlist-retry.timer/.service,
     not in git; the unit only starts while the pending file exists) re-runs
-    the whole job, but only weekdays 00:00-07:00 IST or at weekends - never
-    while a market can be open, finished well before the 08:00 IST morning
-    refresh. A completed run deletes the pending file; the Friday schedule
-    is unchanged. Runs never overlap (lock file in history/).
+    the whole job, but only 00:00-05:25 IST (any day) or 08:15-23:59 IST at
+    weekends - never while a market can be open, and never between 05:30
+    IST and the 08:00 IST morning refresh: 05:30 IST is midnight UTC, and
+    Tradehull names its token file by the (UTC) date, so a login in that gap
+    finds no file for "today" and mints a NEW token, which kicks the running
+    bot off the account's single session (2 Oct 06:20 IST retry: the bot got
+    DH-906 until its next login). A completed run deletes the pending file;
+    the Friday schedule is unchanged. Runs never overlap (lock file in
+    history/).
   - The day's log file is appended to, so every attempt stays on record.
 
 Read-only Dhan calls only; the only writes this script performs are its
@@ -147,7 +152,8 @@ MIN_SUCCESSFUL_SCORES = 50  # abort (no file changes) if the scan can't score at
 PENDING_FILE = DATA_DIR / "weekly_watchlist_refresh_pending.json"   # a run that found no Dhan data, to retry
 LOCK_FILE = HISTORY_DIR / ".weekly_watchlist_refresh.lock"
 EXIT_RETRY_LATER = 75       # EX_TEMPFAIL: systemd shows the run as failed; the retry timer runs it again
-RETRY_WEEKDAY_BEFORE_HOUR = 7   # IST: weekday retries start 00:00-06:59 only (markets shut, before 08:00 restart)
+RETRY_NIGHT_UNTIL = (5, 25)       # IST: retries start before 05:25 (05:30 IST = UTC midnight = new token-file date)
+RETRY_WEEKEND_FROM = (8, 15)      # IST: at weekends also from 08:15, once the 08:00 morning refresh has logged in
 
 POSITION_ENDPOINTS = [
     ("options", "/positions"), ("swing", "/swing/positions"),
@@ -262,10 +268,11 @@ def retry_blocked_reason(now: datetime) -> Optional[str]:
     """--retry runs only while a failed run is pending, and only when no market can be open."""
     if not PENDING_FILE.exists():
         return "no failed run is pending"
-    if now.weekday() >= 5 or now.hour < RETRY_WEEKDAY_BEFORE_HOUR:
+    hm = (now.hour, now.minute)
+    if hm < RETRY_NIGHT_UNTIL or (now.weekday() >= 5 and hm >= RETRY_WEEKEND_FROM):
         return None
-    return (f"outside the retry window (weekdays 00:00-{RETRY_WEEKDAY_BEFORE_HOUR:02d}:00 IST, weekends any time) - "
-            f"a market can be open")
+    return ("outside the retry window (00:00-05:25 IST any day, 08:15-23:59 IST at weekends) - a market can be open, "
+            "or a login now would mint a new token and kick the running bot off its Dhan session")
 
 
 def record_pending(reason: str, now: datetime) -> dict:
@@ -332,7 +339,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         rec = record_pending(reason, now)
         log(f"\nABORTING: {reason}. Leaving every watchlist untouched, NOT restarting. Marked for retry "
             f"({PENDING_FILE.name}, attempt {rec['attempts']}, pending since {rec['since']}): the retry timer re-runs "
-            f"this job hourly on weekdays 00:20-06:20 IST and at weekends until a run completes.")
+            f"this job hourly 00:20-05:20 IST every day and 08:20-23:20 IST at weekends until a run completes.")
         write_log()
         return EXIT_RETRY_LATER
 
