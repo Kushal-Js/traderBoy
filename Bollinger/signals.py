@@ -111,6 +111,14 @@ _SERIES_KEYS = ("open", "high", "low", "close", "volume", "timestamp")
 # closed bar should exist, so the full-history base costs ~one REST call
 # per symbol per bar instead of one per SIGNAL_REFRESH_SECONDS.
 _rest_series_cache: dict[str, dict] = {}
+# When each symbol's base was last requested (successful or not). A base still
+# behind after this bar's first request is re-requested at most every
+# REST_BASE_MIN_REFETCH_SECONDS (2 Oct 2026, same floor as Swing/signals): in
+# the session's first bar the "newest closed bar" (09:10) never exists, and
+# every call used to refetch the 60-day series - several per second at the
+# open (UM + SB tick listeners). WS bars still extend the base meanwhile.
+_rest_requested_at: dict[str, datetime] = {}
+REST_BASE_MIN_REFETCH_SECONDS = 60
 
 
 def _fetch_rest_series(security_id: str, exchange_segment: str, instrument_type: str) -> dict:
@@ -151,10 +159,14 @@ def _get_intraday_series(symbol: str, security_id: str, exchange_segment: str, i
     base = _rest_series_cache.get(symbol)
     base_ts = (base or {}).get("timestamp") or []
     if not base_ts or datetime.fromtimestamp(base_ts[-1], tz=IST) < newest_closed_start:
-        fetched = _fetch_rest_series(security_id, exchange_segment, instrument_type)
-        if fetched.get("close"):
-            _rest_series_cache[symbol] = fetched
-            base = fetched
+        requested = _rest_requested_at.get(symbol)
+        if (not base_ts or requested is None or requested < bar_start
+                or (now - requested).total_seconds() >= REST_BASE_MIN_REFETCH_SECONDS):
+            _rest_requested_at[symbol] = now
+            fetched = _fetch_rest_series(security_id, exchange_segment, instrument_type)
+            if fetched.get("close"):
+                _rest_series_cache[symbol] = fetched
+                base = fetched
     if not base or not base.get("close"):
         return {}
 

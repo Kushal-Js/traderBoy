@@ -14,7 +14,7 @@ mechanic carries over unchanged), run against Unified Momentum's OWN books, watc
   Exit      MAX_LOSS_HIT at 4,500; BREAKEVEN_STOP_HIT once +1,500 was reached; DAILY_SQUARE_OFF 15:15. Broker SL-L at
             the max-loss level (ratcheted to entry once +1,500 - stop_ratchet.py). The supervisor hedges a losing
             call with a real ATM PUT (supervisor.py).
-  Engine B  momentum PUTs live in engine_b.py (own book); this module's monitor tick drives it.
+  Engine B  momentum PUTs live in engine_b.py (own book, own loop - engine_b.loop).
   Mode      real (default) or paper via paper_mode_control ("UnifiedMomentum") - runtime, no restart.
 """
 from __future__ import annotations
@@ -648,6 +648,12 @@ async def _enter(symbol: str, trigger_price: float, stop_price: float, source: s
 #     the entry immediately (same guards, same order path as the scan).
 # The pending order is consumed once (PROFILE.consumed) whichever path gets
 # there first, so the scan and the tick path can never both enter.
+# Nothing happens in the session's first bar (09:15-09:20, 2 Oct 2026): no
+# bar of today has closed, so no order can be pending for it - a previous
+# day's trigger never carries over (signals.resting_trigger_hit, and the
+# backtest's candidates_for) - and the "just-closed" 09:10 bar never exists,
+# so the refresh used to be re-forced every REFRESH_RETRY_SECONDS per stock
+# for five minutes, each one a 60-day REST fetch.
 # --------------------------------------------------------------------------- #
 def install_tick_entries(loop: asyncio.AbstractEventLoop) -> None:
     global _loop
@@ -663,7 +669,7 @@ def _on_underlying_tick(symbol: str, ltp: float, tick_time: datetime) -> None:
             or symbol in paper_book.positions):
         return
     forming = candle_feed.forming_bar(symbol)
-    if forming is None:
+    if forming is None or forming["candle_start"].strftime("%H:%M") <= MARKET_OPEN_TIME:
         return
     state = signals.peek_signal_state(symbol)
     expected = forming["candle_start"] - timedelta(minutes=bcfg.SIGNAL_INTERVAL_MINUTES)
@@ -893,11 +899,7 @@ async def _monitor_tick() -> None:
             logger.exception("[%s] dropped-trigger check failed", STRATEGY)
     if _gate["open"]:
         await _scan_for_entries()
-    try:
-        from . import engine_b      # momentum PUTs: exits every tick, entries on closed 5-min candles
-        await engine_b.tick(square_off)
-    except Exception:  # noqa: BLE001
-        logger.exception("[%s] engine B tick failed", STRATEGY)
+    # Engine B (momentum PUTs) runs on its own loop - engine_b.loop, started by unified_momentum_main.
 
 
 async def monitor_loop() -> None:

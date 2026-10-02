@@ -41,6 +41,21 @@ logger = logging.getLogger("dhan_client")
 IST = ZoneInfo(config.MARKET_TZ)
 
 
+def _noop() -> None:
+    return None
+
+
+def _bump_minute(by_minute: dict, value: float, keep: int = 30, how: str = "sum") -> dict:
+    """Per-IST-minute counter for /feed-stats ("HH:MM" -> value), only the newest `keep` minutes kept. Returns a
+    NEW dict: GET /feed-stats may be iterating the old one on another thread."""
+    key = datetime.now(IST).strftime("%H:%M")
+    out = dict(by_minute)
+    out[key] = (out.get(key, 0) + value) if how == "sum" else max(out.get(key, 0), value)
+    while len(out) > keep:
+        del out[next(iter(out))]
+    return out
+
+
 def _tick_time_from_ltt(raw_ltt, received_at: datetime) -> datetime:
     """Parses a Quote/Full packet's own `LTT` (Last Trade Time) into a
     real datetime, for bucketing a tick by when the trade actually
@@ -503,6 +518,18 @@ class DhanWrapper:
             # PIN+TOTP failure cap (2 Oct 2026) - Options/login_budget.py.
             "totp_failures": 0,
             "totp_paused_until": None,
+            # Shared history-data REST budget (2 Oct 2026) - see _throttle_market_data_call: calls made, calls
+            # skipped by a DH-904 cooldown, seconds spent sleeping for the pacing floor (inside executor
+            # workers), and calls per IST minute (last 30 minutes).
+            "market_data_calls": 0,
+            "market_data_skipped_cooldown": 0,
+            "market_data_pacing_wait_s": 0.0,
+            "market_data_calls_by_minute": {},
+            # Default-executor queue lag (2 Oct 2026) - see executor_lag_probe_forever: order placement runs on
+            # the same small pool as every blocking Dhan call, so this is how long an order could wait for a worker.
+            "executor_lag_ms_last": None,
+            "executor_lag_ms_max": 0.0,
+            "executor_lag_ms_max_by_minute": {},
         }
         # Bounds how many REST LTP-fallback calls can be in flight at once
         # across ALL strategies sharing this connection (Options + Futures,
@@ -3160,13 +3187,41 @@ class DhanWrapper:
         with self._market_data_lock:
             now = time.monotonic()
             if now < self._market_data_cooldown_until:
+                self.stats["market_data_skipped_cooldown"] += 1
                 return False
             wait = self._market_data_next_allowed_at - now
             if wait > 0:
                 time.sleep(wait)
                 now = time.monotonic()
+                self.stats["market_data_pacing_wait_s"] = round(self.stats["market_data_pacing_wait_s"] + wait, 3)
             self._market_data_next_allowed_at = now + config.MARKET_DATA_MIN_INTERVAL_SECONDS
+            self.stats["market_data_calls"] += 1
+            self.stats["market_data_calls_by_minute"] = _bump_minute(self.stats["market_data_calls_by_minute"], 1)
             return True
+
+    async def executor_lag_probe_forever(self, interval_seconds: float = 1.0, warn_after_seconds: float = 2.0) -> None:
+        """How long a job waits for a default-executor worker, measured once a second (2 Oct 2026, Unified Momentum
+        audit). Order placement (run_in_executor(None, place_...)) shares that small pool (EXECUTOR_MAX_WORKERS)
+        with every blocking Dhan call, and the pacing floor above SLEEPS inside a worker - so at a bar start an
+        order could queue behind history fetches. Read-only: one no-op job per interval; a WARNING (at most one a
+        minute) when a job waited warn_after_seconds or longer. Shown in GET /feed-stats (executor_lag_*)."""
+        loop = asyncio.get_running_loop()
+        warned_minute = None
+        while True:
+            started = time.monotonic()
+            await loop.run_in_executor(None, _noop)
+            lag_ms = round((time.monotonic() - started) * 1000, 1)
+            self.stats["executor_lag_ms_last"] = lag_ms
+            self.stats["executor_lag_ms_max"] = max(self.stats["executor_lag_ms_max"], lag_ms)
+            self.stats["executor_lag_ms_max_by_minute"] = _bump_minute(
+                self.stats["executor_lag_ms_max_by_minute"], lag_ms, how="max")
+            minute = datetime.now(IST).strftime("%H:%M")
+            if lag_ms >= warn_after_seconds * 1000 and minute != warned_minute:
+                warned_minute = minute
+                logger.warning("executor lag %.1f s - a blocking Dhan call (an order too) waited that long for a "
+                               "worker; history-data calls this minute: %s", lag_ms / 1000,
+                               self.stats["market_data_calls_by_minute"].get(minute, 0))
+            await asyncio.sleep(interval_seconds)
 
     def _note_market_data_rate_limit_outcome(self, resp: object) -> None:
         """Arms/clears the shared backoff cooldown based on what Dhan

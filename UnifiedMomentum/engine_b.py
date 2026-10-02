@@ -8,7 +8,8 @@ put_paper_book, trade-history tag "UnifiedMomentumPut").
             pure Swing.trading_engine._entry_direction), BEARISH only -> 1 lot ATM PUT. Taken only when Swing/regime
             says MOMENTUM (2 h efficiency ratio >= 0.25 and today's >= 0.15; UNKNOWN fails open), the signal candle's
             volume >= b_volume_floor_ratio x its 20-bar average, a fresh formation since the last put in that stock
-            (Swing's rule, own state), entries 09:15 - b_entry_cutoff_time (14:30).
+            (Swing's rule, own state), entries 09:15 - b_entry_cutoff_time (14:30) on a candle of today's session
+            (the previous day's last candle never trades - the first possible signal is the 09:15 candle at 09:20).
   Gates     shared with engine A: one position per stock across both engines, the market chop gate, the disaster
             brake, premium >= min_premium_rs, funds check; own slot limit b_max_concurrent_trades (2).
   Exits     Swing's options ladder - MAX_LOSS_HIT (b_max_loss_rs) -> TARGET_HIT (+b_target_pct) -> PROFIT_PROTECTION_HIT
@@ -199,6 +200,10 @@ async def _signal(symbol: str) -> Optional[tuple]:
     st = await swing_signals.get_supertrend_state(symbol)
     _release(symbol, reg.is_bullish, st)
     if st is None or st.candle_start is None:
+        return None
+    if st.candle_start.date() != _now().date():
+        # The previous session's last candle (09:15-09:20 every day, until today's first candle closes): it
+        # was never taken (entries stop at 14:30) and the backtest never trades it a day later (2 Oct 2026).
         return None
     direction = await swing_te._entry_direction(symbol, reg, st)
     if direction != "BEARISH" or _consumed.get(symbol) == -1:      # PUTs only; same formation stays blocked
@@ -548,8 +553,20 @@ async def on_price_tick(trading_symbol: str, ltp: float) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Tick (driven by engine A's monitor loop)
+# Tick, on engine B's own loop (2 Oct 2026). It used to run at the end of engine
+# A's monitor tick: an exception earlier in A's tick skipped it - including
+# the 15:15 square-off poll - and A's entry scan delayed it every cycle.
 # --------------------------------------------------------------------------- #
+async def loop() -> None:
+    logger.info("[%s] engine B loop started.", PUT_STRATEGY)
+    while True:
+        try:
+            await tick(_square_off_now())
+        except Exception:  # noqa: BLE001
+            logger.exception("[%s] error in engine B loop tick", PUT_STRATEGY)
+        await asyncio.sleep(bcfg.MONITOR_INTERVAL_SECONDS)
+
+
 async def tick(square_off: bool) -> None:
     await put_store.maybe_reset_for_new_day()
     await engine._sync_pending_exit_orders(put_store)

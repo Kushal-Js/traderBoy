@@ -664,6 +664,12 @@ async def _enter(symbol: str, trigger_price: float, stop_price: float, source: s
 #     the entry immediately (same guards, same order path as the scan).
 # The pending order is consumed once (PROFILE.consumed) whichever path gets
 # there first, so the scan and the tick path can never both enter.
+# Nothing happens in the session's first bar (09:15-09:20, 2 Oct 2026): no
+# bar of today has closed, so no order can be pending for it - a previous
+# day's trigger never carries over (signals.resting_trigger_hit, and the
+# backtest's candidates_for) - and the "just-closed" 09:10 bar never exists,
+# so the refresh used to be re-forced every REFRESH_RETRY_SECONDS per stock
+# for five minutes, each one a 60-day REST fetch.
 # --------------------------------------------------------------------------- #
 def install_tick_entries(loop: asyncio.AbstractEventLoop) -> None:
     global _loop
@@ -679,7 +685,7 @@ def _on_underlying_tick(symbol: str, ltp: float, tick_time: datetime) -> None:
             or symbol in paper_book.positions):
         return
     forming = candle_feed.forming_bar(symbol)
-    if forming is None:
+    if forming is None or forming["candle_start"].strftime("%H:%M") <= MARKET_OPEN_TIME:
         return
     state = signals.peek_signal_state(symbol)
     expected = forming["candle_start"] - timedelta(minutes=bcfg.SIGNAL_INTERVAL_MINUTES)

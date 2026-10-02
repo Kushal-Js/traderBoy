@@ -274,6 +274,20 @@ async def _place_backstop(symbol: str, trading_symbol: str, quantity: int, fill:
     if not bcfg.BROKER_STOP_LOSS_ENABLED:
         return None
     loop = asyncio.get_running_loop()
+    # The bot may have placed the stop just before it stopped (every entry path places the stop, then records the
+    # position): adopt that resting SELL instead of adding a second one for the same quantity - two would both
+    # trigger on a fall and the second would sell a lot the account does not hold (2 Oct 2026). If the broker
+    # cannot be asked, place nothing (the bot's own max-loss check manages the position; the report flags it).
+    try:
+        existing = await loop.run_in_executor(None, dhan_wrapper.get_pending_order_id, trading_symbol, "SELL", "NSE")
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: could not check for a resting SELL order on %s - no backstop placed", symbol,
+                         trading_symbol)
+        return None
+    if existing:
+        await store.record_order(OrderRecord(order_id=existing, underlying_symbol=symbol, trading_symbol=trading_symbol,
+                                             transaction_type="SELL", quantity=quantity, status="PENDING", is_amo=False))
+        return existing
     trig, limit = broker_stop_trigger_and_limit("LONG", fill, quantity, loss_rs, bcfg.BROKER_STOP_LOSS_LIMIT_GAP_MULTIPLE,
                                                 hard_stop_pct=0.95)
     try:
@@ -337,7 +351,8 @@ async def _resolve_intent(iid: str, it: dict, tracked: set, broker_symbols: Opti
         sl_id = await _place_backstop(symbol, ts, qty, fill, settings.get("max_loss_rs"), leg["product_type"], position_store)
         await position_store.add_position(_new_position(symbol, leg, fill, oid, sl_id))
     await loop.run_in_executor(None, dhan_wrapper.subscribe_option_price, ts)
-    out.update(outcome="filled_adopted", entry_price=fill, stop_loss_order_id=sl_id)
+    out.update(outcome="filled_adopted", entry_price=fill, stop_loss_order_id=sl_id,
+               needs_review=bool(bcfg.BROKER_STOP_LOSS_ENABLED and not sl_id))
     return out
 
 

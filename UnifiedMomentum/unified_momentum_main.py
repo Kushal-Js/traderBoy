@@ -53,6 +53,8 @@ logger = logging.getLogger("unified_momentum_main")
 router = APIRouter()
 _monitor_task: Optional[asyncio.Task] = None
 _supervisor_task: Optional[asyncio.Task] = None
+_engine_b_task: Optional[asyncio.Task] = None
+_probe_task: Optional[asyncio.Task] = None
 
 
 async def _legacy_reconcile() -> None:
@@ -78,7 +80,7 @@ async def lifespan(app: FastAPI):
     """Reconciliation and the monitor loop always start (even with
     strategy_enabled=false) so an already-open real position is always
     managed to its exit."""
-    global _monitor_task, _supervisor_task
+    global _monitor_task, _supervisor_task, _engine_b_task, _probe_task
     try:
         n = engine_b.load_state()        # engine B's fresh-formation state (kept across days)
         logger.info("[%s] engine B: fresh-formation state restored for %d stock(s)", STRATEGY, n)
@@ -116,6 +118,9 @@ async def lifespan(app: FastAPI):
     _supervisor_task = asyncio.create_task(supervisor.supervisor_loop())
     install_tick_entries(loop)  # engine A's tick-driven entries off the underlying WS feed
     _monitor_task = asyncio.create_task(monitor_loop())
+    _engine_b_task = asyncio.create_task(engine_b.loop())   # momentum PUTs: own loop since 2 Oct 2026
+    # How long a blocking call (an order too) waits for an executor worker - GET /feed-stats executor_lag_*.
+    _probe_task = asyncio.create_task(dhan_wrapper.executor_lag_probe_forever())
 
     real = not paper_mode_control.is_paper_mode_enabled(STRATEGY)
     logger.info("[%s] startup complete: mode=%s engine A slots=%s engine B=%s (slots %s) settings=%s", STRATEGY,
@@ -128,6 +133,10 @@ async def lifespan(app: FastAPI):
     yield
     if _monitor_task:
         _monitor_task.cancel()
+    if _engine_b_task:
+        _engine_b_task.cancel()
+    if _probe_task:
+        _probe_task.cancel()
     if _supervisor_task:
         _supervisor_task.cancel()
 
