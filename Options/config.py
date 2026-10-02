@@ -695,6 +695,12 @@ INTRADAY_CONTINUOUS_LOOKBACK_DAYS = int(os.getenv("INTRADAY_CONTINUOUS_LOOKBACK_
 MARKET_DATA_MIN_INTERVAL_SECONDS = float(os.getenv("MARKET_DATA_MIN_INTERVAL_SECONDS", "0.5"))
 MARKET_DATA_RATE_LIMIT_COOLDOWN_SECONDS = float(os.getenv("MARKET_DATA_RATE_LIMIT_COOLDOWN_SECONDS", "5"))
 MARKET_DATA_RATE_LIMIT_COOLDOWN_MAX_SECONDS = float(os.getenv("MARKET_DATA_RATE_LIMIT_COOLDOWN_MAX_SECONDS", "40"))
+# Separate thread pool for history-data work (2 Oct 2026, Unified Momentum audit F5) - see
+# DhanWrapper.history_executor. 0 = off (the default executor, unchanged behaviour). The pacing floor above sleeps
+# inside a worker; at every 5-min bar start ~57 history refetches queue through it (~30 s at 2/s), and with the
+# shared 5-worker default pool an order sent then waits ~2.5-3 s for a worker (GET /feed-stats executor_lag_*).
+# Turn on (e.g. 3) only during market hours with a before/after look at executor_lag (13 Sep executor incident).
+HISTORY_EXECUTOR_WORKERS = int(os.getenv("HISTORY_EXECUTOR_WORKERS", "0"))
 
 # Per-package on/off for the EMA-cross exit above. Kept in all three option
 # packages so the Options/Futures trading_engine.py copies stay byte-

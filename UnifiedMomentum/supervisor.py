@@ -127,7 +127,7 @@ async def ensure_series(symbol: str, force: bool = False) -> bool:
         return signals._get_intraday_series(symbol, sid, seg, inst)
 
     try:
-        data = await asyncio.get_running_loop().run_in_executor(None, work)
+        data = await asyncio.get_running_loop().run_in_executor(dhan_wrapper.history_executor(), work)
         return bool(data and data.get("close"))
     except Exception:  # noqa: BLE001
         logger.exception("[supervisor] %s: could not load the candle series for a held position", symbol)

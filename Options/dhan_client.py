@@ -23,6 +23,7 @@ import os
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, time as dtime, timedelta
 from typing import Callable, Optional
@@ -569,6 +570,7 @@ class DhanWrapper:
         self._market_data_next_allowed_at = 0.0
         self._market_data_cooldown_until = 0.0
         self._market_data_consecutive_rate_limit_hits = 0
+        self._history_executor: Optional[ThreadPoolExecutor] = None   # see history_executor()
         # Session guard + in-place re-login (2 Oct 2026) - see relogin().
         self._relogin_lock = threading.Lock()
         self._relogins: list[float] = []          # monotonic times of this hour's re-logins
@@ -3202,6 +3204,19 @@ class DhanWrapper:
             self.stats["market_data_calls"] += 1
             self.stats["market_data_calls_by_minute"] = _bump_minute(self.stats["market_data_calls_by_minute"], 1)
             return True
+
+    def history_executor(self) -> Optional[ThreadPoolExecutor]:
+        """Where the signal modules run their history-data work (run_in_executor's first argument) - 2 Oct 2026.
+        config.HISTORY_EXECUTOR_WORKERS = 0 (default): None = the default executor, exactly as before. > 0: a
+        separate pool of that many threads, so the pacing floor above (which SLEEPS inside a worker) can no
+        longer occupy the default pool that order placement, order status and quotes run on. Event-loop only."""
+        if config.HISTORY_EXECUTOR_WORKERS <= 0:
+            return None
+        if self._history_executor is None:
+            self._history_executor = ThreadPoolExecutor(max_workers=config.HISTORY_EXECUTOR_WORKERS,
+                                                        thread_name_prefix="history")
+            logger.info("history-data executor started: %d worker(s)", config.HISTORY_EXECUTOR_WORKERS)
+        return self._history_executor
 
     def _count_market_data_caller(self, interval_minutes: int, instrument: str) -> None:
         """/feed-stats market_data_calls_by_caller ("Package/module.function 5m" -> calls since start) and

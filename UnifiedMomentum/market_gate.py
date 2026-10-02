@@ -58,7 +58,7 @@ async def refresh(force: bool = False) -> None:
         return
     _state["running"] = True
     try:
-        er, candle = await asyncio.get_running_loop().run_in_executor(None, _read)
+        er, candle = await asyncio.get_running_loop().run_in_executor(dhan_wrapper.history_executor(), _read)
         _state.update(er=er, candle=candle, error=None)
     except Exception as exc:  # noqa: BLE001
         logger.exception("[UnifiedMomentum] market gate: could not read NIFTY's series - gate stays open")

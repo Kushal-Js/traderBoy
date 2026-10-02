@@ -40,7 +40,7 @@ from typing import Optional
 
 from Bollinger import signals
 from Bollinger import trading_engine as engine
-from Options.dhan_client import IST
+from Options.dhan_client import IST, dhan_wrapper
 
 from . import settings
 
@@ -143,7 +143,7 @@ async def last_hour_green(symbol: str) -> tuple[Optional[bool], dict]:
         return signals._get_intraday_series(symbol, sid, seg, inst)
 
     try:
-        data = await asyncio.get_running_loop().run_in_executor(None, work)
+        data = await asyncio.get_running_loop().run_in_executor(dhan_wrapper.history_executor(), work)
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not load the series for the 1-hour entry filter", symbol)
         return None, {"reason": "series_error"}

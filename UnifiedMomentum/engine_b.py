@@ -212,7 +212,8 @@ async def _signal(symbol: str) -> Optional[tuple]:
     reading = _seen.get(key)
     if reading is None:
         try:
-            reading = await asyncio.get_running_loop().run_in_executor(None, regime.read, symbol)
+            reading = await asyncio.get_running_loop().run_in_executor(dhan_wrapper.history_executor(), regime.read,
+                                                                       symbol)
         except Exception:  # noqa: BLE001
             logger.exception("[%s] %s: regime read failed - signal allowed (fail open)", PUT_STRATEGY, symbol)
             reading = regime.RegimeReading(state="UNKNOWN", allows_entry=True, er_2h=None, er_today=None,

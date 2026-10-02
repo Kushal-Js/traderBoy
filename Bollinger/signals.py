@@ -515,7 +515,7 @@ async def get_signal_state(symbol: str, force: bool = False) -> Optional[Bolling
             return latest[1]          # another caller refreshed it while this one waited
         loop = asyncio.get_running_loop()
         try:
-            state = await loop.run_in_executor(None, _fetch_signal_state_once, symbol)
+            state = await loop.run_in_executor(dhan_wrapper.history_executor(), _fetch_signal_state_once, symbol)
             _fail_streak[cache_key] = 0
         except Exception:  # noqa: BLE001
             logger.exception("%s: could not fetch Bollinger signal state - keeping last cached value", symbol)

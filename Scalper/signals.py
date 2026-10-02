@@ -172,7 +172,7 @@ async def refresh(symbol: str, force: bool = False) -> None:
     now = time.time()
     if force or now >= b.rest1_at:
         try:
-            bars = await loop.run_in_executor(None, _rest_bars, symbol, 1, REST_1M_LOOKBACK_DAYS)
+            bars = await loop.run_in_executor(dhan_wrapper.history_executor(), _rest_bars, symbol, 1, REST_1M_LOOKBACK_DAYS)
             if bars:
                 b.rest1 = bars
             b.rest1_at = now + (REST_1M_REFRESH_SECONDS if bars else REST_RETRY_SECONDS)
@@ -181,7 +181,8 @@ async def refresh(symbol: str, force: bool = False) -> None:
             b.rest1_at = now + REST_RETRY_SECONDS
     if force or now >= b.rest15_at:
         try:
-            bars = await loop.run_in_executor(None, _rest_bars, symbol, 15, REST_15M_LOOKBACK_DAYS)
+            bars = await loop.run_in_executor(dhan_wrapper.history_executor(), _rest_bars, symbol, 15,
+                                              REST_15M_LOOKBACK_DAYS)
             if bars:
                 b.rest15 = bars
             b.rest15_at = now + (REST_15M_REFRESH_SECONDS if bars else REST_RETRY_SECONDS)
@@ -201,7 +202,7 @@ async def fill_gap(symbol: str, minute_start: int) -> bool:
         return False
     b.gap_fetch_at = time.time()
     try:
-        bars = await asyncio.get_running_loop().run_in_executor(None, _rest_bars, symbol, 1, 2)
+        bars = await asyncio.get_running_loop().run_in_executor(dhan_wrapper.history_executor(), _rest_bars, symbol, 1, 2)
         b.rest1.update(bars)
     except Exception:  # noqa: BLE001
         logger.exception("[Scalper] %s: gap fetch failed", symbol)

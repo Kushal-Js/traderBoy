@@ -517,7 +517,7 @@ async def get_regime_state(symbol: str) -> Optional[RegimeState]:
         return cached[1]
     loop = asyncio.get_running_loop()
     try:
-        state = await loop.run_in_executor(None, _fetch_regime_state_once, symbol)
+        state = await loop.run_in_executor(dhan_wrapper.history_executor(), _fetch_regime_state_once, symbol)
         _regime_fail_streak[symbol] = 0
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not fetch regime state - keeping last cached value", symbol)
@@ -702,7 +702,8 @@ async def get_supertrend_state(symbol: str, interval_minutes: Optional[int] = No
         return cached[1]
     loop = asyncio.get_running_loop()
     try:
-        state = await loop.run_in_executor(None, _fetch_supertrend_state_once, symbol, interval_minutes)
+        state = await loop.run_in_executor(dhan_wrapper.history_executor(), _fetch_supertrend_state_once, symbol,
+                                           interval_minutes)
         _supertrend_fail_streak[cache_key] = 0
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not fetch Supertrend state (%smin) - keeping last cached value",
@@ -868,7 +869,7 @@ async def get_day_range_state(symbol: str) -> Optional[DayRangeState]:
         return cached[1]
     loop = asyncio.get_running_loop()
     try:
-        state = await loop.run_in_executor(None, _fetch_day_range_state_once, symbol)
+        state = await loop.run_in_executor(dhan_wrapper.history_executor(), _fetch_day_range_state_once, symbol)
         _day_range_fail_streak[symbol] = 0
     except Exception:  # noqa: BLE001
         logger.exception("%s: could not fetch Day Range state - keeping last cached value", symbol)
@@ -1206,7 +1207,8 @@ async def refresh_structure_break_signal(symbol: str) -> None:
         for i, tf in enumerate(("5m", "15m", "1h")):
             if i:
                 await asyncio.sleep(_STRUCTURE_BREAK_FETCH_PACE_SECONDS)
-            regimes[tf] = await loop.run_in_executor(None, _fetch_one_structure_break_timeframe, symbol, tf)
+            regimes[tf] = await loop.run_in_executor(dhan_wrapper.history_executor(),
+                                                     _fetch_one_structure_break_timeframe, symbol, tf)
         agree_bull = all(v == 1 for v in regimes.values())
         agree_bear = all(v == -1 for v in regimes.values())
         combined = 1 if agree_bull else -1 if agree_bear else 0

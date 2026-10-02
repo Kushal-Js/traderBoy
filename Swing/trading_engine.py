@@ -343,11 +343,12 @@ async def _copper_reentry_allowed(symbol: str, side: int) -> bool:
     key = (symbol, closed.isoformat())
     level = _reentry_levels.get(key)
     if level is None:
-        level = await loop.run_in_executor(None, signals.underlying_extreme, symbol, opened, closed, side)
+        level = await loop.run_in_executor(dhan_wrapper.history_executor(), signals.underlying_extreme, symbol, opened,
+                                           closed, side)
         if level is None:
             return True
         _reentry_levels[key] = level
-    if await loop.run_in_executor(None, signals.traded_through, symbol, level, side, closed):
+    if await loop.run_in_executor(dhan_wrapper.history_executor(), signals.traded_through, symbol, level, side, closed):
         return True
     if key not in _reentry_block_logged:
         _reentry_block_logged.add(key)
@@ -538,7 +539,8 @@ async def _regime_allows(symbol: str, direction: str, st) -> bool:
     reading = _regime_logged.get(key)
     if reading is None:
         try:
-            reading = await asyncio.get_running_loop().run_in_executor(None, regime.read, symbol)
+            reading = await asyncio.get_running_loop().run_in_executor(dhan_wrapper.history_executor(), regime.read,
+                                                                       symbol)
         except Exception:  # noqa: BLE001
             logger.exception("%s: regime read failed - entry not filtered", symbol)
             return True
