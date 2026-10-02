@@ -301,6 +301,19 @@ class FuturesContract:
     expiry_date: Optional[date] = None
 
 
+def _parse_dhan_datetime(value) -> Optional[datetime]:
+    """Dhan's profile dates, IST: dataValidity like "2024-12-05 09:37:52.0" (API docs), tokenValidity like
+    "03/10/2026 06:20" (seen live). None when absent or in another format."""
+    text = str(value or "").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S",
+                "%d/%m/%Y %H:%M", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=IST)
+        except ValueError:
+            continue
+    return None
+
+
 class DhanWrapper:
     """Lazily-authenticated singleton wrapper around Tradehull + dhanhq's
     WebSocket classes."""
@@ -477,6 +490,10 @@ class DhanWrapper:
             # Session guard (2 Oct 2026) - see relogin().
             "session_checks": 0,
             "session_relogins": 0,
+            # Dhan's own view of the account, from the same profile call (2 Oct 2026) - see _note_data_plan().
+            "data_plan": None,
+            "data_validity": None,
+            "token_validity": None,
         }
         # Bounds how many REST LTP-fallback calls can be in flight at once
         # across ALL strategies sharing this connection (Options + Futures,
@@ -518,6 +535,7 @@ class DhanWrapper:
         self._relogins: list[float] = []          # monotonic times of this hour's re-logins
         self._session_guard_started = False
         self._order_update_running: Optional[tuple] = None   # (event loop, task) of the live order-update connection
+        self._data_plan_warned_at: Optional[float] = None    # monotonic time of the last data-plan warning
 
     # ------------------------------------------------------------------ #
     # Auth
@@ -652,15 +670,16 @@ class DhanWrapper:
     # ------------------------------------------------------------------ #
     PROFILE_URL = "https://api.dhan.co/v2/profile"
 
-    def _token_state(self, token: str) -> Optional[bool]:
-        """Dhan's verdict on a token, from GET /v2/profile (the check Tradehull itself uses): True = accepted;
-        False = Dhan says it is invalid or expired (HTTP 401, DH-901, or an error naming the token - on 1 Oct it was
-        HTTP 400 'DH-906 Invalid Token'); None = undecided (network error, rate limit, 5xx ...) - never acted on."""
+    def _profile_check(self, token: str) -> tuple[Optional[bool], dict]:
+        """GET /v2/profile with a token -> (verdict, body). Verdict: True = accepted; False = Dhan says the token is
+        invalid or expired (HTTP 401, DH-901, or an error naming the token - on 1 Oct it was HTTP 400 'DH-906
+        Invalid Token'); None = undecided (network error, rate limit, 5xx ...) - never acted on. Body = the parsed
+        JSON ({} when unreadable)."""
         try:
             resp = requests.get(self.PROFILE_URL, headers={"Accept": "application/json", "access-token": str(token)},
                                 timeout=10)
         except requests.RequestException:
-            return None
+            return None, {}
         try:
             body = resp.json()
         except ValueError:
@@ -670,15 +689,55 @@ class DhanWrapper:
         code = str(body.get("errorCode") or "")
         message = str(body.get("errorMessage") or body.get("message") or "")
         if resp.ok and not code and body.get("status") != "failure":
-            return True
+            return True, body
         if resp.status_code == 401 or code == "DH-901" or "token" in message.lower():
-            return False
-        return None
+            return False, body
+        return None, body
+
+    def _token_state(self, token: str) -> Optional[bool]:
+        """Dhan's verdict on a token (the profile check Tradehull itself uses) - see _profile_check."""
+        return self._profile_check(token)[0]
 
     def session_state(self) -> Optional[bool]:
-        """_token_state of the token the bot is using right now (None before the first login)."""
+        """_token_state of the token the bot is using right now (None before the first login); the same profile
+        response also refreshes the Data API plan status (_note_data_plan)."""
         token = getattr(self._client, "token_id", None) if self._client is not None else None
-        return self._token_state(token) if token else None
+        if not token:
+            return None
+        state, profile = self._profile_check(token)
+        if state:
+            self._note_data_plan(profile)
+        return state
+
+    DATA_PLAN_WARN_DAYS = 3
+    DATA_PLAN_WARN_EVERY_SECONDS = 6 * 3600
+
+    def _note_data_plan(self, profile: dict) -> None:
+        """Dhan's profile carries the account's Data API plan ("dataPlan", "dataValidity") and the token's own
+        expiry ("tokenValidity"). From 1 Oct 2026 22:47 IST every candle and price call was refused (DH-902 "not
+        subscribed to Data APIs") and nothing showed it until a scheduled job failed. Now shown in GET /feed-stats (data_plan,
+        data_validity, token_validity) and warned about in the log - plan not "Active", or ending within
+        DATA_PLAN_WARN_DAYS - at most every DATA_PLAN_WARN_EVERY_SECONDS."""
+        plan, validity = profile.get("dataPlan"), profile.get("dataValidity")
+        self.stats["data_plan"], self.stats["data_validity"] = plan, validity
+        self.stats["token_validity"] = profile.get("tokenValidity")
+        problem = None
+        if plan is not None and str(plan).strip().lower() != "active":
+            problem = (f"Dhan Data API plan is {plan!r} (validity {validity}) - candles and prices are refused "
+                       f"(DH-902) until it is renewed")
+        else:
+            ends = _parse_dhan_datetime(validity)
+            if ends is not None:
+                left = ends - datetime.now(IST)
+                if left <= timedelta(days=self.DATA_PLAN_WARN_DAYS):
+                    when = (f"in {left.days}d {left.seconds // 3600}h" if left.total_seconds() > 0 else "already past")
+                    problem = (f"Dhan Data API plan ends {ends:%d %b %Y %H:%M} IST ({when}) - check it renews, or "
+                               f"candles and prices stop (DH-902)")
+        now = time.monotonic()
+        if problem and (self._data_plan_warned_at is None
+                        or now - self._data_plan_warned_at >= self.DATA_PLAN_WARN_EVERY_SECONDS):
+            self._data_plan_warned_at = now
+            logger.warning(problem)
 
     def _mint_token_once(self, tsl) -> tuple[str, str]:
         """One PIN+TOTP login -> a new, profile-validated access token: the steps of Tradehull.get_login's pin_totp
