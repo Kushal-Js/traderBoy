@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, time as dtime
 from typing import Optional
 
 from Options.dhan_client import IST, dhan_wrapper
@@ -26,6 +26,7 @@ logger = logging.getLogger("unified_momentum_market_gate")
 
 REFRESH_SECONDS = 30
 ER_BARS = 24
+SESSION_FIRST_BAR, SESSION_END = dtime(9, 15), dtime(15, 30)
 _state: dict = {"er": None, "at": 0.0, "candle": None, "error": None, "running": False}
 
 
@@ -37,7 +38,11 @@ def _read() -> tuple[Optional[float], Optional[str]]:
     bars = signals._get_intraday_series("NIFTY", sid, seg, inst, 5, min_bars=ER_BARS + 1)
     ts, closes = bars.get("timestamp") or [], bars.get("close") or []
     cut = time.time() - 5 * 60
-    keep = [i for i, t in enumerate(ts) if t <= cut]
+    # Closed bars of the NSE regular session only (2 Oct 2026): the index feed used to leave flat after-hours bars
+    # (1 Oct: 33 NIFTY bars 15:30-18:10 at the closing price) that read as ER 0.0 = "choppy" - the backtest's ER
+    # uses 09:15-15:25 bars only, continuous across days.
+    keep = [i for i, t in enumerate(ts)
+            if t <= cut and SESSION_FIRST_BAR <= datetime.fromtimestamp(t, IST).time() < SESSION_END]
     closes = [closes[i] for i in keep]
     if len(closes) < ER_BARS + 1:
         return None, None

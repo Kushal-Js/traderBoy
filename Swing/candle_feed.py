@@ -83,7 +83,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -105,6 +105,24 @@ MAX_BARS_KEPT = 2600
 # on a restart - comfortably covers MAX_BARS_KEPT's ~35 trading days
 # including weekends/holidays in between.
 DISK_RESTORE_LOOKBACK_DAYS = 55
+
+# NSE regular session (2 Oct 2026). Ticks outside it used to become bars too: the 09:00-09:08 pre-open, the
+# 15:40-16:00 closing-price session (one extra 15:50 bar per stock per day) and the index feed's flat after-hours
+# values (NIFTY/BANKNIFTY kept repeating the close until 18:10-20:35 IST - 33 and 62 flat zero-volume 5-min bars on
+# 1 Oct). Every strategy's indicators then read those bars between one session's close and the next open, although
+# the REST history (and every backtest) has 09:15-15:25 bars only - e.g. Unified Momentum's NIFTY chop gate read
+# 0.0 from Thursday's flat bars. Now NSE equities and indices keep session ticks only (bar starts 09:15 ... 15:25),
+# for live bars, for the tick listeners and for bars restored from disk. MCX keeps its own long session (unchanged).
+NSE_SESSION_START = dtime(9, 15)
+NSE_SESSION_END = dtime(15, 30)
+
+
+def in_session(exchange_segment: Optional[str], t: datetime) -> bool:
+    """True for MCX at any time; for everything else only inside the NSE regular session."""
+    if exchange_segment == "MCX_COMM":
+        return True
+    local = t.astimezone(IST).time() if t.tzinfo is not None else t.time()
+    return NSE_SESSION_START <= local < NSE_SESSION_END
 
 
 class _SymbolState:
@@ -274,6 +292,20 @@ def _update_bar(st: _SymbolState, ltp: float, cum_volume: float, t: datetime) ->
     return completed
 
 
+def _complete_forming(st: _SymbolState) -> Optional[dict]:
+    """Closes the forming bar without starting a new one (the session's last bar, on the first tick after the
+    session ended - otherwise the 15:25 bar would never complete once later ticks are ignored)."""
+    if st.current_bar_start is None:
+        return None
+    completed = {
+        "candle_start": st.current_bar_start, "open": st.bar_open, "high": st.bar_high,
+        "low": st.bar_low, "close": st.bar_close,
+        "volume": max(0.0, st.cum_volume_now - st.cum_volume_at_bar_start),
+    }
+    st.current_bar_start = None
+    return completed
+
+
 def _on_tick(underlying_symbol: str, ltp: float, cum_volume: float, t: datetime) -> None:
     today = t.date()
     completed = None
@@ -281,6 +313,8 @@ def _on_tick(underlying_symbol: str, ltp: float, cum_volume: float, t: datetime)
         st = _state.get(underlying_symbol)
         if st is None:
             return  # not (or no longer) subscribed under this symbol - ignore stray tick
+        ref = _subscribed_ref.get(underlying_symbol)
+        session = in_session(ref[1] if ref else None, t)
         if st.day != today:
             # Day rollover - st.bars is deliberately left untouched (see
             # underlying_candle_feed.py's own _on_tick comment: a real
@@ -291,7 +325,11 @@ def _on_tick(underlying_symbol: str, ltp: float, cum_volume: float, t: datetime)
             st.current_bar_start = None
             st.cum_volume_at_bar_start = 0.0
             st.cum_volume_now = 0.0
-        completed = _update_bar(st, ltp, cum_volume, t)
+        if session:
+            completed = _update_bar(st, ltp, cum_volume, t)
+        elif (st.current_bar_start is not None
+              and t >= st.current_bar_start + timedelta(minutes=BASE_INTERVAL_MINUTES)):
+            completed = _complete_forming(st)
         if completed is not None:
             # Guard against re-completing a candle_start this process (or a
             # prior instance, restored via ensure_subscribed) already
@@ -307,9 +345,10 @@ def _on_tick(underlying_symbol: str, ltp: float, cum_volume: float, t: datetime)
                 if len(st.bars) > MAX_BARS_KEPT:
                     del st.bars[: len(st.bars) - MAX_BARS_KEPT]
                 st.last_persisted_candle_start = completed["candle_start"]
-        st.last_tick_at = t
+        if session:
+            st.last_tick_at = t
         security_id = st.security_id
-    if ltp > 0:
+    if session and ltp > 0:
         for listener in list(_tick_listeners):
             try:
                 listener(underlying_symbol, ltp, t)
@@ -372,7 +411,8 @@ def ensure_subscribed(symbol: str, security_id: str, exchange_segment: str) -> N
         )
 
     today = datetime.now(IST).date()
-    bars = _load_persisted_bars(symbol, security_id, today, DISK_RESTORE_LOOKBACK_DAYS)
+    bars = [b for b in _load_persisted_bars(symbol, security_id, today, DISK_RESTORE_LOOKBACK_DAYS)
+            if in_session(exchange_segment, b["candle_start"])]       # old files still hold off-session bars
     if bars:
         with _lock:
             st = _state.get(symbol)
