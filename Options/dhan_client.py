@@ -34,7 +34,7 @@ from Dhan_Tradehull import Tradehull
 from dhanhq import DhanContext, DhanLogin, MarketFeed, OrderUpdate, dhanhq
 
 import nifty_market_guard
-from . import config, fallback_token
+from . import config, fallback_token, login_budget
 
 logger = logging.getLogger("dhan_client")
 
@@ -500,6 +500,9 @@ class DhanWrapper:
             "fallback_token_expires": None,
             "fallback_switches": 0,
             "data_refused": 0,
+            # PIN+TOTP failure cap (2 Oct 2026) - Options/login_budget.py.
+            "totp_failures": 0,
+            "totp_paused_until": None,
         }
         # Bounds how many REST LTP-fallback calls can be in flight at once
         # across ALL strategies sharing this connection (Options + Futures,
@@ -554,7 +557,10 @@ class DhanWrapper:
     # ------------------------------------------------------------------ #
     # Auth
     # ------------------------------------------------------------------ #
-    def authenticate(self) -> None:
+    def authenticate(self, wait_out_login_pause: bool = False) -> None:
+        """`wait_out_login_pause` (the live bot's startup only): if PIN+TOTP is paused by the failure cap and no
+        fallback token is stored, wait for one / the end of the pause instead of failing (systemd would otherwise
+        restart the bot every few seconds). One-off jobs fail at once and retry on their own schedule."""
         mode = config.DHAN_AUTH_MODE
         if mode == "pin_totp":
             # Session-collision guard (added 21 Sep 2026, real incident -
@@ -591,7 +597,7 @@ class DhanWrapper:
                 )
             if not config.DHAN_CLIENT_ID or not config.DHAN_PIN or not config.DHAN_TOTP_SECRET:
                 raise ValueError("DHAN_CLIENT_ID / DHAN_PIN / DHAN_TOTP_SECRET are not set")
-            tsl = self._login_pin_totp()
+            tsl = self._login_pin_totp(wait_out_login_pause)
         else:
             if not config.DHAN_CLIENT_ID or not config.DHAN_ACCESS_TOKEN:
                 raise ValueError("DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN are not set")
@@ -640,7 +646,7 @@ class DhanWrapper:
         time.sleep(base_seconds)
         time.sleep(31 - (int(time.time()) % 30))
 
-    def _login_pin_totp(self) -> Tradehull:
+    def _login_pin_totp(self, wait_out_login_pause: bool = False) -> Tradehull:
         """PIN+TOTP login, retried in-process (config.DHAN_LOGIN_BACKOFF_SECONDS), WITHOUT handing the PIN to
         Tradehull/dhanhq (2 Oct 2026). Their login path prints and logs the request error with a traceback - on a
         network error that text is the request URL, PIN and TOTP included - and Tradehull gives up after two TOTP
@@ -649,12 +655,16 @@ class DhanWrapper:
         else one PIN+TOTP mint of our own (_mint_token_once); then Tradehull starts in access_token mode with that
         token (it re-validates it, caches it for the other processes and loads the instrument file). If the
         PIN+TOTP login itself fails and a usable fallback access token is stored, the bot starts on that instead
-        (_start_on_fallback) and the session guard keeps retrying the primary. Raises after the last round."""
+        (_start_on_fallback) and the session guard keeps retrying the primary. While the failure cap pauses
+        PIN+TOTP (login_budget) no request is sent: fallback if stored, else wait (bot) or fail (one-off jobs).
+        Raises after the last round."""
         probe = Tradehull.__new__(Tradehull)   # only for Tradehull's token-file / PIN / TOTP helpers - no login
         probe.ClientCode = str(config.DHAN_CLIENT_ID).strip().replace(".0", "")
         rounds = len(config.DHAN_LOGIN_BACKOFF_SECONDS) + 1
         error = ""
-        for rnd in range(1, rounds + 1):
+        rnd = 0
+        while rnd < rounds:
+            rnd += 1
             login_failed = False
             try:
                 cached = probe._read_token_today()
@@ -671,6 +681,17 @@ class DhanWrapper:
                     self._mark_primary(token)
                     return tsl
                 error = "Tradehull did not initialize its REST client (its output is above)"
+            except login_budget.LoginPaused as exc:
+                tsl = self._start_on_fallback(probe, str(exc))
+                if tsl is not None:
+                    return tsl
+                if not wait_out_login_pause:
+                    raise RuntimeError(f"Dhan login failed (mode=pin_totp): {exc}") from None
+                tsl = self._wait_out_login_pause(probe, str(exc))
+                if tsl is not None:
+                    return tsl
+                rnd -= 1                 # the pause did not use up a round
+                continue
             except Exception as exc:  # noqa: BLE001 - _mint_token_once never puts the PIN in its error text
                 error = str(exc)
             if login_failed:
@@ -679,6 +700,8 @@ class DhanWrapper:
                     return tsl
             if rnd == rounds:
                 break
+            if login_budget.paused() is not None:
+                continue                 # that failure hit the cap - the next round handles the pause, no wait
             wait = config.DHAN_LOGIN_BACKOFF_SECONDS[rnd - 1]
             logger.error("Dhan PIN+TOTP login failed (round %d/%d): %s - retrying in %ds + the next TOTP window",
                          rnd, rounds, error, wait)
@@ -767,7 +790,9 @@ class DhanWrapper:
         branch with a request timeout (the SDK's DhanLogin.generate_token has none). Returns (token, expiry). The
         PIN never reaches an error message: a network error is reported by class name only, chained context
         suppressed (requests puts the URL - PIN included - in its text), a malformed DHAN_PIN without its value,
-        and urllib3's request-line DEBUG logging (full URL) is kept off."""
+        and urllib3's request-line DEBUG logging (full URL) is kept off. The request runs inside a
+        login_budget.slot(): raises LoginPaused (no request) while the failure cap's pause lasts; a refusal by Dhan
+        counts as a failure, a token resets the count, a network error is not counted."""
         try:
             pin = tsl._clean_pin(config.DHAN_PIN)
         except ValueError:
@@ -775,14 +800,25 @@ class DhanWrapper:
         pool_log = logging.getLogger("urllib3.connectionpool")
         if pool_log.getEffectiveLevel() < logging.INFO:
             pool_log.setLevel(logging.INFO)
-        try:
-            resp = requests.post(f"{DhanLogin.AUTH_BASE_URL}/app/generateAccessToken", timeout=15,
-                                 params={"dhanClientId": tsl.ClientCode, "pin": pin,
-                                         "totp": tsl._get_totp(config.DHAN_TOTP_SECRET)})
-            body = resp.json()
-        except requests.RequestException as exc:
-            raise RuntimeError(f"PIN+TOTP request failed: {type(exc).__name__} (network)") from None
-        token = tsl.extract_access_token(body)
+        with login_budget.slot() as budget:
+            try:
+                resp = requests.post(f"{DhanLogin.AUTH_BASE_URL}/app/generateAccessToken", timeout=15,
+                                     params={"dhanClientId": tsl.ClientCode, "pin": pin,
+                                             "totp": tsl._get_totp(config.DHAN_TOTP_SECRET)})
+                body = resp.json()
+            except requests.RequestException as exc:
+                raise RuntimeError(f"PIN+TOTP request failed: {type(exc).__name__} (network)") from None
+            try:
+                token = tsl.extract_access_token(body)
+            except Exception as exc:  # noqa: BLE001 - Dhan answered without a token: counts towards the cap
+                state = budget.failure(str(exc))
+                if state.get("paused_until"):
+                    logger.error("Dhan refused %d PIN+TOTP logins in a row - NO MORE PIN+TOTP REQUESTS for %.0f h "
+                                 "(Dhan locks the account at 5); the bot uses the fallback access token if one is "
+                                 "stored. `python3 dhan_fallback_token.py login-reset` clears this.",
+                                 state["consecutive"], config.DHAN_TOTP_PAUSE_SECONDS / 3600)
+                raise
+            budget.success()
         profile = tsl._validate_access_token_profile(token)
         return token, str(body.get("expiryTime") or profile.get("tokenValidity") or "")
 
@@ -798,10 +834,14 @@ class DhanWrapper:
         for n in range(start, tries + 1):
             try:
                 return self._mint_token_once(tsl)
+            except login_budget.LoginPaused:
+                raise                    # no more PIN+TOTP requests until the pause ends - no point waiting here
             except Exception as exc:  # noqa: BLE001 - _mint_token_once never puts the PIN in its error text
                 error = str(exc)
             if n == tries:
                 raise RuntimeError(f"Dhan PIN+TOTP re-login failed after {tries} tries - last error: {error}")
+            if login_budget.paused() is not None:
+                continue                 # that failure hit the cap - the next try raises LoginPaused, no wait
             self._wait_after_failed_mint(n, tries, error)
         raise AssertionError("unreachable")
 
@@ -827,14 +867,13 @@ class DhanWrapper:
             return False
         with self._relogin_lock:
             now = time.monotonic()
-            self._relogins = [t for t in self._relogins if now - t < 3600]
+            self._relogins = [t for t in self._relogins if now - t < 3600]   # successful replacements only
             if len(self._relogins) >= config.DHAN_RELOGIN_MAX_PER_HOUR:
                 logger.error("Dhan rejects the access token again (%s) - NOT logging in again: %d re-logins in the "
                              "last hour already. Another login is probably competing for the account's single "
                              "session (a token made on Dhan web/app or another machine) - check that, then restart "
                              "the bot.", reason, len(self._relogins))
                 return False
-            self._relogins.append(now)
             cached = tsl._read_token_today()
             if cached and cached != tsl.token_id and self._token_state(cached) is True:
                 token, source = cached, "adopted the newer token already saved on this machine"
@@ -846,12 +885,15 @@ class DhanWrapper:
                     if fallback is not None:
                         self._swap_token(tsl, fallback["token"])
                         self._mark_fallback("login")
+                        self._relogins.append(now)
                         self.stats["session_relogins"] += 1
                         logger.error("Dhan PIN+TOTP re-login failed (%s) - SWITCHED TO THE FALLBACK ACCESS TOKEN "
                                      "(expires %s); the primary is retried every %.0f min - reason: %s", exc,
                                      fallback_token.describe(fallback, IST)["expires"],
                                      config.DHAN_FALLBACK_RETRY_PRIMARY_SECONDS / 60, reason)
                         source = None
+                    elif isinstance(exc, login_budget.LoginPaused):
+                        raise
                     else:
                         token, expiry = self._mint_token_pin_totp(tsl, failed_first=str(exc))
                         source = "new PIN+TOTP login"
@@ -862,6 +904,7 @@ class DhanWrapper:
             if source is not None:
                 self._swap_token(tsl, token)
                 self._mark_primary(token)
+                self._relogins.append(now)
                 self.stats["session_relogins"] += 1
                 logger.warning("Dhan session replaced (%s) - reason: %s", source, reason)
         self._reconnect_feeds_after_relogin()
@@ -955,6 +998,24 @@ class DhanWrapper:
                      config.DHAN_FALLBACK_RETRY_PRIMARY_SECONDS / 60)
         return tsl
 
+    def _wait_out_login_pause(self, probe, paused_error: str):
+        """Bot startup while the failure cap pauses PIN+TOTP and no usable fallback is stored: wait instead of
+        exiting - every 60 s look for a newly stored fallback token (-> a Tradehull on it) until the pause ends or is
+        cleared (-> None: the caller makes its next PIN+TOTP round)."""
+        logger.error("Dhan PIN+TOTP login is paused (%s) and no usable fallback access token is stored - the bot "
+                     "WAITS: it starts as soon as `python3 dhan_fallback_token.py set` stores one, or tries PIN+TOTP "
+                     "again when the pause ends", paused_error)
+        noted = time.monotonic()
+        while login_budget.paused() is not None:
+            time.sleep(60)
+            tsl = self._start_on_fallback(probe, paused_error)
+            if tsl is not None:
+                return tsl
+            if time.monotonic() - noted >= 600:
+                noted = time.monotonic()
+                logger.error("Still waiting: Dhan PIN+TOTP login paused, no usable fallback access token stored")
+        return None
+
     def use_fallback_for_data(self) -> bool:
         """Switches this process to the stored fallback token if Dhan serves market data on it (callers have seen
         the current token refused - the session guard, or a one-off job like the weekly watchlist refresh). True
@@ -1036,6 +1097,10 @@ class DhanWrapper:
         expiry (the user must store a fresh one)."""
         d = fallback_token.describe(fallback_token.load(), IST)
         self.stats["fallback_token_expires"] = d.get("expires") if d.get("present") else None
+        self.stats["totp_failures"] = login_budget.state()["consecutive"]
+        until = login_budget.paused()
+        self.stats["totp_paused_until"] = (datetime.fromtimestamp(until, IST).strftime("%d %b %Y %H:%M IST")
+                                          if until else None)
         if self.token_source == "fallback" and (d.get("hours_left") is None or d["hours_left"] < 2):
             self._warn_fallback(f"The bot runs on the FALLBACK access token and it expires {d.get('expires')} - store "
                                 f"a fresh one (`python3 dhan_fallback_token.py set`) unless the primary is back")
@@ -1086,6 +1151,10 @@ class DhanWrapper:
                     else:
                         self._maybe_fallback_for_data()
                 self._note_fallback_token()
+            except login_budget.LoginPaused as exc:
+                self._note_fallback_token()
+                self._warn_fallback(f"Dhan does not accept the bot's token and {exc} - store a fallback access token "
+                                    f"(`python3 dhan_fallback_token.py set`) to keep running")
             except Exception:  # noqa: BLE001
                 logger.exception("Dhan session guard: check / re-login failed - next check in %.0fs",
                                  config.DHAN_SESSION_CHECK_SECONDS)

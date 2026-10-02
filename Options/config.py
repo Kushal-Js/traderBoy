@@ -83,6 +83,16 @@ DHAN_FALLBACK_TOKEN_FILE = os.getenv("DHAN_FALLBACK_TOKEN_FILE",
 DHAN_FALLBACK_RETRY_PRIMARY_SECONDS = float(os.getenv("DHAN_FALLBACK_RETRY_PRIMARY_SECONDS", "900"))
 DHAN_FALLBACK_DATA_PROBE_SECONDS = float(os.getenv("DHAN_FALLBACK_DATA_PROBE_SECONDS", "300"))
 
+# PIN+TOTP failure cap (2 Oct 2026, user request) - Options/login_budget.py. Dhan support (MadeForTrade): TOTP login
+# errors "usually when 5 consecutive failed attempts happen at the server" (lock duration not published). One count
+# for every process on this machine; after DHAN_TOTP_MAX_CONSECUTIVE_FAILURES failures in a row no PIN+TOTP request
+# is sent for DHAN_TOTP_PAUSE_SECONDS, then one try per pause; the bot runs on the fallback token meanwhile. A
+# success - or `python3 dhan_fallback_token.py login-reset` - clears it.
+DHAN_TOTP_MAX_CONSECUTIVE_FAILURES = int(os.getenv("DHAN_TOTP_MAX_CONSECUTIVE_FAILURES", "4"))
+DHAN_TOTP_PAUSE_SECONDS = float(os.getenv("DHAN_TOTP_PAUSE_SECONDS", str(6 * 3600)))
+DHAN_TOTP_FAILURE_FILE = os.getenv("DHAN_TOTP_FAILURE_FILE",
+                                   str(Path(__file__).resolve().parents[1] / "data" / "dhan_totp_failures.json"))
+
 # Shared secret the webhook caller must send back to us, since Chartink
 # webhooks are unauthenticated by default. Optional but recommended.
 WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "")

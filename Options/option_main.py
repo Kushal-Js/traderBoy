@@ -129,7 +129,8 @@ async def lifespan(app: FastAPI):
     # coroutine (a socket connection spinning up its own event loop
     # internally can't happen on a thread that already has uvicorn's event
     # loop running).
-    await loop.run_in_executor(None, dhan_wrapper.authenticate)
+    # wait_out_login_pause: a paused PIN+TOTP login (failure cap) waits for a fallback token instead of exiting.
+    await loop.run_in_executor(None, lambda: dhan_wrapper.authenticate(wait_out_login_pause=True))
     # Replaces the token in place if Dhan stops accepting it mid-run (2 Oct 2026 - see DhanWrapper.relogin).
     dhan_wrapper.start_session_guard()
 

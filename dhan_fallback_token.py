@@ -6,9 +6,11 @@ web.dhan.co, valid ~24 h) that the running bot switches to - without a restart -
 serve: the PIN+TOTP login fails, or Dhan refuses market data on the primary token but not on this one. It goes back
 to the primary as soon as that works again (checked every 15 min; every restart starts on the primary).
 
-    python3 dhan_fallback_token.py set      # paste the token at the hidden prompt (or pipe it on stdin)
-    python3 dhan_fallback_token.py status   # expiry, Dhan's check of the token, data access, what the bot uses
-    python3 dhan_fallback_token.py clear    # remove it
+    python3 dhan_fallback_token.py set          # paste the token at the hidden prompt (or pipe it on stdin)
+    python3 dhan_fallback_token.py status       # expiry, Dhan's check, data access, what the bot uses, PIN+TOTP cap
+    python3 dhan_fallback_token.py clear        # remove it
+    python3 dhan_fallback_token.py login-reset  # clear the PIN+TOTP failure count / pause (Options/login_budget.py)
+                                                # - only once you know logins work again (Dhan locks at 5 failures)
 
 The token is never taken as an argument (shell history / process list) and never printed or logged.
 """
@@ -26,7 +28,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from dotenv import load_dotenv
 load_dotenv(REPO_ROOT / ".env")
 
-from Options import fallback_token
+from Options import fallback_token, login_budget
 from Options.dhan_client import IST, DhanWrapper
 
 
@@ -51,6 +53,14 @@ def _report(rec) -> None:
         print(f"fallback token: expires {d['expires']} ({d['hours_left']} h left, usable={d['usable']})")
         print(f"  Dhan accepts it: {'yes' if accepted else 'NO' if accepted is False else 'unknown (no answer)'}")
         print(f"  market data on it: {'yes' if data else 'REFUSED (DH-902)' if data is False else 'unknown (no answer)'}")
+    s = login_budget.state()
+    until = login_budget.paused()
+    if until:
+        from datetime import datetime
+        print(f"PIN+TOTP logins: PAUSED until {datetime.fromtimestamp(until, IST):%d %b %H:%M} IST after "
+              f"{s['consecutive']} consecutive failures (last: {s['last_error']})")
+    else:
+        print(f"PIN+TOTP logins: allowed ({s['consecutive']} consecutive failure(s) on record)")
     print(_bot_view())
 
 
@@ -74,6 +84,9 @@ def main(argv: list[str]) -> int:
         return 0
     if cmd == "clear":
         print("removed." if fallback_token.clear() else "nothing was stored.")
+        return 0
+    if cmd == "login-reset":
+        print("PIN+TOTP failure count cleared." if login_budget.reset() else "nothing to clear (0 failures on record).")
         return 0
     print(__doc__)
     return 1
