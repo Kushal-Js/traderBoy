@@ -223,7 +223,7 @@ _bases: dict[tuple, _Base] = {}
 _group_locks: dict[tuple, threading.Lock] = {}
 _priority: dict[str, frozenset] = {}
 _update_listeners: list = []
-_state = {"priority_waiting": 0, "thread": None}
+_state = {"priority_waiting": 0, "thread": None, "started_at": None}
 
 
 def register(key: tuple, symbol: str, security_id: str, exchange_segment: str, instrument_type: str, interval: int,
@@ -252,19 +252,42 @@ def register(key: tuple, symbol: str, security_id: str, exchange_segment: str, i
 # before 09:15) and its REST base is downloaded exactly as its signal path would, so at 09:15 nothing is missing.
 # --------------------------------------------------------------------------- #
 PREWARM_START = dtime(9, 5)        # pre-open order entry is over; the last session's history is final
-PREWARM_END = dtime(9, 14)         # never start later than this - the loops take over at 09:15
+PREWARM_END = dtime(9, 14)         # the pre-open warm-up proper; the loops take over at 09:15
+# 3 Oct 2026 (stress test): a restart during the session left every base cold - the first bar's pending orders came
+# 25-59 s late and engine B downloaded inline for minutes. A process that has not warmed up today and starts (or is
+# still running) before the stocks' close warms up at once, Unified Momentum first.
+PREWARM_LATE_END = dtime(15, 15)
 BASES_FILE = Path("data/official_candles_bases.json")
 SEEN_SAVE_SECONDS = 30
 _loaders: dict[str, Callable[[str, dict], None]] = {}
 _hooks: dict[str, Callable[[], object]] = {}     # name -> fn(): other warm-ups (e.g. the Scalper's own candle books)
 _seen = {"date": None, "bases": {}, "dirty": False, "saved_at": 0.0}
 _prewarm = {"done_date": None, "last": None, "ident": None}   # ident: the thread running prewarm(), while it runs
+_priority_series: dict[str, frozenset] = {}   # owner -> {(owner, interval, lookback_days)} every priority stock needs
 
 
 def add_prewarm_loader(owner: str, fn: Callable[[str, dict], None]) -> None:
     """fn(symbol, entry) loads one base of `owner` ("bollinger", "swing") exactly as its signal path would, WS
     subscription included. Blocking - runs on this module's thread."""
     _loaders[owner] = fn
+
+
+def add_priority_series(owner: str, series) -> None:
+    """Declares the candle series (interval, lookback_days) that `owner` reads for EVERY priority (Unified
+    Momentum) stock, so the warm-up loads all of them for every stock on the current list - whatever the last
+    trading day happened to use (3 Oct 2026: after the 2 Oct holiday the file had no 15-min / 7-day Swing base for
+    7 of the 15 stocks, because engine B never reached that read on a day with no candles; at 09:20 it would have
+    downloaded them one by one). Called by the code that reads them, at import."""
+    _priority_series[owner] = frozenset(
+        (owner, int(interval), None if lookback is None else int(lookback)) for interval, lookback in series
+        if int(interval) in SUPPORTED_INTERVALS)
+
+
+def _declared_series() -> set:
+    out: set = set()
+    for series in list(_priority_series.values()):
+        out |= series
+    return out
 
 
 def add_prewarm_hook(name: str, fn: Callable[[], object]) -> None:
@@ -307,7 +330,9 @@ def _maybe_save_seen() -> None:
 
 
 def _prewarm_due(now: datetime) -> bool:
-    return (now.weekday() < 5 and PREWARM_START <= now.time() < PREWARM_END
+    """Once a day per process: at PREWARM_START, or at once when the process starts later in the session
+    (a restart) - until PREWARM_LATE_END."""
+    return (now.weekday() < 5 and PREWARM_START <= now.time() < PREWARM_LATE_END
             and _prewarm["done_date"] != now.date())
 
 
@@ -318,49 +343,82 @@ def _series(entry: dict) -> tuple:
 TEMPLATE_SHARE = 0.8   # a candle series counts as "what a UM stock uses" when >= 80% of UM's listed stocks have it
 
 
+def _is_index(symbol) -> bool:
+    return str(symbol or "").upper() in getattr(dhan_wrapper, "INDEX_SECURITY_ID", {})
+
+
 def _missing_priority_entries(entries: list, priority: set) -> list:
-    """Bases for Unified Momentum's stocks that BASES_FILE does not list (2 Oct 2026): a stock the weekly refresh
-    (Fri 00:00) just added was not used on the last trading day, so it gets the candle series (nearly) every UM stock
-    already in the file uses - today Bollinger 5 min / 60 days + Swing 5 min / 45 days, 15 min / 45 days, 5 min /
-    7 days (all 15 stocks); Swing's 15 min / 7 days is only on the stocks Swing paper also trades (8 of 15) and is
-    left out. A stock is told apart from an index (NIFTY is a priority symbol with fewer series) by the segment it
-    was just WS-subscribed under. Call after the file's entries were loaded."""
+    """Bases of Unified Momentum's stocks that BASES_FILE does not list. Every stock on the CURRENT priority list
+    (the weekly refresh may have just changed it) gets (a) every series a UM reader declared
+    (add_priority_series: engine A's Bollinger 5 min / 60 days, engine B's Swing 5 / 15 min x 45 days and default
+    lookback) and (b) any other series nearly every UM stock in the file uses (TEMPLATE_SHARE). Indices (NIFTY is a
+    priority symbol for the market gate) are left alone. 2 Oct 2026 version took only (b), told stocks from indices by
+    the WS segment and left Swing's 15 min / 7 days out - engine B reads it for every stock (3 Oct stress test)."""
     by_symbol: dict[str, set] = {}
     for e in entries:
         by_symbol.setdefault(e.get("symbol"), set()).add(_series(e))
-    stocks = [s for s in priority if s in by_symbol and (candle_feed._subscribed_ref.get(s) or (None, None))[1] == "NSE_EQ"]
+    stocks = sorted(s for s in priority if not _is_index(s))
     if not stocks:
         return []
+    in_file = [s for s in stocks if s in by_symbol]
     counts: dict[tuple, int] = {}
-    for s in stocks:
+    for s in in_file:
         for series in by_symbol[s]:
             counts[series] = counts.get(series, 0) + 1
-    template = {series for series, n in counts.items() if n >= TEMPLATE_SHARE * len(stocks)}
+    template = {series for series, n in counts.items() if in_file and n >= TEMPLATE_SHARE * len(in_file)}
+    template |= _declared_series()
     out = []
-    for symbol in sorted(priority):
-        if symbol in by_symbol and symbol not in stocks:
-            continue                       # an index (or a symbol whose loads failed)
+    for symbol in stocks:
         for owner, interval, lookback in sorted(template - by_symbol.get(symbol, set()), key=str):
             out.append({"owner": owner, "symbol": symbol, "interval": interval, "lookback_days": lookback})
     return out
 
 
-def prewarm(now: Optional[datetime] = None) -> dict:
-    """Loads every base listed in BASES_FILE (Unified Momentum's stocks and NIFTY first), then the bases of any UM
-    stock the file does not list yet (_missing_priority_entries - e.g. added by Friday's weekly refresh). Blocking -
-    the background thread runs it once per weekday at PREWARM_START. Each load goes through the shared pacing like
-    any download. These loads are not "use" (_note_seen ignores them)."""
-    now = now or _now()
-    _prewarm["done_date"] = now.date()
+OWNER_ORDER = {"bollinger": 0}     # engine A's base first: its pending orders are rebuilt at every bar start
+BAR_RUSH_SECONDS = 25              # after a restart the warm-up stands aside this long after every 5-min close
+
+
+def _read_bases_file() -> list:
     try:
-        entries = json.loads(BASES_FILE.read_text()).get("bases") or []
+        return json.loads(BASES_FILE.read_text()).get("bases") or []
     except FileNotFoundError:
-        entries = []
+        return []
     except Exception:  # noqa: BLE001
         logger.exception("official candles: could not read %s - no warm-up", BASES_FILE)
-        entries = []
+        return []
+
+
+def _yield_to_bar_start() -> None:
+    """After a restart (3 Oct 2026, stress test): the first seconds after each 5-min close belong to the strategies'
+    own refreshes (engine A rebuilds every pending order then) - the warm-up waits them out instead of crowding the
+    shared pacing queue."""
+    while True:
+        now = _now()
+        if now.minute % 5 or now.second >= BAR_RUSH_SECONDS:
+            return
+        time.sleep(BAR_RUSH_SECONDS - now.second + 0.1)
+
+
+def prewarm(now: Optional[datetime] = None) -> dict:
+    """Loads every base listed in BASES_FILE plus every base a Unified Momentum stock needs that the file does not
+    list (_missing_priority_entries - e.g. a stock Friday's weekly refresh added, or a series the last day did not
+    reach), UM's stocks first and engine A's base before engine B's. Blocking - the background thread runs it once a
+    weekday at PREWARM_START, or at once when the process starts later in the session (a restart). Each load goes
+    through the shared pacing like any download. These loads are not "use" (_note_seen ignores them)."""
+    now = now or _now()
+    _prewarm["done_date"] = now.date()
+    snapshot = _prewarm.pop("file_snapshot", None)       # the file as this process found it (see start())
+    entries = snapshot if snapshot is not None else _read_bases_file()
     priority = _priority_symbols()
-    entries.sort(key=lambda e: (0 if e.get("symbol") in priority else 1, e.get("symbol") or "", e.get("interval") or 0))
+    mode = "pre-open" if now.time() < PREWARM_END else "after start"
+    if mode == "after start":
+        # Mid-session: only Unified Momentum's stocks (real money) - the paper strategies load theirs on demand as
+        # before, so the warm-up adds as little as possible to the shared REST queue.
+        entries = [e for e in entries if e.get("symbol") in priority]
+    added = _missing_priority_entries(entries, priority)
+    queue = entries + added
+    queue.sort(key=lambda e: (0 if e.get("symbol") in priority else 1, OWNER_ORDER.get(e.get("owner"), 1),
+                              e.get("symbol") or "", e.get("interval") or 0, e.get("lookback_days") or 0))
     started = time.monotonic()
     counts = {"loaded": 0, "failed": 0, "skipped": 0}
 
@@ -378,7 +436,6 @@ def prewarm(now: Optional[datetime] = None) -> dict:
                              entry.get("owner"), entry.get("symbol"), entry.get("interval"))
 
     _prewarm["ident"] = threading.get_ident()
-    added: list = []
     hooks: dict = {}
     try:
         for name, fn in list(_hooks.items()):          # real-money Scalper first: a few calls, ~1-2 s
@@ -387,25 +444,33 @@ def prewarm(now: Optional[datetime] = None) -> dict:
             except Exception as exc:  # noqa: BLE001
                 hooks[name] = f"failed: {exc}"
                 logger.exception("official candles: warm-up hook %s failed - it readies itself as before", name)
-        for entry in entries:
-            load(entry)
-        added = _missing_priority_entries(entries, priority)
-        for entry in added:
+        for entry in queue:
+            if mode == "after start":
+                _yield_to_bar_start()
             load(entry)
     finally:
         _prewarm["ident"] = None
-    result = {"date": now.date().isoformat(), "listed": len(entries), **counts,
-              "seconds": round(time.monotonic() - started, 1), "symbols": len({e.get("symbol") for e in entries}),
+    result = {"date": now.date().isoformat(), "mode": mode, "listed": len(entries), **counts,
+              "seconds": round(time.monotonic() - started, 1), "symbols": len({e.get("symbol") for e in queue}),
               "added_um_stocks": sorted({e["symbol"] for e in added}), "added_bases": len(added), "hooks": hooks}
     _prewarm["last"] = result
-    logger.info("official candles: pre-open warm-up done - %s", result)
+    logger.info("official candles: %s warm-up done - %s", mode, result)
     return result
+
+
+PRIORITY_WAIT_SECONDS = 60
 
 
 def _maybe_prewarm() -> None:
     now = _now()
-    if _prewarm_due(now):
-        prewarm(now)
+    if not _prewarm_due(now):
+        return
+    # Right after a (re)start the thread runs before Unified Momentum has named its stocks (its loop does within
+    # seconds): wait for that, at most PRIORITY_WAIT_SECONDS, so its stocks still go first and get every series.
+    started = _state.get("started_at")
+    if not _priority_symbols() and started is not None and time.monotonic() - started < PRIORITY_WAIT_SECONDS:
+        return
+    prewarm(now)
 
 
 def start() -> None:
@@ -418,6 +483,10 @@ def start() -> None:
             return
         _init_stats()
         _state["thread"] = threading.Thread(target=_run, name="official-candles", daemon=True)
+        _state["started_at"] = time.monotonic()
+        # Read now: the signal modules start recording today's bases at once and the first save (30 s) would replace
+        # the file - a warm-up after a restart must still see what the previous process listed (3 Oct 2026).
+        _prewarm["file_snapshot"] = _read_bases_file()
     _state["thread"].start()
     logger.info("official candles: background thread started - new bars from complete WS candles at once, Dhan's "
                 "candles fetched behind them (priority: %s)", sorted(_priority_symbols()) or "none yet")

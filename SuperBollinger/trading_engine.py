@@ -867,7 +867,7 @@ async def _trigger_not_taken(symbol: str, state, pending_candle: datetime, trigg
 
     forming = (candle_feed.forming_bar(symbol)
                if candle_feed.is_fresh(symbol, bcfg.WS_STALE_AFTER_SECONDS) else None)
-    spot = forming["close"] if forming else None
+    spot = forming["last"] if forming else None
     cap = settings.get("late_entry_max_pct")
     late = {"trigger_price": trigger, "stop_price": stop, "spot": spot, "max_pct": cap,
             "pct_above_trigger": None if spot is None else round((spot / trigger - 1) * 100, 3),

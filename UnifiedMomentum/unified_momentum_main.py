@@ -42,7 +42,7 @@ from trade_history import REAL_TRADES_NAME, dated_path
 from Options.dhan_client import dhan_wrapper
 
 from . import best_price_memory, engine_b, live_state, market_gate, settings
-from . import supervisor
+from . import supervisor, trading_engine
 from . import watchlist as um_watchlist
 from .state import (HEDGE_STRATEGY, PUT_STRATEGY, STRATEGY, SUPERVISOR_LOG, halted, hedge_paper_book, hedge_store,
                     paper_book, position_store, put_paper_book, put_store)
@@ -199,7 +199,8 @@ async def get_positions():
             **await position_store.snapshot(), **paper_book.snapshot(),
             "engine_b": {"open_count": engine_b.open_count(False), "paper_open_count": engine_b.open_count(True),
                          **await put_store.snapshot(), **put_paper_book.snapshot()},
-            "market_gate": market_gate.snapshot(), "halted_today": halted["day"] == date.today()}
+            "market_gate": market_gate.snapshot(), "halted_today": halted["day"] == date.today(),
+            "contracts_prepared": dict(trading_engine._leg_stats)}
 
 
 def _read_log(name: str, d: date) -> list[dict]:
@@ -271,6 +272,7 @@ async def get_engine_b():
             "open_real": (await put_store.snapshot())["live_positions"],
             "open_paper": put_paper_book.snapshot()["open_positions"],
             "fresh_formation_state": engine_b.state_snapshot()["consumed"],
+            "warm_up": engine_b.warm_snapshot(), "funds_backoff": engine_b.funds_backoff_snapshot(),
             "market_gate": market_gate.snapshot()}
 
 

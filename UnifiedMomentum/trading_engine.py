@@ -59,6 +59,9 @@ PROFILE = engine.Profile(
     daily_square_off_time=settings.get("square_off_time"),
     paper_book=paper_book, events_log=EVENTS_LOG, paper_only=False,
 )
+# Engine A's candle series for every UM stock (Bollinger's REST base) - warmed every morning and after a restart for
+# the whole current list (official_candles.add_priority_series, 3 Oct 2026).
+official_candles.add_priority_series("bollinger", [(bcfg.SIGNAL_INTERVAL_MINUTES, bcfg.REST_LOOKBACK_DAYS)])
 
 
 def _now() -> datetime:
@@ -152,11 +155,115 @@ def _slot_free_for(symbol: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Entry
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Contract resolved BEFORE the trigger (3 Oct 2026, stress test): the trigger tick -> BUY order took 1.2 s at normal
+# load and 4-8 s under stress, most of it resolving the contract (Tradehull's ATM pick re-reads the 200k-row
+# instrument table and asks Dhan for the stock's price, then a paced liquidity download and the daily volume). Once
+# the stock trades within LEG_PREP_WITHIN_PCT of its BULLISH trigger the contract is resolved in the background (one
+# at a time); at the trigger it is reused only while it is still the strike a fresh pick would choose for the
+# current price - else the full resolution runs exactly as before.
+# --------------------------------------------------------------------------- #
+LEG_PREP_WITHIN_PCT = 0.3
+LEG_CACHE_MAX_AGE_SECONDS = 300
+_leg_cache: dict[str, dict] = {}       # symbol -> {"leg", "at" (monotonic), "day", "strike", "strikes", "step"}
+_leg_prep: set[str] = set()            # symbols whose resolution is queued / running
+_leg_prep_lock: dict = {"lock": None}
+_leg_stats = {"prepared": 0, "used": 0, "stale": 0, "failed": 0}
+
+
+def _listed_strikes(symbol: str, option_type: str, expiry) -> list[float]:
+    """Blocking (executor): sorted listed strikes of `symbol`'s `option_type` options for `expiry`."""
+    df = dhan_wrapper.instruments()
+    rows = df[(df["SEM_EXM_EXCH_ID"] == "NSE") & (df["SEM_CUSTOM_SYMBOL"].str.startswith(f"{symbol.upper()} "))
+              & (df["SEM_OPTION_TYPE"] == option_type)]
+    if expiry is not None:
+        rows = rows[rows["SEM_EXPIRY_DATE"].astype(str).str.startswith(expiry.isoformat())]
+    return sorted({float(x) for x in rows["SEM_STRIKE_PRICE"]})
+
+
+def _strike_step(symbol: str) -> Optional[float]:
+    """Tradehull's own strike step for `symbol` (what its ATM pick rounds to), None when unknown."""
+    try:
+        steps = getattr(dhan_wrapper._client, "stock_step_df", None)
+        return float(steps[symbol]) if steps is not None and symbol in steps else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _atm_strike_for(spot: float, cached: dict) -> Optional[float]:
+    """The strike a fresh ATM pick would choose at `spot`: Tradehull's round(spot / step) * step when its step is
+    known, else the nearest listed strike."""
+    if cached.get("step"):
+        return round(spot / cached["step"]) * cached["step"]
+    strikes = cached.get("strikes") or []
+    if not strikes:
+        return None
+    return min(strikes, key=lambda k: abs(k - spot))
+
+
+def _cached_leg(symbol: str, spot: Optional[float]) -> Optional[dict]:
+    """A copy of the prepared contract while it is today's, under LEG_CACHE_MAX_AGE_SECONDS old and still the ATM
+    strike at `spot`; else None (and the caller resolves it fresh)."""
+    c = _leg_cache.get(symbol)
+    if (c is None or spot is None or c["day"] != _now().date()
+            or time.monotonic() - c["at"] > LEG_CACHE_MAX_AGE_SECONDS):
+        return None
+    atm = _atm_strike_for(spot, c)
+    if atm is None or abs(atm - c["strike"]) > 1e-6:
+        return None
+    return dict(c["leg"])
+
+
+async def _prep_leg(symbol: str) -> None:
+    try:
+        if _leg_prep_lock["lock"] is None:
+            _leg_prep_lock["lock"] = asyncio.Lock()
+        async with _leg_prep_lock["lock"]:        # one at a time: at most one worker thread on it
+            forming = candle_feed.forming_bar(symbol)
+            if _cached_leg(symbol, forming.get("last") if forming else None) is not None:
+                return
+            PROFILE.roll_days = settings.get("roll_expiry_within_trading_days")
+            leg = await engine._resolve_option_leg(symbol, "BULLISH", PROFILE)
+            atm = leg["atm"]
+            strikes = await asyncio.get_running_loop().run_in_executor(
+                None, _listed_strikes, symbol, "CE", atm.expiry_date)
+            _leg_cache[symbol] = {"leg": leg, "at": time.monotonic(), "day": _now().date(),
+                                  "strike": float(atm.strike), "strikes": strikes, "step": _strike_step(symbol)}
+            _leg_stats["prepared"] += 1
+            logger.info("[%s] %s: contract ready ahead of the trigger: %s", STRATEGY, symbol, leg["trading_symbol"])
+    except engine._SkipEntry:
+        _leg_cache.pop(symbol, None)            # the entry would skip anyway - resolved again at the trigger
+    except Exception:  # noqa: BLE001
+        _leg_stats["failed"] += 1
+        logger.exception("[%s] %s: preparing the contract failed - it is resolved at the trigger", STRATEGY, symbol)
+    finally:
+        _leg_prep.discard(symbol)
+
+
+def _maybe_prep_leg(symbol: str, last: Optional[float], trigger: Optional[float]) -> None:
+    """WS feed thread (from _on_underlying_tick): queue the contract's resolution once the stock is near its trigger."""
+    if (_loop is None or last is None or not trigger or symbol in _leg_prep
+            or last < trigger * (1 - LEG_PREP_WITHIN_PCT / 100)):
+        return
+    c = _leg_cache.get(symbol)
+    if c is not None and time.monotonic() - c["at"] <= LEG_CACHE_MAX_AGE_SECONDS and _cached_leg(symbol, last):
+        return
+    _leg_prep.add(symbol)
+    asyncio.run_coroutine_threadsafe(_prep_leg(symbol), _loop)
+
+
 async def _resolve_leg(symbol: str) -> tuple[dict, float]:
     """ATM CE (with the expiry roll) + the minimum-premium gate. Raises
     engine._SkipEntry when the entry should not happen."""
     PROFILE.roll_days = settings.get("roll_expiry_within_trading_days")
-    leg = await engine._resolve_option_leg(symbol, "BULLISH", PROFILE)
+    forming = candle_feed.forming_bar(symbol)
+    leg = _cached_leg(symbol, forming.get("last") if forming else None)
+    if leg is not None:
+        _leg_stats["used"] += 1
+    else:
+        if symbol in _leg_cache:
+            _leg_stats["stale"] += 1
+        leg = await engine._resolve_option_leg(symbol, "BULLISH", PROFILE)
     leg["quantity"] = leg["lot_size"] * settings.get("quantity_lots")
     leg["pnl_multiplier"] = leg["quantity"]
     # Last traded price, else the live order book (30 Sep 2026: two real entries were lost as
@@ -174,6 +281,36 @@ async def _resolve_leg(symbol: str) -> tuple[dict, float]:
         raise engine._SkipEntry({"symbol": symbol, "status": "skipped", "reason": "premium_below_minimum",
                                  "trading_symbol": leg["trading_symbol"], "premium": price})
     return leg, price
+
+
+async def _funds_ok(symbol: str, leg: dict, price: float, label: str) -> bool:
+    if not settings.get("funds_check_enabled"):
+        return True
+    try:
+        return await fund_allocation.has_sufficient_bucket_funds(
+            bcfg.FUND_BUCKET, symbol, [(leg["security_id"], leg["product_type"], leg["quantity"], price, "NSE_FNO")],
+            buffer_rs=bcfg.FUNDS_CHECK_BUFFER_RS)
+    except Exception:  # noqa: BLE001
+        logger.exception("[%s] %s: funds check failed - proceeding optimistically", label, symbol)
+        return True
+
+
+async def _pending_buy(symbol: str, trading_symbol: str, label: str) -> Optional[str]:
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            None, dhan_wrapper.get_pending_order_id, trading_symbol, "BUY", "NSE")
+    except Exception:  # noqa: BLE001
+        logger.exception("[%s] %s: could not check for a resting BUY order - proceeding", label, symbol)
+        return None
+
+
+async def funds_and_pending_buy(symbol: str, leg: dict, price: float, label: str) -> tuple[bool, Optional[str]]:
+    """(funds sufficient, id of a BUY already resting for the contract) - the funds check and the duplicate-order
+    guard run side by side (3 Oct 2026, stress test: they were two more Dhan round trips one after the other between
+    the trigger and the order). Same answers and the same fail-open handling as before."""
+    sufficient, existing = await asyncio.gather(_funds_ok(symbol, leg, price, label),
+                                                _pending_buy(symbol, leg["trading_symbol"], label))
+    return sufficient, existing
 
 
 async def settle_unfilled_order(symbol: str, trading_symbol: str, order_id: str, result: OrderResult,
@@ -354,25 +491,11 @@ async def _enter_real_reserved(symbol: str, trigger_price: float, stop_price: fl
             return skip.result
         trading_symbol, quantity, product_type = leg["trading_symbol"], leg["quantity"], leg["product_type"]
 
-        if settings.get("funds_check_enabled"):
-            try:
-                sufficient = await fund_allocation.has_sufficient_bucket_funds(
-                    bcfg.FUND_BUCKET, symbol, [(leg["security_id"], product_type, quantity, gate_price, "NSE_FNO")],
-                    buffer_rs=bcfg.FUNDS_CHECK_BUFFER_RS,
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception("[%s] %s: funds check failed - proceeding optimistically", STRATEGY, symbol)
-                sufficient = True
-            if not sufficient:
-                await _event("ENTRY_SKIPPED_INSUFFICIENT_FUNDS", symbol, {"trading_symbol": trading_symbol})
-                return {"symbol": symbol, "status": "skipped", "reason": "insufficient_funds"}
-
-        # Duplicate-real-order guard (same as Bollinger's / Swing's).
-        try:
-            existing = await loop.run_in_executor(None, dhan_wrapper.get_pending_order_id, trading_symbol, "BUY", "NSE")
-        except Exception:  # noqa: BLE001
-            logger.exception("[%s] %s: could not check for a resting BUY order - proceeding", STRATEGY, symbol)
-            existing = None
+        # Funds check + duplicate-real-order guard (same as Bollinger's / Swing's), side by side.
+        sufficient, existing = await funds_and_pending_buy(symbol, leg, gate_price, STRATEGY)
+        if not sufficient:
+            await _event("ENTRY_SKIPPED_INSUFFICIENT_FUNDS", symbol, {"trading_symbol": trading_symbol})
+            return {"symbol": symbol, "status": "skipped", "reason": "insufficient_funds"}
         if existing:
             logger.warning("[%s] %s: BUY order %s already pending for %s - not placing a duplicate",
                            STRATEGY, symbol, existing, trading_symbol)
@@ -726,7 +849,10 @@ def _on_underlying_tick(symbol: str, ltp: float, tick_time: datetime) -> None:
             asyncio.run_coroutine_threadsafe(_refresh_signal(symbol), _loop)
         return
     if (state.pending_side != "BULLISH" or state.pending_trigger_price is None
-            or forming["high"] < state.pending_trigger_price or PROFILE.consumed.get(symbol) == state.candle_start):
+            or PROFILE.consumed.get(symbol) == state.candle_start):
+        return
+    if forming["high"] < state.pending_trigger_price:
+        _maybe_prep_leg(symbol, forming.get("last"), state.pending_trigger_price)
         return
     _entry_inflight.add(symbol)
     asyncio.run_coroutine_threadsafe(_tick_entry(symbol), _loop)
@@ -909,7 +1035,7 @@ async def _trigger_not_taken(symbol: str, state, pending_candle: datetime, trigg
 
     forming = (candle_feed.forming_bar(symbol)
                if candle_feed.is_fresh(symbol, bcfg.WS_STALE_AFTER_SECONDS) else None)
-    spot = forming["close"] if forming else None
+    spot = forming["last"] if forming else None
     cap = settings.get("late_entry_max_pct")
     late = {"trigger_price": trigger, "stop_price": stop, "spot": spot, "max_pct": cap,
             "pct_above_trigger": None if spot is None else round((spot / trigger - 1) * 100, 3),

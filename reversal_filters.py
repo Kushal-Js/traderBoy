@@ -305,12 +305,18 @@ def _fetch_raw_candles_sync(symbol: str, min_bars: int) -> Optional[dict]:
         # loop just to produce a log line. One attempt, fail fast, skip
         # this one row - exactly the K01-style shared-executor-contention
         # risk this codebase has already been deliberately careful about.
-        security_id = dhan_wrapper._equity_security_id(symbol)
+        # An index (the Scalper's BANKNIFTY) has no NSE_EQ row - every Scalper entry logged an ERROR with a
+        # traceback here until 3 Oct 2026. Its own IDX_I series instead.
+        index_sid = getattr(dhan_wrapper, "INDEX_SECURITY_ID", {}).get(str(symbol).upper())
+        if index_sid:
+            security_id, exchange_segment, instrument_type = index_sid, "IDX_I", "INDEX"
+        else:
+            security_id, exchange_segment, instrument_type = dhan_wrapper._equity_security_id(symbol), "NSE_EQ", "EQUITY"
         now_ist = datetime.now(IST)
         from_date = (now_ist - timedelta(days=7)).strftime("%Y-%m-%d")
         to_date = now_ist.strftime("%Y-%m-%d")
         resp = dhan_wrapper.client.Dhan.intraday_minute_data(
-            security_id=security_id, exchange_segment="NSE_EQ", instrument_type="EQUITY",
+            security_id=security_id, exchange_segment=exchange_segment, instrument_type=instrument_type,
             from_date=from_date, to_date=to_date, interval=5,
         )
         data = (resp.get("data") or {}) if isinstance(resp, dict) else {}

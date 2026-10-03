@@ -66,6 +66,24 @@ PROFILE_B = engine.Profile(
     paper_book=put_paper_book, events_log=EVENTS_LOG, paper_only=False,
 )
 
+# The candle series engine B reads for every stock: Swing's regime (5 / 15 min, REGIME_EMA_LOOKBACK_DAYS), its
+# Supertrend (5 min) and Day Range, the 15-min Supertrend filter in _entry_direction and Swing/regime.read (default
+# lookback). Declared so the warm-up (09:05, and at once after a restart in the session) loads all of them for every
+# stock on the current list - 3 Oct 2026 stress test: after the 2 Oct holiday 7 of the 15 stocks had no 15-min one.
+B_SERIES = tuple(sorted({
+    (swing_config.REGIME_FAST_INTERVAL_MINUTES, swing_config.REGIME_EMA_LOOKBACK_DAYS),
+    (swing_config.REGIME_SLOW_INTERVAL_MINUTES, swing_config.REGIME_EMA_LOOKBACK_DAYS),
+    (swing_config.SUPERTREND_INTERVAL_MINUTES, None),
+    (swing_config.REGIME_SLOW_INTERVAL_MINUTES, None),
+    (5, None),
+}, key=str))
+official_candles.add_priority_series("swing", B_SERIES)
+
+# Funds-refused entries (3 Oct 2026 stress test: a put refused for funds was attempted again on every pass, ~6 s,
+# for the whole candle - 43 times for one stock, each attempt several Dhan calls and a warning line).
+B_FUNDS_RETRY_SECONDS = 60
+_funds_blocked_until: dict[str, float] = {}
+
 _consumed: dict[str, Optional[int]] = {}             # symbol -> -1 after a put entry, until a fresh formation
 _consumed_candle: dict[str, Optional[datetime]] = {}  # symbol -> that entry's signal candle
 _seen: dict[tuple, object] = {}                       # (symbol, direction, candle[, reason]) -> reading / "skip"
@@ -266,6 +284,69 @@ async def _signal(symbol: str) -> Optional[tuple]:
 
 
 # --------------------------------------------------------------------------- #
+# Cold stocks warm up in the background (3 Oct 2026, stress test): the pass used to read a cold stock inline - one
+# Dhan download after another at the 0.5 s pacing while every later stock, and the next pass's exits and square-off
+# check, waited (209 s after a mid-session restart with 45 stocks, 147 s with Dhan answering in 2-4 s). A stock
+# whose series are not in the cache is now skipped for that pass and fetched by one background task, one stock at a
+# time (one worker thread, as before); the next pass evaluates it from the cache.
+# --------------------------------------------------------------------------- #
+_warm_queue: list[str] = []
+_warm_task: dict = {"task": None}
+_warm_stats = {"queued": 0, "warmed": 0, "failed": 0, "seconds": 0.0, "last": None}
+
+
+def _ready(symbol: str) -> bool:
+    """True when this pass can read `symbol`'s series without a download; else queues it for the background warm-up.
+    Fails open (True = the old inline read) if the check itself fails."""
+    try:
+        cold = swing_signals.needs_download(symbol, B_SERIES)
+    except Exception:  # noqa: BLE001
+        logger.exception("[%s] %s: readiness check failed - reading inline", PUT_STRATEGY, symbol)
+        return True
+    if not cold:
+        return True
+    if symbol not in _warm_queue:
+        _warm_queue.append(symbol)
+        _warm_stats["queued"] += 1
+    task = _warm_task["task"]
+    if task is None or task.done():
+        _warm_task["task"] = asyncio.get_running_loop().create_task(_warm_worker())
+    return False
+
+
+async def _warm_worker() -> None:
+    loop = asyncio.get_running_loop()
+    while _warm_queue:
+        symbol = _warm_queue[0]
+        started = time.monotonic()
+        try:
+            await loop.run_in_executor(dhan_wrapper.history_executor(), swing_signals.warm, symbol, B_SERIES)
+            _warm_stats["warmed"] += 1
+        except Exception:  # noqa: BLE001
+            _warm_stats["failed"] += 1
+            logger.exception("[%s] %s: background warm-up failed - tried again on a later pass", PUT_STRATEGY, symbol)
+        finally:
+            if _warm_queue and _warm_queue[0] == symbol:
+                _warm_queue.pop(0)
+            _warm_stats["seconds"] = round(_warm_stats["seconds"] + time.monotonic() - started, 2)
+            _warm_stats["last"] = {"symbol": symbol, "at": _now().strftime("%H:%M:%S"),
+                                   "seconds": round(time.monotonic() - started, 2)}
+
+
+def warm_snapshot() -> dict:
+    return {**_warm_stats, "waiting": list(_warm_queue)}
+
+
+def _funds_blocked(symbol: str) -> bool:
+    return time.monotonic() < _funds_blocked_until.get(symbol, 0.0)
+
+
+def funds_backoff_snapshot() -> dict:
+    now = time.monotonic()
+    return {s: round(t - now) for s, t in _funds_blocked_until.items() if t > now}
+
+
+# --------------------------------------------------------------------------- #
 # Entry
 # --------------------------------------------------------------------------- #
 async def _resolve_leg(symbol: str) -> tuple[dict, float]:
@@ -320,6 +401,8 @@ async def _enter(symbol: str, st, reading) -> None:
         _save_state()
         live_state.save(force=True)
     else:
+        if res.get("reason") == "insufficient_funds":
+            _funds_blocked_until[symbol] = time.monotonic() + B_FUNDS_RETRY_SECONDS
         key = (symbol, "BEARISH", st.candle_start, res.get("reason") or res.get("status"))
         if key not in _seen:
             _remember(key, "skip")
@@ -383,22 +466,10 @@ async def _enter_real_reserved(symbol: str, st, reading) -> dict:
         except engine._SkipEntry as skip:
             return skip.result
         trading_symbol, quantity, product_type = leg["trading_symbol"], leg["quantity"], leg["product_type"]
-        if settings.get("funds_check_enabled"):
-            try:
-                sufficient = await fund_allocation.has_sufficient_bucket_funds(
-                    bcfg.FUND_BUCKET, symbol, [(leg["security_id"], product_type, quantity, gate_price, "NSE_FNO")],
-                    buffer_rs=bcfg.FUNDS_CHECK_BUFFER_RS)
-            except Exception:  # noqa: BLE001
-                logger.exception("[%s] %s: funds check failed - proceeding optimistically", PUT_STRATEGY, symbol)
-                sufficient = True
-            if not sufficient:
-                return {"symbol": symbol, "status": "skipped", "reason": "insufficient_funds",
-                        "trading_symbol": trading_symbol}
-        try:
-            existing = await loop.run_in_executor(None, dhan_wrapper.get_pending_order_id, trading_symbol, "BUY", "NSE")
-        except Exception:  # noqa: BLE001
-            logger.exception("[%s] %s: could not check for a resting BUY order - proceeding", PUT_STRATEGY, symbol)
-            existing = None
+        sufficient, existing = await te.funds_and_pending_buy(symbol, leg, gate_price, PUT_STRATEGY)
+        if not sufficient:
+            return {"symbol": symbol, "status": "skipped", "reason": "insufficient_funds",
+                    "trading_symbol": trading_symbol}
         if existing:
             return {"symbol": symbol, "status": "already_pending", "order_id": existing}
 
@@ -664,7 +735,7 @@ async def tick(square_off: bool) -> None:
         await _apply_paper(symbol, ltp, with_supertrend=True)
     for symbol in [s for s, v in list(_consumed.items()) if v is not None]:
         try:
-            if swing_signals._symbol_market_open(symbol):
+            if swing_signals._symbol_market_open(symbol) and _ready(symbol):
                 await _refresh_release(symbol)
         except Exception:  # noqa: BLE001
             logger.exception("[%s] %s: fresh-formation check failed", PUT_STRATEGY, symbol)
@@ -674,8 +745,10 @@ async def tick(square_off: bool) -> None:
         return
     for i, symbol in enumerate(await te.eligible_symbols()):
         try:
-            if not await can_enter(symbol):
+            if _funds_blocked(symbol) or not await can_enter(symbol):
                 continue
+            if not _ready(symbol):
+                continue                # cold: the background warm-up fetches it, the next pass evaluates it
             if i and not swing_signals.is_symbol_ws_fresh(symbol):
                 await asyncio.sleep(swing_config.SYMBOL_PACING_SECONDS)
             sig = await _signal(symbol)

@@ -1852,6 +1852,11 @@ class DhanWrapper:
                 for callback in self._on_price_tick_subscribers:
                     try:
                         callback(trading_symbol, ltp_val)
+                    except RuntimeError as exc:
+                        # Shutting down: this feed thread outlives the event loop for a moment and the tick has
+                        # nowhere to go (3 Oct 2026: every shutdown logged a burst of these tracebacks).
+                        if "Event loop is closed" not in str(exc):
+                            logger.exception("on_price_tick subscriber failed for %s", trading_symbol)
                     except Exception:  # noqa: BLE001
                         logger.exception("on_price_tick subscriber failed for %s", trading_symbol)
 

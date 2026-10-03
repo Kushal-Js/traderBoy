@@ -123,6 +123,7 @@ def _underlying_reference(symbol: str) -> tuple[str, str, str]:
             candle_feed.ensure_subscribed(symbol, security_id, exchange_segment)
         except Exception:  # noqa: BLE001
             logger.exception("%s: could not WS-subscribe for candle feed - REST fallback continues", symbol)
+    _ref_cache[symbol] = (security_id, exchange_segment, instrument_type)
     return security_id, exchange_segment, instrument_type
 
 
@@ -243,27 +244,11 @@ def _rest_base(cache_key: tuple, interval_minutes: int, symbol: Optional[str] = 
     in the background. Stale or incomplete WS -> the old path."""
     now = _now_ist()
     cached = _raw_series_cache.get(cache_key)
-    if cached and cached[1].get("timestamp"):
-        fetched_at, base = cached
-        if symbol is not None:
-            _register_base(cache_key, symbol)
-        bar_start = now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % interval_minutes)
-        # Capped at the session's last bar (2 Oct 2026): after 15:15 a stock's newest bar stays 15:10 (15:00 for
-        # 15 min) - the closing auction prints no bars, so the base is current and needs no download.
-        newest_closed_start = official_candles.session_capped(bar_start - timedelta(minutes=interval_minutes),
-                                                              interval_minutes, cache_key[1])
-        up_to_date = datetime.fromtimestamp(base["timestamp"][-1], tz=IST) >= newest_closed_start
-        if up_to_date:
-            return base
-        if (symbol is not None and config.USE_WS_CANDLES
-                and official_candles.ws_cover(symbol, cache_key[1], base["timestamp"][-1], interval_minutes, now,
-                                              count=True) != "no"):
-            return base
-        age = (now - fetched_at).total_seconds()
-        if age < REST_BASE_MIN_REFETCH_SECONDS:
-            return base
-    elif cached and (now - cached[0]).total_seconds() < RAW_SERIES_DEDUP_SECONDS:
-        return cached[1]   # a recent failure - don't hammer the API
+    if cached and cached[1].get("timestamp") and symbol is not None:
+        _register_base(cache_key, symbol)
+    served, base = _served_from_cache(cache_key, interval_minutes, symbol, now, count=True)
+    if served:
+        return base
     security_id, exchange_segment, instrument_type, _, lookback_days_override = cache_key
     data = dhan_wrapper.fetch_continuous_intraday(
         security_id, exchange_segment, instrument_type, interval_minutes,
@@ -282,6 +267,58 @@ def _rest_base(cache_key: tuple, interval_minutes: int, symbol: Optional[str] = 
         return cached[1]
     _raw_series_cache[cache_key] = (now, {})
     return {}
+
+
+def _served_from_cache(cache_key: tuple, interval_minutes: int, symbol: Optional[str], now: datetime,
+                       count: bool = False) -> tuple[bool, dict]:
+    """_rest_base's own decision, without the download: (True, base) when the cached base answers now - up to date,
+    behind only by bars the WS feed watched whole, refetched under REST_BASE_MIN_REFETCH_SECONDS ago, or a failure
+    under RAW_SERIES_DEDUP_SECONDS ago - else (False, {}). Cache-only."""
+    cached = _raw_series_cache.get(cache_key)
+    if cached and cached[1].get("timestamp"):
+        fetched_at, base = cached
+        bar_start = now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % interval_minutes)
+        # Capped at the session's last bar (2 Oct 2026): after 15:15 a stock's newest bar stays 15:10 (15:00 for
+        # 15 min) - the closing auction prints no bars, so the base is current and needs no download.
+        newest_closed_start = official_candles.session_capped(bar_start - timedelta(minutes=interval_minutes),
+                                                              interval_minutes, cache_key[1])
+        if datetime.fromtimestamp(base["timestamp"][-1], tz=IST) >= newest_closed_start:
+            return True, base
+        if (symbol is not None and config.USE_WS_CANDLES
+                and official_candles.ws_cover(symbol, cache_key[1], base["timestamp"][-1], interval_minutes, now,
+                                              count=count) != "no"):
+            return True, base
+        if (now - fetched_at).total_seconds() < REST_BASE_MIN_REFETCH_SECONDS:
+            return True, base
+        return False, {}
+    if cached and (now - cached[0]).total_seconds() < RAW_SERIES_DEDUP_SECONDS:
+        return True, cached[1]   # a recent failure - don't hammer the API
+    return False, {}
+
+
+# 3 Oct 2026 (stress test): Unified Momentum engine B used to read a cold stock inline - one download after another,
+# 0.5 s pacing each, its whole loop waiting (209 s after a mid-session restart with 45 stocks). It now asks first
+# (needs_download, cache-only) and lets a background warm-up (warm, blocking) fetch the stock's series.
+_ref_cache: dict[str, tuple[str, str, str]] = {}    # symbol -> (security_id, exchange_segment, instrument_type)
+
+
+def needs_download(symbol: str, series) -> bool:
+    """True when reading any of `series` ((interval, lookback_days) pairs) for `symbol` now would download from Dhan.
+    Cache-only - no Dhan call, no WS subscription. A symbol never resolved in this process counts as cold."""
+    ref = _ref_cache.get(symbol)
+    if ref is None:
+        return True
+    now = _now_ist()
+    return any(not _served_from_cache(ref + (int(interval), lookback), int(interval), symbol, now)[0]
+               for interval, lookback in series)
+
+
+def warm(symbol: str, series) -> None:
+    """Blocking (executor): resolves + WS-subscribes `symbol` and brings each of `series` into the cache - exactly
+    the reads the signal path would make, so the next read answers from the cache."""
+    security_id, exchange_segment, instrument_type = _underlying_reference(symbol)
+    for interval, lookback in series:
+        _rest_base((security_id, exchange_segment, instrument_type, int(interval), lookback), int(interval), symbol)
 
 
 def _register_base(cache_key: tuple, symbol: str) -> None:

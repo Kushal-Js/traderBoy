@@ -147,16 +147,19 @@ async def has_sufficient_bucket_funds(
     out wrong."""
     loop = asyncio.get_running_loop()
     try:
-        total_required = 0.0
-        for leg in legs:
-            security_id, product_type, quantity, price = leg[0], leg[1], leg[2], leg[3]
-            exchange_segment = leg[4] if len(leg) > 4 else "NSE_FNO"
-            margin_data = await loop.run_in_executor(
-                None, dhan_wrapper.get_margin_required,
-                security_id, exchange_segment, "BUY", quantity, product_type, price,
-            )
-            total_required += margin_data.get("totalMargin") or 0.0
-        available = await loop.run_in_executor(None, get_bucket_available_funds, bucket)
+        # Every leg's margin and the available balance asked side by side (3 Oct 2026, stress test: one after the
+        # other they were 2+ Dhan round trips between a real entry's trigger and its order). Any failure -> the
+        # same optimistic fallback as before.
+        calls = [loop.run_in_executor(None, dhan_wrapper.get_margin_required, leg[0],
+                                      leg[4] if len(leg) > 4 else "NSE_FNO", "BUY", leg[2], leg[1], leg[3])
+                 for leg in legs]
+        results = await asyncio.gather(*calls, loop.run_in_executor(None, get_bucket_available_funds, bucket),
+                                       return_exceptions=True)
+        for r in results:
+            if isinstance(r, BaseException):
+                raise r
+        *margins, available = results
+        total_required = sum((m.get("totalMargin") or 0.0) for m in margins)
     except Exception:  # noqa: BLE001
         logger.exception(
             "%s: could not check %s-bucket funds before entry - proceeding optimistically "
