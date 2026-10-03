@@ -450,7 +450,8 @@ def prewarm(now: Optional[datetime] = None) -> dict:
             load(entry)
     finally:
         _prewarm["ident"] = None
-    result = {"date": now.date().isoformat(), "mode": mode, "listed": len(entries), **counts,
+    result = {"date": now.date().isoformat(), "mode": mode, "source": _prewarm.get("source") or "clock",
+              "listed": len(entries), **counts,
               "seconds": round(time.monotonic() - started, 1), "symbols": len({e.get("symbol") for e in queue}),
               "added_um_stocks": sorted({e["symbol"] for e in added}), "added_bases": len(added), "hooks": hooks}
     _prewarm["last"] = result
@@ -470,7 +471,52 @@ def _maybe_prewarm() -> None:
     started = _state.get("started_at")
     if not _priority_symbols() and started is not None and time.monotonic() - started < PRIORITY_WAIT_SECONDS:
         return
-    prewarm(now)
+    run_prewarm(now, "clock")
+
+
+# Server backstop (3 Oct 2026, user: "a scheduler should be placed at server for warm ups at 09:05 AM IST"): the
+# warm-up has to run inside the bot (it fills this process's caches and WS subscriptions), so the droplet's
+# dhanboy-warmup-check.timer (09:06 IST, Mon-Fri, warmup_check.py) asks for it over HTTP - POST
+# /official-candles/prewarm - and waits for the result. Whoever comes first runs it; never twice a day.
+_prewarm_lock = threading.Lock()
+
+
+def run_prewarm(now: Optional[datetime] = None, source: str = "clock") -> Optional[dict]:
+    """Runs the warm-up unless it already ran or is running today. Returns its result, None when skipped."""
+    if not _prewarm_lock.acquire(blocking=False):
+        return None
+    try:
+        now = now or _now()
+        if _prewarm["done_date"] == now.date():
+            return None
+        _prewarm["source"] = source
+        return prewarm(now)
+    finally:
+        _prewarm_lock.release()
+
+
+def prewarm_status() -> dict:
+    """GET /official-candles/prewarm."""
+    now = _now()
+    last = _prewarm["last"]
+    return {"now": now.strftime("%Y-%m-%d %H:%M:%S"), "running": _prewarm_lock.locked(),
+            "done_today": bool(last) and last.get("date") == now.date().isoformat(),
+            "window": f"{PREWARM_START:%H:%M}-{PREWARM_LATE_END:%H:%M} Mon-Fri", "last": last}
+
+
+def request_prewarm(source: str = "request") -> dict:
+    """POST /official-candles/prewarm: starts the warm-up on its own thread when it is due and has not run today.
+    status: started | running | done | outside_window. Never blocks."""
+    st = prewarm_status()
+    if st["running"]:
+        return {"status": "running", **st}
+    if st["done_today"]:
+        return {"status": "done", **st}
+    now = _now()
+    if now.weekday() >= 5 or not (PREWARM_START <= now.time() < PREWARM_LATE_END):
+        return {"status": "outside_window", **st}
+    threading.Thread(target=run_prewarm, args=(None, source), name="prewarm-request", daemon=True).start()
+    return {"status": "started", **st}
 
 
 def start() -> None:

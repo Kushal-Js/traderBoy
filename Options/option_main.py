@@ -499,6 +499,22 @@ async def official_candles_status():
     return official_candles.snapshot()
 
 
+@router.get("/official-candles/prewarm")
+async def official_candles_prewarm_status():
+    """Today's pre-open warm-up: running / done_today / the last result (3 Oct 2026)."""
+    import official_candles
+    return official_candles.prewarm_status()
+
+
+@router.post("/official-candles/prewarm")
+async def official_candles_prewarm_request():
+    """Server backstop for the 09:05 warm-up (3 Oct 2026): the droplet's dhanboy-warmup-check.timer (09:06 IST,
+    Mon-Fri) calls this. Starts the warm-up when it is due and has not run today; never twice a day.
+    -> {"status": "started" | "running" | "done" | "outside_window", ...}"""
+    import official_candles
+    return official_candles.request_prewarm("server_timer")
+
+
 @router.get("/breakout-signal")
 async def get_breakout_signal_status():
     """Today's CE/PE breakout-signal watchlists - which symbols are being
